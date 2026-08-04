@@ -5,4 +5,6 @@
 pub mod chunks;
 pub mod slab;
 
-pub use chunks::{ChunkCommandQueue, SharedRenderStats, VoxelChunksPlugin};
+pub use chunks::{
+    ChunkCommand, ChunkCommandQueue, ChunkReadyChannel, SharedRenderStats, VoxelChunksPlugin,
+};

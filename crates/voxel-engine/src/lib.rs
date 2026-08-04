@@ -5,7 +5,7 @@ pub mod streaming;
 
 use bevy::prelude::*;
 
-pub use streaming::{StreamingConfig, VoxelStreamingPlugin};
+pub use streaming::{LodConfig, VoxelStreamingPlugin};
 
 /// Everything needed for a streamed voxel terrain world.
 pub struct VoxelEnginePlugin;

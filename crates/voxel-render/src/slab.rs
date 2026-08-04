@@ -10,7 +10,7 @@
 /// 4–6 indices per vertex; 8 gives headroom, and allocation checks the
 /// exact counts anyway). The largest class covers the theoretical 34³
 /// extended-cell maximum.
-pub const CLASS_VERTS: [u32; 4] = [1_024, 4_096, 16_384, 40_960];
+pub const CLASS_VERTS: [u32; 4] = [1_024, 4_096, 16_384, 53_248];
 /// Slots per class. Observed terrain distribution skews heavily to the 4k
 /// class (a 32² surface sheet with overlap is ~1.2k–4k vertices).
 pub const CLASS_SLOTS: [u32; 4] = [256, 768, 96, 16];

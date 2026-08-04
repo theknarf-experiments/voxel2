@@ -58,11 +58,12 @@ use bevy::{
     },
 };
 
+use voxel_core::ChunkKey;
+
 use crate::slab::{SlabAlloc, SlabAllocator};
 
 const SAMPLES: u32 = 36;
 const CELLS: u32 = 32;
-const CHUNK_M: f64 = 32.0;
 const VERTEX_FLOATS: u64 = 6;
 
 const ARENA_SLOTS: u32 = 64;
@@ -73,29 +74,41 @@ const STAGING_BUFFERS: usize = 3;
 
 // --- main-world <-> render-world plumbing ------------------------------------
 
-/// Main-world queue of chunk lifecycle commands (filled by streaming code in
-/// voxel-engine, drained by extraction). Interior mutability because
-/// extraction system params must be read-only.
-#[derive(Resource, Default)]
-pub struct ChunkCommandQueue {
-    inner: Mutex<ChunkCommands>,
+/// Chunk lifecycle commands from the main-world LOD controller.
+#[derive(Clone, Copy, Debug)]
+pub enum ChunkCommand {
+    /// Generate (and mesh, if non-empty) this chunk. `show_on_ready` makes
+    /// it visible as soon as it is drawable; otherwise it stays hidden until
+    /// an explicit [`ChunkCommand::Show`] (ready-before-swap LOD flips).
+    Request { key: ChunkKey, show_on_ready: bool },
+    Show(ChunkKey),
+    Free(ChunkKey),
 }
 
-#[derive(Default)]
-struct ChunkCommands {
-    requests: Vec<IVec3>,
-    frees: Vec<IVec3>,
+/// Main-world queue of chunk lifecycle commands (filled by the LOD
+/// controller in voxel-engine, drained by extraction). Interior mutability
+/// because extraction system params must be read-only.
+#[derive(Resource, Default)]
+pub struct ChunkCommandQueue {
+    inner: Mutex<Vec<ChunkCommand>>,
 }
 
 impl ChunkCommandQueue {
-    pub fn request(&self, coord: IVec3) {
-        self.inner.lock().unwrap().requests.push(coord);
-    }
-
-    pub fn free(&self, coord: IVec3) {
-        self.inner.lock().unwrap().frees.push(coord);
+    pub fn push(&self, command: ChunkCommand) {
+        self.inner.lock().unwrap().push(command);
     }
 }
+
+/// Render→main notifications: a requested chunk became drawable (meshed) or
+/// was classified empty. The LOD controller uses these for
+/// ready-before-swap.
+#[derive(Resource, Clone)]
+pub struct ChunkReadyChannel {
+    pub rx: crossbeam_channel::Receiver<ChunkKey>,
+}
+
+#[derive(Resource, Clone)]
+struct ChunkReadySender(crossbeam_channel::Sender<ChunkKey>);
 
 /// Shared render statistics for the debug HUD (written by the render world,
 /// read by the main world).
@@ -127,8 +140,10 @@ impl Plugin for VoxelChunksPlugin {
         embedded_asset!(app, "shaders/voxel_mesh_chunks.wgsl");
         embedded_asset!(app, "shaders/voxel_chunk_draw.wgsl");
 
+        let (ready_tx, ready_rx) = crossbeam_channel::unbounded();
         app.init_resource::<ChunkCommandQueue>()
             .init_resource::<SharedRenderStats>()
+            .insert_resource(ChunkReadyChannel { rx: ready_rx })
             .add_plugins(ExtractComponentPlugin::<VoxelTerrainMarker>::default())
             .add_systems(Startup, spawn_terrain_marker);
 
@@ -139,6 +154,7 @@ impl Plugin for VoxelChunksPlugin {
         };
         render_app
             .insert_resource(stats)
+            .insert_resource(ChunkReadySender(ready_tx))
             .init_resource::<ExtractedChunkCommands>()
             .init_resource::<ChunkTable>()
             .init_resource::<FrameBatches>()
@@ -174,10 +190,7 @@ fn spawn_terrain_marker(mut commands: Commands) {
 // --- render-world state ------------------------------------------------------
 
 #[derive(Resource, Default)]
-struct ExtractedChunkCommands {
-    requests: Vec<IVec3>,
-    frees: Vec<IVec3>,
-}
+struct ExtractedChunkCommands(Vec<ChunkCommand>);
 
 #[derive(Resource, Default)]
 struct ExtractedCameraPos(DVec3);
@@ -191,13 +204,21 @@ enum ChunkState {
     Cancelled { slot: u32 },
     /// Counts known but the slab had no space; retry allocation.
     AwaitingAlloc { slot: u32, verts: u32, indices: u32 },
+    /// Classified all-air/all-solid: drawable as nothing.
+    Empty,
     /// In the slab and drawable.
     Meshed { alloc: SlabAlloc, index_count: u32 },
 }
 
+struct RenderChunk {
+    state: ChunkState,
+    visible: bool,
+    show_on_ready: bool,
+}
+
 #[derive(Resource, Default)]
 struct ChunkTable {
-    chunks: HashMap<IVec3, ChunkState>,
+    chunks: HashMap<ChunkKey, RenderChunk>,
     empty_classified: usize,
 }
 
@@ -244,10 +265,10 @@ struct ChunkDrawUniform {
 
 enum StagingState {
     Free,
-    /// Copy recorded this frame; mapping requested in Cleanup.
-    PendingMap { entries: Vec<(IVec3, u32)> },
+    /// Copy recorded this frame; mapping requested next frame.
+    PendingMap { entries: Vec<(ChunkKey, u32)> },
     /// map_async issued; waiting for the callback.
-    Mapping { entries: Vec<(IVec3, u32)> },
+    Mapping { entries: Vec<(ChunkKey, u32)> },
 }
 
 struct StagingSlot {
@@ -413,7 +434,7 @@ fn init_chunk_resources(
     let view_layout = BindGroupLayoutDescriptor::new(
         "voxel_chunks_view_layout",
         &BindGroupLayoutEntries::sequential(
-            ShaderStages::VERTEX,
+            ShaderStages::VERTEX_FRAGMENT,
             (uniform_buffer::<ViewUniform>(true),),
         ),
     );
@@ -482,9 +503,7 @@ fn extract_chunk_commands(
     queue: Extract<Res<ChunkCommandQueue>>,
     mut extracted: ResMut<ExtractedChunkCommands>,
 ) {
-    let mut commands = queue.inner.lock().unwrap();
-    extracted.requests.append(&mut commands.requests);
-    extracted.frees.append(&mut commands.frees);
+    extracted.0.append(&mut queue.inner.lock().unwrap());
 }
 
 fn extract_camera_pos(
@@ -501,8 +520,29 @@ fn extract_camera_pos(
 
 // --- planning (Prepare) ------------------------------------------------------
 
-fn chunk_origin_m(coord: IVec3) -> DVec3 {
-    coord.as_dvec3() * CHUNK_M
+fn make_params(key: ChunkKey, slot: u32, alloc: Option<&SlabAlloc>, counts_slot: u32) -> ChunkParams {
+    let origin = key.min_corner_m();
+    ChunkParams {
+        origin: Vec4::new(
+            origin.x as f32,
+            origin.y as f32,
+            origin.z as f32,
+            key.voxel_size_m() as f32,
+        ),
+        slot,
+        base_vertex: alloc.map_or(0, |a| a.base_vertex),
+        first_index: alloc.map_or(0, |a| a.first_index),
+        counts_slot,
+    }
+}
+
+/// Generation priority: distance to the chunk's AABB normalized by its edge
+/// length — coarse chunks and near chunks first, uniformly across levels.
+fn gen_priority(key: ChunkKey, camera: DVec3) -> f64 {
+    let min = key.min_corner_m();
+    let max = min + DVec3::splat(key.edge_m());
+    let closest = camera.clamp(min, max);
+    camera.distance(closest) / key.edge_m()
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -514,6 +554,7 @@ fn plan_frame(
     mut draw_list: ResMut<VoxelDrawList>,
     camera: Res<ExtractedCameraPos>,
     stats: Res<SharedRenderStats>,
+    ready_tx: Res<ChunkReadySender>,
     pipelines: Option<Res<ChunkPipelines>>,
     pipeline_cache: Res<PipelineCache>,
     render_device: Res<RenderDevice>,
@@ -555,25 +596,61 @@ fn plan_frame(
         }
     }
 
-    // 1. New requests enter the table.
-    for coord in extracted.requests.drain(..) {
-        table.chunks.entry(coord).or_insert(ChunkState::QueuedGen);
-    }
-
-    // 2. Frees release resources (or flag in-flight work as cancelled).
-    for coord in extracted.frees.drain(..) {
-        match table.chunks.remove(&coord) {
-            Some(ChunkState::CountsInFlight { slot }) => {
-                // Result still coming; readback will recycle the slot.
-                table.chunks.insert(coord, ChunkState::Cancelled { slot });
+    // 1. Apply commands from the LOD controller.
+    for command in extracted.0.drain(..) {
+        match command {
+            ChunkCommand::Request { key, show_on_ready } => {
+                match table.chunks.get_mut(&key) {
+                    None => {
+                        table.chunks.insert(
+                            key,
+                            RenderChunk {
+                                state: ChunkState::QueuedGen,
+                                visible: false,
+                                show_on_ready,
+                            },
+                        );
+                    }
+                    // Freed-while-in-flight chunk re-requested: resurrect it,
+                    // the pending readback will complete it normally.
+                    Some(chunk) => {
+                        if let ChunkState::Cancelled { slot } = chunk.state {
+                            chunk.state = ChunkState::CountsInFlight { slot };
+                            chunk.visible = false;
+                            chunk.show_on_ready = show_on_ready;
+                        }
+                    }
+                }
             }
-            Some(ChunkState::AwaitingAlloc { slot, .. }) => gpu.arena_free.push(slot),
-            Some(ChunkState::Meshed { alloc, .. }) => gpu.slab.free(alloc),
-            _ => {}
+            ChunkCommand::Show(key) => {
+                if let Some(chunk) = table.chunks.get_mut(&key) {
+                    chunk.visible = true;
+                }
+            }
+            ChunkCommand::Free(key) => match table.chunks.remove(&key) {
+                Some(RenderChunk { state: ChunkState::CountsInFlight { slot }, .. }) => {
+                    // Result still coming; readback will recycle the slot.
+                    table.chunks.insert(
+                        key,
+                        RenderChunk {
+                            state: ChunkState::Cancelled { slot },
+                            visible: false,
+                            show_on_ready: false,
+                        },
+                    );
+                }
+                Some(RenderChunk { state: ChunkState::AwaitingAlloc { slot, .. }, .. }) => {
+                    gpu.arena_free.push(slot)
+                }
+                Some(RenderChunk { state: ChunkState::Meshed { alloc, .. }, .. }) => {
+                    gpu.slab.free(alloc)
+                }
+                _ => {}
+            },
         }
     }
 
-    // 3. Drain finished count readbacks.
+    // 2. Drain finished count readbacks.
     while let Ok(staging_idx) = gpu.map_rx.try_recv() {
         let slot_entry = &mut gpu.staging[staging_idx];
         let StagingState::Mapping { entries } =
@@ -583,87 +660,83 @@ fn plan_frame(
         };
         let data = slot_entry.buffer.slice(..).get_mapped_range();
         let counts: &[u32] = bytemuck::cast_slice(&data);
-        for (coord, counts_slot) in &entries {
+        for (key, counts_slot) in &entries {
             let verts = counts[(counts_slot * 2) as usize];
             let quads = counts[(counts_slot * 2 + 1) as usize];
-            match table.chunks.remove(coord) {
-                Some(ChunkState::Cancelled { slot }) => gpu.arena_free.push(slot),
-                Some(ChunkState::CountsInFlight { slot }) => {
+            let table = &mut *table;
+            let Some(chunk) = table.chunks.get_mut(key) else {
+                continue;
+            };
+            match chunk.state {
+                ChunkState::Cancelled { slot } => {
+                    gpu.arena_free.push(slot);
+                    table.chunks.remove(key);
+                }
+                ChunkState::CountsInFlight { slot } => {
                     let max_verts = *crate::slab::CLASS_VERTS.last().unwrap();
                     let max_indices = max_verts * crate::slab::INDEX_FACTOR;
-                    if verts > max_verts || quads * 6 > max_indices {
-                        warn!("chunk {coord} exceeds largest slab class ({verts} verts); dropped");
+                    let too_big = verts > max_verts || quads * 6 > max_indices;
+                    if too_big {
+                        warn!("chunk {key:?} exceeds largest slab class ({verts} verts); dropped");
+                    }
+                    if too_big || verts == 0 || quads == 0 {
                         gpu.arena_free.push(slot);
                         table.empty_classified += 1;
-                    } else if verts == 0 || quads == 0 {
-                        gpu.arena_free.push(slot);
-                        table.empty_classified += 1;
+                        chunk.state = ChunkState::Empty;
+                        let _ = ready_tx.0.send(*key);
                     } else {
-                        table.chunks.insert(
-                            *coord,
-                            ChunkState::AwaitingAlloc { slot, verts, indices: quads * 6 },
-                        );
+                        chunk.state = ChunkState::AwaitingAlloc { slot, verts, indices: quads * 6 };
                     }
                 }
-                other => {
-                    // Shouldn't happen; restore whatever it was.
-                    if let Some(state) = other {
-                        table.chunks.insert(*coord, state);
-                    }
-                }
+                _ => {}
             }
         }
         drop(data);
         slot_entry.buffer.unmap();
     }
 
-    // 4. Schedule mesh dispatches for chunks whose slab slot is ready.
+    // 3. Schedule mesh dispatches for chunks whose slab slot is ready.
     //    Counts-buffer cursors for meshing are assigned from the top so they
     //    never collide with this frame's count batch (assigned from 0).
     let mut mesh_counts_slot = COUNTS_SLOTS;
     let mut freed_slots = Vec::new();
-    let mesh_coords: Vec<IVec3> = if !pipelines_ready {
+    let mesh_keys: Vec<ChunkKey> = if !pipelines_ready {
         Vec::new()
     } else {
         table
             .chunks
             .iter()
-            .filter(|(_, s)| matches!(s, ChunkState::AwaitingAlloc { .. }))
-            .map(|(c, _)| *c)
+            .filter(|(_, c)| matches!(c.state, ChunkState::AwaitingAlloc { .. }))
+            .map(|(k, _)| *k)
             .take(MESH_BUDGET.min((COUNTS_SLOTS as usize).saturating_sub(GEN_BUDGET)))
             .collect()
     };
-    for coord in mesh_coords {
-        let Some(ChunkState::AwaitingAlloc { slot, verts, indices }) = table.chunks.remove(&coord)
-        else {
+    for key in mesh_keys {
+        let chunk = table.chunks.get_mut(&key).unwrap();
+        let ChunkState::AwaitingAlloc { slot, verts, indices } = chunk.state else {
             unreachable!()
         };
         let Some(alloc) = gpu.slab.alloc(verts, indices) else {
             // Slab full: keep waiting (arena slot stays held; visible in HUD).
-            table
-                .chunks
-                .insert(coord, ChunkState::AwaitingAlloc { slot, verts, indices });
             continue;
         };
         mesh_counts_slot -= 1;
-        let origin = chunk_origin_m(coord);
-        let offset = gpu.gen_uniforms.push(&ChunkParams {
-            origin: Vec4::new(origin.x as f32, origin.y as f32, origin.z as f32, 0.0),
-            slot,
-            base_vertex: alloc.base_vertex,
-            first_index: alloc.first_index,
-            counts_slot: mesh_counts_slot,
-        });
+        let offset = gpu
+            .gen_uniforms
+            .push(&make_params(key, slot, Some(&alloc), mesh_counts_slot));
         batches.mesh.push(MeshEntry { uniform_offset: offset });
         // The mesh compute is recorded later this frame, before the main
         // pass, so the chunk is immediately drawable.
-        table
-            .chunks
-            .insert(coord, ChunkState::Meshed { alloc, index_count: indices });
+        chunk.state = ChunkState::Meshed { alloc, index_count: indices };
+        if chunk.show_on_ready {
+            chunk.visible = true;
+        }
+        let _ = ready_tx.0.send(key);
         freed_slots.push(slot);
     }
 
-    // 5. Schedule new density+count work if a staging buffer is available.
+    // 4. Schedule new density+count work if a staging buffer is available,
+    //    nearest-first (normalized by chunk edge so levels interleave fairly).
     let staging_idx = if pipelines_ready {
         gpu.staging
             .iter()
@@ -673,29 +746,22 @@ fn plan_frame(
     };
     if let Some(staging_idx) = staging_idx {
         let mut entries = Vec::new();
-        let queued: Vec<IVec3> = table
+        let mut queued: Vec<(ChunkKey, f64)> = table
             .chunks
             .iter()
-            .filter(|(_, s)| matches!(s, ChunkState::QueuedGen))
-            .map(|(c, _)| *c)
-            .take(GEN_BUDGET)
+            .filter(|(_, c)| matches!(c.state, ChunkState::QueuedGen))
+            .map(|(k, _)| (*k, gen_priority(*k, camera.0)))
             .collect();
-        for coord in queued {
+        queued.sort_by(|a, b| a.1.total_cmp(&b.1));
+        for (key, _) in queued.into_iter().take(GEN_BUDGET) {
             let Some(slot) = gpu.arena_free.pop() else {
                 break;
             };
             let counts_slot = entries.len() as u32;
-            let origin = chunk_origin_m(coord);
-            let offset = gpu.gen_uniforms.push(&ChunkParams {
-                origin: Vec4::new(origin.x as f32, origin.y as f32, origin.z as f32, 0.0),
-                slot,
-                base_vertex: 0,
-                first_index: 0,
-                counts_slot,
-            });
+            let offset = gpu.gen_uniforms.push(&make_params(key, slot, None, counts_slot));
             batches.gen.push(GenEntry { uniform_offset: offset });
-            entries.push((coord, counts_slot));
-            table.chunks.insert(coord, ChunkState::CountsInFlight { slot });
+            entries.push((key, counts_slot));
+            table.chunks.get_mut(&key).unwrap().state = ChunkState::CountsInFlight { slot };
         }
         if !entries.is_empty() {
             batches.staging_idx = Some(staging_idx);
@@ -703,15 +769,19 @@ fn plan_frame(
         }
     }
 
-    // 6. Arena slots freed by meshing become reusable next frame.
+    // 5. Arena slots freed by meshing become reusable next frame.
     gpu.arena_free.append(&mut freed_slots);
 
-    // 7. Build the draw list with camera-relative offsets.
-    for (coord, state) in &table.chunks {
-        let ChunkState::Meshed { alloc, index_count } = state else {
+    // 6. Build the draw list (visible chunks only) with camera-relative
+    //    offsets.
+    for (key, chunk) in &table.chunks {
+        let ChunkState::Meshed { alloc, index_count } = &chunk.state else {
             continue;
         };
-        let rel = chunk_origin_m(*coord) - camera.0;
+        if !chunk.visible {
+            continue;
+        }
+        let rel = key.min_corner_m() - camera.0;
         let offset = gpu.draw_uniforms.push(&ChunkDrawUniform {
             offset: Vec4::new(rel.x as f32, rel.y as f32, rel.z as f32, 0.0),
         });
@@ -726,15 +796,21 @@ fn plan_frame(
     gpu.gen_uniforms.write_buffer(&render_device, &render_queue);
     gpu.draw_uniforms.write_buffer(&render_device, &render_queue);
 
-    // 8. HUD stats.
+    // 7. HUD stats.
     if let Ok(mut s) = stats.0.lock() {
         s.tracked = table.chunks.len();
-        s.meshed = draw_list.0.len();
+        s.meshed = table
+            .chunks
+            .values()
+            .filter(|c| matches!(c.state, ChunkState::Meshed { .. }))
+            .count();
         s.empty_classified = table.empty_classified;
         s.awaiting = table
             .chunks
             .values()
-            .filter(|c| !matches!(c, ChunkState::Meshed { .. }))
+            .filter(|c| {
+                !matches!(c.state, ChunkState::Meshed { .. } | ChunkState::Empty)
+            })
             .count();
         s.arena_free = gpu.arena_free.len() as u32;
         s.slab_occupancy = gpu.slab.occupancy();

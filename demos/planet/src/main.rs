@@ -30,19 +30,27 @@ fn autopilot(mut cameras: Query<&mut Transform, With<Camera3d>>, time: Res<Time>
     };
     let speed: f32 = speed.parse().unwrap_or(100.0);
     for mut transform in &mut cameras {
-        // Level flight: follow the camera's heading but stay at altitude.
-        let dir = transform.forward().with_y(0.0).normalize_or_zero();
+        let dir = transform.forward();
         transform.translation += dir * speed * time.delta_secs();
     }
 }
 
 fn setup(mut commands: Commands) {
+    // Start position/orientation overridable for repeatable tests.
+    let start = std::env::var("VOXEL_START")
+        .ok()
+        .and_then(|s| {
+            let v: Vec<f32> = s.split(',').filter_map(|p| p.trim().parse().ok()).collect();
+            (v.len() == 3).then(|| Vec3::new(v[0], v[1], v[2]))
+        })
+        .unwrap_or(Vec3::new(0.0, 9000.0, 0.0));
     commands.spawn((
         Camera3d::default(),
-        Transform::from_xyz(0.0, 40.0, 0.0).looking_at(Vec3::new(60.0, 10.0, 60.0), Vec3::Y),
+        Transform::from_translation(start)
+            .looking_at(start + Vec3::new(0.4, -0.35, 0.4) * 1000.0, Vec3::Y),
         FreeCamera {
-            walk_speed: 15.0,
-            run_speed: 80.0,
+            walk_speed: 60.0,
+            run_speed: 600.0,
             ..default()
         },
     ));
