@@ -19,8 +19,23 @@ fn main() {
         .insert_resource(ClearColor(Color::srgb(0.65, 0.77, 0.94)))
         .add_plugins((VoxelDebugPlugin, VoxelEnginePlugin::default()))
         .add_systems(Startup, setup)
-        .add_systems(Update, (autopilot, follow_ocean))
+        .add_systems(Update, (autopilot, walk_mode, follow_ocean).chain())
         .run();
+}
+
+/// `VOXEL_WALK=1` glues the camera to the terrain surface at eye height —
+/// on-foot exploration with the flycam's look/WASD controls.
+fn walk_mode(mut cameras: Query<&mut Transform, With<Camera3d>>) {
+    if std::env::var("VOXEL_WALK").is_err() {
+        return;
+    }
+    for mut t in &mut cameras {
+        let h = voxel_worldgen::terrain_height(
+            bevy::math::Vec2::new(t.translation.x, t.translation.z),
+            1.0,
+        );
+        t.translation.y = h + 1.75;
+    }
 }
 
 /// Marker for the camera-following sea-level plane.
@@ -81,9 +96,9 @@ fn setup(
         Mesh3d(meshes.add(Plane3d::new(Vec3::Y, Vec2::splat(60_000.0)))),
         MeshMaterial3d(materials.add(StandardMaterial {
             base_color: Color::srgba(0.10, 0.28, 0.45, 0.72),
-            perceptual_roughness: 0.15,
+            perceptual_roughness: 0.32,
             metallic: 0.0,
-            reflectance: 0.45,
+            reflectance: 0.28,
             alpha_mode: AlphaMode::Blend,
             ..default()
         })),
@@ -96,7 +111,8 @@ fn setup(
             let v: Vec<f32> = s.split(',').filter_map(|p| p.trim().parse().ok()).collect();
             (v.len() == 3).then(|| Vec3::new(v[0], v[1], v[2]))
         })
-        .unwrap_or(Vec3::new(0.0, 9000.0, 0.0));
+        // Default: a scouted scenic forest valley (mountains and sea nearby).
+        .unwrap_or(Vec3::new(-27570.0, 80.0, -36770.0));
     commands.spawn((
         Camera3d::default(),
         Transform::from_translation(start)
