@@ -130,6 +130,20 @@ fn fragment(in: VsOut) -> @location(0) vec4<f32> {
     let rim = vec3<f32>(0.20, 0.24, 0.30) * (1.0 - up) * 0.25;
     var lit = base * (key + rim);
 
+    // Emissive service-light strips on ceiling undersides: sparse lines
+    // running along x, flickered out on some floors.
+    let lf = floor(world.y / 22.0);
+    let ry = world.y - lf * 22.0;
+    let ceilingness = smoothstep(-0.55, -0.85, n.y);
+    let line = 1.0 - smoothstep(0.25, 0.75, abs(fract(world.z / 13.0) - 0.5) * 13.0);
+    let works = step(0.35, hash3(vec3<i32>(i32(floor(world.z / 13.0)), i32(lf), 7)));
+    let strip = ceilingness * line * works;
+    lit += vec3<f32>(1.3, 1.25, 1.05) * strip;
+
+    // Faint up-glow from the strips onto nearby floors.
+    let floorness = smoothstep(0.55, 0.85, n.y);
+    lit += vec3<f32>(0.10, 0.10, 0.085) * floorness * line * works;
+
     // Thick interior gloom.
     let haze_amount = 1.0 - exp(-dist * 0.0035);
     let haze_color = vec3<f32>(0.035, 0.045, 0.06);
