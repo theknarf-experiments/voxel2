@@ -33,6 +33,8 @@ fn vertex(in: VsIn) -> VsOut {
     let h01 = f32(in.inst_hash & 0xFFu) / 255.0;
     let h02 = f32((in.inst_hash >> 8u) & 0xFFu) / 255.0;
     let h03 = f32((in.inst_hash >> 16u) & 0xFFu) / 255.0;
+    // Baked terrain sun-shadow factor (top byte, written by the CPU).
+    let shadow = f32((in.inst_hash >> 24u) & 0xFFu) / 255.0;
 
     // Tuft yaw + scale from the hash.
     let yaw = h01 * 6.2831853;
@@ -59,10 +61,11 @@ fn vertex(in: VsIn) -> VsOut {
     let cam_rel = cam_rel_root + p;
     let view_space = (view.view_from_world * vec4<f32>(cam_rel, 0.0)).xyz;
 
-    // Color: rooted dark, tip lighter, hue variation by hash.
+    // Color: rooted dark, tip lighter, hue variation by hash, dimmed by the
+    // baked terrain shadow (ambient floor keeps shaded grass readable).
     let base = mix(vec3<f32>(0.10, 0.22, 0.06), vec3<f32>(0.16, 0.30, 0.09), h02);
     let tip_col = mix(vec3<f32>(0.35, 0.52, 0.16), vec3<f32>(0.55, 0.62, 0.22), h03);
-    let color = mix(base, tip_col, in.tip);
+    let color = mix(base, tip_col, in.tip) * (0.45 + 0.55 * shadow);
 
     var out: VsOut;
     out.clip = view.clip_from_view * vec4<f32>(view_space, 1.0);

@@ -97,9 +97,12 @@ fn grass_tile(tile: IVec2) -> Vec<voxel_render::GrassInstance> {
         if !(2.5..300.0).contains(&y) || terrain_up(xz, 1.0) < 0.8 {
             continue;
         }
+        // Top byte of the hash carries the baked sun-shadow factor.
+        let shadow = voxel_worldgen::sun_shadow(Vec3::new(x, y, z));
+        let hash = (rng.next_u64() as u32 & 0x00FF_FFFF) | (((shadow * 255.0) as u32) << 24);
         out.push(voxel_render::GrassInstance {
             pos: [x, y - 0.03, z],
-            hash: rng.next_u64() as u32,
+            hash,
         });
     }
     out

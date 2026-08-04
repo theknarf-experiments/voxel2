@@ -69,6 +69,23 @@ pub fn forest_density(xz: Vec2) -> f32 {
     (n * 1.6 - 0.35).clamp(0.0, 1.0)
 }
 
+/// Soft sun shadow at a world position: horizon march over the band-limited
+/// heightfield. Mirrors the WGSL bake in voxel_mesh_chunks.wgsl (sun
+/// direction and falloff must stay in sync).
+pub fn sun_shadow(pos: glam::Vec3) -> f32 {
+    let sun = glam::Vec3::new(0.55, 0.5, 0.32).normalize();
+    let mut occ = 0.0f32;
+    let mut t = 8.0f32;
+    for _ in 0..9 {
+        let sp = pos + sun * t;
+        let dh = terrain_height(Vec2::new(sp.x, sp.z), 8.0) - sp.y;
+        occ = occ.max(dh / t);
+        t *= 1.8;
+    }
+    let x = (occ / 0.2).clamp(0.0, 1.0);
+    1.0 - x * x * (3.0 - 2.0 * x)
+}
+
 /// Approximate surface normal Y (up-ness) via central differences.
 pub fn terrain_up(xz: Vec2, voxel_size: f32) -> f32 {
     let e = 2.0;
