@@ -1,0 +1,11 @@
+[package]
+name = "voxel-worldgen"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+voxel-core.workspace = true
+voxel-layers.workspace = true
+glam.workspace = true
+bytemuck.workspace = true

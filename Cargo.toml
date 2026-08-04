@@ -1,0 +1,35 @@
+[workspace]
+resolver = "2"
+members = ["crates/*", "demos/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+
+[workspace.dependencies]
+# External
+# TODO: slim to explicit feature list once the needed set stabilizes.
+bevy = { version = "0.19", features = ["free_camera"] }
+glam = { version = "0.32", features = ["serde"] }  # keep in sync with bevy's glam version
+bytemuck = { version = "1", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+postcard = { version = "1", features = ["alloc"] }
+lz4_flex = "0.11"
+ahash = "0.8"
+
+# Internal
+voxel-core = { path = "crates/voxel-core" }
+voxel-layers = { path = "crates/voxel-layers" }
+voxel-worldgen = { path = "crates/voxel-worldgen" }
+voxel-gpu = { path = "crates/voxel-gpu" }
+voxel-render = { path = "crates/voxel-render" }
+voxel-engine = { path = "crates/voxel-engine" }
+voxel-debug = { path = "crates/voxel-debug" }
+
+# Fast iterative builds: light opt for our code, full opt for dependencies.
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 3

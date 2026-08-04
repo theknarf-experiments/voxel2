@@ -1,0 +1,12 @@
+[package]
+name = "voxel-engine"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+voxel-core.workspace = true
+voxel-layers.workspace = true
+voxel-gpu.workspace = true
+voxel-render.workspace = true
+bevy.workspace = true

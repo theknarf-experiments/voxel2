@@ -1,0 +1,10 @@
+[package]
+name = "voxel-layers"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+voxel-core.workspace = true
+glam.workspace = true
+ahash.workspace = true

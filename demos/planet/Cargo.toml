@@ -1,0 +1,11 @@
+[package]
+name = "planet"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+bevy.workspace = true
+voxel-debug.workspace = true
+voxel-engine.workspace = true
+voxel-render.workspace = true
