@@ -9,4 +9,5 @@ voxel-core.workspace = true
 voxel-layers.workspace = true
 voxel-gpu.workspace = true
 voxel-render.workspace = true
+voxel-debug.workspace = true
 bevy.workspace = true

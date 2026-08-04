@@ -5140,6 +5140,7 @@ version = "0.1.0"
 dependencies = [
  "bevy",
  "voxel-core",
+ "voxel-debug",
  "voxel-gpu",
  "voxel-layers",
  "voxel-render",
@@ -5169,6 +5170,7 @@ version = "0.1.0"
 dependencies = [
  "bevy",
  "bytemuck",
+ "crossbeam-channel",
  "voxel-core",
 ]
 

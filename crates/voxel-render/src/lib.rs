@@ -1,7 +1,8 @@
 //! Rendering: surface-nets/dual-contouring compute meshing into slab buffers,
-//! the LOD chunk octree, custom phase item with indirect draws, and chunk
+//! the LOD chunk octree, custom phase item with per-chunk draws, and chunk
 //! material shading.
 
-pub mod prototype;
+pub mod chunks;
+pub mod slab;
 
-pub use prototype::VoxelPrototypePlugin;
+pub use chunks::{ChunkCommandQueue, SharedRenderStats, VoxelChunksPlugin};

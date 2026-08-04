@@ -1,2 +1,17 @@
 //! Engine glue: Bevy plugins for chunk streaming lifecycle, generation
-//! budgets/priorities, edit application, and persistence.
+//! budgets, edit application, and persistence.
+
+pub mod streaming;
+
+use bevy::prelude::*;
+
+pub use streaming::{StreamingConfig, VoxelStreamingPlugin};
+
+/// Everything needed for a streamed voxel terrain world.
+pub struct VoxelEnginePlugin;
+
+impl Plugin for VoxelEnginePlugin {
+    fn build(&self, app: &mut App) {
+        app.add_plugins((voxel_render::VoxelChunksPlugin, VoxelStreamingPlugin));
+    }
+}
