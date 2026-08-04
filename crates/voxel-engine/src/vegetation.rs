@@ -114,8 +114,12 @@ struct VegTiles {
 struct TreeAssets {
     foliage_mesh: Handle<Mesh>,
     trunk_mesh: Handle<Mesh>,
+    canopy_mesh: Handle<Mesh>,
+    rock_mesh: Handle<Mesh>,
     foliage_mat: Handle<StandardMaterial>,
     trunk_mat: Handle<StandardMaterial>,
+    canopy_mat: Handle<StandardMaterial>,
+    rock_mat: Handle<StandardMaterial>,
 }
 
 /// Procedural low-poly conifer: an 8-sided trunk cylinder and three stacked
@@ -127,21 +131,44 @@ fn build_tree_assets(
 ) {
     let trunk = cylinder_mesh(0.14, 1.6, 8);
     let mut foliage = MeshBuilder::default();
-    foliage.cone(Vec3::new(0.0, 1.2, 0.0), 1.35, 2.2, 8);
-    foliage.cone(Vec3::new(0.0, 2.4, 0.0), 1.05, 1.9, 8);
-    foliage.cone(Vec3::new(0.0, 3.5, 0.0), 0.7, 1.6, 8);
+    foliage.cone(Vec3::new(0.0, 1.0, 0.0), 1.5, 2.3, 9);
+    foliage.cone(Vec3::new(0.0, 2.2, 0.0), 1.2, 2.0, 9);
+    foliage.cone(Vec3::new(0.0, 3.3, 0.0), 0.85, 1.7, 8);
+    foliage.cone(Vec3::new(0.0, 4.3, 0.0), 0.5, 1.2, 7);
+
+    // Broadleaf canopy: a cluster of jittered blobs above the trunk.
+    let mut canopy = MeshBuilder::default();
+    canopy.blob(Vec3::new(0.0, 3.2, 0.0), 1.6, 0.12, 11);
+    canopy.blob(Vec3::new(0.9, 2.7, 0.4), 1.1, 0.14, 23);
+    canopy.blob(Vec3::new(-0.8, 2.8, -0.3), 1.0, 0.14, 47);
+
+    // Boulder: heavily jittered squashed blob.
+    let mut rock = MeshBuilder::default();
+    rock.blob(Vec3::new(0.0, 0.25, 0.0), 1.0, 0.35, 5);
 
     commands.insert_resource(TreeAssets {
         trunk_mesh: meshes.add(trunk),
         foliage_mesh: meshes.add(foliage.build()),
+        canopy_mesh: meshes.add(canopy.build()),
+        rock_mesh: meshes.add(rock.build()),
         trunk_mat: materials.add(StandardMaterial {
             base_color: Color::srgb(0.35, 0.24, 0.15),
             perceptual_roughness: 0.95,
             ..default()
         }),
         foliage_mat: materials.add(StandardMaterial {
-            base_color: Color::srgb(0.20, 0.42, 0.18),
+            base_color: Color::srgb(0.18, 0.38, 0.16),
             perceptual_roughness: 0.9,
+            ..default()
+        }),
+        canopy_mat: materials.add(StandardMaterial {
+            base_color: Color::srgb(0.30, 0.44, 0.16),
+            perceptual_roughness: 0.9,
+            ..default()
+        }),
+        rock_mat: materials.add(StandardMaterial {
+            base_color: Color::srgb(0.44, 0.42, 0.40),
+            perceptual_roughness: 0.95,
             ..default()
         }),
     });
@@ -172,6 +199,52 @@ impl MeshBuilder {
             self.indices.extend([s, s + 2, s + 1]);
         }
         let _ = base_idx;
+    }
+
+    /// Low-poly UV-sphere blob with per-vertex radial jitter (flat facets).
+    fn blob(&mut self, center: Vec3, radius: f32, jitter: f32, seed: u32) {
+        let segs = 9u32;
+        let rings = 6u32;
+        let mut ring_verts: Vec<Vec<Vec3>> = Vec::new();
+        for r in 0..=rings {
+            let phi = std::f32::consts::PI * r as f32 / rings as f32;
+            let mut row = Vec::new();
+            for s in 0..segs {
+                let theta = std::f32::consts::TAU * s as f32 / segs as f32;
+                let dir = Vec3::new(phi.sin() * theta.cos(), phi.cos(), phi.sin() * theta.sin());
+                let h = {
+                    let mut x = seed
+                        .wrapping_mul(374_761_393)
+                        .wrapping_add(r.wrapping_mul(668_265_263))
+                        .wrapping_add(s.wrapping_mul(2_246_822_519));
+                    x = (x ^ (x >> 13)).wrapping_mul(1_274_126_177);
+                    ((x ^ (x >> 16)) & 0xFFFF) as f32 / 65535.0
+                };
+                let rr = radius * (1.0 + (h - 0.5) * 2.0 * jitter);
+                row.push(center + dir * rr);
+            }
+            ring_verts.push(row);
+        }
+        for r in 0..rings {
+            for s in 0..segs {
+                let s1 = (s + 1) % segs;
+                let quad = [
+                    ring_verts[r as usize][s as usize],
+                    ring_verts[r as usize][s1 as usize],
+                    ring_verts[(r + 1) as usize][s1 as usize],
+                    ring_verts[(r + 1) as usize][s as usize],
+                ];
+                let n = (quad[1] - quad[0]).cross(quad[3] - quad[0]).normalize_or_zero();
+                let n = if n == Vec3::ZERO { Vec3::Y } else { n };
+                let base = self.positions.len() as u32;
+                for p in quad {
+                    self.positions.push(p.to_array());
+                    self.normals.push((-n).to_array());
+                }
+                self.indices
+                    .extend([base, base + 1, base + 2, base, base + 2, base + 3]);
+            }
+        }
     }
 
     fn build(self) -> Mesh {
@@ -276,6 +349,13 @@ fn spawn_tile(commands: &mut Commands, assets: &TreeAssets, tile: IVec2) -> Vec<
         let transform = Transform::from_xyz(x, y - 0.15, z)
             .with_rotation(Quat::from_rotation_y(yaw))
             .with_scale(Vec3::splat(scale));
+        // Pines dominate the highlands, broadleaves the lowlands.
+        let pine = y > 140.0 || rng.next_f32() < 0.45;
+        let (top_mesh, top_mat) = if pine {
+            (&assets.foliage_mesh, &assets.foliage_mat)
+        } else {
+            (&assets.canopy_mesh, &assets.canopy_mat)
+        };
         entities.push(
             commands
                 .spawn((
@@ -288,9 +368,34 @@ fn spawn_tile(commands: &mut Commands, assets: &TreeAssets, tile: IVec2) -> Vec<
         entities.push(
             commands
                 .spawn((
-                    Mesh3d(assets.foliage_mesh.clone()),
-                    MeshMaterial3d(assets.foliage_mat.clone()),
+                    Mesh3d(top_mesh.clone()),
+                    MeshMaterial3d(top_mat.clone()),
                     transform,
+                ))
+                .id(),
+        );
+    }
+
+    // A few boulders per tile, preferring rougher ground; any altitude
+    // below the snow line.
+    for _ in 0..4 {
+        let x = origin.x + rng.next_f32() * TILE_M;
+        let z = origin.y + rng.next_f32() * TILE_M;
+        let xz = Vec2::new(x, z);
+        let y = terrain_height(xz, 1.0);
+        let up = terrain_up(xz, 1.0);
+        if !(2.0..800.0).contains(&y) || up < 0.55 || rng.next_f32() < 0.55 {
+            continue;
+        }
+        let scale = 0.4 + rng.next_f32() * rng.next_f32() * 2.2;
+        entities.push(
+            commands
+                .spawn((
+                    Mesh3d(assets.rock_mesh.clone()),
+                    MeshMaterial3d(assets.rock_mat.clone()),
+                    Transform::from_xyz(x, y - 0.2 * scale, z)
+                        .with_rotation(Quat::from_rotation_y(rng.next_f32() * 6.28))
+                        .with_scale(Vec3::new(scale, scale * 0.75, scale)),
                 ))
                 .id(),
         );
