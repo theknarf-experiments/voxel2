@@ -6,15 +6,16 @@
 //! free-list pushes. Geometry never moves after allocation.
 
 /// Vertex capacities per size class. Index capacity per slot is
-/// `INDEX_FACTOR ×` the class vertex capacity (surface-nets emits roughly
-/// 4–6 indices per vertex; 8 gives headroom, and allocation checks the
-/// exact counts anyway). The largest class covers the theoretical 34³
-/// extended-cell maximum.
+/// `INDEX_FACTOR ×` the class vertex capacity. Allocation checks the exact
+/// counted vertex AND index requirements, so a chunk with an unusual
+/// index/vertex ratio simply lands in a larger class — the factor is a
+/// sizing heuristic, not a correctness bound. The largest class covers the
+/// theoretical 34³ extended-cell maximum with skirt twins.
 pub const CLASS_VERTS: [u32; 4] = [1_024, 4_096, 16_384, 53_248];
-/// Slots per class. Observed terrain distribution skews heavily to the 4k
-/// class (a 32² surface sheet with overlap is ~1.2k–4k vertices).
-pub const CLASS_SLOTS: [u32; 4] = [256, 768, 96, 16];
-pub const INDEX_FACTOR: u32 = 8;
+/// Slots per class, sized for ground-level LOD (~2000 live surface chunks
+/// across all levels at 25 km view distance), skewed to the 4k class.
+pub const CLASS_SLOTS: [u32; 4] = [384, 1_280, 96, 16];
+pub const INDEX_FACTOR: u32 = 6;
 
 /// A granted allocation: ranges into the shared vertex/index buffers.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

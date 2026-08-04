@@ -1,0 +1,9 @@
+[package]
+name = "scout"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+voxel-worldgen.workspace = true
+glam.workspace = true

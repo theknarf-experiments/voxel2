@@ -19,7 +19,7 @@ use std::sync::{Arc, Mutex};
 use bevy::{
     asset::{embedded_asset, load_embedded_asset},
     camera::{
-        primitives::Aabb,
+        primitives::{Aabb, Frustum},
         visibility::{self, VisibilityClass},
     },
     core_pipeline::{
@@ -124,6 +124,7 @@ pub struct RenderStats {
     pub arena_free: u32,
     pub slab_occupancy: [(u32, u32); 4],
     pub drawn: usize,
+    pub culled: usize,
 }
 
 /// Marker entity that anchors the terrain draw in the render phases.
@@ -194,6 +195,9 @@ struct ExtractedChunkCommands(Vec<ChunkCommand>);
 
 #[derive(Resource, Default)]
 struct ExtractedCameraPos(DVec3);
+
+#[derive(Resource, Default)]
+struct ExtractedFrustum(Option<Frustum>);
 
 enum ChunkState {
     /// Waiting for budget / an arena slot.
@@ -507,15 +511,16 @@ fn extract_chunk_commands(
 }
 
 fn extract_camera_pos(
-    cameras: Extract<Query<&GlobalTransform, With<Camera3d>>>,
+    cameras: Extract<Query<(&GlobalTransform, &Frustum), With<Camera3d>>>,
     mut commands: Commands,
 ) {
-    let pos = cameras
+    let (pos, frustum) = cameras
         .iter()
         .next()
-        .map(|t| t.translation().as_dvec3())
+        .map(|(t, f)| (t.translation().as_dvec3(), Some(*f)))
         .unwrap_or_default();
     commands.insert_resource(ExtractedCameraPos(pos));
+    commands.insert_resource(ExtractedFrustum(frustum));
 }
 
 // --- planning (Prepare) ------------------------------------------------------
@@ -553,6 +558,7 @@ fn plan_frame(
     mut batches: ResMut<FrameBatches>,
     mut draw_list: ResMut<VoxelDrawList>,
     camera: Res<ExtractedCameraPos>,
+    frustum: Res<ExtractedFrustum>,
     stats: Res<SharedRenderStats>,
     ready_tx: Res<ChunkReadySender>,
     pipelines: Option<Res<ChunkPipelines>>,
@@ -772,14 +778,30 @@ fn plan_frame(
     // 5. Arena slots freed by meshing become reusable next frame.
     gpu.arena_free.append(&mut freed_slots);
 
-    // 6. Build the draw list (visible chunks only) with camera-relative
-    //    offsets.
+    // 6. Build the draw list (visible chunks only, frustum-culled) with
+    //    camera-relative offsets.
+    let mut culled = 0usize;
     for (key, chunk) in &table.chunks {
         let ChunkState::Meshed { alloc, index_count } = &chunk.state else {
             continue;
         };
         if !chunk.visible {
             continue;
+        }
+        if let Some(f) = &frustum.0 {
+            // World-space AABB, inflated by the skirt depth. f32 is fine at
+            // current view ranges; camera-relative culling comes with M6.
+            let half = key.edge_m() * 0.5 + key.voxel_size_m() * 6.0;
+            let aabb = Aabb {
+                center: (key.min_corner_m() + DVec3::splat(key.edge_m() * 0.5))
+                    .as_vec3()
+                    .into(),
+                half_extents: Vec3A::splat(half as f32),
+            };
+            if !f.intersects_obb_identity(&aabb) {
+                culled += 1;
+                continue;
+            }
         }
         let rel = key.min_corner_m() - camera.0;
         let offset = gpu.draw_uniforms.push(&ChunkDrawUniform {
@@ -815,6 +837,7 @@ fn plan_frame(
         s.arena_free = gpu.arena_free.len() as u32;
         s.slab_occupancy = gpu.slab.occupancy();
         s.drawn = draw_list.0.len();
+        s.culled = culled;
     }
 }
 

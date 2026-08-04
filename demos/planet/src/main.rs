@@ -16,10 +16,29 @@ fn main() {
             }),
             ..default()
         }))
+        .insert_resource(ClearColor(Color::srgb(0.65, 0.77, 0.94)))
         .add_plugins((VoxelDebugPlugin, VoxelEnginePlugin))
         .add_systems(Startup, setup)
-        .add_systems(Update, autopilot)
+        .add_systems(Update, (autopilot, follow_ocean))
         .run();
+}
+
+/// Marker for the camera-following sea-level plane.
+#[derive(Component)]
+struct Ocean;
+
+fn follow_ocean(
+    mut oceans: Query<&mut Transform, (With<Ocean>, Without<Camera3d>)>,
+    cameras: Query<&Transform, With<Camera3d>>,
+) {
+    let Ok(camera) = cameras.single() else {
+        return;
+    };
+    for mut t in &mut oceans {
+        // Snap to a coarse grid so the plane never visibly swims.
+        t.translation.x = (camera.translation.x / 512.0).floor() * 512.0;
+        t.translation.z = (camera.translation.z / 512.0).floor() * 512.0;
+    }
 }
 
 /// Flies the camera forward at a constant speed when `VOXEL_AUTOPILOT` is
@@ -35,7 +54,41 @@ fn autopilot(mut cameras: Query<&mut Transform, With<Camera3d>>, time: Res<Time>
     }
 }
 
-fn setup(mut commands: Commands) {
+fn setup(
+    mut commands: Commands,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+) {
+    // Sun matching the terrain shader's sun_dir, plus sky ambient so
+    // shadowed sides of props aren't black.
+    commands.spawn((
+        DirectionalLight {
+            illuminance: 25_000.0,
+            ..default()
+        },
+        Transform::from_translation(Vec3::ZERO)
+            .looking_to(-Vec3::new(0.55, 0.5, 0.32).normalize(), Vec3::Y),
+    ));
+    commands.insert_resource(GlobalAmbientLight {
+        color: Color::srgb(0.7, 0.8, 1.0),
+        brightness: 400.0,
+        ..default()
+    });
+
+    // Sea-level plane (shading-only water, follows the camera).
+    commands.spawn((
+        Ocean,
+        Mesh3d(meshes.add(Plane3d::new(Vec3::Y, Vec2::splat(60_000.0)))),
+        MeshMaterial3d(materials.add(StandardMaterial {
+            base_color: Color::srgba(0.10, 0.28, 0.45, 0.72),
+            perceptual_roughness: 0.15,
+            metallic: 0.0,
+            reflectance: 0.45,
+            alpha_mode: AlphaMode::Blend,
+            ..default()
+        })),
+        Transform::from_xyz(0.0, 0.0, 0.0),
+    ));
     // Start position/orientation overridable for repeatable tests.
     let start = std::env::var("VOXEL_START")
         .ok()
