@@ -3,8 +3,10 @@
 //! material shading.
 
 pub mod chunks;
+pub mod grass;
 pub mod slab;
 
 pub use chunks::{
     ChunkCommand, ChunkCommandQueue, ChunkReadyChannel, SharedRenderStats, VoxelChunksPlugin,
 };
+pub use grass::{GrassInstance, GrassInstances, GrassPlugin};

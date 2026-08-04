@@ -21,14 +21,88 @@ const TREE_ATTEMPTS: u32 = 18;
 const WORLD_SEED: u64 = 0xF0857;
 const VEG_LAYER_ID: u64 = 0x7EE5;
 
+const GRASS_TILE_M: f32 = 16.0;
+const GRASS_TILE_RADIUS: i32 = 7; // ~112 m of dense grass
+const GRASS_PER_TILE: u32 = 550;
+
 pub struct VegetationPlugin;
 
 impl Plugin for VegetationPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<VegTiles>()
+            .init_resource::<GrassTiles>()
+            .add_plugins(voxel_render::GrassPlugin)
             .add_systems(Startup, build_tree_assets)
-            .add_systems(Update, stream_vegetation);
+            .add_systems(Update, (stream_vegetation, stream_grass));
     }
+}
+
+#[derive(Resource, Default)]
+struct GrassTiles {
+    tiles: HashMap<IVec2, Vec<voxel_render::GrassInstance>>,
+}
+
+fn stream_grass(
+    mut tiles: ResMut<GrassTiles>,
+    instances: Res<voxel_render::GrassInstances>,
+    cameras: Query<&Transform, With<Camera3d>>,
+) {
+    let Ok(camera) = cameras.single() else {
+        return;
+    };
+    let center = IVec2::new(
+        (camera.translation.x / GRASS_TILE_M).floor() as i32,
+        (camera.translation.z / GRASS_TILE_M).floor() as i32,
+    );
+
+    let mut changed = false;
+    for dz in -GRASS_TILE_RADIUS..=GRASS_TILE_RADIUS {
+        for dx in -GRASS_TILE_RADIUS..=GRASS_TILE_RADIUS {
+            let tile = center + IVec2::new(dx, dz);
+            if tiles.tiles.contains_key(&tile) {
+                continue;
+            }
+            tiles.tiles.insert(tile, grass_tile(tile));
+            changed = true;
+        }
+    }
+    let keep = GRASS_TILE_RADIUS + 1;
+    let before = tiles.tiles.len();
+    tiles
+        .tiles
+        .retain(|t, _| (t.x - center.x).abs() <= keep && (t.y - center.y).abs() <= keep);
+    changed |= tiles.tiles.len() != before;
+
+    if changed {
+        let merged: Vec<voxel_render::GrassInstance> =
+            tiles.tiles.values().flatten().copied().collect();
+        instances.set(merged);
+    }
+}
+
+fn grass_tile(tile: IVec2) -> Vec<voxel_render::GrassInstance> {
+    let mut rng = Rng::new(chunk_seed(
+        WORLD_SEED,
+        VEG_LAYER_ID ^ 0x6A55,
+        IVec3::new(tile.x, 1, tile.y),
+    ));
+    let origin = Vec2::new(tile.x as f32, tile.y as f32) * GRASS_TILE_M;
+    let mut out = Vec::new();
+    for _ in 0..GRASS_PER_TILE {
+        let x = origin.x + rng.next_f32() * GRASS_TILE_M;
+        let z = origin.y + rng.next_f32() * GRASS_TILE_M;
+        let xz = Vec2::new(x, z);
+        let y = terrain_height(xz, 1.0);
+        // Grass grows where the terrain shader paints grass.
+        if !(2.5..300.0).contains(&y) || terrain_up(xz, 1.0) < 0.8 {
+            continue;
+        }
+        out.push(voxel_render::GrassInstance {
+            pos: [x, y - 0.03, z],
+            hash: rng.next_u64() as u32,
+        });
+    }
+    out
 }
 
 #[derive(Resource, Default)]
