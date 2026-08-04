@@ -435,6 +435,10 @@ fn init_chunk_resources(
     let mesh_shader: Handle<Shader> =
         load_embedded_asset!(asset_server.as_ref(), "shaders/voxel_mesh_chunks.wgsl");
 
+    let compute_defs: Vec<bevy::shader::ShaderDefVal> = match *world_kind {
+        WorldKind::Planet => vec![],
+        WorldKind::Megastructure => vec!["MEGASTRUCTURE".into()],
+    };
     let compute = |label: &'static str,
                    shader: &Handle<Shader>,
                    entry: &'static str,
@@ -443,6 +447,7 @@ fn init_chunk_resources(
             label: Some(label.into()),
             layout: vec![layout.clone()],
             shader: shader.clone(),
+            shader_defs: compute_defs.clone(),
             entry_point: Some(entry.into()),
             ..default()
         })

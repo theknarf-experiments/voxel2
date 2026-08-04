@@ -209,6 +209,65 @@ fn sn_vertices(@builtin(global_invocation_id) id: vec3<u32>) {
     cell_indices[cell_slot_index(c)] = (local & 0xFFFFu) | (twin << 16u);
 }
 
+// --- baked sun shadow (planet worlds) ----------------------------------------
+// The sun is static, so a horizon march over the coarse terrain heightfield
+// is baked per vertex at mesh time (free at draw time; carried in the spare
+// u16 of the packed position).
+
+fn shash2(p: vec2<i32>) -> f32 {
+    var h: u32 = u32(p.x) * 374761393u + u32(p.y) * 668265263u;
+    h = (h ^ (h >> 13u)) * 1274126177u;
+    h = h ^ (h >> 16u);
+    return f32(h & 0xFFFFFFu) / 16777216.0;
+}
+
+fn svalue_noise2(p: vec2<f32>) -> f32 {
+    let i = vec2<i32>(floor(p));
+    let f = fract(p);
+    let u = f * f * f * (f * (f * 6.0 - 15.0) + 10.0);
+    let a = shash2(i);
+    let b = shash2(i + vec2<i32>(1, 0));
+    let c = shash2(i + vec2<i32>(0, 1));
+    let d = shash2(i + vec2<i32>(1, 1));
+    return mix(mix(a, b, u.x), mix(c, d, u.x), u.y);
+}
+
+fn sfbm2(p: vec2<f32>, base_scale: f32, octaves: i32) -> f32 {
+    var sum = 0.0;
+    var amp = 0.5;
+    var freq = base_scale;
+    for (var i = 0; i < octaves; i++) {
+        sum += amp * (svalue_noise2(p * freq) - 0.5);
+        amp *= 0.5;
+        freq *= 2.0;
+    }
+    return sum;
+}
+
+fn height_coarse(xz: vec2<f32>) -> f32 {
+    let continents = sfbm2(xz, 0.00005, 3) * 800.0;
+    let mountains = sfbm2(xz + vec2<f32>(510.0, -770.0), 0.0008, 4) * 420.0;
+    let rolling = sfbm2(xz + vec2<f32>(1337.0, 55.0), 0.01, 3) * 36.0;
+    return continents + mountains + rolling - 8.0;
+}
+
+fn baked_sun_shadow(world: vec3<f32>) -> f32 {
+#ifdef MEGASTRUCTURE
+    return 1.0;
+#else
+    let sun_dir = normalize(vec3<f32>(0.55, 0.5, 0.32));
+    var occ = 0.0;
+    var t = 8.0;
+    for (var i = 0; i < 9; i++) {
+        let sp = world + sun_dir * t;
+        let dh = height_coarse(sp.xz) - sp.y;
+        occ = max(occ, dh / t);
+        t *= 1.8;
+    }
+    return 1.0 - smoothstep(0.0, 0.2, occ);
+#endif
+}
+
 // Octahedral normal encoding.
 fn oct_encode(n: vec3<f32>) -> vec2<f32> {
     let l1 = abs(n.x) + abs(n.y) + abs(n.z);
@@ -223,9 +282,11 @@ fn oct_encode(n: vec3<f32>) -> vec2<f32> {
 
 fn write_vertex(index: u32, pos_voxels: vec3<f32>, normal: vec3<f32>) {
     let pn = clamp((pos_voxels + POS_BIAS) / POS_RANGE, vec3<f32>(0.0), vec3<f32>(1.0));
+    let world = params.origin.xyz + pos_voxels * params.origin.w;
+    let shadow = baked_sun_shadow(world);
     let out = index * VERTEX_WORDS;
     vertices[out + 0u] = pack2x16unorm(pn.xy);
-    vertices[out + 1u] = pack2x16unorm(vec2<f32>(pn.z, 0.0));
+    vertices[out + 1u] = pack2x16unorm(vec2<f32>(pn.z, shadow));
     vertices[out + 2u] = pack2x16snorm(oct_encode(normal));
 }
 

@@ -28,6 +28,7 @@ struct VsOut {
     @builtin(position) clip: vec4<f32>,
     @location(0) normal: vec3<f32>,
     @location(1) cam_rel: vec3<f32>,
+    @location(2) shadow: f32,
 }
 
 const POS_BIAS: f32 = 8.0;
@@ -52,6 +53,7 @@ fn vertex(in: VsIn) -> VsOut {
     out.clip = view.clip_from_view * vec4<f32>(view_space, 1.0);
     out.normal = oct_decode(in.oct);
     out.cam_rel = cam_rel;
+    out.shadow = in.pos.w;
     return out;
 }
 
@@ -94,6 +96,7 @@ fn fbm3(p: vec3<f32>) -> f32 {
     }
     return sum; // ~[0, 1]
 }
+
 
 #ifdef MEGASTRUCTURE
 @fragment
@@ -203,7 +206,9 @@ fn fragment(in: VsOut) -> @location(0) vec4<f32> {
 
     let nd = max(dot(n, sun_dir), 0.0);
     let hemi = mix(ground_bounce, sky_color, n.y * 0.5 + 0.5);
-    var lit = base * (sun_color * nd * 0.85 + hemi * 0.3);
+    // Terrain sun shadow baked per vertex at mesh time (spare pos channel).
+    let shadow = in.shadow;
+    var lit = base * (sun_color * nd * 0.85 * shadow + hemi * 0.3);
 
     // --- aerial haze ---------------------------------------------------------
     let haze_amount = 1.0 - exp(-dist * 0.00006);
