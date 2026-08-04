@@ -12,14 +12,16 @@
 @group(0) @binding(0) var<uniform> view: View;
 
 struct ChunkDrawUniform {
-    // Chunk minimum corner relative to the camera position, meters.
+    // xyz = chunk minimum corner relative to the camera (m), w = voxel size.
     offset: vec4<f32>,
 }
 @group(1) @binding(0) var<uniform> chunk: ChunkDrawUniform;
 
 struct VsIn {
-    @location(0) pos: vec3<f32>,
-    @location(1) normal: vec3<f32>,
+    // Quantized position: unorm16 x4 mapping [-8, 40] voxels (w unused).
+    @location(0) pos: vec4<f32>,
+    // Octahedral-encoded normal, snorm16 x2.
+    @location(1) oct: vec2<f32>,
 }
 
 struct VsOut {
@@ -28,13 +30,27 @@ struct VsOut {
     @location(1) cam_rel: vec3<f32>,
 }
 
+const POS_BIAS: f32 = 8.0;
+const POS_RANGE: f32 = 48.0;
+
+fn oct_decode(o: vec2<f32>) -> vec3<f32> {
+    var n = vec3<f32>(o, 1.0 - abs(o.x) - abs(o.y));
+    if (n.z < 0.0) {
+        let sx = select(-1.0, 1.0, n.x >= 0.0);
+        let sy = select(-1.0, 1.0, n.y >= 0.0);
+        n = vec3<f32>((1.0 - abs(n.y)) * sx, (1.0 - abs(n.x)) * sy, n.z);
+    }
+    return normalize(n);
+}
+
 @vertex
 fn vertex(in: VsIn) -> VsOut {
-    let cam_rel = in.pos + chunk.offset.xyz;
+    let pos_local = (in.pos.xyz * POS_RANGE - POS_BIAS) * chunk.offset.w;
+    let cam_rel = pos_local + chunk.offset.xyz;
     let view_space = (view.view_from_world * vec4<f32>(cam_rel, 0.0)).xyz;
     var out: VsOut;
     out.clip = view.clip_from_view * vec4<f32>(view_space, 1.0);
-    out.normal = in.normal;
+    out.normal = oct_decode(in.oct);
     out.cam_rel = cam_rel;
     return out;
 }
@@ -79,6 +95,48 @@ fn fbm3(p: vec3<f32>) -> f32 {
     return sum; // ~[0, 1]
 }
 
+#ifdef MEGASTRUCTURE
+@fragment
+fn fragment(in: VsOut) -> @location(0) vec4<f32> {
+    let n = normalize(in.normal);
+    let world = vec3<f32>(
+        view.world_position.x + in.cam_rel.x,
+        view.world_position.y + in.cam_rel.y,
+        view.world_position.z + in.cam_rel.z,
+    );
+    let dist = length(in.cam_rel);
+
+    // Concrete: pale gray with pour-band striations, grime, and streaks.
+    let detail_fade = exp(-dist * 0.004);
+    var grain = 0.5;
+    if (detail_fade > 0.02) {
+        grain = mix(0.5, fbm3(world * 0.9), detail_fade);
+    }
+    let stains = fbm3(world * 0.035);
+    let band = fract(world.y * 0.22 + stains * 0.4);
+    var base = vec3<f32>(0.42, 0.42, 0.43);
+    base *= 0.82 + 0.18 * smoothstep(0.1, 0.9, band); // pour bands
+    base *= 0.75 + 0.35 * grain;                       // fine grain
+    base = mix(base, base * vec3<f32>(0.55, 0.58, 0.55), smoothstep(0.55, 0.85, stains));
+
+    // Vertical drip streaks on walls.
+    let wallness = 1.0 - abs(n.y);
+    let streak = fbm3(vec3<f32>(world.x * 0.6, world.y * 0.03, world.z * 0.6));
+    base *= 1.0 - wallness * smoothstep(0.6, 0.9, streak) * 0.35;
+
+    // Dim top-light as if from distant shafts above; heavy darkness below.
+    let up = n.y * 0.5 + 0.5;
+    let key = vec3<f32>(0.75, 0.78, 0.82) * (0.12 + 0.55 * up * up);
+    let rim = vec3<f32>(0.20, 0.24, 0.30) * (1.0 - up) * 0.25;
+    var lit = base * (key + rim);
+
+    // Thick interior gloom.
+    let haze_amount = 1.0 - exp(-dist * 0.0035);
+    let haze_color = vec3<f32>(0.035, 0.045, 0.06);
+    lit = mix(lit, haze_color, haze_amount);
+    return vec4<f32>(lit, 1.0);
+}
+#else
 @fragment
 fn fragment(in: VsOut) -> @location(0) vec4<f32> {
     let n = normalize(in.normal);
@@ -143,3 +201,4 @@ fn fragment(in: VsOut) -> @location(0) vec4<f32> {
 
     return vec4<f32>(lit, 1.0);
 }
+#endif

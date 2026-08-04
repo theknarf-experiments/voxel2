@@ -8,16 +8,23 @@ use bevy::prelude::*;
 
 pub use streaming::{LodConfig, VoxelStreamingPlugin};
 pub use vegetation::VegetationPlugin;
+pub use voxel_render::WorldKind;
 
-/// Everything needed for a streamed voxel terrain world.
-pub struct VoxelEnginePlugin;
+/// Everything needed for a streamed voxel world.
+#[derive(Default)]
+pub struct VoxelEnginePlugin {
+    pub world: WorldKind,
+}
 
 impl Plugin for VoxelEnginePlugin {
     fn build(&self, app: &mut App) {
         app.add_plugins((
-            voxel_render::VoxelChunksPlugin,
+            voxel_render::VoxelChunksPlugin { world: self.world },
             VoxelStreamingPlugin,
-            VegetationPlugin,
         ));
+        // Organic vegetation only grows on planets.
+        if self.world == WorldKind::Planet {
+            app.add_plugins(VegetationPlugin);
+        }
     }
 }

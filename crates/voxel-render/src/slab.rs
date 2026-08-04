@@ -11,10 +11,11 @@
 /// index/vertex ratio simply lands in a larger class — the factor is a
 /// sizing heuristic, not a correctness bound. The largest class covers the
 /// theoretical 34³ extended-cell maximum with skirt twins.
-pub const CLASS_VERTS: [u32; 4] = [1_024, 4_096, 16_384, 53_248];
+pub const CLASS_VERTS: [u32; 4] = [2_048, 6_144, 16_384, 53_248];
 /// Slots per class, sized for ground-level LOD (~2000 live surface chunks
-/// across all levels at 25 km view distance), skewed to the 4k class.
-pub const CLASS_SLOTS: [u32; 4] = [384, 1_280, 96, 16];
+/// across all levels): terrain chunks are mostly ≤2k, architectural chunks
+/// (a floor slab + pillars + skirt twins) typically 4–6k.
+pub const CLASS_SLOTS: [u32; 4] = [512, 1_024, 384, 96];
 pub const INDEX_FACTOR: u32 = 6;
 
 /// A granted allocation: ranges into the shared vertex/index buffers.
@@ -113,10 +114,13 @@ mod tests {
     fn allocates_smallest_fitting_class() {
         let mut slab = SlabAllocator::new();
         assert_eq!(slab.alloc(100, 600).unwrap().class, 0);
-        assert_eq!(slab.alloc(1_025, 600).unwrap().class, 1);
-        assert_eq!(slab.alloc(5_000, 30_000).unwrap().class, 2);
+        assert_eq!(slab.alloc(CLASS_VERTS[0] + 1, 600).unwrap().class, 1);
+        assert_eq!(slab.alloc(CLASS_VERTS[1] + 1, 600).unwrap().class, 2);
         // Index count alone can push into a bigger class.
-        assert_eq!(slab.alloc(100, 1_024 * INDEX_FACTOR + 1).unwrap().class, 1);
+        assert_eq!(
+            slab.alloc(100, CLASS_VERTS[0] * INDEX_FACTOR + 1).unwrap().class,
+            1
+        );
         // Too big entirely.
         assert!(slab.alloc(CLASS_VERTS[3] + 1, 1).is_none());
     }
@@ -129,8 +133,8 @@ mod tests {
         assert_ne!(a.base_vertex, b.base_vertex);
         assert_ne!(a.first_index, b.first_index);
         // Slots within a class never overlap.
-        assert!(a.base_vertex.abs_diff(b.base_vertex) >= 1_024);
-        assert!(a.first_index.abs_diff(b.first_index) >= 1_024 * INDEX_FACTOR);
+        assert!(a.base_vertex.abs_diff(b.base_vertex) >= CLASS_VERTS[0]);
+        assert!(a.first_index.abs_diff(b.first_index) >= CLASS_VERTS[0] * INDEX_FACTOR);
     }
 
     #[test]

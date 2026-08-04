@@ -17,7 +17,7 @@ fn main() {
             ..default()
         }))
         .insert_resource(ClearColor(Color::srgb(0.65, 0.77, 0.94)))
-        .add_plugins((VoxelDebugPlugin, VoxelEnginePlugin))
+        .add_plugins((VoxelDebugPlugin, VoxelEnginePlugin::default()))
         .add_systems(Startup, setup)
         .add_systems(Update, (autopilot, follow_ocean))
         .run();

@@ -27,7 +27,12 @@ const SLOT_STRIDE: u32 = 46656u;   // 36^3
 const CELL_STRIDE: u32 = 39304u;   // 34^3
 const NONE16: u32 = 0xFFFFu;
 const NONE: u32 = 0xFFFFFFFFu;
-const VERTEX_FLOATS: u32 = 6u;
+// Compressed vertex: 3 u32 words — pos.xy (unorm16), pos.z + pad, oct normal.
+const VERTEX_WORDS: u32 = 3u;
+// Position quantization: chunk-local voxels mapped from [-8, 40] to [0, 1]
+// (covers the apron and the deepest skirt with margin).
+const POS_BIAS: f32 = 8.0;
+const POS_RANGE: f32 = 48.0;
 // Skirt depth in voxel units; must cover the surface deviation of a ±1 LOD
 // neighbor (whose voxels are 2x, deviating up to ~2 coarse voxels).
 const SKIRT_VOXELS: f32 = 6.0;
@@ -49,7 +54,8 @@ struct SlotCounts {
 @group(0) @binding(0) var<storage, read_write> density: array<u32>;
 @group(0) @binding(1) var<uniform> params: ChunkParams;
 @group(0) @binding(2) var<storage, read_write> cell_indices: array<u32>;
-@group(0) @binding(3) var<storage, read_write> vertices: array<f32>;
+@group(0) @binding(3) var<storage, read_write> vertices: array<u32>;
+// u16 indices, two per word; quads always write whole words (6 indices).
 @group(0) @binding(4) var<storage, read_write> indices: array<u32>;
 @group(0) @binding(5) var<storage, read_write> counts: array<SlotCounts>;
 
@@ -183,8 +189,9 @@ fn sn_vertices(@builtin(global_invocation_id) id: vec3<u32>) {
         normal = normalize(g);
     }
 
-    let vs = params.origin.w;
-    let p = (vec3<f32>(c) + sum / n) * vs; // chunk-local meters
+    // Position in voxel units (chunk-local); scaling to meters happens at
+    // decode using the per-chunk voxel size.
+    let pv = vec3<f32>(c) + sum / n;
 
     let boundary = is_boundary_cell(c);
     var count = 1u;
@@ -193,27 +200,33 @@ fn sn_vertices(@builtin(global_invocation_id) id: vec3<u32>) {
     }
     let local = atomicAdd(&counts[params.counts_slot].verts, count);
 
-    let out = (params.base_vertex + local) * VERTEX_FLOATS;
-    vertices[out + 0u] = p.x;
-    vertices[out + 1u] = p.y;
-    vertices[out + 2u] = p.z;
-    vertices[out + 3u] = normal.x;
-    vertices[out + 4u] = normal.y;
-    vertices[out + 5u] = normal.z;
-
+    write_vertex(params.base_vertex + local, pv, normal);
     var twin = NONE16;
     if (boundary) {
         twin = local + 1u;
-        let sp = p - normal * (SKIRT_VOXELS * vs);
-        let tout = (params.base_vertex + twin) * VERTEX_FLOATS;
-        vertices[tout + 0u] = sp.x;
-        vertices[tout + 1u] = sp.y;
-        vertices[tout + 2u] = sp.z;
-        vertices[tout + 3u] = normal.x;
-        vertices[tout + 4u] = normal.y;
-        vertices[tout + 5u] = normal.z;
+        write_vertex(params.base_vertex + twin, pv - normal * SKIRT_VOXELS, normal);
     }
     cell_indices[cell_slot_index(c)] = (local & 0xFFFFu) | (twin << 16u);
+}
+
+// Octahedral normal encoding.
+fn oct_encode(n: vec3<f32>) -> vec2<f32> {
+    let l1 = abs(n.x) + abs(n.y) + abs(n.z);
+    var v = n.xy / l1;
+    if (n.z < 0.0) {
+        let sx = select(-1.0, 1.0, v.x >= 0.0);
+        let sy = select(-1.0, 1.0, v.y >= 0.0);
+        v = vec2<f32>((1.0 - abs(v.y)) * sx, (1.0 - abs(v.x)) * sy);
+    }
+    return v;
+}
+
+fn write_vertex(index: u32, pos_voxels: vec3<f32>, normal: vec3<f32>) {
+    let pn = clamp((pos_voxels + POS_BIAS) / POS_RANGE, vec3<f32>(0.0), vec3<f32>(1.0));
+    let out = index * VERTEX_WORDS;
+    vertices[out + 0u] = pack2x16unorm(pn.xy);
+    vertices[out + 1u] = pack2x16unorm(vec2<f32>(pn.z, 0.0));
+    vertices[out + 2u] = pack2x16snorm(oct_encode(normal));
 }
 
 @compute @workgroup_size(4, 4, 4)
@@ -257,21 +270,17 @@ fn sn_quads(@builtin(global_invocation_id) id: vec3<u32>) {
     }
 }
 
+// Six u16 indices per quad, packed two per u32 word. `first_index` is
+// always even (quad-aligned), so the three words never straddle quads.
 fn write_quad(quad_index: u32, corners: array<u32, 4>, flip: bool) {
-    let base = params.first_index + quad_index * 6u;
+    var i: array<u32, 6>;
     if (flip) {
-        indices[base + 0u] = corners[0];
-        indices[base + 1u] = corners[1];
-        indices[base + 2u] = corners[2];
-        indices[base + 3u] = corners[0];
-        indices[base + 4u] = corners[2];
-        indices[base + 5u] = corners[3];
+        i = array<u32, 6>(corners[0], corners[1], corners[2], corners[0], corners[2], corners[3]);
     } else {
-        indices[base + 0u] = corners[0];
-        indices[base + 1u] = corners[2];
-        indices[base + 2u] = corners[1];
-        indices[base + 3u] = corners[0];
-        indices[base + 4u] = corners[3];
-        indices[base + 5u] = corners[2];
+        i = array<u32, 6>(corners[0], corners[2], corners[1], corners[0], corners[3], corners[2]);
     }
+    let word = (params.first_index + quad_index * 6u) >> 1u;
+    indices[word + 0u] = (i[0] & 0xFFFFu) | (i[1] << 16u);
+    indices[word + 1u] = (i[2] & 0xFFFFu) | (i[3] << 16u);
+    indices[word + 2u] = (i[4] & 0xFFFFu) | (i[5] << 16u);
 }

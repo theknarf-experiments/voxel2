@@ -8,5 +8,6 @@ pub mod slab;
 
 pub use chunks::{
     ChunkCommand, ChunkCommandQueue, ChunkReadyChannel, SharedRenderStats, VoxelChunksPlugin,
+    WorldKind,
 };
 pub use grass::{GrassInstance, GrassInstances, GrassPlugin};

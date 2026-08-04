@@ -64,12 +64,13 @@ use crate::slab::{SlabAlloc, SlabAllocator};
 
 const SAMPLES: u32 = 36;
 const CELLS: u32 = 32;
-const VERTEX_FLOATS: u64 = 6;
+/// Compressed vertex: 12 bytes (unorm16 pos ×4 incl. pad, snorm16 oct normal).
+const VERTEX_BYTES: u64 = 12;
 
 const ARENA_SLOTS: u32 = 64;
 const COUNTS_SLOTS: u32 = 64;
 const GEN_BUDGET: usize = 24;
-const MESH_BUDGET: usize = 24;
+const MESH_BUDGET: usize = 32;
 const STAGING_BUFFERS: usize = 3;
 
 // --- main-world <-> render-world plumbing ------------------------------------
@@ -133,11 +134,23 @@ pub struct RenderStats {
 #[component(on_add = visibility::add_visibility_class::<VoxelTerrainMarker>)]
 pub struct VoxelTerrainMarker;
 
-pub struct VoxelChunksPlugin;
+/// Which world the density/draw shaders generate.
+#[derive(Resource, Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum WorldKind {
+    #[default]
+    Planet,
+    Megastructure,
+}
+
+#[derive(Default)]
+pub struct VoxelChunksPlugin {
+    pub world: WorldKind,
+}
 
 impl Plugin for VoxelChunksPlugin {
     fn build(&self, app: &mut App) {
         embedded_asset!(app, "shaders/voxel_terrain_density.wgsl");
+        embedded_asset!(app, "shaders/voxel_mega_density.wgsl");
         embedded_asset!(app, "shaders/voxel_mesh_chunks.wgsl");
         embedded_asset!(app, "shaders/voxel_chunk_draw.wgsl");
 
@@ -155,6 +168,7 @@ impl Plugin for VoxelChunksPlugin {
         };
         render_app
             .insert_resource(stats)
+            .insert_resource(self.world)
             .insert_resource(ChunkReadySender(ready_tx))
             .init_resource::<ExtractedChunkCommands>()
             .init_resource::<ChunkTable>()
@@ -324,6 +338,7 @@ fn init_chunk_resources(
     render_device: Res<RenderDevice>,
     asset_server: Res<AssetServer>,
     pipeline_cache: Res<PipelineCache>,
+    world_kind: Res<WorldKind>,
 ) {
     let buffer = |label: &str, size: u64, usage: BufferUsages| {
         render_device.create_buffer(&BufferDescriptor {
@@ -361,12 +376,13 @@ fn init_chunk_resources(
         ),
         vertex_slab: buffer(
             "voxel_vertex_slab",
-            SlabAllocator::total_vertices() * VERTEX_FLOATS * 4,
+            SlabAllocator::total_vertices() * VERTEX_BYTES,
             BufferUsages::STORAGE | BufferUsages::VERTEX,
         ),
         index_slab: buffer(
             "voxel_index_slab",
-            SlabAllocator::total_indices() * 4,
+            // u16 indices.
+            SlabAllocator::total_indices() * 2,
             BufferUsages::STORAGE | BufferUsages::INDEX,
         ),
         counts: buffer(
@@ -408,8 +424,14 @@ fn init_chunk_resources(
         ),
     );
 
-    let density_shader: Handle<Shader> =
-        load_embedded_asset!(asset_server.as_ref(), "shaders/voxel_terrain_density.wgsl");
+    let density_shader: Handle<Shader> = match *world_kind {
+        WorldKind::Planet => {
+            load_embedded_asset!(asset_server.as_ref(), "shaders/voxel_terrain_density.wgsl")
+        }
+        WorldKind::Megastructure => {
+            load_embedded_asset!(asset_server.as_ref(), "shaders/voxel_mega_density.wgsl")
+        }
+    };
     let mesh_shader: Handle<Shader> =
         load_embedded_asset!(asset_server.as_ref(), "shaders/voxel_mesh_chunks.wgsl");
 
@@ -451,24 +473,29 @@ fn init_chunk_resources(
     );
     let draw_shader: Handle<Shader> =
         load_embedded_asset!(asset_server.as_ref(), "shaders/voxel_chunk_draw.wgsl");
+    let shader_defs = match *world_kind {
+        WorldKind::Planet => vec![],
+        WorldKind::Megastructure => vec!["MEGASTRUCTURE".into()],
+    };
     let base_descriptor = RenderPipelineDescriptor {
         label: Some("voxel_chunks_draw".into()),
         layout: vec![view_layout.clone(), chunk_layout.clone()],
         vertex: VertexState {
             shader: draw_shader.clone(),
+            shader_defs: shader_defs.clone(),
             entry_point: Some("vertex".into()),
             buffers: vec![VertexBufferLayout {
-                array_stride: VERTEX_FLOATS * 4,
+                array_stride: VERTEX_BYTES,
                 step_mode: VertexStepMode::Vertex,
                 attributes: vec![
                     VertexAttribute {
-                        format: VertexFormat::Float32x3,
+                        format: VertexFormat::Unorm16x4,
                         offset: 0,
                         shader_location: 0,
                     },
                     VertexAttribute {
-                        format: VertexFormat::Float32x3,
-                        offset: 12,
+                        format: VertexFormat::Snorm16x2,
+                        offset: 8,
                         shader_location: 1,
                     },
                 ],
@@ -477,6 +504,7 @@ fn init_chunk_resources(
         },
         fragment: Some(FragmentState {
             shader: draw_shader,
+            shader_defs,
             entry_point: Some("fragment".into()),
             targets: vec![Some(ColorTargetState {
                 format: TextureFormat::Rgba8UnormSrgb,
@@ -805,7 +833,12 @@ fn plan_frame(
         }
         let rel = key.min_corner_m() - camera.0;
         let offset = gpu.draw_uniforms.push(&ChunkDrawUniform {
-            offset: Vec4::new(rel.x as f32, rel.y as f32, rel.z as f32, 0.0),
+            offset: Vec4::new(
+                rel.x as f32,
+                rel.y as f32,
+                rel.z as f32,
+                key.voxel_size_m() as f32,
+            ),
         });
         draw_list.0.push(DrawEntry {
             uniform_offset: offset,
@@ -1080,7 +1113,7 @@ where
         }
         pass.set_bind_group(0, view_bg, &[view_offset.offset]);
         pass.set_vertex_buffer(0, gpu.vertex_slab.slice(..));
-        pass.set_index_buffer(gpu.index_slab.slice(..), IndexFormat::Uint32);
+        pass.set_index_buffer(gpu.index_slab.slice(..), IndexFormat::Uint16);
         for entry in &draw_list.0 {
             pass.set_bind_group(1, chunk_bg, &[entry.uniform_offset]);
             pass.draw_indexed(
