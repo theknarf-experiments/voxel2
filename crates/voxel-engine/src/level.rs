@@ -1300,8 +1300,13 @@ fn autopilot(mut cameras: Query<&mut Transform, With<Camera3d>>, time: Res<Time>
         return;
     };
     let speed: f32 = speed.parse().unwrap_or(50.0);
+    let level_flight = std::env::var("VOXEL_AUTOPILOT_LEVEL").is_ok();
     for mut transform in &mut cameras {
-        let dir = transform.forward();
+        let mut dir = *transform.forward();
+        if level_flight {
+            dir.y = 0.0;
+            dir = dir.normalize_or_zero();
+        }
         transform.translation += dir * speed * time.delta_secs();
     }
 }

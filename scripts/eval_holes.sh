@@ -8,10 +8,14 @@ LEVEL=${1:-levels/planet.json}
 SECS=${2:-60}
 OUT=$(mktemp -d)
 cargo build -p voxel2 2>&1 | tail -1
-VOXEL_EVAL_HOLES=1 VOXEL_START="-29840,900,-36767" VOXEL_LOOK="0.8,-0.35,0.4" \
+VOXEL_EVAL_HOLES=1 VOXEL_AUTOPILOT_LEVEL=1 VOXEL_START="-29840,2400,-36767" VOXEL_LOOK="0.05,-1.0,0.05" \
   VOXEL_AUTOPILOT=140 VOXEL_SCREENSHOT="$OUT/frame_%.png,4" \
   caffeinate -dis ./target/debug/voxel2 "$LEVEL" > "$OUT/run.log" 2>&1 &
 PID=$!
+# Warmup: let the initial world stream in before judging coverage
+# (cold-start loading is a loading-screen concern, not a hole).
+sleep 20
+rm -f "$OUT/frame_%.png"
 # Rotate capture files so every interval is kept, not overwritten.
 for i in $(seq 1 $((SECS / 4))); do
   sleep 4

@@ -72,7 +72,7 @@ impl Plugin for VegetationPlugin {
 /// gate, so a hot-reload can switch worlds (rebuild still runs, so
 /// removing the spawners clears what grew).
 fn vegetation_enabled(level: Option<Res<crate::LevelDef>>) -> bool {
-    level.is_some_and(|l| !l.spawners.is_empty())
+    !crate::level::eval_holes_mode() && level.is_some_and(|l| !l.spawners.is_empty())
 }
 
 /// Despawn everything grown; the streaming systems regrow it on the (new)

@@ -177,6 +177,7 @@ fn lod_tick(
     ops_provider: Res<ChunkOpsProvider>,
     mut rebuild: ResMut<StreamingRebuild>,
     ready_rx: Res<ChunkReadyChannel>,
+    mut field: ResMut<voxel_render::FieldParams>,
     cameras: Query<&Transform, (With<Camera3d>, Without<voxel_render::HelperCamera>)>,
 ) {
     let Ok(camera) = cameras.single() else {
@@ -195,6 +196,13 @@ fn lod_tick(
         }
     };
     let anchor = tree.anchor.unwrap();
+    if anchor_moved {
+        // Publish the field to the density band: every chunk samples at
+        // vs(p) = clamp(|p - anchor| / (split_k * 32), 1, max).
+        field.anchor = anchor.as_vec3();
+        field.dist_scale = (config.split_k * 32.0) as f32;
+        field.max_vs = (1u32 << config.max_level) as f32;
+    }
 
     // 0. Full rebuild: free every requested chunk and restart from the top
     //    ring (used when generation parameters hot-reload).

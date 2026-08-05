@@ -275,6 +275,28 @@ impl Default for EnvParams {
     }
 }
 
+/// The continuous LOD field the density band derives from: every chunk at
+/// every level samples the generator at `vs(p) = clamp(|p - anchor| /
+/// dist_scale, 1, max_vs)`, so shared corners store bit-identical values
+/// regardless of which chunk generated them — seams cannot disagree.
+#[derive(Resource, Clone, Copy)]
+pub struct FieldParams {
+    pub anchor: Vec3,
+    /// split_k × 32 m (voxel size doubles per dist_scale of distance).
+    pub dist_scale: f32,
+    pub max_vs: f32,
+}
+
+impl Default for FieldParams {
+    fn default() -> Self {
+        Self {
+            anchor: Vec3::ZERO,
+            dist_scale: 80.0,
+            max_vs: 256.0,
+        }
+    }
+}
+
 /// GPU layout twin of `voxel_core::worldop::WorldOp` (64 B).
 #[derive(ShaderType, Clone, Copy, Default)]
 pub(crate) struct GpuWorldOp {
@@ -291,12 +313,15 @@ pub(crate) struct GpuWorldOp {
 pub(crate) struct GpuWorldProgram {
     count: UVec4,
     sun: Vec4,
+    /// xyz = field anchor, w = dist_scale; field.x = max_vs.
+    anchor: Vec4,
+    field: Vec4,
     #[shader(size(runtime))]
     ops: Vec<GpuWorldOp>,
 }
 
 impl GpuWorldProgram {
-    fn from_program(program: &WorldProgram) -> Self {
+    fn from_program(program: &WorldProgram, field: &FieldParams) -> Self {
         let ops = &program.ops;
         let height_ops = ops.iter().filter(|op| op.is_height_op()).count() as u32;
         let mut gpu_ops: Vec<GpuWorldOp> = ops
@@ -315,6 +340,8 @@ impl GpuWorldProgram {
         Self {
             count: UVec4::new(ops.len() as u32, height_ops, program.seed, 0),
             sun: program.sun_dir.extend(0.0),
+            anchor: field.anchor.extend(field.dist_scale),
+            field: Vec4::new(field.max_vs, 0.0, 0.0, 0.0),
             ops: gpu_ops,
         }
     }
@@ -337,6 +364,7 @@ impl Plugin for VoxelChunksPlugin {
 
         let (ready_tx, ready_rx) = crossbeam_channel::unbounded();
         app.init_resource::<WorldProgram>();
+        app.init_resource::<FieldParams>();
         app.init_resource::<WorldMaterials>();
         app.init_resource::<EnvParams>();
         app.init_resource::<ChunkCommandQueue>()
@@ -352,6 +380,7 @@ impl Plugin for VoxelChunksPlugin {
         };
         render_app
             .init_resource::<WorldProgram>()
+            .init_resource::<FieldParams>()
             .init_resource::<WorldMaterials>()
             .init_resource::<EnvParams>()
             .insert_resource(stats)
@@ -784,11 +813,13 @@ fn extract_chunk_commands(
 
 fn extract_program(
     program: Extract<Res<WorldProgram>>,
+    field: Extract<Res<FieldParams>>,
     materials: Extract<Res<WorldMaterials>>,
     env: Extract<Res<EnvParams>>,
     mut commands: Commands,
 ) {
     commands.insert_resource(program.clone());
+    commands.insert_resource(**field);
     commands.insert_resource(materials.clone());
     commands.insert_resource(**env);
 }
@@ -851,9 +882,12 @@ fn plan_frame(
     mut batches: ResMut<FrameBatches>,
     mut draw_list: ResMut<VoxelDrawList>,
     camera: Res<ExtractedCameraPos>,
-    program: Res<WorldProgram>,
-    materials: Res<WorldMaterials>,
-    env: Res<EnvParams>,
+    (program, field, materials, env): (
+        Res<WorldProgram>,
+        Res<FieldParams>,
+        Res<WorldMaterials>,
+        Res<EnvParams>,
+    ),
     frustum: Res<ExtractedFrustum>,
     stats: Res<SharedRenderStats>,
     ready_tx: Res<ChunkReadySender>,
@@ -1269,7 +1303,7 @@ fn plan_frame(
     gpu.draw_uniforms
         .write_buffer(&render_device, &render_queue);
     gpu.program_buffer
-        .set(GpuWorldProgram::from_program(&program));
+        .set(GpuWorldProgram::from_program(&program, &field));
     gpu.program_buffer
         .write_buffer(&render_device, &render_queue);
     gpu.materials_uniform

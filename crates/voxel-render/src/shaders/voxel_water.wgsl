@@ -30,8 +30,10 @@ struct WorldOp {
     p2: vec4<f32>,
 }
 struct WorldProgram {
-    count: vec4<u32>, // total ops, height ops, seed, unused
-    sun: vec4<f32>,   // sun direction | unused
+    count: vec4<u32>,  // total ops, height ops, seed, unused
+    sun: vec4<f32>,    // sun direction | unused
+    anchor: vec4<f32>, // LOD field anchor | dist_scale
+    field: vec4<f32>,  // max_vs | unused
     ops: array<WorldOp>,
 }
 @group(0) @binding(3) var<storage, read> prog: WorldProgram;

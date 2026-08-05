@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Count magenta (background) pixels per frame. Exit 1 if any hole pixel
-appears in the lower 60% of any frame (sky above the horizon is
-legitimately background)."""
+appears anywhere in any frame (the eval camera looks steeply down from
+altitude, so no sky is ever legitimately in frame)."""
 import struct, sys, zlib
 
 def load_png(path):
@@ -44,7 +44,7 @@ fail = False
 for path in sys.argv[1:]:
     w, h, bpp, rows = load_png(path)
     holes = 0
-    for y in range(int(h * 0.4), h):
+    for y in range(h):
         row = rows[y]
         for x in range(w):
             r, g, b = row[x * bpp], row[x * bpp + 1], row[x * bpp + 2]
