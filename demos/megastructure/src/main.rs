@@ -34,8 +34,74 @@ fn main() {
             },
         ))
         .add_systems(Startup, setup)
-        .add_systems(Update, autopilot)
+        .add_systems(Update, (autopilot, walk_mode).chain())
         .run();
+}
+
+/// `VOXEL_WALK=1`: gravity + capsule collision against the CPU mirror of
+/// the megastructure SDF — walk the interior on foot.
+fn walk_mode(
+    mut cameras: Query<&mut Transform, With<Camera3d>>,
+    time: Res<Time>,
+    mut fall_speed: Local<f32>,
+    mut spawned: Local<bool>,
+) {
+    if std::env::var("VOXEL_WALK").is_err() {
+        return;
+    }
+    use voxel_worldgen::mega::{mega_gradient, mega_sdf};
+    const RADIUS: f32 = 0.5;
+    const EYE: f32 = 1.6;
+
+    for mut t in &mut cameras {
+        // First tick: relocate onto solid floor (spawn cells can be holes).
+        if !*spawned {
+            *spawned = true;
+            'probe: for r in 0..40 {
+                for (dx, dz) in [(1.0, 0.3), (-0.7, 1.0), (0.4, -1.0), (-1.0, -0.5)] {
+                    let p = t.translation
+                        + Vec3::new(dx * r as f32 * 4.0, 0.0, dz * r as f32 * 4.0);
+                    let level = (p.y / 44.0).round() * 44.0;
+                    let foot = Vec3::new(p.x, level, p.z);
+                    if mega_sdf(foot) < -1.0 {
+                        t.translation = Vec3::new(foot.x, level + 1.5 + EYE, foot.z);
+                        break 'probe;
+                    }
+                }
+            }
+        }
+
+        // Clamped dt + substeps so startup hitches can't tunnel through
+        // 1.5 m floor slabs.
+        let dt = time.delta_secs().min(0.033);
+        *fall_speed = (*fall_speed - 22.0 * dt).max(-30.0);
+        let mut body = t.translation - Vec3::Y * EYE;
+        let mut remaining = *fall_speed * dt;
+        while remaining.abs() > 0.0 {
+            let step = remaining.clamp(-0.4, 0.4);
+            body.y += step;
+            remaining -= step;
+            for _ in 0..4 {
+                let d = mega_sdf(body);
+                if d < RADIUS {
+                    let n = mega_gradient(body);
+                    body += n * (RADIUS - d);
+                    if n.y > 0.5 {
+                        *fall_speed = 0.0;
+                        remaining = 0.0;
+                    }
+                }
+            }
+        }
+        // Resolve horizontal penetration from the flycam's own motion.
+        for _ in 0..4 {
+            let d = mega_sdf(body);
+            if d < RADIUS {
+                body += mega_gradient(body) * (RADIUS - d);
+            }
+        }
+        t.translation = body + Vec3::Y * EYE;
+    }
 }
 
 fn setup(mut commands: Commands) {

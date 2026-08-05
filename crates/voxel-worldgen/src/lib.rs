@@ -5,6 +5,7 @@
 //! `voxel-render/src/shaders/voxel_terrain_density.wgsl` — vegetation and
 //! gameplay place things on the surface the GPU generates.
 
+pub mod mega;
 pub mod roads;
 pub mod ruins;
 

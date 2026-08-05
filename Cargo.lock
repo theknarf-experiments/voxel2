@@ -3377,6 +3377,7 @@ dependencies = [
  "bevy",
  "voxel-debug",
  "voxel-engine",
+ "voxel-worldgen",
 ]
 
 [[package]]
