@@ -129,7 +129,9 @@ struct LodTree {
     /// Parent (requested, hidden) → the 8 active children it will replace.
     merging: HashMap<ChunkKey, [ChunkKey; 8]>,
     /// Chunks the render world reported drawable.
-    ready: HashSet<ChunkKey>,
+    /// Drawable chunks, with the seam mask their mesh was built with
+    /// (u32::MAX = empty, accepts any).
+    ready: HashMap<ChunkKey, u32>,
     /// Top-level cells whose subtree is live.
     top_cells: HashSet<IVec3>,
     /// Face mask baked into each chunk's last requested generation.
@@ -210,15 +212,24 @@ fn lod_tick(
     }
 
     // 1. Absorb readiness notifications.
-    for key in ready_rx.rx.try_iter() {
-        tree.ready.insert(key);
+    for (key, mask) in ready_rx.rx.try_iter() {
+        tree.ready.insert(key, mask);
     }
 
     // 2. Complete splits whose 8 children are all drawable: atomic swap.
     let done_splits: Vec<(ChunkKey, [ChunkKey; 8])> = tree
         .splitting
         .iter()
-        .filter(|(_, children)| children.iter().all(|c| tree.ready.contains(c)))
+        .filter(|(_, children)| {
+            children.iter().all(|c| {
+                // Only a mesh built with the seams the field currently
+                // prescribes may swap in — stale-seam meshes show cracks.
+                match tree.ready.get(c) {
+                    Some(&m) => m == u32::MAX || m == face_mask(&config, anchor, *c),
+                    None => false,
+                }
+            })
+        })
         .map(|(p, c)| (*p, *c))
         .collect();
     for (parent, children) in done_splits {
@@ -236,7 +247,10 @@ fn lod_tick(
     let done_merges: Vec<(ChunkKey, [ChunkKey; 8])> = tree
         .merging
         .iter()
-        .filter(|(parent, _)| tree.ready.contains(parent))
+        .filter(|(parent, _)| match tree.ready.get(parent) {
+            Some(&m) => m == u32::MAX || m == face_mask(&config, anchor, **parent),
+            None => false,
+        })
         .map(|(p, c)| (*p, *c))
         .collect();
     for (parent, children) in done_merges {
@@ -329,20 +343,24 @@ fn lod_tick(
     // change; any leaf whose baked mask disagrees regenerates in place.
     // Pure re-derivation — no event choreography, misses self-heal here.
     if anchor_moved {
-        let stale: Vec<ChunkKey> = tree
+        let mut candidates: Vec<ChunkKey> = tree
             .leaves
             .iter()
-            .filter(|leaf| {
-                !tree.splitting.contains_key(*leaf)
-                    && !in_merge(tree, **leaf)
-                    && tree.sent_masks.get(*leaf) != Some(&face_mask(&config, anchor, **leaf))
-            })
+            .filter(|leaf| !tree.splitting.contains_key(*leaf) && !in_merge(tree, **leaf))
             .copied()
             .collect();
-        for key in stale {
+        // In-flight replacements regenerate for the new anchor too, or the
+        // seam-gated swaps above would wait forever on their stale masks.
+        for children in tree.splitting.values() {
+            candidates.extend(children.iter().copied());
+        }
+        candidates.extend(tree.merging.keys().copied());
+        for key in candidates {
             let mask = face_mask(&config, anchor, key);
-            tree.sent_masks.insert(key, mask);
-            request(&queue, &ops_provider, key, false, mask);
+            if tree.sent_masks.get(&key) != Some(&mask) {
+                tree.sent_masks.insert(key, mask);
+                request(&queue, &ops_provider, key, false, mask);
+            }
         }
     }
 }
@@ -389,7 +407,7 @@ fn free_subtree(tree: &mut LodTree, queue: &ChunkCommandQueue, cell: IVec3, max_
         tree.sent_masks.remove(&key);
         queue.push(ChunkCommand::Free(key));
     }
-    tree.ready.retain(|k| !in_subtree(k));
+    tree.ready.retain(|k, _| !in_subtree(k));
 }
 
 fn hud_stats(

@@ -118,11 +118,13 @@ impl ChunkCommandQueue {
 /// ready-before-swap.
 #[derive(Resource, Clone)]
 pub struct ChunkReadyChannel {
-    pub rx: crossbeam_channel::Receiver<ChunkKey>,
+    /// (key, face_mask baked into the drawable mesh; u32::MAX for
+    /// empty-classified chunks, which any seam configuration accepts).
+    pub rx: crossbeam_channel::Receiver<(ChunkKey, u32)>,
 }
 
 #[derive(Resource, Clone)]
-struct ChunkReadySender(crossbeam_channel::Sender<ChunkKey>);
+struct ChunkReadySender(crossbeam_channel::Sender<(ChunkKey, u32)>);
 
 /// Shared render statistics for the debug HUD (written by the render world,
 /// read by the main world).
@@ -424,6 +426,9 @@ struct RenderChunk {
     /// Seam ownership mask (see [`ChunkCommand::Request`]); baked into both
     /// the gen and mesh params of one generation so passes always agree.
     face_mask: u32,
+    /// The mask the currently in-flight/most recent generation was built
+    /// with (face_mask may have been updated by a newer request since).
+    gen_mask: u32,
     /// In-place regeneration (a neighbor's LOD changed): the old mesh keeps
     /// drawing until the replacement is ready, then swaps atomically.
     pending: Option<Pending>,
@@ -912,6 +917,7 @@ fn plan_frame(
                                 show_on_ready,
                                 ops,
                                 face_mask,
+                                gen_mask: face_mask,
                                 pending: None,
                             },
                         );
@@ -974,6 +980,7 @@ fn plan_frame(
                             show_on_ready: false,
                             ops: None,
                             face_mask: 0,
+                            gen_mask: 0,
                             pending: None,
                         },
                     );
@@ -1039,7 +1046,7 @@ fn plan_frame(
                         gpu.arena_free.push(slot);
                         table.empty_classified += 1;
                         chunk.state = ChunkState::Empty;
-                        let _ = ready_tx.0.send(*key);
+                        let _ = ready_tx.0.send((*key, u32::MAX));
                     } else {
                         chunk.state = ChunkState::AwaitingAlloc {
                             slot,
@@ -1106,7 +1113,7 @@ fn plan_frame(
             Some(&alloc),
             mesh_counts_slot,
             (0, 0),
-            chunk.face_mask,
+            chunk.gen_mask,
         ));
         batches.mesh.push(MeshEntry {
             uniform_offset: offset,
@@ -1125,7 +1132,7 @@ fn plan_frame(
             if chunk.show_on_ready {
                 chunk.visible = true;
             }
-            let _ = ready_tx.0.send(key);
+            let _ = ready_tx.0.send((key, chunk.gen_mask));
         }
         chunk.state = ChunkState::Meshed {
             alloc,
@@ -1184,6 +1191,7 @@ fn plan_frame(
                 uniform_offset: offset,
             });
             entries.push((key, counts_slot));
+            chunk.gen_mask = chunk.face_mask;
             if matches!(chunk.pending, Some(Pending::Queued)) {
                 chunk.pending = Some(Pending::CountsInFlight { slot });
             } else {
