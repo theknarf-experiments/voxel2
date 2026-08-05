@@ -191,6 +191,9 @@ pub const MAT_KIND_SURFACE: u32 = 0;
 /// Renders altitude-zoned natural terrain (low/mid/high/peak colors with
 /// noisy borders) with a slope override to the high-zone color.
 pub const MAT_KIND_ZONED: u32 = 1;
+/// Forested zoned terrain: crown-noise canopy with normal perturbation
+/// and AO between the low and rock zones, strata-bumped rock above.
+pub const MAT_KIND_CANOPY: u32 = 2;
 
 /// One material recipe, GPU form (128 B). The draw shader indexes the
 /// material table with the per-vertex material id the generator ops emit —

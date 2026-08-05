@@ -10,7 +10,7 @@ pub mod water;
 pub use chunks::{
     ChunkCommand, ChunkCommandQueue, ChunkReadyChannel, EnvParams, FieldParams, SharedRenderStats,
     VoxelChunksPlugin, WorldMaterial, WorldMaterials, WorldProgram, MATERIAL_SLOTS,
-    MAT_KIND_SURFACE, MAT_KIND_ZONED,
+    MAT_KIND_CANOPY, MAT_KIND_SURFACE, MAT_KIND_ZONED,
 };
 pub use grass::{GrassInstance, GrassInstances, GrassPlugin, GrassStyle};
 pub use water::{WaterPlugin, WaterSurface};

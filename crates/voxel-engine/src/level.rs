@@ -285,6 +285,31 @@ pub enum MaterialDef {
         #[serde(default = "default_fade")]
         detail_fade: f32,
     },
+    /// Forested zoned terrain: crown-noise canopy between the low and
+    /// rock zones (perturbed normals + crown AO), strata-bumped rock
+    /// above with an implicit snowcap. After iq's Rainforest shading.
+    Canopy {
+        id: u32,
+        low: [f32; 3],
+        /// (dark, sun-lit) canopy greens mixed by crown noise.
+        canopy: [[f32; 3]; 2],
+        rock: [f32; 3],
+        /// Dry/brown patch color on gentle ground.
+        patch: [f32; 3],
+        zones: CanopyZonesDef,
+        /// Crown noise (scale 1/m, normal relief).
+        #[serde(default = "default_crowns")]
+        crowns: [f32; 2],
+        /// Rock strata bumps (scale 1/m, normal relief).
+        #[serde(default = "default_strata")]
+        strata: [f32; 2],
+        #[serde(default = "default_steep")]
+        steep: [f32; 2],
+        #[serde(default = "default_patch_amount")]
+        patch_amount: f32,
+        #[serde(default = "default_zoned_fade")]
+        detail_fade: f32,
+    },
     /// Altitude-zoned natural terrain (low/mid/high/peak with noisy
     /// borders and a slope override to the high color).
     Zoned {
@@ -343,6 +368,16 @@ pub struct EmissiveDef {
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct CanopyZonesDef {
+    /// (start altitude, blend width) where canopy replaces the low color.
+    pub canopy: [f32; 2],
+    /// (start altitude, blend width) where rock replaces canopy.
+    pub rock: [f32; 2],
+    #[serde(default = "default_border")]
+    pub border: f32,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct ZonesDef {
     pub mid: [f32; 2],
     pub high: [f32; 2],
@@ -369,11 +404,22 @@ fn default_border() -> f32 {
 fn default_one() -> f32 {
     1.0
 }
+fn default_crowns() -> [f32; 2] {
+    [0.35, 0.9]
+}
+fn default_strata() -> [f32; 2] {
+    [0.15, 1.2]
+}
+fn default_patch_amount() -> f32 {
+    0.5
+}
 
 impl MaterialDef {
     pub fn id(&self) -> u32 {
         match *self {
-            MaterialDef::Surface { id, .. } | MaterialDef::Zoned { id, .. } => id,
+            MaterialDef::Surface { id, .. }
+            | MaterialDef::Zoned { id, .. }
+            | MaterialDef::Canopy { id, .. } => id,
         }
     }
 
@@ -418,6 +464,28 @@ impl MaterialDef {
                     ),
                 }
             }
+            MaterialDef::Canopy {
+                low,
+                canopy,
+                rock,
+                patch,
+                ref zones,
+                crowns,
+                strata,
+                steep,
+                patch_amount,
+                detail_fade,
+                ..
+            } => voxel_render::WorldMaterial {
+                head: UVec4::new(voxel_render::MAT_KIND_CANOPY, 0, 0, 0),
+                c0: v3(canopy[0], zones.canopy[0]),
+                c1: v3(canopy[1], zones.rock[0]),
+                c2: v3(rock, zones.rock[1]),
+                c3: v3(patch, zones.border),
+                p0: v3(low, zones.canopy[1]),
+                p1: Vec4::new(crowns[0], crowns[1], strata[0], strata[1]),
+                p2: Vec4::new(steep[0], steep[1], detail_fade, patch_amount),
+            },
             MaterialDef::Zoned {
                 low,
                 mid,

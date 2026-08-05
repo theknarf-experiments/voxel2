@@ -1,25 +1,22 @@
-// Scout: find a road midpoint to screenshot.
+// Scout: find steep high terrain (cliff faces) to screenshot.
 fn main() {
-    let mgr = voxel_worldgen::roads::planning_layers(0, 0.32, 700.0);
-    let bounds = voxel_layers::IAabb::new(
-        glam::IVec3::new(-30000, 0, -42000),
-        glam::IVec3::new(-22000, 1, -34000),
-    );
-    for (_, chunk) in mgr.get::<voxel_worldgen::roads::RoadsLayer>(bounds).iter() {
-        for &(a, b) in &chunk.roads {
-            let m = (a + b) * 0.5;
-            let h = voxel_worldgen::terrain_height(m, 1.0);
-            println!(
-                "road: {:.0},{:.0} <-> {:.0},{:.0}  mid {:.0},{:.0},{:.0} len={:.0}",
-                a.x,
-                a.y,
-                b.x,
-                b.y,
-                m.x,
-                h + 25.0,
-                m.y,
-                a.distance(b)
-            );
+    let mut best: Vec<(f32, f32, f32, f32)> = Vec::new(); // (score, x, z, h)
+    for gz in -420..-340 {
+        for gx in -320..-220 {
+            let x = gx as f32 * 100.0;
+            let z = gz as f32 * 100.0;
+            let p = glam::Vec2::new(x, z);
+            let h = voxel_worldgen::terrain_height(p, 1.0);
+            if h < 300.0 {
+                continue;
+            }
+            let up = voxel_worldgen::terrain_up(p, 1.0);
+            let score = h * (1.0 - up);
+            best.push((score, x, z, h));
         }
+    }
+    best.sort_by(|a, b| b.0.total_cmp(&a.0));
+    for (s, x, z, h) in best.iter().take(8) {
+        println!("cliff score {s:.0}: x={x:.0} z={z:.0} h={h:.0}");
     }
 }

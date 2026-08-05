@@ -193,6 +193,80 @@ fn zoned_albedo(m: WorldMaterial, world: vec3<f32>, n: vec3<f32>, dist: f32) -> 
     return mix(base, high, steep);
 }
 
+// Central-difference gradient of fbm3 (for bump-style normal perturbation).
+fn fbm3_grad(p: vec3<f32>, eps: f32) -> vec3<f32> {
+    return vec3<f32>(
+        fbm3(p + vec3<f32>(eps, 0.0, 0.0)) - fbm3(p - vec3<f32>(eps, 0.0, 0.0)),
+        fbm3(p + vec3<f32>(0.0, eps, 0.0)) - fbm3(p - vec3<f32>(0.0, eps, 0.0)),
+        fbm3(p + vec3<f32>(0.0, 0.0, eps)) - fbm3(p - vec3<f32>(0.0, 0.0, eps)),
+    ) / (2.0 * eps);
+}
+
+struct MatSample {
+    albedo: vec3<f32>,
+    normal: vec3<f32>,
+    ao: f32,
+}
+
+// Forested zoned terrain (after iq's Rainforest): the canopy is crown
+// noise — two-tone green mixed by crown height, normals perturbed by the
+// crown gradient so the sun lights individual crowns, AO from crown depth.
+// Rock gets steepness-proportional anisotropic bumps (y squashed 5x →
+// horizontal strata), moss on flat tops, and an implicit snowcap above
+// the rock zone.
+// Layout: c0 canopy_dark | canopy start; c1 canopy_lit | rock start;
+// c2 rock | rock width; c3 patch (dry/brown) | border; p0 low | canopy
+// width; p1 (crown scale, crown relief, strata scale, strata relief);
+// p2 (steep hi, steep lo, detail fade, patch amount).
+fn canopy_material(m: WorldMaterial, world: vec3<f32>, n: vec3<f32>, dist: f32) -> MatSample {
+    let fade = exp(-dist * m.p2.z);
+    let macro_var = fbm3(world * 0.012);
+    let border = (macro_var - 0.5) * m.c3.w;
+
+    let veg_edge = smoothstep(m.c0.w + border * 0.05, m.c0.w + m.p0.w + border * 0.05, world.y);
+    let rockness_alt = smoothstep(m.c1.w + border, m.c1.w + m.c2.w + border, world.y);
+    let steep = smoothstep(m.p2.x, m.p2.y, n.y);
+    let rockness = max(rockness_alt, steep);
+    let veg = veg_edge * (1.0 - rockness);
+
+    // --- canopy: crowns as noise ------------------------------------------
+    let crown_p = world * m.p1.x;
+    let crown = fbm3(crown_p);
+    var nn = n;
+    let crelief = m.p1.y * veg * mix(0.4, 1.0, fade);
+    if (crelief > 0.01) {
+        nn = normalize(n + crelief * fbm3_grad(crown_p, 0.3));
+    }
+    var ccol = mix(m.c0.rgb, m.c1.rgb, smoothstep(0.3, 0.8, crown));
+    // Dry/brown patches on gentle ground, iq-style. (`patch` is a
+    // reserved WGSL word, like `meta`.)
+    let dry = smoothstep(0.55, 0.8, fbm3(world * 0.015)) * m.p2.w * smoothstep(0.5, 0.85, n.y);
+    ccol = mix(ccol, m.c3.rgb, dry);
+    // Crown-depth occlusion: canopy hollows swallow light.
+    let cao = 0.4 + 0.6 * smoothstep(0.15, 0.8, crown);
+
+    // --- rock: anisotropic strata bumps -----------------------------------
+    let strata_p = world * vec3<f32>(m.p1.z, m.p1.z * 0.2, m.p1.z);
+    var rn = n;
+    let srelief = m.p1.w * rockness * (1.0 - abs(n.y) * 0.6) * mix(0.5, 1.0, fade);
+    if (srelief > 0.01) {
+        rn = normalize(n + srelief * fbm3_grad(strata_p, 0.3));
+    }
+    var rcol = m.c2.rgb * (0.75 + 0.5 * mix(0.5, fbm3(world * 0.9), fade));
+    // Moss creeps onto flat rock shelves.
+    rcol = mix(rcol, m.c0.rgb, 0.45 * smoothstep(0.7, 0.92, rn.y) * (1.0 - rockness_alt));
+    // Implicit snowcap well above the rock line.
+    let snow = smoothstep(m.c1.w + 2.5 * m.c2.w + border, m.c1.w + 3.5 * m.c2.w + border, world.y)
+        * smoothstep(0.35, 0.65, rn.y);
+    rcol = mix(rcol, vec3<f32>(0.85, 0.88, 0.95), snow);
+
+    var out: MatSample;
+    out.albedo = mix(mix(m.p0.rgb, ccol, veg_edge), rcol, rockness);
+    out.normal = normalize(mix(mix(n, nn, veg), rn, rockness));
+    out.ao = mix(1.0, cao, veg);
+    return out;
+}
+
 @fragment
 fn fragment(in: VsOut) -> @location(0) vec4<f32> {
     // Coverage-eval mode: monotone geometry against a magenta background,
@@ -215,7 +289,14 @@ fn fragment(in: VsOut) -> @location(0) vec4<f32> {
     let m = mats.materials[min(in.material, 7u)];
 
     var base: vec3<f32>;
-    if (m.head.x == 1u) {
+    var nl = n;
+    var ao = 1.0;
+    if (m.head.x == 2u) {
+        let ms = canopy_material(m, world, n, dist);
+        base = ms.albedo;
+        nl = ms.normal;
+        ao = ms.ao;
+    } else if (m.head.x == 1u) {
         base = zoned_albedo(m, world, n, dist);
     } else {
         base = surface_albedo(m, world, n, dist);
@@ -223,10 +304,10 @@ fn fragment(in: VsOut) -> @location(0) vec4<f32> {
 
     // --- lighting: sun (baked-shadowed) + hemispheric ambient ---------------
     let sun_dir = normalize(env.sun_dir.xyz);
-    let nd = max(dot(n, sun_dir), 0.0);
-    let up = n.y * 0.5 + 0.5;
+    let nd = max(dot(nl, sun_dir), 0.0);
+    let up = nl.y * 0.5 + 0.5;
     let ambient = mix(env.ground.rgb, env.sky.rgb, pow(up, env.ground.w)) * env.sky.w;
-    var lit = base * (env.sun.rgb * nd * env.sun.w * in.shadow + ambient);
+    var lit = base * (env.sun.rgb * nd * env.sun.w * in.shadow + ambient) * ao;
 
     // --- emissive ceiling light strips (surface materials) -------------------
     if (m.head.x == 0u && m.c3.w > 0.0) {
