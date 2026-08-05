@@ -1038,8 +1038,14 @@ fn build_ops_provider(level: &LevelDef) -> ChunkOpsProvider {
         if key.edge_m() > 130.0 {
             return Vec::new(); // meter-scale features: fine LODs only
         }
-        let min = key.min_corner_m().as_vec3();
-        let max = min + Vec3::splat(key.edge_m() as f32);
+        // Pad by the density apron: samples extend 2 voxels below and 3
+        // above the 32-cell core, so an op grazing only the apron still
+        // shapes this chunk's samples — culling it desynchronizes the
+        // seam with the neighbor that keeps it (visible slit through
+        // structures straddling a chunk boundary).
+        let pad = 4.0 * key.voxel_size_m() as f32;
+        let min = key.min_corner_m().as_vec3() - Vec3::splat(pad);
+        let max = key.min_corner_m().as_vec3() + Vec3::splat(key.edge_m() as f32 + pad);
         let mut ops = Vec::new();
         for source in &sources {
             ops.extend(source(min, max));
