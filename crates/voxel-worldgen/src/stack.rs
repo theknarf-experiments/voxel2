@@ -380,6 +380,299 @@ impl Layer for WormBurrows {
     }
 }
 
+/// What an emit layer turns its source's data into.
+#[derive(Clone, Debug)]
+pub enum EmitKind {
+    /// Terrain-seated slab chains along a `connect` source (roads,
+    /// walkways). Optionally reserves spawner clearance along the way.
+    PathSlabs {
+        half_w: f32,
+        thickness: f32,
+        material: u32,
+        clearance: bool,
+    },
+    /// Bed notch + water ribbon + water-surface segments along a `flow`
+    /// source. Half width grows from `width[0]` to `width[1]` downstream.
+    CourseWater { material: u32, width: [f32; 2] },
+    /// Sphere-cut chains from a `worm` source (caves).
+    WormCuts,
+    /// A named structure recipe at each site of a `scatter` source,
+    /// optionally dropping a marker of the given kind.
+    SiteRecipe {
+        recipe: String,
+        marker: Option<String>,
+    },
+}
+
+/// Configuration of an `emit` stack layer: the only kind that produces
+/// [`PatchSet`]s. It is its own index — every element is bucketed by the
+/// cell owning its midpoint (the perf pattern that keeps world queries
+/// local no matter how far a source wanders from its owning cell).
+#[derive(Clone, Debug)]
+pub struct EmitCfg {
+    /// Source instance (a scatter/connect/flow/worm layer).
+    pub source: String,
+    pub kind: EmitKind,
+    /// How far source geometry reaches beyond its owning cells (meters);
+    /// becomes the dependency padding. Author-declared, like every
+    /// LayerProcGen padding.
+    pub pad_m: f32,
+    /// Serve ops only to chunks at least this fine (edge meters) — the
+    /// carve-horizon gate, uniform per chunk. None = all LODs.
+    pub max_chunk_edge_m: Option<f32>,
+}
+
+#[derive(Clone)]
+pub struct EmitPatches {
+    pub cfg: EmitCfg,
+    pub cell_m: i32,
+}
+
+pub struct PatchChunk {
+    pub patches: PatchSet,
+}
+
+/// Largest reach of one emitted element beyond the cell that owns its
+/// midpoint: path/course sub-segments are ≤ 16 m plus their width, worm
+/// spheres a few meters, site structures ≤ ~25 m. Queries pad by this.
+pub const ELEM_PAD_M: f32 = 64.0;
+
+impl Layer for EmitPatches {
+    type Chunk = PatchChunk;
+    const NAME: &'static str = "stack/emit";
+
+    fn chunk_extent(&self) -> IVec3 {
+        IVec3::new(self.cell_m, 0, self.cell_m)
+    }
+
+    fn dependencies(&self) -> Vec<voxel_layers::Dep> {
+        let pad = self.cfg.pad_m as i32;
+        vec![voxel_layers::Dep::named(
+            &self.cfg.source,
+            IVec3::new(pad, 0, pad),
+        )]
+    }
+
+    fn generate(&self, ctx: &LayerCtx<'_, Self>, _coord: IVec3) -> PatchChunk {
+        let own = ctx.chunk_bounds();
+        let pad = self.cfg.pad_m as i32;
+        let padded = own.inflate(IVec3::new(pad, 0, pad));
+        let in_own = |p: Vec2| {
+            p.x >= own.min.x as f32
+                && p.x < own.max.x as f32
+                && p.y >= own.min.z as f32
+                && p.y < own.max.z as f32
+        };
+        let mut out = PatchSet::default();
+        match &self.cfg.kind {
+            EmitKind::PathSlabs {
+                half_w,
+                thickness,
+                material,
+                clearance,
+            } => {
+                for (_, c) in ctx.get_named::<ConnectPaths>(&self.cfg.source, padded).iter() {
+                    for path in &c.paths {
+                        for seg in path.windows(2) {
+                            if !in_own((seg[0] + seg[1]) * 0.5) {
+                                continue;
+                            }
+                            slab_segment_ops(
+                                seg[0], seg[1], *half_w, *thickness, *material, &mut out.ops,
+                            );
+                            if *clearance {
+                                out.clearance.push([seg[0], seg[1]]);
+                            }
+                        }
+                    }
+                }
+            }
+            EmitKind::CourseWater { material, width } => {
+                for (_, c) in ctx.get_named::<FlowCourses>(&self.cfg.source, padded).iter() {
+                    for (waypoints, levels) in &c.courses {
+                        let n = waypoints.len();
+                        for (i, seg) in waypoints.windows(2).enumerate() {
+                            if !in_own((seg[0] + seg[1]) * 0.5) {
+                                continue;
+                            }
+                            let t = i as f32 / n as f32;
+                            let half_w = width[0] + (width[1] - width[0]) * t;
+                            let seg_levels = [levels[i], levels[i + 1]];
+                            water_segment_ops(
+                                seg[0], seg[1], half_w, seg_levels, *material, &mut out.ops,
+                            );
+                            out.water.push(WaterSeg {
+                                a: seg[0],
+                                b: seg[1],
+                                half_w,
+                                levels: seg_levels,
+                            });
+                            out.clearance.push([seg[0], seg[1]]);
+                        }
+                    }
+                }
+            }
+            EmitKind::WormCuts => {
+                for (_, c) in ctx.get_named::<WormBurrows>(&self.cfg.source, padded).iter() {
+                    for worm in &c.worms {
+                        for &(p, r) in worm {
+                            if in_own(Vec2::new(p.x, p.z)) {
+                                out.ops.push(CsgOp::sphere(p, r, 0, true));
+                            }
+                        }
+                    }
+                }
+            }
+            EmitKind::SiteRecipe { recipe, marker } => {
+                for (_, c) in ctx.get_named::<ScatterSites>(&self.cfg.source, padded).iter() {
+                    for &site in &c.sites {
+                        if !in_own(site) {
+                            continue;
+                        }
+                        // Per-site stream independent of cell iteration
+                        // order, derived from the emit instance's seed.
+                        let mut rng = voxel_core::seed::Rng::new(voxel_core::seed::splitmix64(
+                            ctx.seed()
+                                ^ ((site.x.to_bits() as u64) << 32 | site.y.to_bits() as u64),
+                        ));
+                        recipe_ops(recipe, site, &mut rng, &mut out.ops);
+                        if let Some(kind) = marker {
+                            let y = terrain_height(site, 1.0);
+                            out.markers.push(Marker {
+                                pos: Vec3::new(site.x, y, site.y),
+                                kind: kind.clone(),
+                            });
+                        }
+                    }
+                }
+            }
+        }
+        PatchChunk { patches: out }
+    }
+}
+
+/// Structure recipes by name. Unknown names panic: level JSON referencing
+/// a recipe that does not exist is an authoring error, not a soft skip.
+fn recipe_ops(recipe: &str, site: Vec2, rng: &mut voxel_core::seed::Rng, out: &mut Vec<CsgOp>) {
+    match recipe {
+        "ruin" => crate::ruins::ruin_recipe_ops(site, rng, out),
+        other => panic!("unknown structure recipe {other:?}"),
+    }
+}
+
+/// Terrain-seated slab chain along one path segment (roads).
+fn slab_segment_ops(
+    a: Vec2,
+    b: Vec2,
+    half_w: f32,
+    thickness: f32,
+    material: u32,
+    out: &mut Vec<CsgOp>,
+) {
+    let len = a.distance(b);
+    if len < 0.01 {
+        return;
+    }
+    let dir = (b - a) / len;
+    let steps = (len / 3.2).ceil() as i32;
+    for i in 0..steps {
+        let t = (i as f32 + 0.5) / steps as f32;
+        let p = a + dir * (t * len);
+        let y = terrain_height(p, 1.0);
+        out.push(CsgOp::boxy(
+            Vec3::new(p.x, y - 0.15, p.y),
+            Vec3::new(half_w, thickness, half_w),
+            0.0,
+            material,
+            false,
+        ));
+    }
+}
+
+/// Bed notch + water ribbon along one course segment, flow-aligned with
+/// interpolated (monotone) water levels — the rivers emission.
+fn water_segment_ops(
+    a: Vec2,
+    b: Vec2,
+    half_w: f32,
+    levels: [f32; 2],
+    material: u32,
+    out: &mut Vec<CsgOp>,
+) {
+    let len = a.distance(b);
+    if len < 0.01 {
+        return;
+    }
+    let dir = (b - a) / len;
+    let yaw = dir.to_angle();
+    let steps = (len / 3.0).ceil().max(1.0) as i32;
+    let sub = len / steps as f32;
+    for i in 0..steps {
+        let t = (i as f32 + 0.5) / steps as f32;
+        let p = a + dir * (t * len);
+        let level = levels[0] + (levels[1] - levels[0]) * t;
+        out.push(CsgOp::boxy(
+            Vec3::new(p.x, level + 0.9, p.y),
+            Vec3::new(sub * 0.7 + 0.8, 2.4, half_w + 1.4),
+            -yaw,
+            0,
+            true,
+        ));
+        out.push(CsgOp::boxy(
+            Vec3::new(p.x, level - 0.8, p.y),
+            Vec3::new(sub * 0.7 + 0.6, 1.0, half_w),
+            -yaw,
+            material,
+            false,
+        ));
+    }
+}
+
+/// Patches of one emit instance overlapping the world box `[min, max]`,
+/// filtered to elements that touch it. Local: reads only the index cells
+/// within `ELEM_PAD_M` of the box.
+pub fn patches_in(
+    mgr: &voxel_layers::LayerManager,
+    instance: &str,
+    min: Vec3,
+    max: Vec3,
+) -> PatchSet {
+    let pad = ELEM_PAD_M as i32;
+    let bounds = IAabb::new(
+        IVec3::new(min.x as i32 - pad, 0, min.z as i32 - pad),
+        IVec3::new(max.x as i32 + pad, 1, max.z as i32 + pad),
+    );
+    let seg_touches = |a: Vec2, b: Vec2, half_w: f32| {
+        let lo = a.min(b) - Vec2::splat(half_w);
+        let hi = a.max(b) + Vec2::splat(half_w);
+        lo.x <= max.x && hi.x >= min.x && lo.y <= max.z && hi.y >= min.z
+    };
+    let mut out = PatchSet::default();
+    for (_, c) in mgr.get_named::<EmitPatches>(instance, bounds).iter() {
+        for op in &c.patches.ops {
+            if op.touches(min, max) {
+                out.ops.push(*op);
+            }
+        }
+        for w in &c.patches.water {
+            if seg_touches(w.a, w.b, w.half_w) {
+                out.water.push(*w);
+            }
+        }
+        for seg in &c.patches.clearance {
+            if seg_touches(seg[0], seg[1], 0.0) {
+                out.clearance.push(*seg);
+            }
+        }
+        for m in &c.patches.markers {
+            if m.pos.x >= min.x && m.pos.x <= max.x && m.pos.z >= min.z && m.pos.z <= max.z {
+                out.markers.push(m.clone());
+            }
+        }
+    }
+    out
+}
+
 /// Convenience: sites of a named scatter instance within bounds.
 pub fn sites_in(
     mgr: &voxel_layers::LayerManager,
@@ -557,6 +850,234 @@ mod tests {
             }
         }
         assert!(worms > 0, "no worms");
+    }
+
+    #[test]
+    fn emit_site_recipe_produces_ops_and_markers_at_sites() {
+        let build = || {
+            let mut mgr = LayerManager::new(7);
+            mgr.register_as(
+                "sites:ruins",
+                ScatterSites {
+                    cfg: ScatterCfg {
+                        chance: 0.32,
+                        altitude: [8.0, 280.0],
+                        up: [0.88, 1.0],
+                        ..Default::default()
+                    },
+                },
+            );
+            mgr.register_as(
+                "ruins",
+                EmitPatches {
+                    cfg: EmitCfg {
+                        source: "sites:ruins".into(),
+                        kind: EmitKind::SiteRecipe {
+                            recipe: "ruin".into(),
+                            marker: Some("ruin".into()),
+                        },
+                        pad_m: 0.0,
+                        max_chunk_edge_m: None,
+                    },
+                    cell_m: 256,
+                },
+            );
+            mgr
+        };
+        let mgr = build();
+        let b = land_bounds(4096);
+        let (min, max) = (
+            Vec3::new(b.min.x as f32, -100.0, b.min.z as f32),
+            Vec3::new(b.max.x as f32, 500.0, b.max.z as f32),
+        );
+        let patches = build_patches(&mgr, "ruins", min, max);
+        // sites_in returns whole overlapping cells; markers are filtered
+        // to the exact box — compare against the filtered set.
+        let all_sites = sites_in(&mgr, "sites:ruins", b.inflate(IVec3::splat(512)));
+        let sites: Vec<Vec2> = all_sites
+            .iter()
+            .copied()
+            .filter(|s| s.x >= min.x && s.x <= max.x && s.y >= min.z && s.y <= max.z)
+            .collect();
+        assert!(!sites.is_empty(), "no ruin sites on land");
+        assert!(!patches.ops.is_empty(), "recipe emitted no geometry");
+        assert_eq!(patches.markers.len(), sites.len());
+        for op in &patches.ops {
+            let p = Vec2::new(op.center[0], op.center[2]);
+            let near = all_sites.iter().any(|s| s.distance(p) < ELEM_PAD_M);
+            assert!(near, "op at {p:?} far from every site");
+        }
+        assert_eq!(patches, build_patches(&build(), "ruins", min, max));
+    }
+
+    fn build_patches(
+        mgr: &LayerManager,
+        instance: &str,
+        min: Vec3,
+        max: Vec3,
+    ) -> PatchSet {
+        patches_in(mgr, instance, min, max)
+    }
+
+    #[test]
+    fn emit_path_slabs_seat_on_terrain_with_clearance() {
+        let mut mgr = LayerManager::new(5);
+        mgr.register_as(
+            "sites:towns",
+            ScatterSites {
+                cfg: ScatterCfg {
+                    chance: 0.6,
+                    altitude: [3.0, 400.0],
+                    ..Default::default()
+                },
+            },
+        );
+        mgr.register_as(
+            "paths:roads",
+            ConnectPaths {
+                cfg: ConnectCfg {
+                    source: "sites:towns".into(),
+                    ..Default::default()
+                },
+                cell_m: 256,
+            },
+        );
+        mgr.register_as(
+            "roads",
+            EmitPatches {
+                cfg: EmitCfg {
+                    source: "paths:roads".into(),
+                    kind: EmitKind::PathSlabs {
+                        half_w: 2.4,
+                        thickness: 0.5,
+                        material: 3,
+                        clearance: true,
+                    },
+                    // Endpoints within reach/2 of the midpoint cell, plus
+                    // the pathfinding corridor.
+                    pad_m: 700.0 * 0.5 + 192.0 + 64.0,
+                    max_chunk_edge_m: None,
+                },
+                cell_m: 256,
+            },
+        );
+        let b = land_bounds(4096);
+        let (min, max) = (
+            Vec3::new(b.min.x as f32, -100.0, b.min.z as f32),
+            Vec3::new(b.max.x as f32, 500.0, b.max.z as f32),
+        );
+        let patches = patches_in(&mgr, "roads", min, max);
+        assert!(!patches.ops.is_empty(), "no road slabs");
+        assert!(!patches.clearance.is_empty(), "no clearance segments");
+        for op in &patches.ops {
+            let ground = terrain_height(Vec2::new(op.center[0], op.center[2]), 1.0);
+            assert!((op.center[1] - ground).abs() < 2.0, "slab far from ground");
+        }
+        // Sub-box query = filtered superset (locality contract).
+        let (smin, smax) = (
+            min + Vec3::new(2048.0, 0.0, 2048.0),
+            max - Vec3::new(2048.0, 0.0, 2048.0),
+        );
+        let sub = patches_in(&mgr, "roads", smin, smax);
+        let expect: Vec<_> = patches
+            .ops
+            .iter()
+            .filter(|op| op.touches(smin, smax))
+            .copied()
+            .collect();
+        assert_eq!(sub.ops, expect);
+    }
+
+    #[test]
+    fn emit_course_water_and_worm_cuts() {
+        let mut mgr = LayerManager::new(5);
+        mgr.register_as(
+            "sites:springs",
+            ScatterSites {
+                cfg: ScatterCfg {
+                    cell_m: 512,
+                    chance: 0.6,
+                    altitude: [60.0, 400.0],
+                    ..Default::default()
+                },
+            },
+        );
+        mgr.register_as(
+            "flow:rivers",
+            FlowCourses {
+                cfg: FlowCfg {
+                    source: "sites:springs".into(),
+                    ..Default::default()
+                },
+                cell_m: 512,
+            },
+        );
+        mgr.register_as(
+            "rivers",
+            EmitPatches {
+                cfg: EmitCfg {
+                    source: "flow:rivers".into(),
+                    kind: EmitKind::CourseWater {
+                        material: 4,
+                        width: [2.0, 7.0],
+                    },
+                    // Courses run up to max_steps * step from their spring.
+                    pad_m: 400.0 * 8.0 + 64.0,
+                    max_chunk_edge_m: Some(140.0),
+                },
+                cell_m: 512,
+            },
+        );
+        mgr.register_as(
+            "sites:mouths",
+            ScatterSites {
+                cfg: ScatterCfg {
+                    chance: 0.6,
+                    altitude: [6.0, 500.0],
+                    ..Default::default()
+                },
+            },
+        );
+        mgr.register_as(
+            "worm:caves",
+            WormBurrows {
+                cfg: WormCfg {
+                    source: "sites:mouths".into(),
+                    ..Default::default()
+                },
+                cell_m: 256,
+            },
+        );
+        mgr.register_as(
+            "caves",
+            EmitPatches {
+                cfg: EmitCfg {
+                    source: "worm:caves".into(),
+                    kind: EmitKind::WormCuts,
+                    pad_m: 340.0,
+                    max_chunk_edge_m: Some(140.0),
+                },
+                cell_m: 256,
+            },
+        );
+        let b = land_bounds(4096);
+        let (min, max) = (
+            Vec3::new(b.min.x as f32, -200.0, b.min.z as f32),
+            Vec3::new(b.max.x as f32, 500.0, b.max.z as f32),
+        );
+        let rivers = patches_in(&mgr, "rivers", min, max);
+        assert!(!rivers.water.is_empty(), "no water segments");
+        assert!(!rivers.ops.is_empty(), "no river bed ops");
+        assert!(!rivers.clearance.is_empty(), "no river clearance");
+        for w in &rivers.water {
+            assert!(w.half_w >= 2.0 && w.half_w <= 7.0);
+            assert!(w.levels[1] <= w.levels[0] + 1e-4, "water flows uphill");
+        }
+        let caves = patches_in(&mgr, "caves", min, max);
+        assert!(!caves.ops.is_empty(), "no cave cuts");
+        for op in &caves.ops {
+            assert_eq!(op.kind, voxel_core::csg::CSG_KIND_SPHERE_CUT);
+        }
     }
 
     #[test]

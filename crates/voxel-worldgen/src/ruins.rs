@@ -59,7 +59,13 @@ fn cell_ops(seed: u64, chance: f32, cx: i32, cz: i32, out: &mut Vec<CsgOp>) {
     };
     // Fresh sub-seeded stream for the layout, independent of site selection.
     let mut rng = Rng::new(chunk_seed(RUIN_SEED ^ seed, 0x202, IVec3::new(cx, 0, cz)));
+    ruin_recipe_ops(center_xz, &mut rng, out);
+}
 
+/// The ruin structure recipe: geometry for one site, from any rng stream.
+/// Largest reach from the site: ring radius (17) + tower radius — well
+/// under the stack's element-padding contract.
+pub fn ruin_recipe_ops(center_xz: Vec2, rng: &mut Rng, out: &mut Vec<CsgOp>) {
     let radius = 8.0 + rng.next_f32() * 9.0;
     let segments = 6 + rng.next_range(4);
     let base_angle = rng.next_f32() * std::f32::consts::TAU;
