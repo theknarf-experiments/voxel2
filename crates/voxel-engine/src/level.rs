@@ -2006,7 +2006,15 @@ mod tests {
                 | StackLayerDef::Emit { name, .. } => name.as_str(),
             })
             .collect();
-        for expect in ["sites:ruins", "ruins", "paths:roads", "roads", "rivers", "caves"] {
+        for expect in [
+            "sites:ruins",
+            "ruins",
+            "paths:roads",
+            "roads",
+            "rivers",
+            "caves",
+            "dungeons",
+        ] {
             assert!(names.contains(&expect), "stack missing {expect}");
         }
         assert!(planet.sun.is_some());
@@ -2069,6 +2077,10 @@ mod tests {
         assert!(
             !world.markers_in(min2, max2, Some("ruin")).is_empty(),
             "no ruin markers"
+        );
+        assert!(
+            !world.markers_in(min2, max2, Some("dungeon")).is_empty(),
+            "no dungeon markers"
         );
         // Determinism across a fresh build.
         let (_, world2, _) = build_ops_provider(&planet);

@@ -543,6 +543,31 @@
       "emit": {
         "type": "worm_cuts"
       }
+    },
+    {
+      "kind": "scatter",
+      "name": "sites:dungeons",
+      "chance": 0.22,
+      "altitude": [
+        12.0,
+        260.0
+      ],
+      "up": [
+        0.85,
+        1.0
+      ]
+    },
+    {
+      "kind": "emit",
+      "name": "dungeons",
+      "source": "sites:dungeons",
+      "pad_m": 0.0,
+      "max_chunk_edge_m": 140.0,
+      "emit": {
+        "type": "site_recipe",
+        "recipe": "dungeon",
+        "marker": "dungeon"
+      }
     }
   ]
 }

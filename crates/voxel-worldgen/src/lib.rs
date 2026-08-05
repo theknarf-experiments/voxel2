@@ -9,6 +9,7 @@ pub mod mega;
 pub mod program;
 pub mod roads;
 pub mod caves;
+pub mod dungeon;
 pub mod path;
 pub mod rivers;
 pub mod stack;

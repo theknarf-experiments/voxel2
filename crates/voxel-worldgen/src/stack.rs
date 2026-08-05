@@ -558,6 +558,7 @@ impl Layer for EmitPatches {
 fn recipe_ops(recipe: &str, site: Vec2, rng: &mut voxel_core::seed::Rng, out: &mut Vec<CsgOp>) {
     match recipe {
         "ruin" => crate::ruins::ruin_recipe_ops(site, rng, out),
+        "dungeon" => crate::dungeon::dungeon_recipe_ops(site, rng, out),
         other => panic!("unknown structure recipe {other:?}"),
     }
 }
