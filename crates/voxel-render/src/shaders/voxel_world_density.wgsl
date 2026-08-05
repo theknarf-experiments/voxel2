@@ -18,6 +18,11 @@ const COARSE_VOXEL_M: f32 = 4.0;
 struct ChunkParams {
     // xyz = chunk minimum corner in world meters, w = voxel size in meters.
     origin: vec4<f32>,
+    // Minimum corner in integer world-voxel units (pos * 32, this
+    // chunk's scale; w unused): sample positions derive from these exact
+    // integers so shared samples are bit-identical across chunks at any
+    // voxel size (see chunks.rs twin).
+    origin_voxels: vec4<i32>,
     slot: u32,
     base_vertex: u32,
     first_index: u32,
@@ -338,7 +343,10 @@ fn density_main(@builtin(global_invocation_id) id: vec3<u32>) {
     let vs = params.origin.w;
     // Sample i holds cell corner i - 2 (apron covers coarse-parity cells).
     let c = vec3<i32>(id) - vec3<i32>(2);
-    let p = params.origin.xyz + vec3<f32>(c) * vs;
+    // Exact integer world-voxel index -> one rounding, identical for
+    // every chunk (and LOD: (2k)*(vs/2) == k*vs bit-exactly) that
+    // evaluates this world sample.
+    let p = vec3<f32>(params.origin_voxels.xyz + c) * vs;
 
     let s = eval_program(p, vs);
     var d_m = s.d;

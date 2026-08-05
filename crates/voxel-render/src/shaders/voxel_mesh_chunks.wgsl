@@ -38,6 +38,8 @@ const POS_RANGE: f32 = 48.0;
 struct ChunkParams {
     // xyz = chunk minimum corner in world meters, w = voxel size in meters.
     origin: vec4<f32>,
+    // Layout twin of the density shader's integer origin (unused here).
+    origin_voxels: vec4<i32>,
     slot: u32,
     base_vertex: u32,
     first_index: u32,

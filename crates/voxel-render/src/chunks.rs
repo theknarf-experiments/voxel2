@@ -545,6 +545,14 @@ struct VoxelDrawList(Vec<DrawEntry>);
 #[derive(ShaderType, Clone, Copy)]
 struct ChunkParams {
     origin: Vec4,
+    /// Chunk minimum corner in integer world-voxel units at this chunk's
+    /// own scale (pos × 32), w unused. Density sample positions derive
+    /// from these EXACT integers so two chunks sharing a world sample
+    /// compute a bit-identical position — `origin + idx × vs` rounds
+    /// differently per chunk whenever the voxel size is not an exact
+    /// binary float (0.1 m is not), and a single ULP flips signs where a
+    /// surface grazes a sample: deterministic seam cracks.
+    origin_voxels: bevy::math::IVec4,
     slot: u32,
     base_vertex: u32,
     first_index: u32,
@@ -890,6 +898,7 @@ fn make_params(
             origin.z as f32,
             key.voxel_size_m() as f32,
         ),
+        origin_voxels: (key.pos * 32).extend(0),
         slot,
         base_vertex: alloc.map_or(0, |a| a.base_vertex),
         first_index: alloc.map_or(0, |a| a.first_index),
