@@ -404,6 +404,26 @@ fn placement_rotation(
 }
 
 /// Field-register density gate for spawner candidates (see `WOP_FIELD`).
+/// Spawn probability from an "instance:biome" reference: the biome's
+/// blended weight at the point (1 when no biome is configured).
+fn biome_gate(
+    world: &crate::level::WorldQuery,
+    reference: &Option<String>,
+    xz: Vec2,
+) -> f32 {
+    let Some(reference) = reference else {
+        return 1.0;
+    };
+    let Some((instance, biome)) = reference.rsplit_once(':') else {
+        return 1.0;
+    };
+    world
+        .biomes_at(instance, xz)
+        .iter()
+        .find_map(|(n, w)| (n == biome).then_some(*w))
+        .unwrap_or(1.0)
+}
+
 fn field_gate(density: &Option<crate::level::FieldDensityDef>, xz: Vec2) -> f32 {
     density.as_ref().map_or(1.0, |d| {
         let f = voxel_worldgen::world_fields(xz)[(d.field as usize).min(3)];
@@ -432,7 +452,7 @@ fn grass_tile(
         if on_road(&road_segs, xz) {
             continue;
         }
-        if rng.next_f32() > field_gate(&grass.density, xz) {
+        if rng.next_f32() > field_gate(&grass.density, xz) * biome_gate(world, &grass.biome, xz) {
             continue;
         }
         let y = terrain_height(xz, 1.0);
@@ -834,7 +854,7 @@ fn tile_trees(
         let xz = Vec2::new(x, z);
         // Seat on the band-limited surface mid-LOD terrain shows across the
         // detail radius (tiles spawn at the rim, where the ground is ~L2).
-        if rng.next_f32() > field_gate(&trees.density, xz) {
+        if rng.next_f32() > field_gate(&trees.density, xz) * biome_gate(world, &trees.biome, xz) {
             continue;
         }
         if on_road(&road_segs, xz) {
@@ -958,7 +978,9 @@ fn spawn_tile(
         let x = origin.x + rng.next_f32() * TILE_M;
         let z = origin.y + rng.next_f32() * TILE_M;
         let xz = Vec2::new(x, z);
-        if on_road(&boulder_roads, xz) || rng.next_f32() > field_gate(&b.density, xz) {
+        if on_road(&boulder_roads, xz)
+            || rng.next_f32() > field_gate(&b.density, xz) * biome_gate(world, &b.biome, xz)
+        {
             continue;
         }
         let y = terrain_height(xz, 4.0);

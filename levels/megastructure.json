@@ -198,10 +198,26 @@
   ],
   "stack": [
     {
+      "kind": "biomes",
+      "name": "districts",
+      "cell_m": 1024,
+      "table": [
+        [
+          "habitation",
+          1.0
+        ],
+        [
+          "void",
+          1.0
+        ]
+      ]
+    },
+    {
       "kind": "scatter3",
       "name": "sites:pockets",
       "chance": 0.45,
-      "snap_y_m": 44.0
+      "snap_y_m": 44.0,
+      "biome": "districts:habitation"
     },
     {
       "kind": "emit",

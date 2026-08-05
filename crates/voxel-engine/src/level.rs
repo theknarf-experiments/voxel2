@@ -263,6 +263,10 @@ pub struct TreesDef {
     #[serde(default)]
     pub placement: PlacementRulesDef,
     pub species: Vec<SpeciesDef>,
+    /// "instance:biome" — spawn probability scales with the biome's
+    /// blended weight (soft borders).
+    #[serde(default)]
+    pub biome: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -316,6 +320,10 @@ pub struct GrassDef {
     /// Orientation + banding rules (align/tilt unused for grass).
     #[serde(default)]
     pub placement: PlacementRulesDef,
+    /// "instance:biome" — spawn probability scales with the biome's
+    /// blended weight (soft borders).
+    #[serde(default)]
+    pub biome: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -339,6 +347,10 @@ pub struct BouldersDef {
     /// Orientation + banding rules.
     #[serde(default)]
     pub placement: PlacementRulesDef,
+    /// "instance:biome" — spawn probability scales with the biome's
+    /// blended weight (soft borders).
+    #[serde(default)]
+    pub biome: Option<String>,
 }
 
 fn d_tree_attempts() -> u32 {
@@ -1061,6 +1073,10 @@ pub enum StackLayerDef {
         altitude: [f32; 2],
         #[serde(default = "d_up_interval")]
         up: [f32; 2],
+        /// "instance:biome" — accept sites with probability = that
+        /// biome's blended weight.
+        #[serde(default)]
+        biome: Option<String>,
     },
     /// Pathfound links between sites of a scatter instance.
     Connect {
@@ -1099,6 +1115,15 @@ pub enum StackLayerDef {
         #[serde(default = "d_burial")]
         burial_radii: f32,
     },
+    /// A coarse blended-region field; other layers and spawners gate on
+    /// its named biomes.
+    Biomes {
+        name: String,
+        #[serde(default = "d_biome_cell")]
+        cell_m: i32,
+        /// (biome name, selection weight) — order defines indices.
+        table: Vec<(String, f32)>,
+    },
     /// Volumetric sites for interior worlds (no terrain filters).
     Scatter3 {
         name: String,
@@ -1112,6 +1137,9 @@ pub enum StackLayerDef {
         /// Snap site y to the structural floor lattice (0 = none).
         #[serde(default)]
         snap_y_m: f32,
+        /// "instance:biome" gate (planar districts).
+        #[serde(default)]
+        biome: Option<String>,
     },
     /// Orthogonal links between volumetric sites (walkway tubes).
     Connect3 {
@@ -1263,6 +1291,9 @@ fn d_tube_bore() -> f32 {
 fn d_tube_lift() -> f32 {
     3.0
 }
+fn d_biome_cell() -> i32 {
+    2048
+}
 
 impl EmitDef {
     fn to_kind(&self) -> voxel_worldgen::stack::EmitKind {
@@ -1297,9 +1328,41 @@ impl EmitDef {
 }
 
 impl StackLayerDef {
-    fn register(&self, mgr: &mut voxel_layers::LayerManager) {
+    /// Resolve an "instance:biome" reference against earlier stack layers.
+    fn biome_gate(stack: &[StackLayerDef], reference: &str) -> voxel_worldgen::stack::BiomeGate {
+        let (instance, biome_name) = reference
+            .rsplit_once(':')
+            .unwrap_or_else(|| panic!("biome ref {reference:?} is not \"instance:biome\""));
+        for def in stack {
+            if let StackLayerDef::Biomes { name, table, .. } = def {
+                if name == instance {
+                    let biome = table
+                        .iter()
+                        .position(|(n, _)| n == biome_name)
+                        .unwrap_or_else(|| {
+                            panic!("biome {biome_name:?} not in layer {instance:?}")
+                        });
+                    return voxel_worldgen::stack::BiomeGate {
+                        instance: instance.to_string(),
+                        biome: biome as u32,
+                        n_biomes: table.len(),
+                    };
+                }
+            }
+        }
+        panic!("biome layer {instance:?} not found in stack");
+    }
+
+    fn register(&self, stack: &[StackLayerDef], mgr: &mut voxel_layers::LayerManager) {
         use voxel_worldgen::stack::*;
         match self.clone() {
+            StackLayerDef::Biomes {
+                name,
+                cell_m,
+                table,
+            } => mgr.register_as(&name, BiomeField {
+                cfg: BiomeCfg { cell_m, table },
+            }),
             StackLayerDef::Scatter {
                 name,
                 cell_m,
@@ -1307,6 +1370,7 @@ impl StackLayerDef {
                 margin_m,
                 altitude,
                 up,
+                biome,
             } => mgr.register_as(
                 &name,
                 ScatterSites {
@@ -1316,6 +1380,7 @@ impl StackLayerDef {
                         margin_m,
                         altitude,
                         up,
+                        biome: biome.map(|r| Self::biome_gate(stack, &r)),
                     },
                 },
             ),
@@ -1382,6 +1447,7 @@ impl StackLayerDef {
                 chance,
                 margin_m,
                 snap_y_m,
+                biome,
             } => mgr.register_as(
                 &name,
                 Scatter3Sites {
@@ -1391,6 +1457,7 @@ impl StackLayerDef {
                         chance,
                         margin_m,
                         snap_y_m,
+                        biome: biome.map(|r| Self::biome_gate(stack, &r)),
                     },
                 },
             ),
@@ -1640,6 +1707,8 @@ pub struct WorldQuery {
     emitters: Vec<(String, Option<f32>)>,
     /// Legacy op sources not yet in the stack (pockets, placements).
     sources: Vec<OpsSource>,
+    /// Biome layers: (instance name, ordered biome names).
+    biome_tables: Vec<(String, Vec<String>)>,
 }
 
 impl WorldQuery {
@@ -1705,6 +1774,22 @@ impl WorldQuery {
         out
     }
 
+    /// Blended biome weights at a point: (biome name, weight) for the
+    /// named biome layer, from the level's stack. Empty if the layer is
+    /// not declared.
+    pub fn biomes_at(&self, instance: &str, p: bevy::math::Vec2) -> Vec<(String, f32)> {
+        let Some(mgr) = &self.stack else {
+            return Vec::new();
+        };
+        let Some(table) = self.biome_tables.iter().find_map(|(n, t)| {
+            (n == instance).then_some(t)
+        }) else {
+            return Vec::new();
+        };
+        let w = voxel_worldgen::stack::biome_weights_at(mgr, instance, table.len(), p);
+        table.iter().cloned().zip(w).map(|(n, v)| (n, v)).collect()
+    }
+
     /// Markers overlapping the xz box, optionally of one kind (findable
     /// content: dungeon entrances, points of interest).
     pub fn markers_in(
@@ -1743,7 +1828,7 @@ fn build_ops_provider(level: &LevelDef) -> (ChunkOpsProvider, WorldQuery, Planni
         let mut mgr = voxel_layers::LayerManager::new(level.seed);
         let mut emitters = Vec::new();
         for def in &level.stack {
-            def.register(&mut mgr);
+            def.register(&level.stack, &mut mgr);
             if let StackLayerDef::Emit {
                 name,
                 max_chunk_edge_m,
@@ -1809,10 +1894,22 @@ fn build_ops_provider(level: &LevelDef) -> (ChunkOpsProvider, WorldQuery, Planni
         }));
     }
 
+    let biome_tables = level
+        .stack
+        .iter()
+        .filter_map(|d| match d {
+            StackLayerDef::Biomes { name, table, .. } => Some((
+                name.clone(),
+                table.iter().map(|(n, _)| n.clone()).collect(),
+            )),
+            _ => None,
+        })
+        .collect();
     let world = WorldQuery {
         stack,
         emitters,
         sources,
+        biome_tables,
     };
     if world.stack.is_none() && world.sources.is_empty() {
         return (ChunkOpsProvider(None), world, PlanningLayers(managers));
@@ -2071,7 +2168,8 @@ mod tests {
             .stack
             .iter()
             .map(|l| match l {
-                StackLayerDef::Scatter { name, .. }
+                StackLayerDef::Biomes { name, .. }
+                | StackLayerDef::Scatter { name, .. }
                 | StackLayerDef::Scatter3 { name, .. }
                 | StackLayerDef::Connect { name, .. }
                 | StackLayerDef::Connect3 { name, .. }
@@ -2081,6 +2179,7 @@ mod tests {
             })
             .collect();
         for expect in [
+            "biomes",
             "sites:ruins",
             "ruins",
             "paths:roads",
@@ -2107,7 +2206,8 @@ mod tests {
             .stack
             .iter()
             .map(|l| match l {
-                StackLayerDef::Scatter { name, .. }
+                StackLayerDef::Biomes { name, .. }
+                | StackLayerDef::Scatter { name, .. }
                 | StackLayerDef::Scatter3 { name, .. }
                 | StackLayerDef::Connect { name, .. }
                 | StackLayerDef::Connect3 { name, .. }
@@ -2146,7 +2246,7 @@ mod tests {
 
     #[test]
     fn mega_stack_serves_pockets_and_tubes_through_world_query() {
-        let _lock = PROGRAM_LOCK.lock().unwrap();
+        let _lock = PROGRAM_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let mega = LevelDef::from_json(&shipped("megastructure.json")).unwrap();
         let packed: Vec<_> = mega.generator.iter().map(GenOpDef::pack).collect();
         voxel_worldgen::program::set_program(packed);
@@ -2182,7 +2282,7 @@ mod tests {
 
     #[test]
     fn planet_stack_serves_gated_ops_through_world_query() {
-        let _lock = PROGRAM_LOCK.lock().unwrap();
+        let _lock = PROGRAM_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let planet = LevelDef::from_json(&shipped("planet.json")).unwrap();
         let packed: Vec<_> = planet.generator.iter().map(GenOpDef::pack).collect();
         voxel_worldgen::program::set_program(packed);
@@ -2214,6 +2314,25 @@ mod tests {
             !world.markers_in(min2, max2, Some("dungeon")).is_empty(),
             "no dungeon markers"
         );
+        // Biomes blend through the facade: partition of unity, both
+        // regions dominant somewhere across a wide sweep.
+        let mut dominant = [false; 2];
+        for gz in 0..12 {
+            for gx in 0..12 {
+                let t = bevy::math::Vec2::new(gx as f32 / 11.0, gz as f32 / 11.0);
+                let p = min2 + (max2 - min2) * t;
+                let w = world.biomes_at("biomes", p);
+                assert_eq!(w.len(), 2);
+                let sum: f32 = w.iter().map(|(_, v)| v).sum();
+                assert!((sum - 1.0).abs() < 1e-4);
+                for (b, (_, v)) in w.iter().enumerate() {
+                    if *v > 0.7 {
+                        dominant[b] = true;
+                    }
+                }
+            }
+        }
+        assert!(dominant[0] && dominant[1], "biomes not regional: {dominant:?}");
         // Determinism across a fresh build.
         let (_, world2, _) = build_ops_provider(&planet);
         assert_eq!(fine, world2.ops_in(min, max, 12.8));

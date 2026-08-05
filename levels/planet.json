@@ -319,7 +319,8 @@
       "placement": {
         "tilt_deg": 4.0,
         "altitude_falloff": 25.0
-      }
+      },
+      "biome": "biomes:forest"
     },
     {
       "type": "grass",
@@ -337,7 +338,8 @@
       "placement": {
         "align": "normal",
         "tilt_deg": 8.0
-      }
+      },
+      "biome": "biomes:meadow"
     }
   ],
   "prefabs": {
@@ -455,6 +457,21 @@
     }
   ],
   "stack": [
+    {
+      "kind": "biomes",
+      "name": "biomes",
+      "cell_m": 2048,
+      "table": [
+        [
+          "forest",
+          2.0
+        ],
+        [
+          "meadow",
+          1.0
+        ]
+      ]
+    },
     {
       "kind": "scatter",
       "name": "sites:ruins",
