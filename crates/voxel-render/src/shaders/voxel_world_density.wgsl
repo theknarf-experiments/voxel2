@@ -24,6 +24,7 @@ struct ChunkParams {
     counts_slot: u32,
     csg_offset: u32,
     csg_count: u32,
+    // x = seam mask: 2 bits per face (+x,-x,+y,-y,+z,-z); 1 = coarser.
     _pad: vec2<u32>,
 }
 
@@ -295,22 +296,26 @@ fn eval_program(p: vec3<f32>, vs: f32) -> WorldSample {
     return WorldSample(d, mat);
 }
 
-@compute @workgroup_size(6, 6, 6)
-fn density_main(@builtin(global_invocation_id) id: vec3<u32>) {
-    if (any(id >= vec3<u32>(SAMPLES))) {
-        return;
-    }
-    let vs = params.origin.w;
-    // Sample i holds cell corner i - 2 (apron covers coarse-parity cells).
-    let p = params.origin.xyz + vec3<f32>(vec3<i32>(id) - vec3<i32>(2)) * vs;
+// Per-face band ramp: 1 on/beyond the boundary plane toward a coarser
+// neighbor, 0.5 one corner inside, 0 elsewhere. Blending the stored
+// density to the parent band in this shell makes the apron samples
+// bit-equal to the coarser neighbor's own samples, so seam vertices land
+// exactly on its geometry.
+fn coarser_ramp(c: vec3<i32>) -> f32 {
+    let mask = params._pad.x;
+    var r = 0.0;
+    if ((mask & 3u) == 1u) { r = max(r, clamp(f32(c.x) - 30.0, 0.0, 2.0) * 0.5); }
+    if (((mask >> 2u) & 3u) == 1u) { r = max(r, clamp(2.0 - f32(c.x), 0.0, 2.0) * 0.5); }
+    if (((mask >> 4u) & 3u) == 1u) { r = max(r, clamp(f32(c.y) - 30.0, 0.0, 2.0) * 0.5); }
+    if (((mask >> 6u) & 3u) == 1u) { r = max(r, clamp(2.0 - f32(c.y), 0.0, 2.0) * 0.5); }
+    if (((mask >> 8u) & 3u) == 1u) { r = max(r, clamp(f32(c.z) - 30.0, 0.0, 2.0) * 0.5); }
+    if (((mask >> 10u) & 3u) == 1u) { r = max(r, clamp(2.0 - f32(c.z), 0.0, 2.0) * 0.5); }
+    return r;
+}
 
-    let s = eval_program(p, vs);
-    var d_m = s.d;
-    var mat = s.mat;
-
-    // Planning-layer CSG: additions merge (optionally smoothly) into the
-    // world, cuts carve it. Ops are meter-scale, so they only apply at
-    // fine LODs (they are also only provided there).
+fn apply_csg(d_in: f32, mat_in: u32, p: vec3<f32>, vs: f32) -> vec2<f32> {
+    var d_m = d_in;
+    var mat = mat_in;
     if (params.csg_count > 0u && vs < COARSE_VOXEL_M) {
         for (var i = 0u; i < params.csg_count; i++) {
             let op = csg_ops[params.csg_offset + i];
@@ -328,6 +333,33 @@ fn density_main(@builtin(global_invocation_id) id: vec3<u32>) {
                 d_m = max(d_m, -od);
             }
         }
+    }
+    return vec2<f32>(d_m, bitcast<f32>(mat));
+}
+
+@compute @workgroup_size(6, 6, 6)
+fn density_main(@builtin(global_invocation_id) id: vec3<u32>) {
+    if (any(id >= vec3<u32>(SAMPLES))) {
+        return;
+    }
+    let vs = params.origin.w;
+    // Sample i holds cell corner i - 2 (apron covers coarse-parity cells).
+    let c = vec3<i32>(id) - vec3<i32>(2);
+    let p = params.origin.xyz + vec3<f32>(c) * vs;
+
+    let s = eval_program(p, vs);
+    var d_m = s.d;
+    var mat = s.mat;
+    let fine = apply_csg(d_m, mat, p, vs);
+    d_m = fine.x;
+    mat = bitcast<u32>(fine.y);
+
+    // Band-blend toward coarser neighbors (exactly what the parent stores).
+    let ramp = coarser_ramp(c);
+    if (ramp > 0.0) {
+        let sp = eval_program(p, vs * 2.0);
+        let parent = apply_csg(sp.d, sp.mat, p, vs * 2.0);
+        d_m = mix(d_m, parent.x, ramp);
     }
 
     // SDF stored in voxel-size units, narrow band ±4.

@@ -91,6 +91,9 @@ pub enum ChunkCommand {
         key: ChunkKey,
         show_on_ready: bool,
         ops: Option<Arc<Vec<CsgOp>>>,
+        /// 2 bits per face (+x,-x,+y,-y,+z,-z): 0 equal/none, 1 = neighbor
+        /// coarser, 2 = neighbor finer. Drives seam ownership + band blend.
+        face_mask: u32,
     },
     Show(ChunkKey),
     Free(ChunkKey),
@@ -418,6 +421,18 @@ struct RenderChunk {
     show_on_ready: bool,
     /// Planning-layer ops, held until the density pass consumes them.
     ops: Option<Arc<Vec<CsgOp>>>,
+    /// Seam ownership mask (see [`ChunkCommand::Request`]); baked into both
+    /// the gen and mesh params of one generation so passes always agree.
+    face_mask: u32,
+    /// In-place regeneration (a neighbor's LOD changed): the old mesh keeps
+    /// drawing until the replacement is ready, then swaps atomically.
+    pending: Option<Pending>,
+}
+
+enum Pending {
+    Queued,
+    CountsInFlight { slot: u32 },
+    AwaitingAlloc { slot: u32, verts: u32, indices: u32 },
 }
 
 #[derive(Resource, Default)]
@@ -794,6 +809,7 @@ fn make_params(
     alloc: Option<&SlabAlloc>,
     counts_slot: u32,
     csg: (u32, u32),
+    face_mask: u32,
 ) -> ChunkParams {
     let origin = key.min_corner_m();
     ChunkParams {
@@ -809,7 +825,7 @@ fn make_params(
         counts_slot,
         csg_offset: csg.0,
         csg_count: csg.1,
-        _pad: UVec2::ZERO,
+        _pad: UVec2::new(face_mask, 0),
     }
 }
 
@@ -884,6 +900,7 @@ fn plan_frame(
                 key,
                 show_on_ready,
                 ops,
+                face_mask,
             } => {
                 match table.chunks.get_mut(&key) {
                     None => {
@@ -894,18 +911,35 @@ fn plan_frame(
                                 visible: false,
                                 show_on_ready,
                                 ops,
+                                face_mask,
+                                pending: None,
                             },
                         );
                     }
-                    // Freed-while-in-flight chunk re-requested: resurrect it,
-                    // the pending readback will complete it normally.
-                    Some(chunk) => {
-                        if let ChunkState::Cancelled { slot } = chunk.state {
+                    Some(chunk) => match chunk.state {
+                        // Freed-while-in-flight chunk re-requested:
+                        // resurrect it, the pending readback completes it.
+                        ChunkState::Cancelled { slot } => {
                             chunk.state = ChunkState::CountsInFlight { slot };
                             chunk.visible = false;
                             chunk.show_on_ready = show_on_ready;
+                            chunk.face_mask = face_mask;
                         }
-                    }
+                        // Not yet generating: the new mask/ops just apply.
+                        ChunkState::QueuedGen => {
+                            chunk.ops = ops;
+                            chunk.face_mask = face_mask;
+                        }
+                        // Live or mid-generation: regenerate in place with
+                        // the new mask; the old mesh draws until it's ready.
+                        _ => {
+                            chunk.ops = ops;
+                            chunk.face_mask = face_mask;
+                            if chunk.pending.is_none() {
+                                chunk.pending = Some(Pending::Queued);
+                            }
+                        }
+                    },
                 }
             }
             ChunkCommand::Show(key) => {
@@ -913,11 +947,24 @@ fn plan_frame(
                     chunk.visible = true;
                 }
             }
-            ChunkCommand::Free(key) => match table.chunks.remove(&key) {
-                Some(RenderChunk {
-                    state: ChunkState::CountsInFlight { slot },
-                    ..
-                }) => {
+            ChunkCommand::Free(key) => {
+                let Some(chunk) = table.chunks.remove(&key) else {
+                    continue;
+                };
+                // A pending regen may hold its own arena slot.
+                let mut inflight_slot = None;
+                match chunk.pending {
+                    Some(Pending::CountsInFlight { slot }) => inflight_slot = Some(slot),
+                    Some(Pending::AwaitingAlloc { slot, .. }) => gpu.arena_free.push(slot),
+                    _ => {}
+                }
+                match chunk.state {
+                    ChunkState::CountsInFlight { slot } => inflight_slot = Some(slot),
+                    ChunkState::AwaitingAlloc { slot, .. } => gpu.arena_free.push(slot),
+                    ChunkState::Meshed { alloc, .. } => gpu.slab.free(alloc),
+                    _ => {}
+                }
+                if let Some(slot) = inflight_slot {
                     // Result still coming; readback will recycle the slot.
                     table.chunks.insert(
                         key,
@@ -926,19 +973,12 @@ fn plan_frame(
                             visible: false,
                             show_on_ready: false,
                             ops: None,
+                            face_mask: 0,
+                            pending: None,
                         },
                     );
                 }
-                Some(RenderChunk {
-                    state: ChunkState::AwaitingAlloc { slot, .. },
-                    ..
-                }) => gpu.arena_free.push(slot),
-                Some(RenderChunk {
-                    state: ChunkState::Meshed { alloc, .. },
-                    ..
-                }) => gpu.slab.free(alloc),
-                _ => {}
-            },
+            }
         }
     }
 
@@ -959,6 +999,30 @@ fn plan_frame(
             let Some(chunk) = table.chunks.get_mut(key) else {
                 continue;
             };
+            // A pending regen's counts route to the pending track.
+            if let Some(Pending::CountsInFlight { slot }) = chunk.pending {
+                let max_verts = *crate::slab::CLASS_VERTS.last().unwrap();
+                let max_indices = max_verts * crate::slab::INDEX_FACTOR;
+                if verts > max_verts || quads * 6 > max_indices {
+                    warn!("chunk {key:?} regen exceeds largest slab class; kept old mesh");
+                    gpu.arena_free.push(slot);
+                    chunk.pending = None;
+                } else if verts == 0 || quads == 0 {
+                    gpu.arena_free.push(slot);
+                    chunk.pending = None;
+                    if let ChunkState::Meshed { alloc, .. } = chunk.state {
+                        gpu.slab.free(alloc);
+                    }
+                    chunk.state = ChunkState::Empty;
+                } else {
+                    chunk.pending = Some(Pending::AwaitingAlloc {
+                        slot,
+                        verts,
+                        indices: quads * 6,
+                    });
+                }
+                continue;
+            }
             match chunk.state {
                 ChunkState::Cancelled { slot } => {
                     gpu.arena_free.push(slot);
@@ -1002,20 +1066,34 @@ fn plan_frame(
         table
             .chunks
             .iter()
-            .filter(|(_, c)| matches!(c.state, ChunkState::AwaitingAlloc { .. }))
+            .filter(|(_, c)| {
+                matches!(c.state, ChunkState::AwaitingAlloc { .. })
+                    || matches!(c.pending, Some(Pending::AwaitingAlloc { .. }))
+            })
             .map(|(k, _)| *k)
             .take(MESH_BUDGET.min((COUNTS_SLOTS as usize).saturating_sub(GEN_BUDGET)))
             .collect()
     };
     for key in mesh_keys {
         let chunk = table.chunks.get_mut(&key).unwrap();
-        let ChunkState::AwaitingAlloc {
-            slot,
-            verts,
-            indices,
-        } = chunk.state
-        else {
-            unreachable!()
+        let (slot, verts, indices, is_pending) = match (&chunk.state, &chunk.pending) {
+            (
+                _,
+                Some(Pending::AwaitingAlloc {
+                    slot,
+                    verts,
+                    indices,
+                }),
+            ) => (*slot, *verts, *indices, true),
+            (
+                ChunkState::AwaitingAlloc {
+                    slot,
+                    verts,
+                    indices,
+                },
+                _,
+            ) => (*slot, *verts, *indices, false),
+            _ => unreachable!(),
         };
         let Some(alloc) = gpu.slab.alloc(verts, indices) else {
             // Slab full: keep waiting (arena slot stays held; visible in HUD).
@@ -1028,6 +1106,7 @@ fn plan_frame(
             Some(&alloc),
             mesh_counts_slot,
             (0, 0),
+            chunk.face_mask,
         ));
         batches.mesh.push(MeshEntry {
             uniform_offset: offset,
@@ -1035,15 +1114,23 @@ fn plan_frame(
             index_count: indices,
         });
         // The mesh compute is recorded later this frame, before the main
-        // pass, so the chunk is immediately drawable.
+        // pass, so the chunk is immediately drawable. A pending regen swaps
+        // its new mesh in atomically (the old one drew until now).
+        if is_pending {
+            if let ChunkState::Meshed { alloc: old, .. } = chunk.state {
+                gpu.slab.free(old);
+            }
+            chunk.pending = None;
+        } else {
+            if chunk.show_on_ready {
+                chunk.visible = true;
+            }
+            let _ = ready_tx.0.send(key);
+        }
         chunk.state = ChunkState::Meshed {
             alloc,
             index_count: indices,
         };
-        if chunk.show_on_ready {
-            chunk.visible = true;
-        }
-        let _ = ready_tx.0.send(key);
         freed_slots.push(slot);
     }
 
@@ -1062,7 +1149,11 @@ fn plan_frame(
         let mut queued: Vec<(ChunkKey, f64)> = table
             .chunks
             .iter()
-            .filter(|(_, c)| matches!(c.state, ChunkState::QueuedGen))
+            .filter(|(_, c)| {
+                matches!(c.state, ChunkState::QueuedGen)
+                    || (matches!(c.pending, Some(Pending::Queued))
+                        && matches!(c.state, ChunkState::Meshed { .. } | ChunkState::Empty))
+            })
             .map(|(k, _)| (*k, gen_priority(*k, camera.0)))
             .collect();
         queued.sort_by(|a, b| a.1.total_cmp(&b.1));
@@ -1081,14 +1172,23 @@ fn plan_frame(
                 None => (0, 0),
             };
             let counts_slot = entries.len() as u32;
-            let offset = gpu
-                .gen_uniforms
-                .push(&make_params(key, slot, None, counts_slot, csg));
+            let offset = gpu.gen_uniforms.push(&make_params(
+                key,
+                slot,
+                None,
+                counts_slot,
+                csg,
+                chunk.face_mask,
+            ));
             batches.gen.push(GenEntry {
                 uniform_offset: offset,
             });
             entries.push((key, counts_slot));
-            chunk.state = ChunkState::CountsInFlight { slot };
+            if matches!(chunk.pending, Some(Pending::Queued)) {
+                chunk.pending = Some(Pending::CountsInFlight { slot });
+            } else {
+                chunk.state = ChunkState::CountsInFlight { slot };
+            }
         }
         if !entries.is_empty() {
             batches.staging_idx = Some(staging_idx);
@@ -1269,7 +1369,6 @@ fn dispatch_chunk_work(
         });
 
         let gen_groups = SAMPLES.div_ceil(6);
-        let cell_groups = CELLS / 4;
         // Count and vertex passes cover the extended cell range -1..=32.
         let ext_groups = (CELLS + 2).div_ceil(4);
 
@@ -1294,7 +1393,7 @@ fn dispatch_chunk_work(
         pass.set_pipeline(quads);
         for entry in &batches.mesh {
             pass.set_bind_group(0, &mesh_bg, &[entry.uniform_offset]);
-            pass.dispatch_workgroups(cell_groups, cell_groups, cell_groups);
+            pass.dispatch_workgroups(ext_groups, ext_groups, ext_groups);
         }
     }
 

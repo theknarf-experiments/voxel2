@@ -29,6 +29,7 @@ fn request(
     provider: &ChunkOpsProvider,
     key: ChunkKey,
     show_on_ready: bool,
+    face_mask: u32,
 ) {
     let ops = provider
         .0
@@ -40,7 +41,119 @@ fn request(
         key,
         show_on_ready,
         ops,
+        face_mask,
     });
+}
+
+/// Face directions in mask order (+x, -x, +y, -y, +z, -z).
+const FACE_DIRS: [IVec3; 6] = [
+    IVec3::new(1, 0, 0),
+    IVec3::new(-1, 0, 0),
+    IVec3::new(0, 1, 0),
+    IVec3::new(0, -1, 0),
+    IVec3::new(0, 0, 1),
+    IVec3::new(0, 0, -1),
+];
+
+/// The leaf covering `key`'s region at `key.level` or above, if any.
+fn covering_level(tree: &LodTree, max_level: u8, key: ChunkKey) -> Option<u8> {
+    let mut k = key;
+    loop {
+        if tree.leaves.contains(&k) {
+            return Some(k.level);
+        }
+        if k.level >= max_level {
+            return None;
+        }
+        k = k.parent();
+    }
+}
+
+/// Does `key`'s region contain leaves finer than `key.level`?
+fn region_has_finer(tree: &LodTree, key: ChunkKey, depth: u8) -> bool {
+    if key.level == 0 || depth == 0 {
+        return false;
+    }
+    key.children()
+        .iter()
+        .any(|c| tree.leaves.contains(c) || region_has_finer(tree, *c, depth - 1))
+}
+
+/// Seam mask for a chunk: 2 bits per face — 0 equal/none, 1 neighbor
+/// coarser, 2 neighbor finer. Baked into the chunk's generation so density
+/// band-blending and mesh seam ownership agree with the LOD tree.
+fn face_mask(tree: &LodTree, max_level: u8, key: ChunkKey) -> u32 {
+    let mut mask = 0u32;
+    for (i, d) in FACE_DIRS.iter().enumerate() {
+        let n = ChunkKey::new(key.level, key.pos + *d);
+        let code = match covering_level(tree, max_level, n) {
+            Some(l) if l > key.level => 1u32,
+            Some(_) => 0u32,
+            None => {
+                if region_has_finer(tree, n, 3) {
+                    2
+                } else {
+                    0
+                }
+            }
+        };
+        mask |= code << (2 * i);
+    }
+    mask
+}
+
+/// Re-request a live chunk with a freshly computed mask (regenerates in
+/// place; the old mesh draws until the replacement is ready).
+fn refresh(
+    tree: &LodTree,
+    queue: &ChunkCommandQueue,
+    provider: &ChunkOpsProvider,
+    max_level: u8,
+    key: ChunkKey,
+) {
+    let mask = face_mask(tree, max_level, key);
+    request(queue, provider, key, false, mask);
+}
+
+/// After a region swaps LOD, its face neighbors' seam masks changed:
+/// refresh the equal-level neighbor leaf, or the finer leaves touching the
+/// face.
+fn refresh_neighbors(
+    tree: &LodTree,
+    queue: &ChunkCommandQueue,
+    provider: &ChunkOpsProvider,
+    max_level: u8,
+    region: ChunkKey,
+) {
+    for (i, d) in FACE_DIRS.iter().enumerate() {
+        let n = ChunkKey::new(region.level, region.pos + *d);
+        if tree.leaves.contains(&n) {
+            refresh(tree, queue, provider, max_level, n);
+            continue;
+        }
+        if region.level == 0 {
+            continue;
+        }
+        // Finer neighbors: the children of `region` on face `i` each have an
+        // outward neighbor at child level.
+        for child in region.children() {
+            let on_face = match i {
+                0 => child.pos.x == region.pos.x * 2 + 1,
+                1 => child.pos.x == region.pos.x * 2,
+                2 => child.pos.y == region.pos.y * 2 + 1,
+                3 => child.pos.y == region.pos.y * 2,
+                4 => child.pos.z == region.pos.z * 2 + 1,
+                _ => child.pos.z == region.pos.z * 2,
+            };
+            if !on_face {
+                continue;
+            }
+            let fine_n = ChunkKey::new(child.level, child.pos + *d);
+            if tree.leaves.contains(&fine_n) {
+                refresh(tree, queue, provider, max_level, fine_n);
+            }
+        }
+    }
 }
 
 /// LOD configuration.
@@ -172,6 +285,7 @@ fn lod_tick(
         tree.leaves.remove(&parent);
         tree.ready.remove(&parent);
         queue.push(ChunkCommand::Free(parent));
+        refresh_neighbors(tree, &queue, &ops_provider, config.max_level, parent);
     }
 
     // 3. Complete merges whose parent is drawable: atomic swap.
@@ -190,6 +304,7 @@ fn lod_tick(
             tree.ready.remove(&child);
             queue.push(ChunkCommand::Free(child));
         }
+        refresh_neighbors(tree, &queue, &ops_provider, config.max_level, parent);
     }
 
     // 4. Top-level ring maintenance.
@@ -203,7 +318,8 @@ fn lod_tick(
                 let cell = IVec3::new(center_x + dx, y, center_z + dz);
                 if tree.top_cells.insert(cell) {
                     let key = ChunkKey::new(config.max_level, cell);
-                    request(&queue, &ops_provider, key, true);
+                    let mask = face_mask(tree, config.max_level, key);
+                    request(&queue, &ops_provider, key, true, mask);
                     tree.leaves.insert(key);
                 }
             }
@@ -222,7 +338,7 @@ fn lod_tick(
     }
 
     // 5. Splits: leaves too close for their level refine.
-    let candidates: Vec<ChunkKey> = tree
+    let mut to_split: Vec<ChunkKey> = tree
         .leaves
         .iter()
         .filter(|leaf| {
@@ -233,10 +349,45 @@ fn lod_tick(
         })
         .copied()
         .collect();
-    for leaf in candidates {
+    // Restricted octree: a split may not create a >1 LOD difference across
+    // any of the 26 neighbors; coarser neighbors cascade-split first.
+    let mut i = 0;
+    while i < to_split.len() {
+        let leaf = to_split[i];
+        i += 1;
+        if leaf.level == 0 || tree.splitting.contains_key(&leaf) || in_merge(tree, leaf) {
+            continue;
+        }
+        let mut blocked = false;
+        for dz in -1..=1 {
+            for dy in -1..=1 {
+                for dx in -1..=1 {
+                    if dx == 0 && dy == 0 && dz == 0 {
+                        continue;
+                    }
+                    let n = ChunkKey::new(leaf.level, leaf.pos + IVec3::new(dx, dy, dz));
+                    if let Some(l) = covering_level(tree, config.max_level, n) {
+                        if l > leaf.level {
+                            blocked = true;
+                            let mut c = n;
+                            while c.level < l {
+                                c = c.parent();
+                            }
+                            if !to_split.contains(&c) {
+                                to_split.push(c);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if blocked {
+            continue; // waits until the cascade brings neighbors to level
+        }
         let children = leaf.children();
         for child in children {
-            request(&queue, &ops_provider, child, false);
+            let mask = face_mask(tree, config.max_level, child);
+            request(&queue, &ops_provider, child, false, mask);
         }
         tree.splitting.insert(leaf, children);
     }
@@ -249,7 +400,7 @@ fn lod_tick(
         }
         *sibling_count.entry(leaf.parent()).or_default() += 1;
     }
-    for (parent, count) in sibling_count {
+    'merge: for (parent, count) in sibling_count {
         if count != 8
             || tree.merging.contains_key(&parent)
             || aabb_distance(camera, parent) <= config.merge_k * parent.edge_m()
@@ -261,7 +412,25 @@ fn lod_tick(
         if children.iter().any(|c| tree.splitting.contains_key(c)) {
             continue;
         }
-        request(&queue, &ops_provider, parent, false);
+        // Restricted octree: merging may not leave a neighbor >1 finer.
+        for dz in -1..=1 {
+            for dy in -1..=1 {
+                for dx in -1..=1 {
+                    if dx == 0 && dy == 0 && dz == 0 {
+                        continue;
+                    }
+                    let n = ChunkKey::new(parent.level, parent.pos + IVec3::new(dx, dy, dz));
+                    if covering_level(tree, config.max_level, n).is_none()
+                        && parent.level >= 2
+                        && n.children().iter().any(|c| region_has_finer(tree, *c, 3))
+                    {
+                        continue 'merge;
+                    }
+                }
+            }
+        }
+        let mask = face_mask(tree, config.max_level, parent);
+        request(&queue, &ops_provider, parent, false, mask);
         tree.merging.insert(parent, children);
     }
 }

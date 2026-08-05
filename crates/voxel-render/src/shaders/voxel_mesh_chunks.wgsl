@@ -14,11 +14,12 @@
 // edge origin corner lies in [0, 32)³, so boundary quads reference
 // duplicated apron vertices that are bit-identical to the neighbor's.
 //
-// Cracks at DIFFERENT-LOD boundaries are hidden by skirts: every vertex in a
-// boundary cell layer gets a twin displaced into the solid along -normal,
-// and every face-crossing quad is emitted a second time using the twins.
-// Seen through a crack, the displaced copy reads as ground instead of void.
-// (Boundary-vertex snapping replaces this in a later milestone.)
+// DIFFERENT-LOD boundaries are exact, not hidden: the density pass blends
+// the stored field to the parent band in the shell toward a coarser
+// neighbor, apron vertices there snap onto the coarse-parity surface-nets
+// vertex (bit-equal to the neighbor's own vertex), and seam-quad ownership
+// follows the per-face LOD mask — the finer side owns each seam plane.
+// No skirts anywhere.
 
 const CELLS: u32 = 32u;
 const CELLS_EXT: u32 = 34u;        // cells -1..=32
@@ -30,12 +31,9 @@ const NONE: u32 = 0xFFFFFFFFu;
 // Compressed vertex: 3 u32 words — pos.xy (unorm16), pos.z + pad, oct normal.
 const VERTEX_WORDS: u32 = 3u;
 // Position quantization: chunk-local voxels mapped from [-8, 40] to [0, 1]
-// (covers the apron and the deepest skirt with margin).
+// (covers the apron with margin; kept for vertex-format stability).
 const POS_BIAS: f32 = 8.0;
 const POS_RANGE: f32 = 48.0;
-// Skirt depth in voxel units; must cover the surface deviation of a ±1 LOD
-// neighbor (whose voxels are 2x, deviating up to ~2 coarse voxels).
-const SKIRT_VOXELS: f32 = 6.0;
 
 struct ChunkParams {
     // xyz = chunk minimum corner in world meters, w = voxel size in meters.
@@ -46,6 +44,8 @@ struct ChunkParams {
     counts_slot: u32,
     csg_offset: u32,
     csg_count: u32,
+    // x = seam mask: 2 bits per face (+x,-x,+y,-y,+z,-z);
+    // 1 = neighbor coarser, 2 = neighbor finer.
     _pad: vec2<u32>,
 }
 
@@ -102,25 +102,38 @@ fn cell_slot_index(c: vec3<i32>) -> u32 {
     return params.slot * CELL_STRIDE + i.x + CELLS_EXT * (i.y + CELLS_EXT * i.z);
 }
 
-// Boundary cells participate in skirts: the two outermost cell layers on
-// each face (the crack sits on the face plane between them).
-fn is_boundary_cell(c: vec3<i32>) -> bool {
-    return any(c <= vec3<i32>(0)) || any(c >= vec3<i32>(31));
+// Face codes from the seam mask (face order +x,-x,+y,-y,+z,-z).
+fn face_code(f: u32) -> u32 {
+    return (params._pad.x >> (2u * f)) & 3u;
 }
 
-// Stitched-surface-nets snap factor: 1 at the outermost (apron) cell layer,
-// 0.5 one cell in, 0 in the interior. Corner parity is global (chunk
-// origins are even in voxel units), so equal-LOD neighbors snap to the same
-// coarse solution and a fine chunk's face vertices land exactly on a
-// coarser neighbor's vertices — watertight in both cases.
-fn snap_factor(c: vec3<i32>) -> f32 {
-    var t = 0.0;
-    if (any(c <= vec3<i32>(-1)) || any(c >= vec3<i32>(32))) {
-        t = 1.0;
-    } else if (any(c <= vec3<i32>(0)) || any(c >= vec3<i32>(31))) {
-        t = 0.5;
+// Apron cells on a face toward a coarser neighbor snap fully onto the
+// coarse-parity vertex (bit-equal to that neighbor's own vertex, thanks to
+// the density band-blend in this shell).
+fn snap_to_parity(c: vec3<i32>) -> bool {
+    return (c.x == 32 && face_code(0u) == 1u) || (c.x == -1 && face_code(1u) == 1u)
+        || (c.y == 32 && face_code(2u) == 1u) || (c.y == -1 && face_code(3u) == 1u)
+        || (c.z == 32 && face_code(4u) == 1u) || (c.z == -1 && face_code(5u) == 1u);
+}
+
+// Seam-aware quad ownership. Default: edge-origin in [0, 32)³. Toward a
+// coarser +face the chunk additionally owns the seam-plane quads (origin
+// 32 on that axis); toward a finer -face it cedes its plane quads (origin
+// 0) to the finer neighbors, which mesh that plane at their resolution.
+fn owns_quad(c: vec3<i32>, axis: u32) -> bool {
+    for (var a = 0u; a < 3u; a++) {
+        let ca = c[a];
+        if (ca < 0 || ca > 32) {
+            return false;
+        }
+        if (ca == 32 && !(axis != a && face_code(2u * a) == 1u)) {
+            return false;
+        }
+        if (ca == 0 && axis != a && face_code(2u * a + 1u) == 2u) {
+            return false;
+        }
     }
-    return t;
+    return true;
 }
 
 // Surface-nets vertex of the coarse-parity (2x) cell containing fine cell
@@ -182,13 +195,6 @@ fn quad_exists(c: vec3<i32>, axis: u32) -> bool {
     return (s0 < 0.0) != (s1 < 0.0);
 }
 
-// A face-crossing quad (uses apron cells) gets a skirt copy.
-fn quad_is_boundary(c: vec3<i32>, axis: u32) -> bool {
-    let u_axis = (axis + 1u) % 3u;
-    let v_axis = (axis + 2u) % 3u;
-    return c[u_axis] == 0 || c[v_axis] == 0;
-}
-
 @compute @workgroup_size(4, 4, 4)
 fn sn_count(@builtin(global_invocation_id) id: vec3<u32>) {
     if (any(id >= vec3<u32>(CELLS_EXT))) {
@@ -197,22 +203,11 @@ fn sn_count(@builtin(global_invocation_id) id: vec3<u32>) {
     let c = vec3<i32>(id) - vec3<i32>(1); // -1..=32
     let mask = cell_sign_mask(c);
     if (mask != 0u && mask != 255u) {
-        var n = 1u;
-        if (is_boundary_cell(c)) {
-            n = 2u; // twin vertex for the skirt
-        }
-        atomicAdd(&counts[params.counts_slot].verts, n);
+        atomicAdd(&counts[params.counts_slot].verts, 1u);
     }
-    // Quads are only owned for origin corners inside [0, 32)³.
-    if (all(c >= vec3<i32>(0)) && all(c < vec3<i32>(i32(CELLS)))) {
-        for (var axis = 0u; axis < 3u; axis++) {
-            if (quad_exists(c, axis)) {
-                var n = 1u;
-                if (quad_is_boundary(c, axis)) {
-                    n = 2u; // skirt quad
-                }
-                atomicAdd(&counts[params.counts_slot].quads, n);
-            }
+    for (var axis = 0u; axis < 3u; axis++) {
+        if (owns_quad(c, axis) && quad_exists(c, axis)) {
+            atomicAdd(&counts[params.counts_slot].quads, 1u);
         }
     }
 }
@@ -268,22 +263,17 @@ fn sn_vertices(@builtin(global_invocation_id) id: vec3<u32>) {
     // decode using the per-chunk voxel size.
     var pv = vec3<f32>(c) + sum / n;
 
-    // Stitch chunk boundaries: morph boundary-band vertices onto the
-    // coarse-parity surface so neighboring chunks (same or ±1 LOD) meet.
-    let snap = snap_factor(c);
-    if (snap > 0.0) {
+    // Seam vertices toward a coarser neighbor land exactly on its own
+    // surface-nets vertex: the parity cell's SN solution over parent-band
+    // samples (the density pass blended this shell to the parent band).
+    if (snap_to_parity(c)) {
         let cv = coarse_vertex(c);
         if (cv.w > 0.5) {
-            pv = mix(pv, cv.xyz, snap);
+            pv = cv.xyz;
         }
     }
 
-    let boundary = is_boundary_cell(c);
-    var count = 1u;
-    if (boundary) {
-        count = 2u;
-    }
-    let local = atomicAdd(&counts[params.counts_slot].verts, count);
+    let local = atomicAdd(&counts[params.counts_slot].verts, 1u);
 
     // Vertex material: the material of the most-solid corner.
     var mat = 0u;
@@ -296,23 +286,7 @@ fn sn_vertices(@builtin(global_invocation_id) id: vec3<u32>) {
     }
 
     write_vertex(params.base_vertex + local, pv, normal, mat);
-    var twin = NONE16;
-    if (boundary) {
-        // Skirt twins displace along -normal; that hides them inside the
-        // ground on terrain, but on thin features (CSG walls, pillars) the
-        // displaced point lands in open air and the skirt reads as a giant
-        // blade. Only create the twin when it ends up inside solid — the
-        // counted capacity covers it either way, and skipped skirt quads
-        // collapse to degenerate triangles (their index range is
-        // pre-cleared).
-        let tp = pv - normal * SKIRT_VOXELS;
-        let tc = vec3<i32>(round(tp));
-        if (sample_sdf(tc) < -1.0) {
-            twin = local + 1u;
-            write_vertex(params.base_vertex + twin, tp, normal, mat);
-        }
-    }
-    cell_indices[cell_slot_index(c)] = (local & 0xFFFFu) | (twin << 16u);
+    cell_indices[cell_slot_index(c)] = local & 0xFFFFu;
 }
 
 // --- baked sun shadow (planet worlds) ----------------------------------------
@@ -436,14 +410,14 @@ fn write_vertex(index: u32, pos_voxels: vec3<f32>, normal: vec3<f32>, material: 
 
 @compute @workgroup_size(4, 4, 4)
 fn sn_quads(@builtin(global_invocation_id) id: vec3<u32>) {
-    if (any(id >= vec3<u32>(CELLS))) {
+    if (any(id >= vec3<u32>(CELLS_EXT))) {
         return;
     }
-    let c = vec3<i32>(id);
+    let c = vec3<i32>(id) - vec3<i32>(1); // -1..=32 (seam ownership extends)
     let s0 = sample_sdf(c);
 
     for (var axis = 0u; axis < 3u; axis++) {
-        if (!quad_exists(c, axis)) {
+        if (!owns_quad(c, axis) || !quad_exists(c, axis)) {
             continue;
         }
         var u = vec3<i32>(0);
@@ -453,25 +427,12 @@ fn sn_quads(@builtin(global_invocation_id) id: vec3<u32>) {
         let cells = array<vec3<i32>, 4>(c, c - u, c - u - v, c - v);
 
         var quad: array<u32, 4>;
-        var twins: array<u32, 4>;
         for (var i = 0u; i < 4u; i++) {
-            let packed = cell_indices[cell_slot_index(cells[i])];
-            quad[i] = packed & 0xFFFFu;
-            let t = packed >> 16u;
-            // Non-boundary cells have no twin; fall back to the vertex.
-            twins[i] = select(t, quad[i], t == NONE16);
+            quad[i] = cell_indices[cell_slot_index(cells[i])] & 0xFFFFu;
         }
 
-        let boundary = quad_is_boundary(c, axis);
-        var emit = 1u;
-        if (boundary) {
-            emit = 2u;
-        }
-        let q = atomicAdd(&counts[params.counts_slot].quads, emit);
+        let q = atomicAdd(&counts[params.counts_slot].quads, 1u);
         write_quad(q, quad, s0 < 0.0);
-        if (boundary) {
-            write_quad(q + 1u, twins, s0 < 0.0);
-        }
     }
 }
 
