@@ -1,6 +1,8 @@
 // Chunk draw: camera-relative vertex transform over the slab buffers, with
-// fully procedural terrain shading (no texture assets): noise-based albedo
-// per material zone, hemispheric ambient, sun light, planet-scale haze.
+// fully procedural, fully data-driven shading (no texture assets, no
+// world-specific branches): the per-vertex material id indexes the level's
+// material table, and lighting/atmosphere come from the level's
+// environment uniform.
 //
 // Vertices are chunk-local; the per-chunk uniform carries the chunk origin
 // relative to the camera (computed in f64 on CPU). Multiplying the view
@@ -16,6 +18,34 @@ struct ChunkDrawUniform {
     offset: vec4<f32>,
 }
 @group(1) @binding(0) var<uniform> chunk: ChunkDrawUniform;
+
+// Material recipes (128 B each, layout mirrors voxel-render WorldMaterial).
+// head.x = kind: 0 = surface (base/grain/bands/grime/streaks/moss/emissive),
+// 1 = zoned altitude terrain.
+struct WorldMaterial {
+    head: vec4<u32>,
+    c0: vec4<f32>,
+    c1: vec4<f32>,
+    c2: vec4<f32>,
+    c3: vec4<f32>,
+    p0: vec4<f32>,
+    p1: vec4<f32>,
+    p2: vec4<f32>,
+}
+struct MaterialTable {
+    materials: array<WorldMaterial, 8>,
+}
+@group(1) @binding(1) var<uniform> mats: MaterialTable;
+
+// Level lighting + atmosphere.
+struct EnvParams {
+    haze: vec4<f32>,      // rgb | density
+    haze_tint: vec4<f32>, // rgb | tint power (0 = untinted)
+    sun: vec4<f32>,       // rgb | strength
+    sky: vec4<f32>,       // ambient sky rgb | ambient strength
+    ground: vec4<f32>,    // ambient ground rgb | up exponent
+}
+@group(1) @binding(2) var<uniform> env: EnvParams;
 
 struct VsIn {
     // Quantized position: unorm16 x4 mapping [-8, 40] voxels (w unused).
@@ -103,62 +133,65 @@ fn fbm3(p: vec3<f32>) -> f32 {
 }
 
 
-#ifdef CONCRETE_SHADING
-@fragment
-fn fragment(in: VsOut) -> @location(0) vec4<f32> {
-    let n = normalize(in.normal);
-    let world = vec3<f32>(
-        view.world_position.x + in.cam_rel.x,
-        view.world_position.y + in.cam_rel.y,
-        view.world_position.z + in.cam_rel.z,
-    );
-    let dist = length(in.cam_rel);
-
-    // Concrete: pale gray with pour-band striations, grime, and streaks.
-    let detail_fade = exp(-dist * 0.004);
+// Uniform-base surface: grain, pour/mortar bands, grime, drip streaks,
+// moss in upward crevices. Returns albedo; emissive is added after
+// lighting.
+fn surface_albedo(m: WorldMaterial, world: vec3<f32>, n: vec3<f32>, dist: f32) -> vec3<f32> {
+    let detail_fade = exp(-dist * m.p2.z);
     var grain = 0.5;
     if (detail_fade > 0.02) {
         grain = mix(0.5, fbm3(world * 0.9), detail_fade);
     }
     let stains = fbm3(world * 0.035);
-    let band = fract(world.y * 0.22 + stains * 0.4);
-    var base = vec3<f32>(0.42, 0.42, 0.43);
-    base *= 0.82 + 0.18 * smoothstep(0.1, 0.9, band); // pour bands
-    base *= 0.75 + 0.35 * grain;                       // fine grain
-    base = mix(base, base * vec3<f32>(0.55, 0.58, 0.55), smoothstep(0.55, 0.85, stains));
-
+    var base = m.c0.rgb;
+    if (m.p0.y > 0.0) {
+        let band = fract(world.y * m.p0.x + stains * m.p1.x);
+        base *= (1.0 - m.p0.y) + m.p0.y * smoothstep(m.p0.z, m.p0.w, band);
+    }
+    base *= 0.75 + m.c0.w * grain;
+    // Grime patches darken toward the tint.
+    base = mix(base, base * m.c1.rgb, smoothstep(0.55, 0.85, stains) * m.c1.w);
     // Vertical drip streaks on walls.
-    let wallness = 1.0 - abs(n.y);
-    let streak = fbm3(vec3<f32>(world.x * 0.6, world.y * 0.03, world.z * 0.6));
-    base *= 1.0 - wallness * smoothstep(0.6, 0.9, streak) * 0.35;
-
-    // Dim top-light as if from distant shafts above; heavy darkness below.
-    let up = n.y * 0.5 + 0.5;
-    let key = vec3<f32>(0.75, 0.78, 0.82) * (0.12 + 0.55 * up * up);
-    let rim = vec3<f32>(0.20, 0.24, 0.30) * (1.0 - up) * 0.25;
-    var lit = base * (key + rim);
-
-    // Emissive service-light strips on ceiling undersides: sparse lines
-    // running along x, flickered out on some floors.
-    let lf = floor(world.y / 22.0);
-    let ry = world.y - lf * 22.0;
-    let ceilingness = smoothstep(-0.55, -0.85, n.y);
-    let line = 1.0 - smoothstep(0.25, 0.75, abs(fract(world.z / 13.0) - 0.5) * 13.0);
-    let works = step(0.35, hash3(vec3<i32>(i32(floor(world.z / 13.0)), i32(lf), 7)));
-    let strip = ceilingness * line * works;
-    lit += vec3<f32>(1.3, 1.25, 1.05) * strip;
-
-    // Faint up-glow from the strips onto nearby floors.
-    let floorness = smoothstep(0.55, 0.85, n.y);
-    lit += vec3<f32>(0.10, 0.10, 0.085) * floorness * line * works;
-
-    // Thick interior gloom.
-    let haze_amount = 1.0 - exp(-dist * 0.0035);
-    let haze_color = vec3<f32>(0.035, 0.045, 0.06);
-    lit = mix(lit, haze_color, haze_amount);
-    return vec4<f32>(lit, 1.0);
+    if (m.p1.y > 0.0) {
+        let wallness = 1.0 - abs(n.y);
+        let streak = fbm3(vec3<f32>(world.x * 0.6, world.y * 0.03, world.z * 0.6));
+        base *= 1.0 - wallness * smoothstep(0.6, 0.9, streak) * m.p1.y;
+    }
+    // Moss in upward crevices.
+    if (m.c2.w > 0.0) {
+        let macro_var = fbm3(world * 0.012);
+        let moss = smoothstep(0.6, 0.9, macro_var) * smoothstep(0.5, 0.9, n.y) * m.c2.w;
+        base = mix(base, m.c2.rgb, moss);
+    }
+    return base;
 }
-#else
+
+// Altitude-zoned natural terrain: low/mid/high/peak colors with noisy
+// borders, slope override to the high (rock) color.
+fn zoned_albedo(m: WorldMaterial, world: vec3<f32>, n: vec3<f32>, dist: f32) -> vec3<f32> {
+    let detail_fade = exp(-dist * m.p2.w);
+    var detail = 0.5;
+    if (detail_fade > 0.02) {
+        detail = mix(0.5, fbm3(world * 0.35), detail_fade);
+    }
+    let macro_var = fbm3(world * 0.012);
+
+    var low = m.c0.rgb * (0.85 + 0.3 * detail);
+    var mid = mix(m.c1.rgb, m.p0.rgb, macro_var);
+    mid *= 0.8 + 0.45 * detail;
+    let band = fract(world.y * 0.06 + macro_var * 2.0);
+    var high = mix(m.c2.rgb, m.p1.rgb, smoothstep(0.2, 0.8, band));
+    high *= 0.8 + 0.4 * detail;
+    var peak = m.c3.rgb * (0.9 + 0.2 * detail);
+
+    let border = (macro_var - 0.5) * m.c3.w;
+    var base = mix(low, mid, smoothstep(m.c0.w + border * 0.05, m.c0.w + m.p0.w + border * 0.05, world.y));
+    base = mix(base, high, smoothstep(m.c1.w + border, m.c1.w + m.p1.w + border, world.y));
+    base = mix(base, peak, smoothstep(m.c2.w + border, m.c2.w + m.p2.x + border, world.y));
+    let steep = smoothstep(m.p2.y, m.p2.z, n.y); // 1 on cliffs
+    return mix(base, high, steep);
+}
+
 @fragment
 fn fragment(in: VsOut) -> @location(0) vec4<f32> {
     let n = normalize(in.normal);
@@ -168,72 +201,42 @@ fn fragment(in: VsOut) -> @location(0) vec4<f32> {
         view.world_position.z + in.cam_rel.z,
     );
     let dist = length(in.cam_rel);
+    let m = mats.materials[min(in.material, 7u)];
 
-    // Fade detail octaves out with distance so far terrain doesn't shimmer.
-    let detail_fade = exp(-dist * 0.002);
-    var detail = 0.5;
-    if (detail_fade > 0.02) {
-        detail = mix(0.5, fbm3(world * 0.35), detail_fade);
-    }
-    let macro_var = fbm3(world * 0.012); // large patchiness
-
-    // --- material zones ------------------------------------------------------
-    // Grass: hue patchiness + fine detail.
-    let grass_a = vec3<f32>(0.21, 0.35, 0.12);
-    let grass_b = vec3<f32>(0.34, 0.42, 0.16);
-    var grass = mix(grass_a, grass_b, macro_var);
-    grass *= 0.8 + 0.45 * detail;
-
-    // Rock: banded by altitude + detail grain.
-    let rock_a = vec3<f32>(0.33, 0.30, 0.27);
-    let rock_b = vec3<f32>(0.46, 0.42, 0.38);
-    let band = fract(world.y * 0.06 + macro_var * 2.0);
-    var rock = mix(rock_a, rock_b, smoothstep(0.2, 0.8, band));
-    rock *= 0.8 + 0.4 * detail;
-
-    // Sand and snow.
-    var sand = vec3<f32>(0.62, 0.56, 0.42) * (0.85 + 0.3 * detail);
-    var snow = vec3<f32>(0.82, 0.85, 0.92) * (0.9 + 0.2 * detail);
-
-    // Zone blending by altitude with noisy borders, then slope override.
-    let border = (macro_var - 0.5) * 60.0;
-    var base = mix(sand, grass, smoothstep(1.5 + border * 0.05, 5.0 + border * 0.05, world.y));
-    base = mix(base, rock, smoothstep(340.0 + border, 620.0 + border, world.y));
-    base = mix(base, snow, smoothstep(820.0 + border, 1050.0 + border, world.y));
-    let steep = smoothstep(0.72, 0.45, n.y); // 1 on cliffs
-    base = mix(base, rock, steep);
-
-    // Material 3: worked stone (ruins, roads) — cut-block gray with grime,
-    // faint moss only in upward crevices.
-    if (in.material == 3u) {
-        var stone = vec3<f32>(0.52, 0.50, 0.46);
-        let block = fract(world.y * 0.55 + macro_var * 0.7);
-        stone *= 0.82 + 0.18 * smoothstep(0.08, 0.25, block); // mortar lines
-        stone *= 0.75 + 0.4 * detail;
-        let moss = smoothstep(0.6, 0.9, macro_var) * smoothstep(0.5, 0.9, n.y) * 0.5;
-        base = mix(stone, grass, moss);
+    var base: vec3<f32>;
+    if (m.head.x == 1u) {
+        base = zoned_albedo(m, world, n, dist);
+    } else {
+        base = surface_albedo(m, world, n, dist);
     }
 
-    // --- lighting ------------------------------------------------------------
+    // --- lighting: sun (baked-shadowed) + hemispheric ambient ---------------
     let sun_dir = normalize(vec3<f32>(0.55, 0.5, 0.32));
-    let sun_color = vec3<f32>(1.0, 0.96, 0.88);
-    let sky_color = vec3<f32>(0.55, 0.70, 0.95);
-    let ground_bounce = vec3<f32>(0.25, 0.24, 0.20);
-
     let nd = max(dot(n, sun_dir), 0.0);
-    let hemi = mix(ground_bounce, sky_color, n.y * 0.5 + 0.5);
-    // Terrain sun shadow baked per vertex at mesh time (spare pos channel).
-    let shadow = in.shadow;
-    var lit = base * (sun_color * nd * 0.85 * shadow + hemi * 0.3);
+    let up = n.y * 0.5 + 0.5;
+    let ambient = mix(env.ground.rgb, env.sky.rgb, pow(up, env.ground.w)) * env.sky.w;
+    var lit = base * (env.sun.rgb * nd * env.sun.w * in.shadow + ambient);
 
-    // --- aerial haze ---------------------------------------------------------
-    let haze_amount = 1.0 - exp(-dist * 0.00006);
-    // Haze tinted warmer toward the sun direction.
-    let view_dir = normalize(in.cam_rel);
-    let sun_amount = pow(max(dot(view_dir, sun_dir), 0.0), 4.0);
-    let haze_color = mix(vec3<f32>(0.62, 0.72, 0.88), vec3<f32>(0.92, 0.85, 0.72), sun_amount);
+    // --- emissive ceiling light strips (surface materials) -------------------
+    if (m.head.x == 0u && m.c3.w > 0.0) {
+        let lf = floor(world.y / m.p1.w);
+        let ceilingness = smoothstep(-0.55, -0.85, n.y);
+        let line = 1.0 - smoothstep(0.25, 0.75, abs(fract(world.z / m.p1.z) - 0.5) * m.p1.z);
+        let works = step(1.0 - m.p2.x, hash3(vec3<i32>(i32(floor(world.z / m.p1.z)), i32(lf), 7)));
+        lit += m.c3.rgb * m.c3.w * ceilingness * line * works;
+        // Faint up-glow from the strips onto nearby floors.
+        let floorness = smoothstep(0.55, 0.85, n.y);
+        lit += m.c3.rgb * m.p2.y * floorness * line * works;
+    }
+
+    // --- haze, optionally tinted toward the sun ------------------------------
+    let haze_amount = 1.0 - exp(-dist * env.haze.w);
+    var haze_color = env.haze.rgb;
+    if (env.haze_tint.w > 0.0) {
+        let view_dir = normalize(in.cam_rel);
+        let sun_amount = pow(max(dot(view_dir, sun_dir), 0.0), env.haze_tint.w);
+        haze_color = mix(haze_color, env.haze_tint.rgb, sun_amount);
+    }
     lit = mix(lit, haze_color, haze_amount);
-
     return vec4<f32>(lit, 1.0);
 }
-#endif

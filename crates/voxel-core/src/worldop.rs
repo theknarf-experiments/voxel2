@@ -42,6 +42,12 @@ pub const WOP_SHAFTS_CUT: u32 = 10;
 /// Merge catwalk beams bridging the shafts along X on every Nth lattice
 /// level. `p0 = (every_n, half_width, y_offset, half_height)`, `p1.x = reach`.
 pub const WOP_BEAMS: u32 = 11;
+/// Meta op (no SDF effect): the world has a water surface. `p0.x = sea
+/// level (m)`. Drives the ocean draw and shoreline shading.
+pub const WOP_WATER: u32 = 12;
+/// Meta op (no SDF effect): vegetation grows on the heightfield surface.
+/// `p0.x = density multiplier`. Drives tree/grass streaming.
+pub const WOP_VEGETATION: u32 = 13;
 
 /// Skip this op at coarse LODs (voxel size >= the structural cutoff).
 pub const WOP_FLAG_FINE_ONLY: u32 = 1;

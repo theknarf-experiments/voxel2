@@ -26,13 +26,15 @@ cargo run -p scout --release                      # offline: scan for scenic loc
 There are no hardcoded worlds. A level file describes everything, most
 importantly the **generator program**: an ordered list of composable ops
 (FBM height bands, floor lattices, pillar/wall grids, shafts, catwalk
-beams, …) that one GPU interpreter evaluates as the world's SDF — a lush
-planet and a concrete megacity are the same engine fed different data. The
-rest of the file covers seed, LOD configuration, lighting, camera, feature
-toggles (water/vegetation), walk and shading modes, and parameterized
-planning-op providers that author structures (ruins site chance, road
-reach, pocket density, …). See `levels/*.json` and
-`voxel_engine::level::LevelDef`.
+beams, plus `water` and `vegetation` meta ops) that one GPU interpreter
+evaluates as the world's SDF — a lush planet and a concrete megacity are
+the same engine fed different data. Shading is data too: a **material
+table** (parameterized `surface` and `zoned` recipes) indexed by the
+material ids the generator ops emit, and an **environment** block for
+lighting and haze. The rest covers seed, LOD configuration, camera, walk
+mode, and parameterized planning-op providers that author structures
+(ruins site chance, road reach, pocket density, …). See `levels/*.json`
+and `voxel_engine::level::LevelDef`.
 
 **Live editing**: the level file is watched while running. Lighting,
 colors, shading, and camera tuning apply instantly; changes to the
@@ -80,12 +82,14 @@ speed. Env vars:
   Rust twin interpreter: vegetation placement, ruins/roads planning,
   walk-mode collision, and scenic-location scouting all consume the same
   world the GPU renders — one op table, two interpreters.
-- **Fully procedural shading.** No texture assets: noise-grained material
-  zones, worked-stone with mortar bands and moss, concrete with pour bands
-  and grime, emissive light strips, hemispheric ambient, sun-tinted haze,
-  and horizon-marched sun shadows baked per vertex at mesh time (free per
-  frame). Grass is one instanced draw with wind sway and distance shrink;
-  far forests are merged silhouette impostors to ~3 km.
+- **Fully procedural, fully data-driven shading.** No texture assets and
+  no world-specific shader branches: one fragment path indexes the level's
+  material table (noise-grained bands, grime, streaks, moss, emissive
+  light strips, altitude-zoned terrain) and its environment uniform
+  (sun, hemispheric ambient, tinted haze). Horizon-marched sun shadows
+  bake per vertex at mesh time (free per frame). Grass is one instanced
+  draw with wind sway and distance shrink; far forests are merged
+  silhouette impostors to ~3 km.
 
 ## Workspace
 

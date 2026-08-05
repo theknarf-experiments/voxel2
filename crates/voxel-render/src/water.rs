@@ -55,26 +55,23 @@ struct WaterParams {
 #[component(on_add = visibility::add_visibility_class::<WaterMarker>)]
 pub struct WaterMarker;
 
-/// Level-controlled toggle: hides the ocean in waterless worlds. Runtime
-/// (not build-time) so a hot-reload can switch worlds.
-#[derive(Resource, Clone, Copy)]
-pub struct WaterEnabled(pub bool);
-
-impl Default for WaterEnabled {
-    fn default() -> Self {
-        Self(true)
-    }
+/// The generator's water surface (from its `water` op): presence and sea
+/// level. Runtime (not build-time) so a hot-reload can switch worlds.
+#[derive(Resource, Clone, Copy, Default)]
+pub struct WaterSurface {
+    pub enabled: bool,
+    pub level: f32,
 }
 
 fn apply_water_toggle(
-    enabled: Res<WaterEnabled>,
+    surface: Res<WaterSurface>,
     mut markers: Query<&mut Visibility, With<WaterMarker>>,
 ) {
-    if !enabled.is_changed() {
+    if !surface.is_changed() {
         return;
     }
     for mut visibility in &mut markers {
-        *visibility = if enabled.0 {
+        *visibility = if surface.enabled {
             Visibility::Visible
         } else {
             Visibility::Hidden
@@ -82,12 +79,16 @@ fn apply_water_toggle(
     }
 }
 
+fn extract_water_surface(surface: Extract<Res<WaterSurface>>, mut commands: Commands) {
+    commands.insert_resource(**surface);
+}
+
 pub struct WaterPlugin;
 
 impl Plugin for WaterPlugin {
     fn build(&self, app: &mut App) {
         embedded_asset!(app, "shaders/voxel_water.wgsl");
-        app.init_resource::<WaterEnabled>()
+        app.init_resource::<WaterSurface>()
             .add_plugins(ExtractComponentPlugin::<WaterMarker>::default())
             .add_systems(Startup, spawn_water_marker)
             .add_systems(Update, apply_water_toggle);
@@ -99,9 +100,13 @@ impl Plugin for WaterPlugin {
             .init_resource::<PendingWaterQueues>()
             .init_resource::<WaterBindGroupRes>()
             .init_resource::<ExtractedWaterCamera>()
+            .init_resource::<WaterSurface>()
             .add_render_command::<Opaque3d, DrawWaterCommands>()
             .add_systems(RenderStartup, init_water_pipeline)
-            .add_systems(ExtractSchedule, extract_water_camera)
+            .add_systems(
+                ExtractSchedule,
+                (extract_water_camera, extract_water_surface),
+            )
             .add_systems(
                 Render,
                 prepare_water_bind_group.in_set(RenderSystems::PrepareBindGroups),
@@ -223,6 +228,7 @@ fn prepare_water_bind_group(
     globals: Res<GlobalsBuffer>,
     pipeline: Option<Res<WaterPipeline>>,
     camera: Res<ExtractedWaterCamera>,
+    surface: Res<WaterSurface>,
     gpu: Option<Res<crate::chunks::ChunkGpuResources>>,
     pipeline_cache: Res<PipelineCache>,
     render_device: Res<RenderDevice>,
@@ -241,7 +247,7 @@ fn prepare_water_bind_group(
     let ox = (camera.0.x as f64 / SEA_SNAP).floor() * SEA_SNAP;
     let oz = (camera.0.z as f64 / SEA_SNAP).floor() * SEA_SNAP;
     res.params.set(WaterParams {
-        origin: Vec4::new(ox as f32, 0.0, oz as f32, 0.0),
+        origin: Vec4::new(ox as f32, surface.level, oz as f32, 0.0),
     });
     res.params.write_buffer(&render_device, &render_queue);
     // The chunk pipeline owns and writes the program buffer each frame.

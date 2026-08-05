@@ -167,9 +167,9 @@ fn fragment(in: VsOut) -> @location(0) vec4<f32> {
     let view_dir = normalize(-in.cam_rel);
     let sun_dir = normalize(vec3<f32>(0.55, 0.5, 0.32));
 
-    // Depth-based color from the seabed heightfield.
+    // Depth-based color from the seabed heightfield below sea level.
     let bed = seabed_height(in.world_xz);
-    let depth = max(-bed, 0.0);
+    let depth = max(params.origin.y - bed, 0.0);
     let deep = vec3<f32>(0.04, 0.13, 0.22);
     let shallow = vec3<f32>(0.10, 0.34, 0.36);
     var water = mix(shallow, deep, smoothstep(1.5, 26.0, depth));

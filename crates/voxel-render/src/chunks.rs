@@ -50,10 +50,9 @@ use bevy::{
             ComputePipelineDescriptor, DepthStencilState, DynamicUniformBuffer, FragmentState,
             IndexFormat, MapMode, PipelineCache, RenderPipeline, RenderPipelineDescriptor,
             ShaderStages, ShaderType, Specializer, SpecializerKey, StorageBuffer, TextureFormat,
-            Variants, VertexAttribute, VertexFormat, VertexState, VertexStepMode,
+            UniformBuffer, Variants, VertexAttribute, VertexFormat, VertexState, VertexStepMode,
         },
         renderer::{RenderContext, RenderDevice, RenderGraph, RenderQueue},
-        sync_world::MainEntity,
         view::{
             ExtractedView, RenderVisibleEntities, ViewUniform, ViewUniformOffset, ViewUniforms,
         },
@@ -146,15 +145,111 @@ pub struct RenderStats {
 #[derive(Resource, Clone, Default)]
 pub struct WorldProgram(pub std::sync::Arc<Vec<voxel_core::worldop::WorldOp>>);
 
-/// Fragment shading family for the chunk draw (a level-selected preset
-/// until materials become palette data).
-#[derive(Resource, Clone, Copy, PartialEq, Eq, Hash, Debug, Default)]
-pub enum ShadingMode {
-    /// Procedural nature zones: grass tops, rock faces, snow, worked stone.
-    #[default]
-    Zones,
-    /// Poured concrete: pale banded gray with grime and streaks.
-    Concrete,
+/// Renders a uniform base color modulated by grain, pour/mortar bands,
+/// grime, drip streaks, moss in upward crevices, and optional emissive
+/// ceiling light strips.
+pub const MAT_KIND_SURFACE: u32 = 0;
+/// Renders altitude-zoned natural terrain (low/mid/high/peak colors with
+/// noisy borders) with a slope override to the high-zone color.
+pub const MAT_KIND_ZONED: u32 = 1;
+
+/// One material recipe, GPU form (128 B). The draw shader indexes the
+/// material table with the per-vertex material id the generator ops emit —
+/// shading is level data, not engine code.
+///
+/// Layout by kind — `surface`:
+/// c0 = base rgb | grain amp, c1 = grime tint | amount,
+/// c2 = moss rgb | amount, c3 = emissive rgb | intensity,
+/// p0 = band (freq, amp, lo, hi), p1 = (band warp, streaks, strip spacing,
+/// strip level spacing), p2 = (strip chance, strip glow, detail fade, -).
+///
+/// `zoned`: c0..c3 = low/mid/high/peak rgb | (mid start, high start, peak
+/// start, border amp), p0 = mid-b rgb | mid width, p1 = high-b rgb | high
+/// width, p2 = (peak width, steep hi, steep lo, detail fade).
+#[derive(ShaderType, Clone, Copy)]
+pub struct WorldMaterial {
+    /// kind, unused ×3
+    pub head: UVec4,
+    pub c0: Vec4,
+    pub c1: Vec4,
+    pub c2: Vec4,
+    pub c3: Vec4,
+    pub p0: Vec4,
+    pub p1: Vec4,
+    pub p2: Vec4,
+}
+
+impl Default for WorldMaterial {
+    fn default() -> Self {
+        // Neutral gray surface — what an unassigned material id renders as.
+        Self {
+            head: UVec4::new(MAT_KIND_SURFACE, 0, 0, 0),
+            c0: Vec4::new(0.5, 0.5, 0.5, 0.3),
+            c1: Vec4::ZERO,
+            c2: Vec4::ZERO,
+            c3: Vec4::ZERO,
+            p0: Vec4::new(0.0, 0.0, 0.0, 1.0),
+            p1: Vec4::ZERO,
+            p2: Vec4::new(0.0, 0.0, 0.002, 0.0),
+        }
+    }
+}
+
+/// Material ids addressable by generator ops (fits a uniform buffer).
+pub const MATERIAL_SLOTS: usize = 8;
+
+/// The level's material table, indexed by the material ids its generator
+/// ops emit. Extracted every frame so hot-reloads apply.
+#[derive(Resource, Clone, Default)]
+pub struct WorldMaterials(pub Vec<WorldMaterial>);
+
+#[derive(ShaderType, Clone)]
+pub(crate) struct GpuMaterialTable {
+    materials: [WorldMaterial; MATERIAL_SLOTS],
+}
+
+impl GpuMaterialTable {
+    fn from_slice(mats: &[WorldMaterial]) -> Self {
+        let mut materials = [WorldMaterial::default(); MATERIAL_SLOTS];
+        for (i, m) in mats.iter().take(MATERIAL_SLOTS).enumerate() {
+            materials[i] = *m;
+        }
+        Self { materials }
+    }
+}
+
+impl Default for GpuMaterialTable {
+    fn default() -> Self {
+        Self::from_slice(&[])
+    }
+}
+
+/// Level lighting + atmosphere for the chunk draw — environment as data.
+#[derive(Resource, ShaderType, Clone, Copy)]
+pub struct EnvParams {
+    /// Haze rgb | density (per meter).
+    pub haze: Vec4,
+    /// Sun-direction haze tint rgb | tint power (0 = untinted haze).
+    pub haze_tint: Vec4,
+    /// Sun rgb | strength (0 = sunless interior).
+    pub sun: Vec4,
+    /// Ambient sky rgb | ambient strength.
+    pub sky: Vec4,
+    /// Ambient ground rgb | up-ness exponent.
+    pub ground: Vec4,
+}
+
+impl Default for EnvParams {
+    fn default() -> Self {
+        // Sun-lit outdoors.
+        Self {
+            haze: Vec4::new(0.62, 0.72, 0.88, 0.00006),
+            haze_tint: Vec4::new(0.92, 0.85, 0.72, 4.0),
+            sun: Vec4::new(1.0, 0.96, 0.88, 0.85),
+            sky: Vec4::new(0.55, 0.70, 0.95, 0.3),
+            ground: Vec4::new(0.25, 0.24, 0.20, 1.0),
+        }
+    }
 }
 
 /// GPU layout twin of `voxel_core::worldop::WorldOp` (64 B).
@@ -215,7 +310,8 @@ impl Plugin for VoxelChunksPlugin {
 
         let (ready_tx, ready_rx) = crossbeam_channel::unbounded();
         app.init_resource::<WorldProgram>();
-        app.init_resource::<ShadingMode>();
+        app.init_resource::<WorldMaterials>();
+        app.init_resource::<EnvParams>();
         app.init_resource::<ChunkCommandQueue>()
             .init_resource::<SharedRenderStats>()
             .insert_resource(ChunkReadyChannel { rx: ready_rx })
@@ -229,7 +325,8 @@ impl Plugin for VoxelChunksPlugin {
         };
         render_app
             .init_resource::<WorldProgram>()
-            .init_resource::<ShadingMode>()
+            .init_resource::<WorldMaterials>()
+            .init_resource::<EnvParams>()
             .insert_resource(stats)
             .insert_resource(ChunkReadySender(ready_tx))
             .init_resource::<ExtractedChunkCommands>()
@@ -384,6 +481,8 @@ pub(crate) struct ChunkGpuResources {
     slab: SlabAllocator,
     gen_uniforms: DynamicUniformBuffer<ChunkParams>,
     pub(crate) program_buffer: StorageBuffer<GpuWorldProgram>,
+    materials_uniform: UniformBuffer<GpuMaterialTable>,
+    env_uniform: UniformBuffer<EnvParams>,
     draw_uniforms: DynamicUniformBuffer<ChunkDrawUniform>,
     map_tx: crossbeam_channel::Sender<usize>,
     map_rx: crossbeam_channel::Receiver<usize>,
@@ -485,6 +584,8 @@ fn init_chunk_resources(
         slab: SlabAllocator::new(),
         gen_uniforms: DynamicUniformBuffer::default(),
         program_buffer: StorageBuffer::default(),
+        materials_uniform: UniformBuffer::default(),
+        env_uniform: UniformBuffer::default(),
         draw_uniforms: DynamicUniformBuffer::default(),
         map_tx,
         map_rx,
@@ -565,8 +666,12 @@ fn init_chunk_resources(
     let chunk_layout = BindGroupLayoutDescriptor::new(
         "voxel_chunks_chunk_layout",
         &BindGroupLayoutEntries::sequential(
-            ShaderStages::VERTEX,
-            (uniform_buffer::<ChunkDrawUniform>(true),),
+            ShaderStages::VERTEX_FRAGMENT,
+            (
+                uniform_buffer::<ChunkDrawUniform>(true), // per-chunk offset
+                uniform_buffer::<GpuMaterialTable>(false), // material table
+                uniform_buffer::<EnvParams>(false),       // lighting/atmosphere
+            ),
         ),
     );
     let draw_shader: Handle<Shader> =
@@ -632,11 +737,13 @@ fn extract_chunk_commands(
 
 fn extract_program(
     program: Extract<Res<WorldProgram>>,
-    shading: Extract<Res<ShadingMode>>,
+    materials: Extract<Res<WorldMaterials>>,
+    env: Extract<Res<EnvParams>>,
     mut commands: Commands,
 ) {
     commands.insert_resource(program.clone());
-    commands.insert_resource(**shading);
+    commands.insert_resource(materials.clone());
+    commands.insert_resource(**env);
 }
 
 fn extract_camera_pos(
@@ -697,6 +804,8 @@ fn plan_frame(
     mut draw_list: ResMut<VoxelDrawList>,
     camera: Res<ExtractedCameraPos>,
     program: Res<WorldProgram>,
+    materials: Res<WorldMaterials>,
+    env: Res<EnvParams>,
     frustum: Res<ExtractedFrustum>,
     stats: Res<SharedRenderStats>,
     ready_tx: Res<ChunkReadySender>,
@@ -1026,6 +1135,12 @@ fn plan_frame(
         .set(GpuWorldProgram::from_ops(&program.0));
     gpu.program_buffer
         .write_buffer(&render_device, &render_queue);
+    gpu.materials_uniform
+        .set(GpuMaterialTable::from_slice(&materials.0));
+    gpu.materials_uniform
+        .write_buffer(&render_device, &render_queue);
+    gpu.env_uniform.set(*env);
+    gpu.env_uniform.write_buffer(&render_device, &render_queue);
 
     // 7. HUD stats.
     if let Ok(mut s) = stats.0.lock() {
@@ -1156,7 +1271,7 @@ fn dispatch_chunk_work(
 struct VoxelChunksSpecializer;
 
 #[derive(Copy, Clone, PartialEq, Eq, Hash, SpecializerKey)]
-struct VoxelChunksKey(Msaa, ShadingMode);
+struct VoxelChunksKey(Msaa);
 
 impl Specializer<RenderPipeline> for VoxelChunksSpecializer {
     type Key = VoxelChunksKey;
@@ -1167,15 +1282,6 @@ impl Specializer<RenderPipeline> for VoxelChunksSpecializer {
         descriptor: &mut RenderPipelineDescriptor,
     ) -> Result<Canonical<Self::Key>, BevyError> {
         descriptor.multisample.count = key.0.samples();
-        if key.1 == ShadingMode::Concrete {
-            descriptor
-                .vertex
-                .shader_defs
-                .push("CONCRETE_SHADING".into());
-            if let Some(fragment) = &mut descriptor.fragment {
-                fragment.shader_defs.push("CONCRETE_SHADING".into());
-            }
-        }
         Ok(key)
     }
 }
@@ -1202,13 +1308,19 @@ fn prepare_view_bind_group(
         &pipeline_cache.get_bind_group_layout(&pipeline.view_layout),
         &BindGroupEntries::sequential((view_binding,)),
     ));
-    bind_groups.chunk = gpu.draw_uniforms.binding().map(|b| {
-        render_device.create_bind_group(
-            "voxel_chunks_chunk_bg",
-            &pipeline_cache.get_bind_group_layout(&pipeline.chunk_layout),
-            &BindGroupEntries::sequential((b,)),
-        )
-    });
+    let (Some(chunk_binding), Some(materials_binding), Some(env_binding)) = (
+        gpu.draw_uniforms.binding(),
+        gpu.materials_uniform.binding(),
+        gpu.env_uniform.binding(),
+    ) else {
+        bind_groups.chunk = None;
+        return;
+    };
+    bind_groups.chunk = Some(render_device.create_bind_group(
+        "voxel_chunks_chunk_bg",
+        &pipeline_cache.get_bind_group_layout(&pipeline.chunk_layout),
+        &BindGroupEntries::sequential((chunk_binding, materials_binding, env_binding)),
+    ));
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1220,16 +1332,11 @@ fn queue_voxel_chunks(
     views: Query<(&ExtractedView, &RenderVisibleEntities, &Msaa)>,
     dirty_specializations: Res<DirtySpecializations>,
     mut pending_queues: ResMut<PendingVoxelQueues>,
-    shading: Res<ShadingMode>,
-    mut last_shading: Local<Option<ShadingMode>>,
 ) {
     let Some(mut pipeline) = pipeline else {
         return;
     };
     let draw_function = opaque_draw_functions.read().id::<DrawVoxelChunksCommands>();
-    // A live shading switch invalidates the retained phase items.
-    let force_requeue = *last_shading != Some(*shading);
-    *last_shading = Some(*shading);
 
     for (view, view_visible_entities, msaa) in views.iter() {
         let Some(opaque_phase) = opaque_render_phases.get_mut(&view.retained_view_entity) else {
@@ -1245,22 +1352,13 @@ fn queue_voxel_chunks(
         {
             opaque_phase.remove(main_entity);
         }
-        let mut to_queue: Vec<(Entity, MainEntity)> = dirty_specializations
+        for (render_entity, main_entity) in dirty_specializations
             .iter_to_queue(view.retained_view_entity, visible, &view_pending.prev_frame)
             .map(|(re, me)| (*re, *me))
-            .collect();
-        if force_requeue {
-            for pair in &visible.entities_cpu_culling {
-                if !to_queue.contains(pair) {
-                    opaque_phase.remove(pair.1);
-                    to_queue.push(*pair);
-                }
-            }
-        }
-        for (render_entity, main_entity) in to_queue {
+        {
             let Ok(pipeline_id) = pipeline
                 .variants
-                .specialize(&pipeline_cache, VoxelChunksKey(*msaa, *shading))
+                .specialize(&pipeline_cache, VoxelChunksKey(*msaa))
             else {
                 continue;
             };

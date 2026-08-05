@@ -64,11 +64,11 @@ impl Plugin for VegetationPlugin {
     }
 }
 
-/// Vegetation grows only when the level asks for it — a runtime gate so a
-/// hot-reload can switch worlds (rebuild still runs, so a toggle-off clears
-/// what grew).
-fn vegetation_enabled(level: Option<Res<crate::LevelDef>>) -> bool {
-    level.is_none_or(|l| l.features.vegetation)
+/// Vegetation grows only when the generator program says so (a
+/// `vegetation` op) — a runtime gate, so a hot-reload can switch worlds
+/// (rebuild still runs, so removing the op clears what grew).
+fn vegetation_enabled() -> bool {
+    voxel_worldgen::program::vegetation_density(&voxel_worldgen::program::program()).is_some()
 }
 
 /// Despawn everything grown; the streaming systems regrow it on the (new)
@@ -614,9 +614,12 @@ fn tile_trees(tile: IVec2) -> Vec<TreeInstance> {
         IVec3::new(tile.x, 0, tile.y),
     ));
     let origin = Vec2::new(tile.x as f32, tile.y as f32) * TILE_M;
-    // Forest density gated by slow noise so woods come in coherent patches.
-    let density = voxel_worldgen::forest_density(origin + Vec2::splat(TILE_M * 0.5));
-    let attempts = (TREE_ATTEMPTS as f32 * density) as u32;
+    // Forest density gated by slow noise so woods come in coherent patches,
+    // scaled by the generator's vegetation-op multiplier.
+    let scale = voxel_worldgen::program::vegetation_density(&voxel_worldgen::program::program())
+        .unwrap_or(0.0);
+    let density = voxel_worldgen::forest_density(origin + Vec2::splat(TILE_M * 0.5)) * scale;
+    let attempts = (TREE_ATTEMPTS as f32 * density.min(1.0)) as u32;
 
     let mut out = Vec::new();
     for _ in 0..attempts {

@@ -25,9 +25,13 @@ architecture. Design plan: `~/.claude/plans/binary-twirling-brooks.md`.
   WGSL structs — note `meta` is a reserved WGSL word, the GPU field is
   `head`), vertex packing (mesh shader ↔ draw shader ↔ slab layouts),
   baked-shadow march (mesh shader ↔ voxel_worldgen::sun_shadow).
-- **Worlds are data, not code**: never add a world-kind enum or
-  world-specific shader; extend the op set (voxel-core::worldop + both
-  interpreters + GenOpDef) and express the world in the level JSON.
+- **Worlds are data, not code**: never add a world-kind enum,
+  world-specific shader, feature flag, or shading branch; extend the op
+  set (voxel-core::worldop + both interpreters + GenOpDef — water and
+  vegetation are meta ops) or the material recipe kinds
+  (voxel-render WorldMaterial ↔ MaterialDef::pack ↔ the WGSL
+  MaterialTable — field-position layout twins) and express the world in
+  the level JSON. Lighting/haze are the level's `environment` block.
   `voxel_engine` tests pin the shipped JSONs to the reference programs.
 - Count pass and emit passes in `voxel_mesh_chunks.wgsl` must agree
   *exactly* on skip rules — allocation uses counted values.

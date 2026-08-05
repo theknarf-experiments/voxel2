@@ -1,9 +1,10 @@
 //! Data-driven levels: a JSON `LevelDef` describes everything the engine
 //! needs to present a world — the *generator program* that is the world's
-//! geometry, seed, LOD configuration, lighting, camera, feature toggles,
-//! and parameterized planning-op providers. Level editors author these
-//! files; the engine has no hardcoded worlds — a lush planet and a concrete
-//! megacity are the same interpreter fed different data.
+//! geometry (including water/vegetation meta ops), the material table its
+//! ops reference, the lighting/haze environment, seed, LOD configuration,
+//! camera, and parameterized planning-op providers. Level editors author
+//! these files; the engine has no hardcoded worlds — a lush planet and a
+//! concrete megacity are the same interpreter fed different data.
 
 use std::sync::Arc;
 
@@ -45,14 +46,6 @@ pub struct CameraDef {
     pub run_speed: f32,
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug, Default)]
-pub struct FeaturesDef {
-    #[serde(default)]
-    pub water: bool,
-    #[serde(default)]
-    pub vegetation: bool,
-}
-
 /// How the walk mode (`VOXEL_WALK=1`) grounds the camera.
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
@@ -64,15 +57,221 @@ pub enum WalkDef {
     Sdf,
 }
 
-/// Fragment shading family (a preset until materials are palette data).
-#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
-#[serde(rename_all = "snake_case")]
-pub enum ShadingDef {
-    /// Procedural nature zones: grass tops, rock faces, snow, worked stone.
-    #[default]
-    Zones,
-    /// Poured concrete: banded gray with grime and streaks.
-    Concrete,
+/// Lighting + atmosphere for the chunk draw. Every field has the sun-lit
+/// outdoor default, so levels only state what differs.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(default)]
+pub struct EnvDef {
+    /// Haze color; density is per meter (planet ~6e-5, interior ~3.5e-3).
+    pub haze_color: [f32; 3],
+    pub haze_density: f32,
+    /// Haze tint toward the sun direction (power 0 disables).
+    pub haze_sun_tint: [f32; 3],
+    pub haze_tint_power: f32,
+    pub sun_color: [f32; 3],
+    /// 0 = sunless interior (ambient only).
+    pub sun_strength: f32,
+    pub ambient_sky: [f32; 3],
+    pub ambient_ground: [f32; 3],
+    pub ambient_strength: f32,
+    /// Exponent on up-ness: 1 = hemispheric, 2 = top-lit interior.
+    pub ambient_exponent: f32,
+}
+
+impl Default for EnvDef {
+    fn default() -> Self {
+        Self {
+            haze_color: [0.62, 0.72, 0.88],
+            haze_density: 0.00006,
+            haze_sun_tint: [0.92, 0.85, 0.72],
+            haze_tint_power: 4.0,
+            sun_color: [1.0, 0.96, 0.88],
+            sun_strength: 0.85,
+            ambient_sky: [0.55, 0.70, 0.95],
+            ambient_ground: [0.25, 0.24, 0.20],
+            ambient_strength: 0.3,
+            ambient_exponent: 1.0,
+        }
+    }
+}
+
+/// One material recipe, referenced by the material ids generator ops emit.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum MaterialDef {
+    /// Uniform base with grain, optional bands/grime/streaks/moss/emissive.
+    Surface {
+        id: u32,
+        base: [f32; 3],
+        #[serde(default = "default_grain")]
+        grain: f32,
+        #[serde(default)]
+        band: Option<BandDef>,
+        #[serde(default)]
+        grime: Option<GrimeDef>,
+        #[serde(default)]
+        streaks: f32,
+        #[serde(default)]
+        moss: Option<MossDef>,
+        #[serde(default)]
+        emissive: Option<EmissiveDef>,
+        #[serde(default = "default_fade")]
+        detail_fade: f32,
+    },
+    /// Altitude-zoned natural terrain (low/mid/high/peak with noisy
+    /// borders and a slope override to the high color).
+    Zoned {
+        id: u32,
+        low: [f32; 3],
+        /// Two hues mixed by large-scale noise.
+        mid: [[f32; 3]; 2],
+        /// Two hues banded by altitude.
+        high: [[f32; 3]; 2],
+        peak: [f32; 3],
+        /// (start altitude, blend width) for mid/high/peak transitions.
+        zones: ZonesDef,
+        /// Slope override: up-ness (hi, lo) mapping to the high color.
+        #[serde(default = "default_steep")]
+        steep: [f32; 2],
+        #[serde(default = "default_zoned_fade")]
+        detail_fade: f32,
+    },
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct BandDef {
+    pub freq: f32,
+    pub amp: f32,
+    pub lo: f32,
+    pub hi: f32,
+    #[serde(default)]
+    pub warp: f32,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct GrimeDef {
+    pub tint: [f32; 3],
+    pub amount: f32,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct MossDef {
+    pub color: [f32; 3],
+    pub amount: f32,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct EmissiveDef {
+    pub color: [f32; 3],
+    #[serde(default = "default_one")]
+    pub intensity: f32,
+    /// Strip spacing along z / vertical level spacing (meters).
+    pub spacing: f32,
+    pub level_spacing: f32,
+    /// Chance a strip is lit.
+    pub chance: f32,
+    /// Up-glow intensity on floors below.
+    #[serde(default)]
+    pub glow: f32,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct ZonesDef {
+    pub mid: [f32; 2],
+    pub high: [f32; 2],
+    pub peak: [f32; 2],
+    #[serde(default = "default_border")]
+    pub border: f32,
+}
+
+fn default_grain() -> f32 {
+    0.35
+}
+fn default_fade() -> f32 {
+    0.004
+}
+fn default_zoned_fade() -> f32 {
+    0.002
+}
+fn default_steep() -> [f32; 2] {
+    [0.72, 0.45]
+}
+fn default_border() -> f32 {
+    60.0
+}
+fn default_one() -> f32 {
+    1.0
+}
+
+impl MaterialDef {
+    pub fn id(&self) -> u32 {
+        match *self {
+            MaterialDef::Surface { id, .. } | MaterialDef::Zoned { id, .. } => id,
+        }
+    }
+
+    /// Pack into the GPU recipe form.
+    pub fn pack(&self) -> voxel_render::WorldMaterial {
+        use bevy::math::{UVec4, Vec4};
+        let v3 = |c: [f32; 3], w: f32| Vec4::new(c[0], c[1], c[2], w);
+        match *self {
+            MaterialDef::Surface {
+                base,
+                grain,
+                ref band,
+                ref grime,
+                streaks,
+                ref moss,
+                ref emissive,
+                detail_fade,
+                ..
+            } => {
+                let b = band.clone();
+                let e = emissive.clone();
+                voxel_render::WorldMaterial {
+                    head: UVec4::new(voxel_render::MAT_KIND_SURFACE, 0, 0, 0),
+                    c0: v3(base, grain),
+                    c1: grime.as_ref().map_or(Vec4::ZERO, |g| v3(g.tint, g.amount)),
+                    c2: moss.as_ref().map_or(Vec4::ZERO, |m| v3(m.color, m.amount)),
+                    c3: e.as_ref().map_or(Vec4::ZERO, |e| v3(e.color, e.intensity)),
+                    p0: b
+                        .as_ref()
+                        .map_or(Vec4::ZERO, |b| Vec4::new(b.freq, b.amp, b.lo, b.hi)),
+                    p1: Vec4::new(
+                        b.as_ref().map_or(0.0, |b| b.warp),
+                        streaks,
+                        e.as_ref().map_or(1.0, |e| e.spacing),
+                        e.as_ref().map_or(1.0, |e| e.level_spacing),
+                    ),
+                    p2: Vec4::new(
+                        e.as_ref().map_or(0.0, |e| e.chance),
+                        e.as_ref().map_or(0.0, |e| e.glow),
+                        detail_fade,
+                        0.0,
+                    ),
+                }
+            }
+            MaterialDef::Zoned {
+                low,
+                mid,
+                high,
+                peak,
+                ref zones,
+                steep,
+                detail_fade,
+                ..
+            } => voxel_render::WorldMaterial {
+                head: UVec4::new(voxel_render::MAT_KIND_ZONED, 0, 0, 0),
+                c0: v3(low, zones.mid[0]),
+                c1: v3(mid[0], zones.high[0]),
+                c2: v3(high[0], zones.peak[0]),
+                c3: v3(peak, zones.border),
+                p0: v3(mid[1], zones.mid[1]),
+                p1: v3(high[1], zones.high[1]),
+                p2: Vec4::new(zones.peak[1], steep[0], steep[1], detail_fade),
+            },
+        }
+    }
 }
 
 /// A complete level description.
@@ -85,16 +284,18 @@ pub struct LevelDef {
     pub ambient: AmbientDef,
     #[serde(default)]
     pub sun: Option<SunDef>,
+    #[serde(default)]
+    pub environment: EnvDef,
     pub lod: LodDef,
     pub camera: CameraDef,
     #[serde(default)]
-    pub features: FeaturesDef,
-    #[serde(default)]
     pub walk: WalkDef,
-    #[serde(default)]
-    pub shading: ShadingDef,
-    /// The world's base geometry: generator ops, interpreted in order.
+    /// The world's base geometry (and water/vegetation meta ops),
+    /// interpreted in order.
     pub generator: Vec<GenOpDef>,
+    /// Material recipes for the ids the generator ops emit.
+    #[serde(default)]
+    pub materials: Vec<MaterialDef>,
     /// Planning-op providers, composed in order.
     #[serde(default)]
     pub ops: Vec<OpsDef>,
@@ -212,6 +413,18 @@ pub enum GenOpDef {
     },
     /// Carve the shafts out of everything merged so far.
     ShaftsCut,
+    /// Meta: the world has a water surface at this sea level (drives the
+    /// ocean draw and shoreline; no SDF effect).
+    Water {
+        #[serde(default)]
+        level: f32,
+    },
+    /// Meta: vegetation grows on the heightfield surface (density scales
+    /// the forest noise; no SDF effect).
+    Vegetation {
+        #[serde(default = "default_one")]
+        density: f32,
+    },
     /// Catwalk beams bridging the shafts on every Nth lattice level.
     Beams {
         every: u32,
@@ -325,6 +538,10 @@ impl GenOpDef {
                 radius,
             } => WorldOp::new(WOP_SHAFTS_XZ).p0([spacing, jitter, radius[0], radius[1]]),
             GenOpDef::ShaftsCut => WorldOp::new(WOP_SHAFTS_CUT),
+            GenOpDef::Water { level } => WorldOp::new(WOP_WATER).p0([level, 0.0, 0.0, 0.0]),
+            GenOpDef::Vegetation { density } => {
+                WorldOp::new(WOP_VEGETATION).p0([density, 0.0, 0.0, 0.0])
+            }
             GenOpDef::Beams {
                 every,
                 half_width,
@@ -401,10 +618,43 @@ fn apply_generator(level: &LevelDef) -> voxel_render::WorldProgram {
     voxel_render::WorldProgram(Arc::new(ops))
 }
 
-fn shading_mode(level: &LevelDef) -> voxel_render::ShadingMode {
-    match level.shading {
-        ShadingDef::Zones => voxel_render::ShadingMode::Zones,
-        ShadingDef::Concrete => voxel_render::ShadingMode::Concrete,
+/// The generator's water surface (its `water` op, if present).
+fn water_surface(program: &voxel_render::WorldProgram) -> voxel_render::WaterSurface {
+    match voxel_worldgen::program::water_level(&program.0) {
+        Some(level) => voxel_render::WaterSurface {
+            enabled: true,
+            level,
+        },
+        None => voxel_render::WaterSurface {
+            enabled: false,
+            level: 0.0,
+        },
+    }
+}
+
+/// Pack the level's material table, ordered by material id.
+fn material_table(level: &LevelDef) -> voxel_render::WorldMaterials {
+    let mut table = vec![voxel_render::WorldMaterial::default(); voxel_render::MATERIAL_SLOTS];
+    for def in &level.materials {
+        let id = def.id() as usize;
+        if id < table.len() {
+            table[id] = def.pack();
+        } else {
+            warn!("material id {id} out of range (max {})", table.len() - 1);
+        }
+    }
+    voxel_render::WorldMaterials(table)
+}
+
+fn env_params(level: &LevelDef) -> voxel_render::EnvParams {
+    let e = &level.environment;
+    let v = |c: [f32; 3], w: f32| Vec4::new(c[0], c[1], c[2], w);
+    voxel_render::EnvParams {
+        haze: v(e.haze_color, e.haze_density),
+        haze_tint: v(e.haze_sun_tint, e.haze_tint_power),
+        sun: v(e.sun_color, e.sun_strength),
+        sky: v(e.ambient_sky, e.ambient_strength),
+        ground: v(e.ambient_ground, e.ambient_exponent),
     }
 }
 
@@ -446,8 +696,10 @@ impl Plugin for LevelPlugin {
         }
 
         let program = apply_generator(&level);
+        let water = water_surface(&program);
         app.insert_resource(program)
-            .insert_resource(shading_mode(&level))
+            .insert_resource(material_table(&level))
+            .insert_resource(env_params(&level))
             .insert_resource(ClearColor(Color::srgb(c[0], c[1], c[2])))
             .insert_resource(LodConfig {
                 max_level: level.lod.max_level,
@@ -457,7 +709,7 @@ impl Plugin for LevelPlugin {
                 merge_k: level.lod.merge_k,
             })
             .insert_resource(build_ops_provider(&level))
-            .insert_resource(voxel_render::water::WaterEnabled(level.features.water))
+            .insert_resource(water)
             .insert_resource(level.clone())
             .add_plugins(VoxelEnginePlugin { vegetation: true })
             .add_plugins(voxel_render::WaterPlugin)
@@ -572,7 +824,7 @@ fn reload_level(
     mut clear: ResMut<ClearColor>,
     mut lod: ResMut<LodConfig>,
     mut rebuild: ResMut<StreamingRebuild>,
-    mut water: ResMut<voxel_render::WaterEnabled>,
+    mut water: ResMut<voxel_render::WaterSurface>,
     mut veg_rebuild: Option<ResMut<crate::vegetation::VegetationRebuild>>,
     mut cameras: Query<&mut voxel_debug::FreeCamera>,
     mut camera_transforms: Query<&mut Transform, With<Camera3d>>,
@@ -635,18 +887,21 @@ fn reload_level(
             window.title = format!("voxel2 — {}", new.name);
         }
     }
-    if new.shading != level.shading {
-        commands.insert_resource(shading_mode(&new));
+    if new.materials != level.materials {
+        commands.insert_resource(material_table(&new));
     }
-    if new.features.water != level.features.water {
-        water.0 = new.features.water;
+    if new.environment != level.environment {
+        commands.insert_resource(env_params(&new));
     }
     info!("level reload: presentation applied");
 
-    // Generation-affecting changes: rebuild the streamed world.
+    // Generation-affecting changes: rebuild the streamed world. Water and
+    // vegetation are generator ops, so their toggles ride along.
     let generator_changed = new.generator != level.generator;
     if generator_changed {
-        commands.insert_resource(apply_generator(&new));
+        let program = apply_generator(&new);
+        *water = water_surface(&program);
+        commands.insert_resource(program);
     }
     let regen = generator_changed
         || new.seed != level.seed
@@ -662,7 +917,7 @@ fn reload_level(
         rebuild.0 = true;
         info!("level reload: generation changed — rebuilding world");
     }
-    if generator_changed || new.features.vegetation != level.features.vegetation {
+    if generator_changed {
         if let Some(veg) = veg_rebuild.as_mut() {
             veg.0 = true;
         }
@@ -696,19 +951,30 @@ mod tests {
     #[test]
     fn shipped_levels_parse() {
         let planet = LevelDef::from_json(&shipped("planet.json")).unwrap();
-        assert!(planet.features.water && planet.features.vegetation);
         assert!(matches!(planet.ops[0], OpsDef::Ruins { .. }));
         assert!(matches!(planet.ops[1], OpsDef::Roads { .. }));
         assert!(planet.sun.is_some());
         assert_eq!(planet.walk, WalkDef::Terrain);
-        assert_eq!(planet.shading, ShadingDef::Zones);
+        // Water and vegetation are generator ops, not features.
+        let packed: Vec<_> = planet.generator.iter().map(GenOpDef::pack).collect();
+        assert_eq!(voxel_worldgen::program::water_level(&packed), Some(0.0));
+        assert_eq!(
+            voxel_worldgen::program::vegetation_density(&packed),
+            Some(1.0)
+        );
+        // Materials cover the ids the generator emits.
+        assert!(planet.materials.iter().any(|m| m.id() == 1));
+        assert!(planet.materials.iter().any(|m| m.id() == 3));
 
         let mega = LevelDef::from_json(&shipped("megastructure.json")).unwrap();
-        assert!(!mega.features.water);
         assert!(matches!(mega.ops[0], OpsDef::Pockets { .. }));
         assert!(mega.sun.is_none());
         assert_eq!(mega.walk, WalkDef::Sdf);
-        assert_eq!(mega.shading, ShadingDef::Concrete);
+        let packed: Vec<_> = mega.generator.iter().map(GenOpDef::pack).collect();
+        assert_eq!(voxel_worldgen::program::water_level(&packed), None);
+        assert_eq!(voxel_worldgen::program::vegetation_density(&packed), None);
+        assert!(mega.materials.iter().any(|m| m.id() == 2));
+        assert!(mega.environment.sun_strength == 0.0);
     }
 
     #[test]
@@ -717,6 +983,8 @@ mod tests {
         let json = serde_json::to_string(&planet).unwrap();
         let back = LevelDef::from_json(&json).unwrap();
         assert_eq!(back.generator, planet.generator);
+        assert_eq!(back.materials, planet.materials);
+        assert_eq!(back.environment, planet.environment);
         assert_eq!(back.ops, planet.ops);
         assert_eq!(back.camera.start, planet.camera.start);
     }
