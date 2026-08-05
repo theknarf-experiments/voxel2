@@ -105,6 +105,88 @@ pub enum SpawnerDef {
     Boulders(BouldersDef),
 }
 
+/// One authored CSG primitive in a prefab's local space.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct CsgOpDef {
+    /// "box" or "cylinder".
+    pub shape: String,
+    /// "add" (default) or "cut".
+    #[serde(default = "d_op_add")]
+    pub op: String,
+    #[serde(default)]
+    pub center: [f32; 3],
+    /// Box half extents (box shape).
+    #[serde(default)]
+    pub half: [f32; 3],
+    /// Cylinder radius / half height (cylinder shape).
+    #[serde(default)]
+    pub radius: f32,
+    #[serde(default)]
+    pub half_height: f32,
+    #[serde(default)]
+    pub yaw_deg: f32,
+    #[serde(default = "d_op_material")]
+    pub material: u32,
+    #[serde(default)]
+    pub blend: f32,
+}
+
+fn d_op_add() -> String {
+    "add".into()
+}
+fn d_op_material() -> u32 {
+    3
+}
+
+impl CsgOpDef {
+    pub fn to_op(&self) -> CsgOp {
+        let cut = self.op == "cut";
+        let mut op = if self.shape == "cylinder" {
+            CsgOp::cylinder(
+                bevy::math::Vec3::from(self.center),
+                self.radius,
+                self.half_height,
+                self.material,
+                cut,
+            )
+        } else {
+            CsgOp::boxy(
+                bevy::math::Vec3::from(self.center),
+                bevy::math::Vec3::from(self.half),
+                self.yaw_deg.to_radians(),
+                self.material,
+                cut,
+            )
+        };
+        op.blend = self.blend;
+        op
+    }
+}
+
+/// A hand-authored instance of a prefab (or inline ops) in the world —
+/// VoxelPlugin's placeable asset items as level data. Applied after the
+/// procedural op providers, ordered by `priority`.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct PlacementDef {
+    /// Name into the level's `prefabs` table...
+    #[serde(default)]
+    pub prefab: Option<String>,
+    /// ...or inline local-space ops.
+    #[serde(default)]
+    pub ops: Vec<CsgOpDef>,
+    pub position: [f32; 3],
+    #[serde(default)]
+    pub yaw_deg: f32,
+    #[serde(default = "default_one")]
+    pub scale: f32,
+    /// Seat on the terrain surface: `position[1]` becomes an offset from
+    /// the heightfield at (x, z).
+    #[serde(default)]
+    pub snap_to_terrain: bool,
+    #[serde(default)]
+    pub priority: i32,
+}
+
 /// Spawn density driven by a generator field register (`field` op):
 /// gate = clamp(field[slot] * scale + offset, 0, 1). Shared world data —
 /// several spawners (and future consumers) can reference one field.
@@ -552,6 +634,12 @@ pub struct LevelDef {
     /// Material recipes for the ids the generator ops emit.
     #[serde(default)]
     pub materials: Vec<MaterialDef>,
+    /// Named prefabs: reusable local-space CSG op groups for placements.
+    #[serde(default)]
+    pub prefabs: std::collections::HashMap<String, Vec<CsgOpDef>>,
+    /// Hand-authored prefab instances in the world.
+    #[serde(default)]
+    pub placements: Vec<PlacementDef>,
     /// Prop populations on the heightfield surface (trees/grass/boulders).
     #[serde(default)]
     pub spawners: Vec<SpawnerDef>,
@@ -1151,6 +1239,56 @@ fn build_ops_provider(level: &LevelDef) -> ChunkOpsProvider {
             })),
         }
     }
+    // Authored placements: resolve prefab refs, bake world-space ops once
+    // (translate + yaw + uniform scale; optional terrain seating), then
+    // serve them AABB-culled like any other source — ordered by priority
+    // after the procedural providers.
+    let mut placed: Vec<(i32, Vec<CsgOp>)> = Vec::new();
+    for p in &level.placements {
+        let local: &[CsgOpDef] = match (&p.prefab, &p.ops) {
+            (Some(name), _) => match level.prefabs.get(name) {
+                Some(ops) => ops,
+                None => {
+                    warn!("placement references unknown prefab '{name}'");
+                    continue;
+                }
+            },
+            (None, ops) => ops,
+        };
+        let mut pos = bevy::math::Vec3::from(p.position);
+        if p.snap_to_terrain {
+            pos.y = voxel_worldgen::terrain_height(bevy::math::Vec2::new(pos.x, pos.z), 1.0)
+                + p.position[1];
+        }
+        let (sin, cos) = p.yaw_deg.to_radians().sin_cos();
+        let rot = |v: bevy::math::Vec3| {
+            bevy::math::Vec3::new(v.x * cos - v.z * sin, v.y, v.x * sin + v.z * cos)
+        };
+        let ops: Vec<CsgOp> = local
+            .iter()
+            .map(|def| {
+                let mut op = def.to_op();
+                op.center = (pos + rot(bevy::math::Vec3::from(op.center) * p.scale)).to_array();
+                op.half = (bevy::math::Vec3::from(op.half) * p.scale).to_array();
+                op.yaw += p.yaw_deg.to_radians();
+                op.blend *= p.scale;
+                op
+            })
+            .collect();
+        placed.push((p.priority, ops));
+    }
+    placed.sort_by_key(|(priority, _)| *priority);
+    if !placed.is_empty() {
+        let placed = Arc::new(placed);
+        sources.push(Arc::new(move |min, max| {
+            let mut out = Vec::new();
+            for (_, ops) in placed.iter() {
+                out.extend(ops.iter().filter(|op| op.touches(min, max)).copied());
+            }
+            out
+        }));
+    }
+
     if sources.is_empty() {
         return ChunkOpsProvider(None);
     }
