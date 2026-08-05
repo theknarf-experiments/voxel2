@@ -1,7 +1,5 @@
 //! The `Layer` trait and supporting geometry types.
 
-use std::any::TypeId;
-
 use glam::IVec3;
 
 use crate::manager::LayerCtx;

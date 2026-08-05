@@ -8,7 +8,7 @@ use std::marker::PhantomData;
 use std::sync::{Arc, Mutex, OnceLock};
 
 use glam::IVec3;
-use voxel_core::seed::{chunk_seed, splitmix64, Rng};
+use voxel_core::seed::{chunk_seed, Rng};
 
 use crate::layer::{chunk_bounds, chunk_range, layer_key, Dep, IAabb, Layer, LayerKey};
 

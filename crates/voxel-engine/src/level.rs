@@ -689,6 +689,9 @@ pub struct LevelDef {
     /// Planning-op providers, composed in order.
     #[serde(default)]
     pub ops: Vec<OpsDef>,
+    /// The planning stack: generic layers composed into one LayerManager.
+    #[serde(default)]
+    pub stack: Vec<StackLayerDef>,
 }
 
 /// When a generator op applies across the LOD range.
@@ -1042,36 +1045,11 @@ impl GenOpDef {
     }
 }
 
-/// A parameterized planning-op provider.
+/// A parameterized planning-op provider (legacy — features are moving
+/// into the generic `stack`; only the megastructure pockets remain).
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum OpsDef {
-    /// Scattered ruin sites (per-256 m-cell probability).
-    Ruins {
-        #[serde(default = "default_ruin_chance")]
-        chance: f32,
-    },
-    /// Roads connecting ruin sites (max connection distance, meters).
-    Roads {
-        #[serde(default = "default_ruin_chance")]
-        site_chance: f32,
-        #[serde(default = "default_road_reach")]
-        reach: f32,
-    },
-    /// Rivers: springs on high ground descending to the sea (per-512 m
-    /// cell probability), carving beds filled with the water material.
-    Rivers {
-        #[serde(default = "default_ruin_chance")]
-        chance: f32,
-    },
-    /// Perlin-worm cave tunnels (per-256 m-cell probability).
-    Caves {
-        #[serde(default = "default_ruin_chance")]
-        chance: f32,
-        /// Tunnel radius range (meters).
-        #[serde(default = "default_cave_radius")]
-        radius: [f32; 2],
-    },
     /// Megastructure habitation pockets (per-cell probability).
     Pockets {
         #[serde(default = "default_pocket_chance")]
@@ -1079,17 +1057,289 @@ pub enum OpsDef {
     },
 }
 
-fn default_cave_radius() -> [f32; 2] {
-    [2.2, 3.6]
-}
-fn default_ruin_chance() -> f32 {
-    0.32
-}
-fn default_road_reach() -> f32 {
-    700.0
-}
 fn default_pocket_chance() -> f32 {
     0.45
+}
+
+/// One layer of the level's planning stack — the generic vocabulary
+/// (scatter/connect/flow/worm/emit) every planned feature is expressed
+/// in. Layers register in author order into ONE LayerManager per level;
+/// `source` references an earlier layer by instance name.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum StackLayerDef {
+    /// Hash-gated candidate sites per cell, filtered by terrain.
+    Scatter {
+        name: String,
+        #[serde(default = "d_cell")]
+        cell_m: i32,
+        chance: f32,
+        #[serde(default = "d_margin")]
+        margin_m: f32,
+        #[serde(default = "d_altitude")]
+        altitude: [f32; 2],
+        #[serde(default = "d_up_interval")]
+        up: [f32; 2],
+    },
+    /// Pathfound links between sites of a scatter instance.
+    Connect {
+        name: String,
+        source: String,
+        #[serde(default = "d_cell")]
+        cell_m: i32,
+        #[serde(default = "d_reach")]
+        reach_m: f32,
+        #[serde(default = "d_corridor")]
+        corridor_m: f32,
+        #[serde(default = "d_slope_penalty")]
+        slope_penalty: f32,
+    },
+    /// Descent courses (pond-and-spill hydrology) from sites.
+    Flow {
+        name: String,
+        source: String,
+        #[serde(default = "d_flow_cell")]
+        cell_m: i32,
+        #[serde(default = "d_flow_steps")]
+        max_steps: usize,
+        #[serde(default = "d_spill")]
+        max_spill_rise: f32,
+    },
+    /// Noise-steered burrows from sites.
+    Worm {
+        name: String,
+        source: String,
+        #[serde(default = "d_cell")]
+        cell_m: i32,
+        #[serde(default = "d_worm_steps")]
+        steps: u32,
+        #[serde(default = "d_worm_radius")]
+        radius: [f32; 2],
+        #[serde(default = "d_burial")]
+        burial_radii: f32,
+    },
+    /// Turn a source layer's data into world patches (the only kind that
+    /// produces geometry; also the index that keeps queries local).
+    Emit {
+        name: String,
+        source: String,
+        #[serde(default = "d_cell")]
+        cell_m: i32,
+        /// Source reach beyond its owning cells (dependency padding, m).
+        pad_m: f32,
+        /// Carve-horizon gate: serve ops only to chunks at least this
+        /// fine (edge meters). Uniform per chunk, never per op.
+        #[serde(default)]
+        max_chunk_edge_m: Option<f32>,
+        emit: EmitDef,
+    },
+}
+
+/// The emission shape of an `emit` stack layer.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum EmitDef {
+    /// Terrain-seated slabs along a `connect` source (roads).
+    PathSlabs {
+        #[serde(default = "d_half_w")]
+        half_w: f32,
+        #[serde(default = "d_thickness")]
+        thickness: f32,
+        #[serde(default = "d_op_material")]
+        material: u32,
+        #[serde(default = "d_true")]
+        clearance: bool,
+    },
+    /// Bed notch + water ribbon + surface segments along a `flow` source.
+    CourseWater {
+        material: u32,
+        #[serde(default = "d_course_width")]
+        width: [f32; 2],
+    },
+    /// Sphere-cut chains from a `worm` source (caves).
+    WormCuts,
+    /// A named structure recipe per site, with an optional marker.
+    SiteRecipe {
+        recipe: String,
+        #[serde(default)]
+        marker: Option<String>,
+    },
+}
+
+fn d_cell() -> i32 {
+    256
+}
+fn d_flow_cell() -> i32 {
+    512
+}
+fn d_margin() -> f32 {
+    32.0
+}
+fn d_altitude() -> [f32; 2] {
+    [f32::MIN, f32::MAX]
+}
+fn d_up_interval() -> [f32; 2] {
+    [0.0, 1.0]
+}
+fn d_reach() -> f32 {
+    700.0
+}
+fn d_corridor() -> f32 {
+    192.0
+}
+fn d_slope_penalty() -> f32 {
+    60.0
+}
+fn d_flow_steps() -> usize {
+    400
+}
+fn d_spill() -> f32 {
+    7.0
+}
+fn d_worm_steps() -> u32 {
+    70
+}
+fn d_worm_radius() -> [f32; 2] {
+    [2.2, 3.6]
+}
+fn d_burial() -> f32 {
+    2.4
+}
+fn d_half_w() -> f32 {
+    2.4
+}
+fn d_thickness() -> f32 {
+    0.5
+}
+fn d_true() -> bool {
+    true
+}
+fn d_course_width() -> [f32; 2] {
+    [2.0, 7.0]
+}
+
+impl EmitDef {
+    fn to_kind(&self) -> voxel_worldgen::stack::EmitKind {
+        use voxel_worldgen::stack::EmitKind;
+        match self.clone() {
+            EmitDef::PathSlabs {
+                half_w,
+                thickness,
+                material,
+                clearance,
+            } => EmitKind::PathSlabs {
+                half_w,
+                thickness,
+                material,
+                clearance,
+            },
+            EmitDef::CourseWater { material, width } => EmitKind::CourseWater { material, width },
+            EmitDef::WormCuts => EmitKind::WormCuts,
+            EmitDef::SiteRecipe { recipe, marker } => EmitKind::SiteRecipe { recipe, marker },
+        }
+    }
+}
+
+impl StackLayerDef {
+    fn register(&self, mgr: &mut voxel_layers::LayerManager) {
+        use voxel_worldgen::stack::*;
+        match self.clone() {
+            StackLayerDef::Scatter {
+                name,
+                cell_m,
+                chance,
+                margin_m,
+                altitude,
+                up,
+            } => mgr.register_as(
+                &name,
+                ScatterSites {
+                    cfg: ScatterCfg {
+                        cell_m,
+                        chance,
+                        margin_m,
+                        altitude,
+                        up,
+                    },
+                },
+            ),
+            StackLayerDef::Connect {
+                name,
+                source,
+                cell_m,
+                reach_m,
+                corridor_m,
+                slope_penalty,
+            } => mgr.register_as(
+                &name,
+                ConnectPaths {
+                    cfg: ConnectCfg {
+                        source,
+                        reach_m,
+                        corridor_m,
+                        slope_penalty,
+                    },
+                    cell_m,
+                },
+            ),
+            StackLayerDef::Flow {
+                name,
+                source,
+                cell_m,
+                max_steps,
+                max_spill_rise,
+            } => mgr.register_as(
+                &name,
+                FlowCourses {
+                    cfg: FlowCfg {
+                        source,
+                        max_steps,
+                        max_spill_rise,
+                        ..Default::default()
+                    },
+                    cell_m,
+                },
+            ),
+            StackLayerDef::Worm {
+                name,
+                source,
+                cell_m,
+                steps,
+                radius,
+                burial_radii,
+            } => mgr.register_as(
+                &name,
+                WormBurrows {
+                    cfg: WormCfg {
+                        source,
+                        steps,
+                        radius,
+                        burial_radii,
+                    },
+                    cell_m,
+                },
+            ),
+            StackLayerDef::Emit {
+                name,
+                source,
+                cell_m,
+                pad_m,
+                max_chunk_edge_m,
+                emit,
+            } => mgr.register_as(
+                &name,
+                EmitPatches {
+                    cfg: EmitCfg {
+                        source,
+                        kind: emit.to_kind(),
+                        pad_m,
+                        max_chunk_edge_m,
+                    },
+                    cell_m,
+                },
+            ),
+        }
+    }
 }
 
 impl LevelDef {
@@ -1098,7 +1348,6 @@ impl LevelDef {
     pub fn pocket_chance(&self) -> Option<f32> {
         self.ops.iter().find_map(|o| match o {
             OpsDef::Pockets { chance } => Some(*chance),
-            _ => None,
         })
     }
 }
@@ -1246,8 +1495,7 @@ impl Plugin for LevelPlugin {
 
         let program = apply_generator(&level);
         let water = water_surface(&program);
-        let (ops_provider, surface_cuts, planning_layers, roads_query) =
-            build_ops_provider(&level);
+        let (ops_provider, world_query, planning_layers) = build_ops_provider(&level);
         app.insert_resource(program)
             .insert_resource(material_table(&level))
             .insert_resource(env_params(&level))
@@ -1264,9 +1512,8 @@ impl Plugin for LevelPlugin {
                 merge_k: level.lod.merge_k,
             })
             .insert_resource(ops_provider)
-            .insert_resource(surface_cuts)
+            .insert_resource(world_query)
             .insert_resource(planning_layers)
-            .insert_resource(roads_query)
             .insert_resource(water)
             .insert_resource(grass_style(&level))
             .insert_resource(level.clone())
@@ -1281,87 +1528,148 @@ impl Plugin for LevelPlugin {
 /// A boxed source of planning ops for a world-space box.
 type OpsSource = Arc<dyn Fn(Vec3, Vec3) -> Vec<CsgOp> + Send + Sync>;
 
-/// Compose the named planning providers into one op source.
-/// Point/box query for CUT ops (carved voids): spawners consult it so
-/// props never seat on heightfield ground that a cave mouth or doorway
-/// has carved away.
-#[derive(Resource, Default, Clone)]
-pub struct SurfaceCutsQuery(
-    pub Option<Arc<dyn Fn(bevy::math::Vec3, bevy::math::Vec3) -> Vec<CsgOp> + Send + Sync>>,
-);
-
 /// Layer managers backing the ops providers, exposed so the engine can
 /// roll their caches with the camera (they grow unboundedly otherwise).
 #[derive(Resource, Default, Clone)]
 pub struct PlanningLayers(pub Vec<Arc<voxel_layers::LayerManager>>);
 
-/// Linear-feature segments (roads, rivers) overlapping a box (world xz
-/// meters): spawner clearance so props never grow on roadbeds or in
-/// riverbeds.
-#[derive(Resource, Default, Clone)]
-pub struct RoadsQuery(
-    pub Option<Arc<dyn Fn(bevy::math::Vec2, bevy::math::Vec2) -> Vec<[bevy::math::Vec2; 2]> + Send + Sync>>,
-);
+/// The one facade over everything planning produces: CSG ops (with each
+/// emitter's carve-horizon gate applied uniformly per chunk), cut ops
+/// for spawner ground checks, clearance segments keeping props off
+/// roadbeds and riverbeds, water-surface segments, and markers. This
+/// replaces the per-feature side channels the engine used to grow
+/// (SurfaceCutsQuery, RoadsQuery).
+#[derive(Resource, Clone, Default)]
+pub struct WorldQuery {
+    /// The level's planning stack (one manager for all layers).
+    stack: Option<Arc<voxel_layers::LayerManager>>,
+    /// Emit instances: (name, carve-horizon gate in chunk-edge meters).
+    emitters: Vec<(String, Option<f32>)>,
+    /// Legacy op sources not yet in the stack (pockets, placements).
+    sources: Vec<OpsSource>,
+}
 
-fn build_ops_provider(
-    level: &LevelDef,
-) -> (ChunkOpsProvider, SurfaceCutsQuery, PlanningLayers, RoadsQuery) {
+impl WorldQuery {
+    /// All ops overlapping the box, as served to a chunk of the given
+    /// edge. Gated emitters drop out wholesale for coarse chunks — the
+    /// gate is per chunk, never per op (a per-op gate desynchronizes
+    /// neighboring LODs and cracks every seam).
+    pub fn ops_in(&self, min: Vec3, max: Vec3, chunk_edge_m: f32) -> Vec<CsgOp> {
+        let mut out = Vec::new();
+        for source in &self.sources {
+            out.extend(source(min, max));
+        }
+        if let Some(mgr) = &self.stack {
+            for (name, gate) in &self.emitters {
+                if gate.is_none_or(|g| chunk_edge_m <= g) {
+                    out.extend(voxel_worldgen::stack::patches_in(mgr, name, min, max).ops);
+                }
+            }
+        }
+        out
+    }
+
+    /// Cut ops (carved voids) overlapping the box: spawners consult this
+    /// so props never seat on heightfield ground that a cave mouth or
+    /// doorway has carved away.
+    pub fn cuts_in(&self, min: Vec3, max: Vec3) -> Vec<CsgOp> {
+        let mut ops = self.ops_in(min, max, 0.0);
+        ops.retain(|op| op.kind & 1 == 1);
+        ops
+    }
+
+    /// Clearance segments (roadbeds, riverbeds) overlapping the xz box.
+    pub fn clearance_in(&self, min: bevy::math::Vec2, max: bevy::math::Vec2) -> Vec<[bevy::math::Vec2; 2]> {
+        let (min3, max3) = (
+            Vec3::new(min.x, -1.0e9, min.y),
+            Vec3::new(max.x, 1.0e9, max.y),
+        );
+        let mut out = Vec::new();
+        if let Some(mgr) = &self.stack {
+            for (name, _) in &self.emitters {
+                out.extend(voxel_worldgen::stack::patches_in(mgr, name, min3, max3).clearance);
+            }
+        }
+        out
+    }
+
+    /// Water-surface segments overlapping the xz box (river renderer).
+    pub fn water_in(
+        &self,
+        min: bevy::math::Vec2,
+        max: bevy::math::Vec2,
+    ) -> Vec<voxel_worldgen::stack::WaterSeg> {
+        let (min3, max3) = (
+            Vec3::new(min.x, -1.0e9, min.y),
+            Vec3::new(max.x, 1.0e9, max.y),
+        );
+        let mut out = Vec::new();
+        if let Some(mgr) = &self.stack {
+            for (name, _) in &self.emitters {
+                out.extend(voxel_worldgen::stack::patches_in(mgr, name, min3, max3).water);
+            }
+        }
+        out
+    }
+
+    /// Markers overlapping the xz box, optionally of one kind (findable
+    /// content: dungeon entrances, points of interest).
+    pub fn markers_in(
+        &self,
+        min: bevy::math::Vec2,
+        max: bevy::math::Vec2,
+        kind: Option<&str>,
+    ) -> Vec<voxel_worldgen::stack::Marker> {
+        let (min3, max3) = (
+            Vec3::new(min.x, -1.0e9, min.y),
+            Vec3::new(max.x, 1.0e9, max.y),
+        );
+        let mut out = Vec::new();
+        if let Some(mgr) = &self.stack {
+            for (name, _) in &self.emitters {
+                out.extend(
+                    voxel_worldgen::stack::patches_in(mgr, name, min3, max3)
+                        .markers
+                        .into_iter()
+                        .filter(|m| kind.is_none_or(|k| m.kind == k)),
+                );
+            }
+        }
+        out
+    }
+}
+
+fn build_ops_provider(level: &LevelDef) -> (ChunkOpsProvider, WorldQuery, PlanningLayers) {
     let seed = level.seed;
     let mut sources: Vec<OpsSource> = Vec::new();
     let mut managers: Vec<Arc<voxel_layers::LayerManager>> = Vec::new();
-    type ClearanceSource =
-        Arc<dyn Fn(bevy::math::Vec2, bevy::math::Vec2) -> Vec<[bevy::math::Vec2; 2]> + Send + Sync>;
-    let mut clearance_sources: Vec<ClearanceSource> = Vec::new();
+
+    // The planning stack: every layer into ONE manager, in author order.
+    let (stack, emitters) = if level.stack.is_empty() {
+        (None, Vec::new())
+    } else {
+        let mut mgr = voxel_layers::LayerManager::new(seed);
+        let mut emitters = Vec::new();
+        for def in &level.stack {
+            def.register(&mut mgr);
+            if let StackLayerDef::Emit {
+                name,
+                max_chunk_edge_m,
+                ..
+            } = def
+            {
+                emitters.push((name.clone(), *max_chunk_edge_m));
+            }
+        }
+        let mgr = Arc::new(mgr);
+        managers.push(mgr.clone());
+        (Some(mgr), emitters)
+    };
+
     for def in &level.ops {
         match *def {
-            OpsDef::Ruins { chance } => sources.push(Arc::new(move |min, max| {
-                voxel_worldgen::ruins::ruins_ops(seed, chance, min, max)
-            })),
-            OpsDef::Roads { site_chance, reach } => {
-                let layers = Arc::new(voxel_worldgen::roads::planning_layers(
-                    seed,
-                    site_chance,
-                    reach,
-                ));
-                managers.push(layers.clone());
-                let roads_layers = layers.clone();
-                clearance_sources.push(Arc::new(move |min, max| {
-                    voxel_worldgen::roads::roads_near(&roads_layers, min, max)
-                }));
-                sources.push(Arc::new(move |min, max| {
-                    voxel_worldgen::roads::road_ops(&layers, min, max)
-                }));
-            }
             OpsDef::Pockets { chance } => sources.push(Arc::new(move |min, max| {
                 voxel_worldgen::mega::pockets_ops(seed, chance, min, max)
-            })),
-            OpsDef::Rivers { chance } => {
-                let layers = Arc::new(voxel_worldgen::rivers::planning_layers(seed, chance));
-                managers.push(layers.clone());
-                let clear_layers = layers.clone();
-                clearance_sources.push(Arc::new(move |min, max| {
-                    voxel_worldgen::rivers::rivers_near(&clear_layers, min, max)
-                }));
-                sources.push(Arc::new(move |min, max| {
-                    // Same carve-horizon rule as caves: bed cuts are
-                    // meter-scale and alias at coarse sampling.
-                    if max.x - min.x > 140.0 {
-                        return Vec::new();
-                    }
-                    voxel_worldgen::rivers::river_ops(&layers, min, max)
-                }));
-            }
-            OpsDef::Caves { chance, radius } => sources.push(Arc::new(move |min, max| {
-                // Meter-scale carved voids: served only to chunks that can
-                // resolve them. A per-chunk gate keeps every chunk's op
-                // list internally uniform (a per-op LOD gate in the shader
-                // desynchronizes neighboring LODs and cracks every seam
-                // near a cave); the carve horizon ring this creates is the
-                // same accepted class as the global ops horizon.
-                if max.x - min.x > 140.0 {
-                    return Vec::new();
-                }
-                voxel_worldgen::caves::caves_ops(seed, chance, radius, min, max)
             })),
         }
     }
@@ -1415,36 +1723,15 @@ fn build_ops_provider(
         }));
     }
 
-    let roads_query = if clearance_sources.is_empty() {
-        RoadsQuery(None)
-    } else {
-        let cs = clearance_sources;
-        RoadsQuery(Some(Arc::new(move |min, max| {
-            let mut out = Vec::new();
-            for source in &cs {
-                out.extend(source(min, max));
-            }
-            out
-        })))
+    let world = WorldQuery {
+        stack,
+        emitters,
+        sources,
     };
-    if sources.is_empty() {
-        return (
-            ChunkOpsProvider(None),
-            SurfaceCutsQuery(None),
-            PlanningLayers(managers),
-            roads_query,
-        );
+    if world.stack.is_none() && world.sources.is_empty() {
+        return (ChunkOpsProvider(None), world, PlanningLayers(managers));
     }
-    let sources = Arc::new(sources);
-    let cut_sources = sources.clone();
-    let cuts = SurfaceCutsQuery(Some(Arc::new(move |min: Vec3, max: Vec3| {
-        let mut ops = Vec::new();
-        for source in cut_sources.iter() {
-            ops.extend(source(min, max));
-        }
-        ops.retain(|op| op.kind & 1 == 1);
-        ops
-    })));
+    let wq = world.clone();
     let provider = ChunkOpsProvider(Some(Arc::new(move |key: ChunkKey| {
         // Meter-scale features apply on every level whose chunks can show
         // them at visible size: the ops horizon (where the SDF genuinely
@@ -1461,13 +1748,9 @@ fn build_ops_provider(
         let pad = 4.0 * key.voxel_size_m() as f32;
         let min = key.min_corner_m().as_vec3() - Vec3::splat(pad);
         let max = key.min_corner_m().as_vec3() + Vec3::splat(key.edge_m() as f32 + pad);
-        let mut ops = Vec::new();
-        for source in sources.iter() {
-            ops.extend(source(min, max));
-        }
-        ops
+        wq.ops_in(min, max, key.edge_m() as f32)
     })));
-    (provider, cuts, PlanningLayers(managers), roads_query)
+    (provider, world, PlanningLayers(managers))
 }
 
 /// Rolling eviction for the planning-layer caches: every few seconds,
@@ -1648,6 +1931,7 @@ fn reload_level(
     }
     let regen = generator_changed
         || new.ops != level.ops
+        || new.stack != level.stack
         || new.lod.max_level != level.lod.max_level
         || new.lod.top_radius != level.lod.top_radius
         || new.lod.top_y != level.lod.top_y;
@@ -1655,12 +1939,10 @@ fn reload_level(
         lod.max_level = new.lod.max_level;
         lod.top_radius = new.lod.top_radius;
         lod.top_y = new.lod.top_y;
-        let (ops_provider, surface_cuts, planning_layers, roads_query) =
-            build_ops_provider(&new);
+        let (ops_provider, world_query, planning_layers) = build_ops_provider(&new);
         commands.insert_resource(ops_provider);
-        commands.insert_resource(surface_cuts);
+        commands.insert_resource(world_query);
         commands.insert_resource(planning_layers);
-        commands.insert_resource(roads_query);
         rebuild.0 = true;
         info!("level reload: generation changed — rebuilding world");
     }
@@ -1699,8 +1981,22 @@ mod tests {
     #[test]
     fn shipped_levels_parse() {
         let planet = LevelDef::from_json(&shipped("planet.json")).unwrap();
-        assert!(matches!(planet.ops[0], OpsDef::Ruins { .. }));
-        assert!(matches!(planet.ops[1], OpsDef::Roads { .. }));
+        // The planet's features are stack data, not op providers.
+        assert!(planet.ops.is_empty());
+        let names: Vec<&str> = planet
+            .stack
+            .iter()
+            .map(|l| match l {
+                StackLayerDef::Scatter { name, .. }
+                | StackLayerDef::Connect { name, .. }
+                | StackLayerDef::Flow { name, .. }
+                | StackLayerDef::Worm { name, .. }
+                | StackLayerDef::Emit { name, .. } => name.as_str(),
+            })
+            .collect();
+        for expect in ["sites:ruins", "ruins", "paths:roads", "roads", "rivers", "caves"] {
+            assert!(names.contains(&expect), "stack missing {expect}");
+        }
         assert!(planet.sun.is_some());
         assert_eq!(planet.walk, WalkDef::Terrain);
         // Water is a generator op; vegetation is spawner data.
@@ -1732,7 +2028,39 @@ mod tests {
         assert_eq!(back.materials, planet.materials);
         assert_eq!(back.environment, planet.environment);
         assert_eq!(back.ops, planet.ops);
+        assert_eq!(back.stack, planet.stack);
         assert_eq!(back.camera.start, planet.camera.start);
+    }
+
+    #[test]
+    fn planet_stack_serves_gated_ops_through_world_query() {
+        let planet = LevelDef::from_json(&shipped("planet.json")).unwrap();
+        let (_, world, _) = build_ops_provider(&planet);
+        // A land region large enough to hold every feature kind.
+        let min = Vec3::new(-31096.0, -200.0, -42096.0);
+        let max = Vec3::new(-22904.0, 500.0, -33904.0);
+        let fine = world.ops_in(min, max, 12.8);
+        assert!(!fine.is_empty(), "stack served no ops");
+        let has_sphere_cuts = |ops: &[CsgOp]| {
+            ops.iter()
+                .any(|op| op.kind == voxel_core::csg::CSG_KIND_SPHERE_CUT)
+        };
+        assert!(has_sphere_cuts(&fine), "no cave cuts at fine LOD");
+        // Coarse chunks must not see gated emitters (carve horizon).
+        let coarse = world.ops_in(min, max, 500.0);
+        assert!(!has_sphere_cuts(&coarse), "cave cuts leaked past the gate");
+        // Clearance + water flow through the same facade.
+        let min2 = bevy::math::Vec2::new(min.x, min.z);
+        let max2 = bevy::math::Vec2::new(max.x, max.z);
+        assert!(!world.clearance_in(min2, max2).is_empty(), "no clearance");
+        assert!(!world.water_in(min2, max2).is_empty(), "no water segments");
+        assert!(
+            !world.markers_in(min2, max2, Some("ruin")).is_empty(),
+            "no ruin markers"
+        );
+        // Determinism across a fresh build.
+        let (_, world2, _) = build_ops_provider(&planet);
+        assert_eq!(fine, world2.ops_in(min, max, 12.8));
     }
 
     #[test]

@@ -242,25 +242,6 @@
       "detail_fade": 0.004
     }
   ],
-  "ops": [
-    {
-      "type": "ruins",
-      "chance": 0.32
-    },
-    {
-      "type": "roads",
-      "site_chance": 0.32,
-      "reach": 700.0
-    },
-    {
-      "type": "caves",
-      "chance": 0.45
-    },
-    {
-      "type": "rivers",
-      "chance": 0.5
-    }
-  ],
   "spawners": [
     {
       "type": "trees",
@@ -471,6 +452,97 @@
       "yaw_deg": 30.0,
       "snap_to_terrain": true,
       "priority": 0
+    }
+  ],
+  "stack": [
+    {
+      "kind": "scatter",
+      "name": "sites:ruins",
+      "chance": 0.32,
+      "altitude": [
+        8.0,
+        280.0
+      ],
+      "up": [
+        0.88,
+        1.0
+      ]
+    },
+    {
+      "kind": "emit",
+      "name": "ruins",
+      "source": "sites:ruins",
+      "pad_m": 0.0,
+      "emit": {
+        "type": "site_recipe",
+        "recipe": "ruin",
+        "marker": "ruin"
+      }
+    },
+    {
+      "kind": "connect",
+      "name": "paths:roads",
+      "source": "sites:ruins"
+    },
+    {
+      "kind": "emit",
+      "name": "roads",
+      "source": "paths:roads",
+      "pad_m": 606.0,
+      "emit": {
+        "type": "path_slabs"
+      }
+    },
+    {
+      "kind": "scatter",
+      "name": "sites:springs",
+      "cell_m": 512,
+      "chance": 0.5,
+      "altitude": [
+        60.0,
+        400.0
+      ]
+    },
+    {
+      "kind": "flow",
+      "name": "flow:rivers",
+      "source": "sites:springs"
+    },
+    {
+      "kind": "emit",
+      "name": "rivers",
+      "source": "flow:rivers",
+      "cell_m": 512,
+      "pad_m": 3264.0,
+      "max_chunk_edge_m": 140.0,
+      "emit": {
+        "type": "course_water",
+        "material": 4
+      }
+    },
+    {
+      "kind": "scatter",
+      "name": "sites:caves",
+      "chance": 0.45,
+      "altitude": [
+        6.0,
+        500.0
+      ]
+    },
+    {
+      "kind": "worm",
+      "name": "worm:caves",
+      "source": "sites:caves"
+    },
+    {
+      "kind": "emit",
+      "name": "caves",
+      "source": "worm:caves",
+      "pad_m": 340.0,
+      "max_chunk_edge_m": 140.0,
+      "emit": {
+        "type": "worm_cuts"
+      }
     }
   ]
 }
