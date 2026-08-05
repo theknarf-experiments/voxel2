@@ -551,6 +551,7 @@ fn lod_tick(
     mut rebuild: ResMut<StreamingRebuild>,
     ready_rx: Res<ChunkReadyChannel>,
     mut field: ResMut<voxel_render::FieldParams>,
+    stats: Res<SharedRenderStats>,
     cameras: Query<&Transform, (With<Camera3d>, Without<voxel_render::HelperCamera>)>,
 ) {
     let Ok(camera) = cameras.single() else {
@@ -661,6 +662,47 @@ fn lod_tick(
             commit_epoch(tree, &queue, epoch);
         } else {
             tree.epoch = Some(epoch);
+        }
+    }
+
+    // VOXEL_VALIDATE_SEAMS=1: every ~30 frames, verify that every shown
+    // chunk's requested mask matches the mask the current shown
+    // configuration demands, and that its drawable mesh carries it.
+    // Any mismatch is a crack on screen — log precisely which chunk.
+    if std::env::var("VOXEL_VALIDATE_SEAMS").is_ok() {
+        static FRAME: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        if FRAME.fetch_add(1, std::sync::atomic::Ordering::Relaxed) % 30 == 0 {
+            // Ground truth: compare each DRAWN mesh's mask (exported by the
+            // render world) against what the current shown configuration
+            // demands. Any mismatch is a potential crack on screen.
+            let drawn: Vec<(ChunkKey, u32)> = stats
+                .0
+                .lock()
+                .map(|s| s.drawn_masks.clone())
+                .unwrap_or_default();
+            let post = PostState::current(&tree.leaves);
+            let mut stale = 0u32;
+            for (key, mask) in &drawn {
+                if !tree.leaves.contains(key) {
+                    continue; // freed/swapped since export
+                }
+                let want = post.seam_mask(config.max_level, *key);
+                if *mask != want {
+                    stale += 1;
+                    if stale <= 4 {
+                        info!(
+                            "seam-validate: DRAWN mask stale for {key:?}: want {want:#x} drawn {mask:#x}"
+                        );
+                    }
+                }
+            }
+            if stale > 0 {
+                info!(
+                    "seam-validate: {stale} stale drawn of {} drawn meshes (epoch {})",
+                    drawn.len(),
+                    if tree.epoch.is_some() { "in-flight" } else { "idle" },
+                );
+            }
         }
     }
 

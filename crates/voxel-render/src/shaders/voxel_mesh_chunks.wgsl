@@ -290,10 +290,42 @@ fn sn_vertices(@builtin(global_invocation_id) id: vec3<u32>) {
     // Seam vertices toward a coarser neighbor land exactly on its own
     // surface-nets vertex: the parity cell's SN solution over parent-band
     // samples (the density pass blended this shell to the parent band).
+    var snap_failed = false;
     if (snap_to_parity(c)) {
         let cv = coarse_vertex(c);
         if (cv.w > 0.5) {
             pv = cv.xyz;
+        } else {
+            // Thin feature: the containing parity cell has no crossing, so
+            // there is no coarse vertex to land on and the fine surface
+            // would hang as an open rim (visible sliver into the void).
+            // Weld onto the nearest neighboring parity vertex instead —
+            // the scan order is fixed and both sides of any seam sample
+            // identical world positions, so every copy of this cell picks
+            // the same weld target on the coarse neighbor's surface.
+            snap_failed = true;
+            let big = vec3<i32>(
+                i32(floor(f32(c.x) / 2.0)),
+                i32(floor(f32(c.y) / 2.0)),
+                i32(floor(f32(c.z) / 2.0)),
+            );
+            for (var dz = -1; dz <= 1 && snap_failed; dz++) {
+                for (var dy = -1; dy <= 1 && snap_failed; dy++) {
+                    for (var dx = -1; dx <= 1 && snap_failed; dx++) {
+                        if (dx == 0 && dy == 0 && dz == 0) { continue; }
+                        let nb = big + vec3<i32>(dx, dy, dz);
+                        // Keep parity samples (base .. base+2) in range.
+                        if (any(nb < vec3<i32>(-1)) || any(nb > vec3<i32>(16))) {
+                            continue;
+                        }
+                        let nv = coarse_vertex(nb * 2);
+                        if (nv.w > 0.5) {
+                            pv = nv.xyz;
+                            snap_failed = false;
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -307,6 +339,11 @@ fn sn_vertices(@builtin(global_invocation_id) id: vec3<u32>) {
             best = s[i];
             mat = sample_material(c + corner_offset(i));
         }
+    }
+    // Debug (eval): flag failed-snap vertices via a reserved material so
+    // the draw shader can paint them for correlation with hole pixels.
+    if (snap_failed && params._pad.y == 1u) {
+        mat = 255u;
     }
 
     write_vertex(params.base_vertex + local, pv, normal, mat);
@@ -455,14 +492,26 @@ fn sn_quads(@builtin(global_invocation_id) id: vec3<u32>) {
             quad[i] = cell_indices[cell_slot_index(cells[i])] & 0xFFFFu;
         }
 
-        // Split across the shorter diagonal (better triangles on saddles).
+        // Split across the shorter diagonal (better triangles on saddles) —
+        // but never across a collapsed one: parity snapping merges seam
+        // vertex pairs, and a quad whose 0-2 diagonal has collapsed loses
+        // BOTH triangles if split along it (each contains the duplicate
+        // pair). Splitting across the surviving diagonal keeps the quad's
+        // one real triangle.
         let p0 = read_pos(quad[0]);
         let p1 = read_pos(quad[1]);
         let p2 = read_pos(quad[2]);
         let p3 = read_pos(quad[3]);
         let d02 = p2 - p0;
         let d13 = p3 - p1;
-        let alt = dot(d13, d13) < dot(d02, d02);
+        let l02 = dot(d02, d02);
+        let l13 = dot(d13, d13);
+        var alt = l13 < l02;
+        if (l02 < 1e-10) {
+            alt = true;
+        } else if (l13 < 1e-10) {
+            alt = false;
+        }
 
         let q = atomicAdd(&counts[params.counts_slot].quads, 1u);
         write_quad(q, quad, s0 < 0.0, alt);

@@ -148,6 +148,10 @@ pub struct SharedRenderStats(pub Arc<Mutex<RenderStats>>);
 
 #[derive(Default)]
 pub struct RenderStats {
+    /// Mask each currently-drawn (visible, meshed) chunk's on-screen mesh
+    /// was built with — ground truth for seam validation (the ready
+    /// channel reports held meshes before they swap in).
+    pub drawn_masks: Vec<(ChunkKey, u32)>,
     pub tracked: usize,
     pub meshed: usize,
     pub empty_classified: usize,
@@ -475,6 +479,9 @@ struct RenderChunk {
     /// The mask the currently in-flight/most recent generation was built
     /// with (face_mask may have been updated by a newer request since).
     gen_mask: u32,
+    /// The mask of the mesh currently drawn (updates only when a mesh
+    /// swaps in — gen_mask may already describe a held successor).
+    drawn_mask: u32,
     /// In-place regeneration (a neighbor's LOD changed): the old mesh keeps
     /// drawing until the replacement is ready, then swaps atomically.
     pending: Option<Pending>,
@@ -882,7 +889,10 @@ fn make_params(
         counts_slot,
         csg_offset: csg.0,
         csg_count: csg.1,
-        _pad: UVec2::new(face_mask, 0),
+        _pad: UVec2::new(
+            face_mask,
+            std::env::var("VOXEL_EVAL_HOLES").map_or(0, |_| 1),
+        ),
     }
 }
 
@@ -975,6 +985,7 @@ fn plan_frame(
                                 ops,
                                 face_mask,
                                 gen_mask: face_mask,
+                                drawn_mask: face_mask,
                                 pending: None,
                             },
                         );
@@ -1038,6 +1049,7 @@ fn plan_frame(
                                 gpu.slab.free(old);
                             }
                             chunk.state = ChunkState::Meshed { alloc, index_count };
+                            chunk.drawn_mask = chunk.gen_mask;
                         }
                         Some(Pending::HeldEmpty) => {
                             if let ChunkState::Meshed { alloc, .. } = chunk.state {
@@ -1079,6 +1091,7 @@ fn plan_frame(
                             ops: None,
                             face_mask: 0,
                             gen_mask: 0,
+                            drawn_mask: STALE_MASK,
                             pending: None,
                         },
                     );
@@ -1252,6 +1265,7 @@ fn plan_frame(
             }
             let _ = ready_tx.0.send((key, chunk.gen_mask));
         }
+        chunk.drawn_mask = chunk.gen_mask;
         chunk.state = ChunkState::Meshed {
             alloc,
             index_count: indices,
@@ -1402,6 +1416,12 @@ fn plan_frame(
 
     // 7. HUD stats.
     if let Ok(mut s) = stats.0.lock() {
+        s.drawn_masks.clear();
+        for (key, c) in &table.chunks {
+            if c.visible && matches!(c.state, ChunkState::Meshed { .. }) {
+                s.drawn_masks.push((*key, c.drawn_mask));
+            }
+        }
         s.tracked = table.chunks.len();
         s.meshed = table
             .chunks
