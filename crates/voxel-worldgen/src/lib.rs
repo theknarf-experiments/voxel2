@@ -111,13 +111,17 @@ pub fn sun_shadow(pos: glam::Vec3) -> f32 {
 
 /// Approximate surface normal Y (up-ness) via central differences.
 pub fn terrain_up(xz: Vec2, voxel_size: f32) -> f32 {
+    terrain_normal(xz, voxel_size).y
+}
+
+/// Surface normal of the heightfield (for align-to-normal spawners).
+pub fn terrain_normal(xz: Vec2, voxel_size: f32) -> glam::Vec3 {
     let e = 2.0;
     let hx = terrain_height(xz + Vec2::new(e, 0.0), voxel_size)
         - terrain_height(xz - Vec2::new(e, 0.0), voxel_size);
     let hz = terrain_height(xz + Vec2::new(0.0, e), voxel_size)
         - terrain_height(xz - Vec2::new(0.0, e), voxel_size);
-    let n = glam::Vec3::new(-hx, 2.0 * e, -hz).normalize();
-    n.y
+    glam::Vec3::new(-hx, 2.0 * e, -hz).normalize()
 }
 
 #[cfg(test)]

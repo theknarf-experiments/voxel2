@@ -199,6 +199,40 @@ pub struct FieldDensityDef {
     pub offset: f32,
 }
 
+/// Orientation + banding rules shared by prop spawners (VoxelPlugin's
+/// BasicSpawner placement block as data).
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(default)]
+pub struct PlacementRulesDef {
+    /// Up-ness (surface normal Y) interval: 1 = flat ground. The lower
+    /// bound is the spawner's legacy `min_up`; an upper bound below 1
+    /// restricts to slopes (scree, wall moss).
+    pub max_up: f32,
+    /// Soft edge width (meters) on the altitude band: spawn probability
+    /// fades linearly across it instead of a hard cut.
+    pub altitude_falloff: f32,
+    /// "up" (default) or "normal": align instances to the world up axis
+    /// or the terrain surface normal.
+    pub align: String,
+    /// Random tilt (degrees) from the alignment axis.
+    pub tilt_deg: f32,
+    /// Embed depth (meters) below the seated surface point
+    /// (None = the spawner's legacy default).
+    pub sink: Option<f32>,
+}
+
+impl Default for PlacementRulesDef {
+    fn default() -> Self {
+        Self {
+            max_up: 1.0,
+            altitude_falloff: 0.0,
+            align: "up".into(),
+            tilt_deg: 0.0,
+            sink: None,
+        }
+    }
+}
+
 /// Coherent-patch noise for spawn density (clearings in a forest).
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct PatchDef {
@@ -225,6 +259,9 @@ pub struct TreesDef {
     /// Density from a generator field register.
     #[serde(default)]
     pub density: Option<FieldDensityDef>,
+    /// Orientation + banding rules.
+    #[serde(default)]
+    pub placement: PlacementRulesDef,
     pub species: Vec<SpeciesDef>,
 }
 
@@ -276,6 +313,9 @@ pub struct GrassDef {
     /// Density from a generator field register.
     #[serde(default)]
     pub density: Option<FieldDensityDef>,
+    /// Orientation + banding rules (align/tilt unused for grass).
+    #[serde(default)]
+    pub placement: PlacementRulesDef,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -296,6 +336,9 @@ pub struct BouldersDef {
     /// Density from a generator field register.
     #[serde(default)]
     pub density: Option<FieldDensityDef>,
+    /// Orientation + banding rules.
+    #[serde(default)]
+    pub placement: PlacementRulesDef,
 }
 
 fn d_tree_attempts() -> u32 {

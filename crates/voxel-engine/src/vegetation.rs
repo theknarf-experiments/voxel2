@@ -326,6 +326,39 @@ fn stream_grass(
     }
 }
 
+/// Soft altitude-band gate: 1 inside, fading linearly to 0 across
+/// `falloff` meters at each edge (0 falloff = hard band).
+fn altitude_gate(alt: [f32; 2], falloff: f32, y: f32) -> f32 {
+    if falloff <= 0.0 {
+        return if (alt[0]..alt[1]).contains(&y) { 1.0 } else { 0.0 };
+    }
+    (((y - alt[0]) / falloff).clamp(0.0, 1.0)).min(((alt[1] - y) / falloff).clamp(0.0, 1.0))
+}
+
+/// Instance rotation from the spawner's placement rules: optional
+/// align-to-surface-normal, random tilt cone, then yaw. Draws from `rng`
+/// only when tilt is enabled, so legacy data keeps its exact layouts.
+fn placement_rotation(
+    rules: &crate::level::PlacementRulesDef,
+    xz: Vec2,
+    yaw: f32,
+    rng: &mut Rng,
+) -> Quat {
+    let base = if rules.align == "normal" {
+        Quat::from_rotation_arc(Vec3::Y, voxel_worldgen::terrain_normal(xz, 4.0))
+    } else {
+        Quat::IDENTITY
+    };
+    let tilt = if rules.tilt_deg > 0.0 {
+        let dir = rng.next_f32() * std::f32::consts::TAU;
+        let angle = rng.next_f32() * rules.tilt_deg.to_radians();
+        Quat::from_axis_angle(Vec3::new(dir.cos(), 0.0, dir.sin()), angle)
+    } else {
+        Quat::IDENTITY
+    };
+    base * tilt * Quat::from_rotation_y(yaw)
+}
+
 /// Field-register density gate for spawner candidates (see `WOP_FIELD`).
 fn field_gate(density: &Option<crate::level::FieldDensityDef>, xz: Vec2) -> f32 {
     density.as_ref().map_or(1.0, |d| {
@@ -350,9 +383,12 @@ fn grass_tile(tile: IVec2, grass: &crate::level::GrassDef) -> Vec<voxel_render::
             continue;
         }
         let y = terrain_height(xz, 1.0);
-        if !(grass.altitude[0]..grass.altitude[1]).contains(&y)
-            || terrain_up(xz, 1.0) < grass.min_up
-        {
+        let gate = altitude_gate(grass.altitude, grass.placement.altitude_falloff, y);
+        if gate <= 0.0 || (gate < 1.0 && rng.next_f32() > gate) {
+            continue;
+        }
+        let up = terrain_up(xz, 1.0);
+        if up < grass.min_up || up > grass.placement.max_up {
             continue;
         }
         // Top byte of the hash carries the baked sun-shadow factor.
@@ -696,6 +732,9 @@ fn stream_vegetation(
 /// impostors so trees never teleport across the detail boundary).
 struct TreeInstance {
     pos: Vec3,
+    /// Full placement rotation (align/tilt/yaw) for near meshes.
+    rot: Quat,
+    /// Yaw alone for the crossed-quad impostors.
     yaw: f32,
     scale: f32,
     species: usize,
@@ -736,9 +775,12 @@ fn tile_trees(tile: IVec2, trees: &crate::level::TreesDef) -> Vec<TreeInstance> 
             continue;
         }
         let y = terrain_height(xz, 4.0);
-        if !(trees.altitude[0]..trees.altitude[1]).contains(&y)
-            || terrain_up(xz, 4.0) < trees.min_up
-        {
+        let gate = altitude_gate(trees.altitude, trees.placement.altitude_falloff, y);
+        if gate <= 0.0 || (gate < 1.0 && rng.next_f32() > gate) {
+            continue;
+        }
+        let up = terrain_up(xz, 4.0);
+        if up < trees.min_up || up > trees.placement.max_up {
             continue;
         }
         let yaw = rng.next_f32() * std::f32::consts::TAU;
@@ -770,8 +812,10 @@ fn tile_trees(tile: IVec2, trees: &crate::level::TreesDef) -> Vec<TreeInstance> 
         }
         let sr = trees.species[species].scale;
         let scale = sr[0] + rng.next_f32() * (sr[1] - sr[0]);
+        let sink = trees.placement.sink.unwrap_or(0.45);
         out.push(TreeInstance {
-            pos: Vec3::new(x, y - 0.45, z),
+            pos: Vec3::new(x, y - sink, z),
+            rot: placement_rotation(&trees.placement, xz, yaw, &mut rng),
             yaw,
             scale,
             species,
@@ -790,7 +834,7 @@ fn spawn_tile(
     let trees = level.trees();
     for tree in trees.map(|t| tile_trees(tile, t)).unwrap_or_default() {
         let transform = Transform::from_translation(tree.pos)
-            .with_rotation(Quat::from_rotation_y(tree.yaw))
+            .with_rotation(tree.rot)
             .with_scale(Vec3::splat(tree.scale));
         let Some(sp) = assets.species.get(tree.species) else {
             continue;
@@ -845,23 +889,24 @@ fn spawn_tile(
             continue;
         }
         let y = terrain_height(xz, 4.0);
+        let gate = altitude_gate(b.altitude, b.placement.altitude_falloff, y);
+        if gate <= 0.0 || (gate < 1.0 && rng.next_f32() > gate) {
+            continue;
+        }
         let up = terrain_up(xz, 4.0);
-        if !(b.altitude[0]..b.altitude[1]).contains(&y)
-            || up < b.min_up
-            || rng.next_f32() >= b.chance
-        {
+        if up < b.min_up || up > b.placement.max_up || rng.next_f32() >= b.chance {
             continue;
         }
         let scale = b.scale[0] + rng.next_f32() * rng.next_f32() * (b.scale[1] - b.scale[0]);
+        let sink = b.placement.sink.unwrap_or(0.2 * scale);
+        let yaw = rng.next_f32() * std::f32::consts::TAU;
         entities.push(
             commands
                 .spawn((
                     Mesh3d(assets.rock_mesh.clone()),
                     MeshMaterial3d(assets.rock_mat.clone()),
-                    Transform::from_xyz(x, y - 0.2 * scale, z)
-                        .with_rotation(Quat::from_rotation_y(
-                            rng.next_f32() * std::f32::consts::TAU,
-                        ))
+                    Transform::from_xyz(x, y - sink, z)
+                        .with_rotation(placement_rotation(&b.placement, xz, yaw, &mut rng))
                         .with_scale(Vec3::new(scale, scale * 0.75, scale)),
                 ))
                 .id(),

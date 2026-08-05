@@ -315,6 +315,10 @@
       ],
       "density": {
         "field": 0
+      },
+      "placement": {
+        "tilt_deg": 4.0,
+        "altitude_falloff": 25.0
       }
     },
     {
@@ -329,7 +333,11 @@
       "altitude": [
         2.0,
         800.0
-      ]
+      ],
+      "placement": {
+        "align": "normal",
+        "tilt_deg": 8.0
+      }
     }
   ],
   "prefabs": {
