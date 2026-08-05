@@ -62,6 +62,14 @@ struct SlotCounts {
 @group(0) @binding(4) var<storage, read_write> indices: array<u32>;
 @group(0) @binding(5) var<storage, read_write> counts: array<SlotCounts>;
 
+struct WorldTuning {
+    t0: vec4<f32>, // continents scale/amp, mountains scale/amp
+    t1: vec4<f32>, // rolling scale/amp, detail scale/amp
+    t2: vec4<f32>, // height offset, floor/pillar/wall spacing
+    t3: vec4<f32>, // shaft spacing, wall chance, opening chance, unused
+}
+@group(0) @binding(6) var<uniform> tuning: WorldTuning;
+
 fn corner_offset(i: u32) -> vec3<i32> {
     return vec3<i32>(i32(i & 1u), i32((i >> 1u) & 1u), i32((i >> 2u) & 1u));
 }
@@ -325,10 +333,10 @@ fn sfbm2(p: vec2<f32>, base_scale: f32, octaves: i32) -> f32 {
 }
 
 fn height_coarse(xz: vec2<f32>) -> f32 {
-    let continents = sfbm2(xz, 0.00005, 3) * 800.0;
-    let mountains = sfbm2(xz + vec2<f32>(510.0, -770.0), 0.0008, 4) * 420.0;
-    let rolling = sfbm2(xz + vec2<f32>(1337.0, 55.0), 0.01, 3) * 36.0;
-    return continents + mountains + rolling - 8.0;
+    let continents = sfbm2(xz, tuning.t0.x, 3) * tuning.t0.y;
+    let mountains = sfbm2(xz + vec2<f32>(510.0, -770.0), tuning.t0.z, 4) * tuning.t0.w;
+    let rolling = sfbm2(xz + vec2<f32>(1337.0, 55.0), tuning.t1.x, 3) * tuning.t1.y;
+    return continents + mountains + rolling + tuning.t2.x;
 }
 
 fn baked_sun_shadow(world: vec3<f32>) -> f32 {

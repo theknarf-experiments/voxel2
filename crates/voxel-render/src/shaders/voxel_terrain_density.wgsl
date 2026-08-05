@@ -36,6 +36,14 @@ struct CsgOp {
 }
 @group(0) @binding(2) var<storage, read_write> csg_ops: array<CsgOp>;
 
+struct WorldTuning {
+    t0: vec4<f32>, // continents scale/amp, mountains scale/amp
+    t1: vec4<f32>, // rolling scale/amp, detail scale/amp
+    t2: vec4<f32>, // height offset, floor/pillar/wall spacing
+    t3: vec4<f32>, // shaft spacing, wall chance, opening chance, unused
+}
+@group(0) @binding(3) var<uniform> tuning: WorldTuning;
+
 fn op_sdf(op: CsgOp, p: vec3<f32>) -> f32 {
     var q = p - op.center;
     let c = cos(-op.yaw);
@@ -96,13 +104,13 @@ fn fbm(p: vec2<f32>, base_scale: f32, octaves: i32, voxel_size: f32) -> f32 {
 }
 
 fn terrain_height(xz: vec2<f32>, voxel_size: f32) -> f32 {
-    // Continent-scale relief (20 km wavelength) survives even 256 m voxels,
-    // so orbit views show real terrain; finer bands fade in as LOD refines.
-    let continents = fbm(xz, 0.00005, 3, voxel_size) * 800.0;
-    let mountains = fbm(xz + vec2<f32>(510.0, -770.0), 0.0008, 5, voxel_size) * 420.0;
-    let rolling = fbm(xz + vec2<f32>(1337.0, 55.0), 0.01, 5, voxel_size) * 36.0;
-    let detail = fbm(xz + vec2<f32>(37.0, 91.0), 0.06, 4, voxel_size) * 5.0;
-    return continents + mountains + rolling + detail - 8.0;
+    // Band scales/amplitudes come from the level's world tuning; finer
+    // bands fade in as LOD refines (band-limiting).
+    let continents = fbm(xz, tuning.t0.x, 3, voxel_size) * tuning.t0.y;
+    let mountains = fbm(xz + vec2<f32>(510.0, -770.0), tuning.t0.z, 5, voxel_size) * tuning.t0.w;
+    let rolling = fbm(xz + vec2<f32>(1337.0, 55.0), tuning.t1.x, 5, voxel_size) * tuning.t1.y;
+    let detail = fbm(xz + vec2<f32>(37.0, 91.0), tuning.t1.z, 4, voxel_size) * tuning.t1.w;
+    return continents + mountains + rolling + detail + tuning.t2.x;
 }
 
 @compute @workgroup_size(6, 6, 6)

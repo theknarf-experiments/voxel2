@@ -48,5 +48,13 @@
       "type": "pockets",
       "chance": 0.45
     }
-  ]
+  ],
+  "mega": {
+    "floor_spacing": 44.0,
+    "pillar_spacing": 34.0,
+    "wall_spacing": 104.0,
+    "shaft_spacing": 288.0,
+    "wall_chance": 0.45,
+    "opening_chance": 0.16
+  }
 }

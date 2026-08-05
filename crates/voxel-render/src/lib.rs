@@ -9,7 +9,7 @@ pub mod water;
 
 pub use chunks::{
     ChunkCommand, ChunkCommandQueue, ChunkReadyChannel, SharedRenderStats, VoxelChunksPlugin,
-    WorldKind,
+    WorldKind, WorldTuning,
 };
 pub use grass::{GrassInstance, GrassInstances, GrassPlugin};
 pub use water::WaterPlugin;

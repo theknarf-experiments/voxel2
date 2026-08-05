@@ -33,6 +33,10 @@ const SUPER_HIDE_M: f32 = 320.0;
 /// Super-tile builds per frame (amortize the height/shadow evaluation).
 const SUPER_BUDGET: usize = 8;
 
+/// Set to despawn and regrow all vegetation (terrain tuning changed).
+#[derive(Resource, Default)]
+pub struct VegetationRebuild(pub bool);
+
 pub struct VegetationPlugin;
 
 impl Plugin for VegetationPlugin {
@@ -40,17 +44,48 @@ impl Plugin for VegetationPlugin {
         app.init_resource::<VegTiles>()
             .init_resource::<GrassTiles>()
             .init_resource::<FarForest>()
+            .init_resource::<VegetationRebuild>()
             .add_plugins(voxel_render::GrassPlugin)
             .add_systems(Startup, build_tree_assets)
             .add_systems(
                 Update,
                 (
+                    rebuild_vegetation,
                     stream_vegetation,
                     stream_grass,
                     stream_far_forest,
                     far_forest_visibility,
-                ),
+                )
+                    .chain(),
             );
+    }
+}
+
+/// Despawn everything grown; the streaming systems regrow it on the (new)
+/// terrain over the following frames.
+fn rebuild_vegetation(
+    mut commands: Commands,
+    mut flag: ResMut<VegetationRebuild>,
+    mut veg: ResMut<VegTiles>,
+    mut grass: ResMut<GrassTiles>,
+    mut far: ResMut<FarForest>,
+    instances: Res<voxel_render::GrassInstances>,
+) {
+    if !flag.0 {
+        return;
+    }
+    flag.0 = false;
+    for (_, entities) in veg.tiles.drain() {
+        for e in entities {
+            commands.entity(e).despawn();
+        }
+    }
+    grass.tiles.clear();
+    instances.set(Vec::new());
+    for (_, entity) in far.tiles.drain() {
+        if let Some(e) = entity {
+            commands.entity(e).despawn();
+        }
     }
 }
 
@@ -124,7 +159,11 @@ fn build_super_tile(
     for dz in 0..sub {
         for dx in 0..sub {
             let detail = IVec2::new(tile.x * sub + dx, tile.y * sub + dz);
-            for tree in tile_trees(detail) {
+            for mut tree in tile_trees(detail) {
+                // Seat impostors on the band-limited height that coarse-LOD
+                // terrain actually shows at their distance, not the full-
+                // detail surface — otherwise they float over smoothed hills.
+                tree.pos.y = terrain_height(Vec2::new(tree.pos.x, tree.pos.z), 16.0) - 0.15;
                 let shade = 0.45 + 0.55 * voxel_worldgen::sun_shadow(tree.pos);
                 if tree.pine {
                     let c = [0.10 * shade, 0.22 * shade, 0.09 * shade, 1.0];

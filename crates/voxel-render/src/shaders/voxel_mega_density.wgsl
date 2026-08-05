@@ -32,6 +32,14 @@ struct CsgOp {
 }
 @group(0) @binding(2) var<storage, read_write> csg_ops: array<CsgOp>;
 
+struct WorldTuning {
+    t0: vec4<f32>, // continents scale/amp, mountains scale/amp
+    t1: vec4<f32>, // rolling scale/amp, detail scale/amp
+    t2: vec4<f32>, // height offset, floor/pillar/wall spacing
+    t3: vec4<f32>, // shaft spacing, wall chance, opening chance, unused
+}
+@group(0) @binding(3) var<uniform> tuning: WorldTuning;
+
 fn op_sdf(op: CsgOp, p: vec3<f32>) -> f32 {
     var q = p - op.center;
     let c = cos(-op.yaw);
@@ -66,17 +74,13 @@ fn sd_box(p: vec3<f32>, b: vec3<f32>) -> f32 {
     return length(max(q, vec3<f32>(0.0))) + min(max(q.x, max(q.y, q.z)), 0.0);
 }
 
-const FLOOR_SPACING: f32 = 44.0;
-const PILLAR_SPACING: f32 = 34.0;
-const WALL_SPACING: f32 = 104.0;
-const SHAFT_SPACING: f32 = 288.0;
 
 fn mega_sdf(p: vec3<f32>, vs: f32) -> f32 {
     // --- megashafts (needed at every LOD) -----------------------------------
-    let sc = vec2<i32>(round(p.xz / SHAFT_SPACING));
+    let sc = vec2<i32>(round(p.xz / tuning.t3.x));
     let sjit = vec2<f32>(hash2(sc + vec2<i32>(41, 13)) - 0.5, hash2(sc + vec2<i32>(-7, 99)) - 0.5)
         * 90.0;
-    let sxz = p.xz - vec2<f32>(sc) * SHAFT_SPACING - sjit;
+    let sxz = p.xz - vec2<f32>(sc) * tuning.t3.x - sjit;
     let sr = 24.0 + hash2(sc) * 30.0;
     let shaft = length(sxz) - sr;
 
@@ -89,32 +93,32 @@ fn mega_sdf(p: vec3<f32>, vs: f32) -> f32 {
         return -shaft;
     }
 
-    // --- floors: horizontal slabs every FLOOR_SPACING, 3 m thick ------------
-    let level = round(p.y / FLOOR_SPACING);
-    let fy = p.y - level * FLOOR_SPACING;
+    // --- floors: horizontal slabs every tuning.t2.y, 3 m thick ------------
+    let level = round(p.y / tuning.t2.y);
+    let fy = p.y - level * tuning.t2.y;
     var d = abs(fy) - 1.5;
 
     // Floor openings: some 16 m grid cells of each level are cut away.
     let op_cell = vec2<i32>(floor(p.xz / 16.0));
     let op = hash3(vec3<i32>(op_cell.x, i32(level), op_cell.y));
-    if (op < 0.16) {
+    if (op < tuning.t3.z) {
         let oc = (vec2<f32>(op_cell) + 0.5) * 16.0;
         let cut = sd_box(vec3<f32>(p.x - oc.x, fy, p.z - oc.y), vec3<f32>(7.0, 4.0, 7.0));
         d = max(d, -cut);
     }
 
     // --- pillars: square columns on a jittered grid -------------------------
-    let pc = vec2<i32>(round(p.xz / PILLAR_SPACING));
+    let pc = vec2<i32>(round(p.xz / tuning.t2.z));
     let jit = vec2<f32>(hash2(pc) - 0.5, hash2(pc + vec2<i32>(311, 77)) - 0.5) * 8.0;
-    let pxz = p.xz - vec2<f32>(pc) * PILLAR_SPACING - jit;
+    let pxz = p.xz - vec2<f32>(pc) * tuning.t2.z - jit;
     let girth = 1.6 + hash2(pc + vec2<i32>(9, -4)) * 2.2;
     let pillar = max(abs(pxz.x), abs(pxz.y)) - girth;
     d = min(d, pillar);
 
     // --- walls: sparse room-scale partitions with corridor cuts -------------
-    let wxi = round(p.x / WALL_SPACING);
-    let wx = p.x - wxi * WALL_SPACING;
-    if (hash2(vec2<i32>(i32(wxi), i32(level))) < 0.45) {
+    let wxi = round(p.x / tuning.t2.w);
+    let wx = p.x - wxi * tuning.t2.w;
+    if (hash2(vec2<i32>(i32(wxi), i32(level))) < tuning.t3.y) {
         var wall = abs(wx) - 1.2;
         // Corridor openings punched through on a 22 m grid, 2 floors tall.
         let cz = round(p.z / 22.0);
@@ -125,9 +129,9 @@ fn mega_sdf(p: vec3<f32>, vs: f32) -> f32 {
         }
         d = min(d, wall);
     }
-    let wzi = round(p.z / WALL_SPACING);
-    let wz = p.z - wzi * WALL_SPACING;
-    if (hash2(vec2<i32>(i32(wzi) + 501, i32(level))) < 0.45) {
+    let wzi = round(p.z / tuning.t2.w);
+    let wz = p.z - wzi * tuning.t2.w;
+    if (hash2(vec2<i32>(i32(wzi) + 501, i32(level))) < tuning.t3.y) {
         var wall = abs(wz) - 1.2;
         let cx = round(p.x / 22.0);
         let cxl = p.x - cx * 22.0;

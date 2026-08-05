@@ -16,6 +16,14 @@ struct WaterParams {
 }
 @group(0) @binding(2) var<uniform> params: WaterParams;
 
+struct WorldTuning {
+    t0: vec4<f32>, // continents scale/amp, mountains scale/amp
+    t1: vec4<f32>, // rolling scale/amp, detail scale/amp
+    t2: vec4<f32>, // height offset, floor/pillar/wall spacing
+    t3: vec4<f32>, // shaft spacing, wall chance, opening chance, unused
+}
+@group(0) @binding(3) var<uniform> tuning: WorldTuning;
+
 const GRID_N: u32 = 192u;       // vertices per side
 const RANGE_M: f32 = 30000.0;   // farthest grid reach from center
 const SEA_SNAP: f32 = 64.0;     // origin snap so the grid never swims
@@ -122,10 +130,10 @@ fn fbm2(p: vec2<f32>, base_scale: f32, octaves: i32) -> f32 {
 }
 
 fn seabed_height(xz: vec2<f32>) -> f32 {
-    let continents = fbm2(xz, 0.00005, 3) * 800.0;
-    let mountains = fbm2(xz + vec2<f32>(510.0, -770.0), 0.0008, 4) * 420.0;
-    let rolling = fbm2(xz + vec2<f32>(1337.0, 55.0), 0.01, 3) * 36.0;
-    return continents + mountains + rolling - 8.0;
+    let continents = fbm2(xz, tuning.t0.x, 3) * tuning.t0.y;
+    let mountains = fbm2(xz + vec2<f32>(510.0, -770.0), tuning.t0.z, 4) * tuning.t0.w;
+    let rolling = fbm2(xz + vec2<f32>(1337.0, 55.0), tuning.t1.x, 3) * tuning.t1.y;
+    return continents + mountains + rolling + tuning.t2.x;
 }
 
 @fragment

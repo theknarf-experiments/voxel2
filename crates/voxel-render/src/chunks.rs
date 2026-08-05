@@ -49,8 +49,8 @@ use bevy::{
             Canonical, ColorTargetState, ColorWrites, CompareFunction, ComputePassDescriptor,
             ComputePipelineDescriptor, DepthStencilState, DynamicUniformBuffer, FragmentState,
             IndexFormat, MapMode, PipelineCache, RenderPipeline, RenderPipelineDescriptor,
-            ShaderStages, ShaderType, Specializer, SpecializerKey, TextureFormat, Variants,
-            VertexAttribute, VertexFormat, VertexState, VertexStepMode,
+            ShaderStages, ShaderType, Specializer, SpecializerKey, TextureFormat, UniformBuffer,
+            Variants, VertexAttribute, VertexFormat, VertexState, VertexStepMode,
         },
         renderer::{RenderContext, RenderDevice, RenderGraph, RenderQueue},
         view::{
@@ -138,6 +138,32 @@ pub struct RenderStats {
     pub culled: usize,
 }
 
+/// World tuning parameters shared with the GPU (terrain bands, mega
+/// lattice). Set by the level presenter; extracted every frame so
+/// hot-reloads apply. Packed as vec4s for uniform layout.
+#[derive(Resource, ShaderType, Clone, Copy)]
+pub struct WorldTuning {
+    /// continents scale/amp, mountains scale/amp
+    pub t0: Vec4,
+    /// rolling scale/amp, detail scale/amp
+    pub t1: Vec4,
+    /// height offset, floor/pillar/wall spacing
+    pub t2: Vec4,
+    /// shaft spacing, wall chance, opening chance, (unused)
+    pub t3: Vec4,
+}
+
+impl Default for WorldTuning {
+    fn default() -> Self {
+        Self {
+            t0: Vec4::new(0.00005, 800.0, 0.0008, 420.0),
+            t1: Vec4::new(0.01, 36.0, 0.06, 5.0),
+            t2: Vec4::new(-8.0, 44.0, 34.0, 104.0),
+            t3: Vec4::new(288.0, 0.45, 0.16, 0.0),
+        }
+    }
+}
+
 /// Marker entity that anchors the terrain draw in the render phases.
 #[derive(Clone, Component, ExtractComponent)]
 #[require(VisibilityClass)]
@@ -165,6 +191,7 @@ impl Plugin for VoxelChunksPlugin {
         embedded_asset!(app, "shaders/voxel_chunk_draw.wgsl");
 
         let (ready_tx, ready_rx) = crossbeam_channel::unbounded();
+        app.init_resource::<WorldTuning>();
         app.init_resource::<ChunkCommandQueue>()
             .init_resource::<SharedRenderStats>()
             .insert_resource(ChunkReadyChannel { rx: ready_rx })
@@ -177,6 +204,7 @@ impl Plugin for VoxelChunksPlugin {
             return;
         };
         render_app
+            .init_resource::<WorldTuning>()
             .insert_resource(stats)
             .insert_resource(self.world)
             .insert_resource(ChunkReadySender(ready_tx))
@@ -190,7 +218,7 @@ impl Plugin for VoxelChunksPlugin {
             .add_systems(RenderStartup, init_chunk_resources)
             .add_systems(
                 ExtractSchedule,
-                (extract_chunk_commands, extract_camera_pos),
+                (extract_chunk_commands, extract_camera_pos, extract_tuning),
             )
             .add_systems(Render, plan_frame.in_set(RenderSystems::Prepare))
             .add_systems(
@@ -331,6 +359,7 @@ struct ChunkGpuResources {
     arena_free: Vec<u32>,
     slab: SlabAllocator,
     gen_uniforms: DynamicUniformBuffer<ChunkParams>,
+    tuning_uniform: UniformBuffer<WorldTuning>,
     draw_uniforms: DynamicUniformBuffer<ChunkDrawUniform>,
     map_tx: crossbeam_channel::Sender<usize>,
     map_rx: crossbeam_channel::Receiver<usize>,
@@ -432,6 +461,7 @@ fn init_chunk_resources(
         arena_free: (0..ARENA_SLOTS).rev().collect(),
         slab: SlabAllocator::new(),
         gen_uniforms: DynamicUniformBuffer::default(),
+        tuning_uniform: UniformBuffer::default(),
         draw_uniforms: DynamicUniformBuffer::default(),
         map_tx,
         map_rx,
@@ -442,9 +472,10 @@ fn init_chunk_resources(
         &BindGroupLayoutEntries::sequential(
             ShaderStages::COMPUTE,
             (
-                storage_buffer_sized(false, None),   // density arena
-                uniform_buffer::<ChunkParams>(true), // per-chunk params
-                storage_buffer_sized(false, None),   // planning CSG ops
+                storage_buffer_sized(false, None),    // density arena
+                uniform_buffer::<ChunkParams>(true),  // per-chunk params
+                storage_buffer_sized(false, None),    // planning CSG ops
+                uniform_buffer::<WorldTuning>(false), // world tuning
             ),
         ),
     );
@@ -453,12 +484,13 @@ fn init_chunk_resources(
         &BindGroupLayoutEntries::sequential(
             ShaderStages::COMPUTE,
             (
-                storage_buffer_sized(false, None),   // density arena
-                uniform_buffer::<ChunkParams>(true), // per-chunk params
-                storage_buffer_sized(false, None),   // cell_indices scratch
-                storage_buffer_sized(false, None),   // vertex slab
-                storage_buffer_sized(false, None),   // index slab
-                storage_buffer_sized(false, None),   // counts
+                storage_buffer_sized(false, None),    // density arena
+                uniform_buffer::<ChunkParams>(true),  // per-chunk params
+                storage_buffer_sized(false, None),    // cell_indices scratch
+                storage_buffer_sized(false, None),    // vertex slab
+                storage_buffer_sized(false, None),    // index slab
+                storage_buffer_sized(false, None),    // counts
+                uniform_buffer::<WorldTuning>(false), // world tuning
             ),
         ),
     );
@@ -590,6 +622,10 @@ fn extract_chunk_commands(
     extracted.0.append(&mut queue.inner.lock().unwrap());
 }
 
+fn extract_tuning(tuning: Extract<Res<WorldTuning>>, mut commands: Commands) {
+    commands.insert_resource(**tuning);
+}
+
 fn extract_camera_pos(
     cameras: Extract<Query<(&GlobalTransform, &Frustum), With<Camera3d>>>,
     mut commands: Commands,
@@ -647,6 +683,7 @@ fn plan_frame(
     mut batches: ResMut<FrameBatches>,
     mut draw_list: ResMut<VoxelDrawList>,
     camera: Res<ExtractedCameraPos>,
+    tuning: Res<WorldTuning>,
     frustum: Res<ExtractedFrustum>,
     stats: Res<SharedRenderStats>,
     ready_tx: Res<ChunkReadySender>,
@@ -972,6 +1009,9 @@ fn plan_frame(
     gpu.gen_uniforms.write_buffer(&render_device, &render_queue);
     gpu.draw_uniforms
         .write_buffer(&render_device, &render_queue);
+    gpu.tuning_uniform.set(*tuning);
+    gpu.tuning_uniform
+        .write_buffer(&render_device, &render_queue);
 
     // 7. HUD stats.
     if let Ok(mut s) = stats.0.lock() {
@@ -1024,6 +1064,9 @@ fn dispatch_chunk_work(
         return;
     };
 
+    let Some(tuning_binding) = gpu.tuning_uniform.binding() else {
+        return;
+    };
     let csg = gpu.csg_buffer.as_ref().unwrap_or(&gpu.csg_dummy);
     let gen_bg = render_context.render_device().create_bind_group(
         "voxel_gen_bg",
@@ -1032,6 +1075,7 @@ fn dispatch_chunk_work(
             gpu.density_arena.as_entire_buffer_binding(),
             gen_uniform_binding.clone(),
             csg.as_entire_buffer_binding(),
+            tuning_binding.clone(),
         )),
     );
     let mesh_bg = render_context.render_device().create_bind_group(
@@ -1044,6 +1088,7 @@ fn dispatch_chunk_work(
             gpu.vertex_slab.as_entire_buffer_binding(),
             gpu.index_slab.as_entire_buffer_binding(),
             gpu.counts.as_entire_buffer_binding(),
+            tuning_binding,
         )),
     );
 

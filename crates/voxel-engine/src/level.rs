@@ -76,6 +76,60 @@ pub struct LevelDef {
     /// Planning-op providers, composed in order.
     #[serde(default)]
     pub ops: Vec<OpsDef>,
+    /// Terrain heightfield tuning (planet worlds).
+    #[serde(default)]
+    pub terrain: TerrainDef,
+    /// Lattice tuning (megastructure worlds).
+    #[serde(default)]
+    pub mega: MegaDef,
+}
+
+/// Terrain heightfield bands: `[cycles_per_meter, amplitude_m]` each.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(default)]
+pub struct TerrainDef {
+    pub continents: [f32; 2],
+    pub mountains: [f32; 2],
+    pub rolling: [f32; 2],
+    pub detail: [f32; 2],
+    pub offset: f32,
+}
+
+impl Default for TerrainDef {
+    fn default() -> Self {
+        Self {
+            continents: [0.00005, 800.0],
+            mountains: [0.0008, 420.0],
+            rolling: [0.01, 36.0],
+            detail: [0.06, 5.0],
+            offset: -8.0,
+        }
+    }
+}
+
+/// Megastructure lattice dimensions (meters) and probabilities.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(default)]
+pub struct MegaDef {
+    pub floor_spacing: f32,
+    pub pillar_spacing: f32,
+    pub wall_spacing: f32,
+    pub shaft_spacing: f32,
+    pub wall_chance: f32,
+    pub opening_chance: f32,
+}
+
+impl Default for MegaDef {
+    fn default() -> Self {
+        Self {
+            floor_spacing: 44.0,
+            pillar_spacing: 34.0,
+            wall_spacing: 104.0,
+            shaft_spacing: 288.0,
+            wall_chance: 0.45,
+            opening_chance: 0.16,
+        }
+    }
 }
 
 /// A parameterized planning-op provider.
@@ -135,6 +189,43 @@ impl LevelDef {
     }
 }
 
+/// Push the level's tuning into the CPU mirrors and produce the matching
+/// GPU uniform — one source of truth for both twins.
+fn apply_tuning(level: &LevelDef) -> voxel_render::WorldTuning {
+    let t = &level.terrain;
+    let m = &level.mega;
+    voxel_worldgen::params::set_terrain_params(voxel_worldgen::params::TerrainParams {
+        continents_scale: t.continents[0],
+        continents_amp: t.continents[1],
+        mountains_scale: t.mountains[0],
+        mountains_amp: t.mountains[1],
+        rolling_scale: t.rolling[0],
+        rolling_amp: t.rolling[1],
+        detail_scale: t.detail[0],
+        detail_amp: t.detail[1],
+        offset: t.offset,
+    });
+    voxel_worldgen::params::set_mega_params(voxel_worldgen::params::MegaParams {
+        floor_spacing: m.floor_spacing,
+        pillar_spacing: m.pillar_spacing,
+        wall_spacing: m.wall_spacing,
+        shaft_spacing: m.shaft_spacing,
+        wall_chance: m.wall_chance,
+        opening_chance: m.opening_chance,
+    });
+    voxel_render::WorldTuning {
+        t0: Vec4::new(
+            t.continents[0],
+            t.continents[1],
+            t.mountains[0],
+            t.mountains[1],
+        ),
+        t1: Vec4::new(t.rolling[0], t.rolling[1], t.detail[0], t.detail[1]),
+        t2: Vec4::new(t.offset, m.floor_spacing, m.pillar_spacing, m.wall_spacing),
+        t3: Vec4::new(m.shaft_spacing, m.wall_chance, m.opening_chance, 0.0),
+    }
+}
+
 /// Presents a [`LevelDef`]: engine plugins, lighting, camera, planning
 /// providers, autopilot/walk controls — everything the old hardcoded demos
 /// did, from data. With a `source` path, the file is watched and edits
@@ -172,7 +263,9 @@ impl Plugin for LevelPlugin {
             .add_systems(Update, reload_level);
         }
 
-        app.insert_resource(ClearColor(Color::srgb(c[0], c[1], c[2])))
+        let tuning = apply_tuning(&level);
+        app.insert_resource(tuning)
+            .insert_resource(ClearColor(Color::srgb(c[0], c[1], c[2])))
             .insert_resource(LodConfig {
                 max_level: level.lod.max_level,
                 top_radius: level.lod.top_radius,
@@ -301,6 +394,7 @@ fn reload_level(
     mut clear: ResMut<ClearColor>,
     mut lod: ResMut<LodConfig>,
     mut rebuild: ResMut<StreamingRebuild>,
+    mut veg_rebuild: Option<ResMut<crate::vegetation::VegetationRebuild>>,
     mut cameras: Query<&mut voxel_debug::FreeCamera>,
     suns: Query<Entity, With<LevelSun>>,
 ) {
@@ -358,7 +452,16 @@ fn reload_level(
     info!("level reload: presentation applied");
 
     // Generation-affecting changes: rebuild the streamed world.
-    let regen = new.seed != level.seed
+    let tuning_changed = new.terrain != level.terrain || new.mega != level.mega;
+    if tuning_changed {
+        let tuning = apply_tuning(&new);
+        commands.insert_resource(tuning);
+        if let Some(veg) = veg_rebuild.as_mut() {
+            veg.0 = true;
+        }
+    }
+    let regen = tuning_changed
+        || new.seed != level.seed
         || new.ops != level.ops
         || new.lod.max_level != level.lod.max_level
         || new.lod.top_radius != level.lod.top_radius

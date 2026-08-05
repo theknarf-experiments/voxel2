@@ -5,11 +5,6 @@
 
 use glam::{IVec2, IVec3, Vec2, Vec3};
 
-const FLOOR_SPACING: f32 = 44.0;
-const PILLAR_SPACING: f32 = 34.0;
-const WALL_SPACING: f32 = 104.0;
-const SHAFT_SPACING: f32 = 288.0;
-
 fn hash2(p: IVec2) -> f32 {
     let mut h: u32 = (p.x as u32)
         .wrapping_mul(374_761_393)
@@ -36,30 +31,32 @@ fn sd_box(p: Vec3, b: Vec3) -> f32 {
 
 /// Signed distance (meters) to the megastructure at full detail.
 pub fn mega_sdf(p: Vec3) -> f32 {
+    let mp = crate::params::mega_params();
+
     let pxz = Vec2::new(p.x, p.z);
 
     // Megashafts.
     let sc = IVec2::new(
-        (p.x / SHAFT_SPACING).round() as i32,
-        (p.z / SHAFT_SPACING).round() as i32,
+        (p.x / mp.shaft_spacing).round() as i32,
+        (p.z / mp.shaft_spacing).round() as i32,
     );
     let sjit = Vec2::new(
         hash2(sc + IVec2::new(41, 13)) - 0.5,
         hash2(sc + IVec2::new(-7, 99)) - 0.5,
     ) * 90.0;
-    let sxz = pxz - Vec2::new(sc.x as f32, sc.y as f32) * SHAFT_SPACING - sjit;
+    let sxz = pxz - Vec2::new(sc.x as f32, sc.y as f32) * mp.shaft_spacing - sjit;
     let sr = 24.0 + hash2(sc) * 30.0;
     let shaft = sxz.length() - sr;
 
     // Floors.
-    let level = (p.y / FLOOR_SPACING).round();
-    let fy = p.y - level * FLOOR_SPACING;
+    let level = (p.y / mp.floor_spacing).round();
+    let fy = p.y - level * mp.floor_spacing;
     let mut d = fy.abs() - 1.5;
 
     // Floor openings.
     let op_cell = IVec2::new((p.x / 16.0).floor() as i32, (p.z / 16.0).floor() as i32);
     let op = hash3(IVec3::new(op_cell.x, level as i32, op_cell.y));
-    if op < 0.16 {
+    if op < mp.opening_chance {
         let oc = (Vec2::new(op_cell.x as f32, op_cell.y as f32) + 0.5) * 16.0;
         let cut = sd_box(
             Vec3::new(p.x - oc.x, fy, p.z - oc.y),
@@ -70,19 +67,19 @@ pub fn mega_sdf(p: Vec3) -> f32 {
 
     // Pillars.
     let pc = IVec2::new(
-        (p.x / PILLAR_SPACING).round() as i32,
-        (p.z / PILLAR_SPACING).round() as i32,
+        (p.x / mp.pillar_spacing).round() as i32,
+        (p.z / mp.pillar_spacing).round() as i32,
     );
     let jit = Vec2::new(hash2(pc) - 0.5, hash2(pc + IVec2::new(311, 77)) - 0.5) * 8.0;
-    let pp = pxz - Vec2::new(pc.x as f32, pc.y as f32) * PILLAR_SPACING - jit;
+    let pp = pxz - Vec2::new(pc.x as f32, pc.y as f32) * mp.pillar_spacing - jit;
     let girth = 1.6 + hash2(pc + IVec2::new(9, -4)) * 2.2;
     let pillar = pp.x.abs().max(pp.y.abs()) - girth;
     d = d.min(pillar);
 
     // Walls with doorways (x-normal walls).
-    let wxi = (p.x / WALL_SPACING).round();
-    let wx = p.x - wxi * WALL_SPACING;
-    if hash2(IVec2::new(wxi as i32, level as i32)) < 0.45 {
+    let wxi = (p.x / mp.wall_spacing).round();
+    let wx = p.x - wxi * mp.wall_spacing;
+    if hash2(IVec2::new(wxi as i32, level as i32)) < mp.wall_chance {
         let mut wall = wx.abs() - 1.2;
         let cz = (p.z / 22.0).round();
         let czl = p.z - cz * 22.0;
@@ -93,9 +90,9 @@ pub fn mega_sdf(p: Vec3) -> f32 {
         d = d.min(wall);
     }
     // z-normal walls.
-    let wzi = (p.z / WALL_SPACING).round();
-    let wz = p.z - wzi * WALL_SPACING;
-    if hash2(IVec2::new(wzi as i32 + 501, level as i32)) < 0.45 {
+    let wzi = (p.z / mp.wall_spacing).round();
+    let wz = p.z - wzi * mp.wall_spacing;
+    if hash2(IVec2::new(wzi as i32 + 501, level as i32)) < mp.wall_chance {
         let mut wall = wz.abs() - 1.2;
         let cx = (p.x / 22.0).round();
         let cxl = p.x - cx * 22.0;
@@ -137,7 +134,7 @@ use voxel_core::csg::CsgOp;
 use voxel_core::seed::{chunk_seed, Rng};
 
 const POCKET_CELL_XZ: f32 = 128.0;
-const POCKET_CELL_Y: f32 = FLOOR_SPACING * 3.0;
+const POCKET_CELL_Y: f32 = 44.0 * 3.0;
 const POCKET_SEED: u64 = 0xB10C;
 
 /// Planned features overlapping `[min, max]`: hollow room shells with
@@ -171,14 +168,15 @@ fn pocket_cell_ops(seed: u64, chance: f32, cx: i32, cy: i32, cz: i32, out: &mut 
     let x = cx as f32 * POCKET_CELL_XZ + 24.0 + rng.next_f32() * (POCKET_CELL_XZ - 48.0);
     let z = cz as f32 * POCKET_CELL_XZ + 24.0 + rng.next_f32() * (POCKET_CELL_XZ - 48.0);
     // Snap to the nearest floor level inside the cell.
-    let level = ((cy as f32 + 0.5) * POCKET_CELL_Y / FLOOR_SPACING).round();
-    let floor_top = level * FLOOR_SPACING + 1.5;
+    let fs = crate::params::mega_params().floor_spacing;
+    let level = ((cy as f32 + 0.5) * POCKET_CELL_Y / fs).round();
+    let floor_top = level * fs + 1.5;
 
     if roll < 0.12 {
         // Light well: a square shaft cut through three levels.
         out.push(CsgOp::boxy(
-            Vec3::new(x, floor_top + FLOOR_SPACING, z),
-            Vec3::new(2.4, FLOOR_SPACING * 1.6, 2.4),
+            Vec3::new(x, floor_top + fs, z),
+            Vec3::new(2.4, fs * 1.6, 2.4),
             0.0,
             0,
             true,

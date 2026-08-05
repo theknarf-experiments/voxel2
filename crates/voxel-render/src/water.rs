@@ -102,6 +102,7 @@ struct WaterPipeline {
 struct WaterBindGroupRes {
     bind_group: Option<BindGroup>,
     params: UniformBuffer<WaterParams>,
+    tuning: UniformBuffer<crate::chunks::WorldTuning>,
 }
 
 #[derive(Resource, Default)]
@@ -125,6 +126,7 @@ fn init_water_pipeline(mut commands: Commands, asset_server: Res<AssetServer>) {
                 uniform_buffer::<ViewUniform>(true),
                 uniform_buffer::<GlobalsUniform>(false),
                 uniform_buffer::<WaterParams>(false),
+                uniform_buffer::<crate::chunks::WorldTuning>(false),
             ),
         ),
     );
@@ -190,6 +192,7 @@ fn prepare_water_bind_group(
     globals: Res<GlobalsBuffer>,
     pipeline: Option<Res<WaterPipeline>>,
     camera: Res<ExtractedWaterCamera>,
+    tuning: Res<crate::chunks::WorldTuning>,
     pipeline_cache: Res<PipelineCache>,
     render_device: Res<RenderDevice>,
     render_queue: Res<RenderQueue>,
@@ -210,13 +213,21 @@ fn prepare_water_bind_group(
         origin: Vec4::new(ox as f32, 0.0, oz as f32, 0.0),
     });
     res.params.write_buffer(&render_device, &render_queue);
-    let Some(params_binding) = res.params.binding() else {
+    res.tuning.set(*tuning);
+    res.tuning.write_buffer(&render_device, &render_queue);
+    let (Some(params_binding), Some(tuning_binding)) = (res.params.binding(), res.tuning.binding())
+    else {
         return;
     };
     res.bind_group = Some(render_device.create_bind_group(
         "water_bg",
         &pipeline_cache.get_bind_group_layout(&pipeline.layout),
-        &BindGroupEntries::sequential((view_binding, globals_binding, params_binding)),
+        &BindGroupEntries::sequential((
+            view_binding,
+            globals_binding,
+            params_binding,
+            tuning_binding,
+        )),
     ));
 }
 
