@@ -77,8 +77,8 @@ const COUNTS_SLOTS: u32 = 128;
 // Sized for throughput ~2k chunks/s at 120 fps while keeping each frame's
 // GPU batch small enough not to blow a ~8 ms vsync slot (spiky batches
 // read as missed-vsync 17 ms frames even when average load is fine).
-const GEN_BUDGET: usize = 16;
-const MESH_BUDGET: usize = 24;
+const GEN_BUDGET: usize = 24;
+const MESH_BUDGET: usize = 32;
 const STAGING_BUFFERS: usize = 3;
 
 // --- main-world <-> render-world plumbing ------------------------------------
@@ -909,7 +909,10 @@ fn gen_priority(key: ChunkKey, camera: DVec3) -> f64 {
     let min = key.min_corner_m();
     let max = min + DVec3::splat(key.edge_m());
     let closest = camera.clamp(min, max);
-    camera.distance(closest) / key.edge_m()
+    // Coarser levels first (they cover the most screen), distance breaks
+    // ties within a level — initial load and new-area streaming paint
+    // the whole world coarse before any region refines.
+    camera.distance(closest) / key.edge_m() - key.level as f64 * 4.0
 }
 
 #[allow(clippy::too_many_arguments)]

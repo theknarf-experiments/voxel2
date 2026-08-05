@@ -193,13 +193,23 @@ fn zoned_albedo(m: WorldMaterial, world: vec3<f32>, n: vec3<f32>, dist: f32) -> 
     return mix(base, high, steep);
 }
 
-// Central-difference gradient of fbm3 (for bump-style normal perturbation).
-fn fbm3_grad(p: vec3<f32>, eps: f32) -> vec3<f32> {
-    return vec3<f32>(
-        fbm3(p + vec3<f32>(eps, 0.0, 0.0)) - fbm3(p - vec3<f32>(eps, 0.0, 0.0)),
-        fbm3(p + vec3<f32>(0.0, eps, 0.0)) - fbm3(p - vec3<f32>(0.0, eps, 0.0)),
-        fbm3(p + vec3<f32>(0.0, 0.0, eps)) - fbm3(p - vec3<f32>(0.0, 0.0, eps)),
-    ) / (2.0 * eps);
+// Two-octave fbm — the canopy runs per terrain pixel, so its noise
+// budget is tight (the full material was measured at half the frame).
+fn fbm3_2(p: vec3<f32>) -> f32 {
+    return 0.5 * noise3(p) + 0.25 * noise3(p * 2.17);
+}
+
+// 4-tap tetrahedral gradient of ONE value-noise octave: bump direction
+// only needs the dominant frequency, and this is the cheapest stable
+// estimate (iq uses the same trick for tree normals).
+fn noise3_grad(p: vec3<f32>, eps: f32) -> vec3<f32> {
+    let e1 = vec3<f32>(1.0, -1.0, -1.0);
+    let e2 = vec3<f32>(-1.0, -1.0, 1.0);
+    let e3 = vec3<f32>(-1.0, 1.0, -1.0);
+    let e4 = vec3<f32>(1.0, 1.0, 1.0);
+    return (e1 * noise3(p + eps * e1) + e2 * noise3(p + eps * e2)
+        + e3 * noise3(p + eps * e3) + e4 * noise3(p + eps * e4))
+        / (4.0 * eps);
 }
 
 struct MatSample {
@@ -220,7 +230,8 @@ struct MatSample {
 // p2 (steep hi, steep lo, detail fade, patch amount).
 fn canopy_material(m: WorldMaterial, world: vec3<f32>, n: vec3<f32>, dist: f32) -> MatSample {
     let fade = exp(-dist * m.p2.z);
-    let macro_var = fbm3(world * 0.012);
+    // One shared macro field drives the zone border AND the dry patches.
+    let macro_var = fbm3_2(world * 0.012);
     let border = (macro_var - 0.5) * m.c3.w;
 
     let veg_edge = smoothstep(m.c0.w + border * 0.05, m.c0.w + m.p0.w + border * 0.05, world.y);
@@ -231,28 +242,28 @@ fn canopy_material(m: WorldMaterial, world: vec3<f32>, n: vec3<f32>, dist: f32) 
 
     // --- canopy: crowns as noise ------------------------------------------
     let crown_p = world * m.p1.x;
-    let crown = fbm3(crown_p);
+    let crown = fbm3_2(crown_p);
     var nn = n;
     let crelief = m.p1.y * veg * mix(0.4, 1.0, fade);
     if (crelief > 0.01) {
-        nn = normalize(n + crelief * fbm3_grad(crown_p, 0.3));
+        nn = normalize(n + crelief * noise3_grad(crown_p, 0.3));
     }
-    var ccol = mix(m.c0.rgb, m.c1.rgb, smoothstep(0.3, 0.8, crown));
+    var ccol = mix(m.c0.rgb, m.c1.rgb, smoothstep(0.25, 0.7, crown));
     // Dry/brown patches on gentle ground, iq-style. (`patch` is a
     // reserved WGSL word, like `meta`.)
-    let dry = smoothstep(0.55, 0.8, fbm3(world * 0.015)) * m.p2.w * smoothstep(0.5, 0.85, n.y);
+    let dry = smoothstep(0.62, 0.8, macro_var) * m.p2.w * smoothstep(0.5, 0.85, n.y);
     ccol = mix(ccol, m.c3.rgb, dry);
     // Crown-depth occlusion: canopy hollows swallow light.
-    let cao = 0.4 + 0.6 * smoothstep(0.15, 0.8, crown);
+    let cao = 0.4 + 0.6 * smoothstep(0.12, 0.7, crown);
 
     // --- rock: anisotropic strata bumps -----------------------------------
     let strata_p = world * vec3<f32>(m.p1.z, m.p1.z * 0.2, m.p1.z);
     var rn = n;
     let srelief = m.p1.w * rockness * (1.0 - abs(n.y) * 0.6) * mix(0.5, 1.0, fade);
     if (srelief > 0.01) {
-        rn = normalize(n + srelief * fbm3_grad(strata_p, 0.3));
+        rn = normalize(n + srelief * noise3_grad(strata_p, 0.3));
     }
-    var rcol = m.c2.rgb * (0.75 + 0.5 * mix(0.5, fbm3(world * 0.9), fade));
+    var rcol = m.c2.rgb * (0.75 + 0.5 * mix(0.5, noise3(world * 0.9), fade));
     // Moss creeps onto flat rock shelves.
     rcol = mix(rcol, m.c0.rgb, 0.45 * smoothstep(0.7, 0.92, rn.y) * (1.0 - rockness_alt));
     // Implicit snowcap well above the rock line.

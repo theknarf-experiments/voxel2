@@ -420,7 +420,10 @@ fn plan_epoch_snapshot(
         aabb_distance(anchor, *a)
             .total_cmp(&aabb_distance(anchor, *b))
     });
-    splits.truncate(EPOCH_MAX_SPLITS);
+    // Big deficits (initial load, teleport) get big epochs: serialized
+    // epochs with a small cap leave the GPU idle while stragglers finish.
+    let split_cap = if splits.len() > 64 { 128 } else { EPOCH_MAX_SPLITS };
+    splits.truncate(split_cap);
     // Governor: a bloated tree (fast flight ratchets leaves upward) or a
     // caller-imposed merge-only phase stops splitting entirely; merges
     // drain the population and free slab memory.
