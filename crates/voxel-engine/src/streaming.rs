@@ -106,6 +106,13 @@ impl Default for LodConfig {
 #[derive(Resource, Default)]
 pub struct StreamingRebuild(pub bool);
 
+/// Optional cache pre-warmer run inside the async genesis planning task:
+/// touches the planning-layer cells the vegetation streamers will query
+/// around the spawn, so their first main-thread ticks hit warm caches
+/// (cold-start layer generation on the main thread costs 100+ ms/tile).
+#[derive(Resource, Default, Clone)]
+pub struct PlanningWarmup(pub Option<std::sync::Arc<dyn Fn(bevy::math::DVec3) + Send + Sync>>);
+
 /// The fully-converged starting configuration for a fresh world: the
 /// exact final LOD per region (no intermediate levels are ever
 /// generated), revealed in one atomic commit — the alternative,
@@ -283,6 +290,9 @@ const EPOCH_STALL_LIMIT: std::time::Duration = std::time::Duration::from_secs(20
 /// Live epoch-machine probe for remote debugging (voxel/status).
 #[derive(Resource, Default, Clone)]
 pub struct StreamProbe {
+    /// Genesis committed: the world exists and planning caches are warm
+    /// (vegetation streamers wait for this before their first build).
+    pub world_ready: bool,
     pub leaves: usize,
     pub planning: bool,
     pub replan_needed: bool,
@@ -521,6 +531,7 @@ impl Plugin for VoxelStreamingPlugin {
             .init_resource::<StreamingRebuild>()
             .init_resource::<LodTree>()
             .init_resource::<StreamProbe>()
+            .init_resource::<PlanningWarmup>()
             .add_systems(Update, (lod_tick, hud_stats));
     }
 }
@@ -793,6 +804,7 @@ fn lod_tick(
     mut tree: ResMut<LodTree>,
     queue: Res<ChunkCommandQueue>,
     ops_provider: Res<ChunkOpsProvider>,
+    warmup: Res<PlanningWarmup>,
     mut rebuild: ResMut<StreamingRebuild>,
     ready_rx: Res<ChunkReadyChannel>,
     mut field: ResMut<voxel_render::FieldParams>,
@@ -890,8 +902,14 @@ fn lod_tick(
         } else {
             let config = config.clone();
             let provider = ops_provider.0.clone();
+            let warmup = warmup.0.clone();
             tree.genesis_planning = Some(bevy::tasks::AsyncComputeTaskPool::get().spawn(
-                async move { plan_genesis(&config, anchor, provider.as_deref()) },
+                async move {
+                    if let Some(warm) = warmup {
+                        warm(anchor);
+                    }
+                    plan_genesis(&config, anchor, provider.as_deref())
+                },
             ));
         }
         return;
@@ -1072,6 +1090,8 @@ fn lod_tick(
         }
     }
 
+    probe.world_ready =
+        tree.genesis.is_none() && tree.genesis_planning.is_none() && !tree.leaves.is_empty();
     probe.leaves = tree.leaves.len();
     probe.planning = tree.planning.is_some();
     probe.replan_needed = tree.replan_needed;

@@ -76,6 +76,7 @@ fn water_color(level: &LevelDef, id: u32) -> Color {
 }
 
 pub fn stream_water_meshes(
+    probe: Res<crate::streaming::StreamProbe>,
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
@@ -84,7 +85,7 @@ pub fn stream_water_meshes(
     mut tiles: ResMut<WaterMeshTiles>,
     cameras: Query<&Transform, (With<Camera3d>, Without<voxel_render::HelperCamera>)>,
 ) {
-    if eval_holes_mode() {
+    if eval_holes_mode() || !probe.world_ready {
         return;
     }
     let Ok(camera) = cameras.single() else {

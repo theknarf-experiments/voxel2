@@ -1644,7 +1644,25 @@ impl Plugin for LevelPlugin {
         let program = apply_generator(&level);
         let water = water_surface(&program);
         let (ops_provider, world_query, planning_layers) = build_ops_provider(&level);
+        // Pre-warm the planning caches the vegetation streamers will hit,
+        // inside the async genesis task (cold layer generation must never
+        // land on the main thread).
+        let warm_world = world_query.clone();
+        let warmup = crate::streaming::PlanningWarmup(Some(std::sync::Arc::new(
+            move |anchor: bevy::math::DVec3| {
+                let c = bevy::math::Vec2::new(anchor.x as f32, anchor.z as f32);
+                const WARM_M: f32 = 1_700.0;
+                let (min, max) = (c - Vec2::splat(WARM_M), c + Vec2::splat(WARM_M));
+                let _ = warm_world.clearance_in(min, max);
+                let _ = warm_world.cuts_in(
+                    Vec3::new(min.x, -10_000.0, min.y),
+                    Vec3::new(max.x, 10_000.0, max.y),
+                );
+                let _ = warm_world.water_in(min, max);
+            },
+        )));
         app.insert_resource(program)
+            .insert_resource(warmup)
             .insert_resource(material_table(&level))
             .insert_resource(env_params(&level))
             .insert_resource(if eval_holes_mode() {

@@ -115,6 +115,7 @@ struct FarForest {
 }
 
 fn stream_far_forest(
+    probe: Res<crate::streaming::StreamProbe>,
     mut commands: Commands,
     mut far: ResMut<FarForest>,
     mut meshes: ResMut<Assets<Mesh>>,
@@ -123,6 +124,11 @@ fn stream_far_forest(
     world: Res<crate::level::WorldQuery>,
     cameras: Query<&Transform, (With<Camera3d>, Without<voxel_render::HelperCamera>)>,
 ) {
+    // Cold planning caches must never be generated on the main
+    // thread: wait for genesis (which pre-warms them) to commit.
+    if !probe.world_ready {
+        return;
+    }
     let (Some(assets), Ok(camera)) = (assets, cameras.single()) else {
         return;
     };
@@ -267,6 +273,7 @@ struct GrassTiles {
 }
 
 fn stream_grass(
+    probe: Res<crate::streaming::StreamProbe>,
     mut tiles: ResMut<GrassTiles>,
     instances: Res<voxel_render::GrassInstances>,
     level: Res<crate::LevelDef>,
@@ -274,6 +281,11 @@ fn stream_grass(
     time: Res<Time>,
     cameras: Query<&Transform, (With<Camera3d>, Without<voxel_render::HelperCamera>)>,
 ) {
+    // Cold planning caches must never be generated on the main
+    // thread: wait for genesis (which pre-warms them) to commit.
+    if !probe.world_ready {
+        return;
+    }
     let (Some(grass), Ok(camera)) = (level.grass(), cameras.single()) else {
         return;
     };
@@ -748,6 +760,7 @@ fn cylinder_mesh(radius: f32, height: f32, sides: u32) -> Mesh {
 }
 
 fn stream_vegetation(
+    probe: Res<crate::streaming::StreamProbe>,
     mut commands: Commands,
     mut tiles: ResMut<VegTiles>,
     assets: Option<Res<TreeAssets>>,
@@ -755,6 +768,11 @@ fn stream_vegetation(
     world: Res<crate::level::WorldQuery>,
     cameras: Query<&Transform, (With<Camera3d>, Without<voxel_render::HelperCamera>)>,
 ) {
+    // Cold planning caches must never be generated on the main
+    // thread: wait for genesis (which pre-warms them) to commit.
+    if !probe.world_ready {
+        return;
+    }
     let (Some(assets), Ok(camera)) = (assets, cameras.single()) else {
         return;
     };
