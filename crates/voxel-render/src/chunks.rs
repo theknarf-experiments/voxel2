@@ -918,10 +918,12 @@ fn gen_priority(key: ChunkKey, camera: DVec3) -> f64 {
     let min = key.min_corner_m();
     let max = min + DVec3::splat(key.edge_m());
     let closest = camera.clamp(min, max);
-    // Coarser levels first (they cover the most screen), distance breaks
-    // ties within a level — initial load and new-area streaming paint
-    // the whole world coarse before any region refines.
-    camera.distance(closest) / key.edge_m() - key.level as f64 * 4.0
+    // Distance normalized by chunk size: the chunk the player stands in
+    // always generates first, and far coverage chunks (huge edges) still
+    // rank early. (A coarse-first level bias lived here briefly for
+    // progressive load-in; the genesis bootstrap made it obsolete and it
+    // pushed the player's chunk to the back of the queue.)
+    camera.distance(closest) / key.edge_m()
 }
 
 #[allow(clippy::too_many_arguments)]

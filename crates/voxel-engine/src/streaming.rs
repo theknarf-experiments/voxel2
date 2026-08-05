@@ -106,12 +106,137 @@ impl Default for LodConfig {
 #[derive(Resource, Default)]
 pub struct StreamingRebuild(pub bool);
 
+/// The fully-converged starting configuration for a fresh world: the
+/// exact final LOD per region (no intermediate levels are ever
+/// generated), revealed in one atomic commit — the alternative,
+/// coarse-first refinement, reads as "broken, then less broken" on a
+/// cold start and wastes the transient rungs.
+struct GenesisPlan {
+    top_cells: HashSet<IVec3>,
+    leaves: HashSet<ChunkKey>,
+    sent_masks: HashMap<ChunkKey, u32>,
+    waits: HashMap<ChunkKey, u32>,
+    to_request: Vec<(ChunkKey, u32, bool, Option<Arc<Vec<CsgOp>>>)>,
+}
+
+/// Simulate epoch refinement to its fixpoint on a scratch tree (pure,
+/// runs in the planning task) and emit the converged configuration.
+fn plan_genesis(
+    config: &LodConfig,
+    anchor: DVec3,
+    provider: Option<&(dyn Fn(ChunkKey) -> Vec<CsgOp> + Send + Sync)>,
+) -> GenesisPlan {
+    let t0 = std::time::Instant::now();
+    // 1. Pure field descent: the exact configuration the field wants.
+    fn descend(config: &LodConfig, anchor: DVec3, k: ChunkKey, out: &mut HashSet<ChunkKey>) {
+        if split_wanted(config, anchor, k) {
+            for c in k.children() {
+                descend(config, anchor, c, out);
+            }
+        } else {
+            out.insert(k);
+        }
+    }
+    let mut leaves: HashSet<ChunkKey> = HashSet::new();
+    let mut top_cells: HashSet<IVec3> = HashSet::new();
+    let top_edge = ChunkKey::new(config.max_level, IVec3::ZERO).edge_m();
+    let cx = (anchor.x / top_edge).floor() as i32;
+    let cz = (anchor.z / top_edge).floor() as i32;
+    for dz in -config.top_radius..=config.top_radius {
+        for dx in -config.top_radius..=config.top_radius {
+            for y in config.top_y.0..=config.top_y.1 {
+                let cell = IVec3::new(cx + dx, y, cz + dz);
+                top_cells.insert(cell);
+                descend(config, anchor, ChunkKey::new(config.max_level, cell), &mut leaves);
+            }
+        }
+    }
+    // 2. ±1 clamp: the field allows 2-level jumps across diagonals; split
+    //    the coarser side until every touching pair is within one level —
+    //    the same fixpoint the runtime's force-split closure converges to.
+    loop {
+        let mut force: HashSet<ChunkKey> = HashSet::new();
+        {
+            let post = PostState::current(&leaves);
+            for leaf in &leaves {
+                for dz in -1..=1 {
+                    for dy in -1..=1 {
+                        for dx in -1..=1 {
+                            if dx == 0 && dy == 0 && dz == 0 {
+                                continue;
+                            }
+                            let n =
+                                ChunkKey::new(leaf.level, leaf.pos + IVec3::new(dx, dy, dz));
+                            if let Some(l) = post.covering_level(config.max_level, n) {
+                                if l > leaf.level + 1 {
+                                    let mut k = n;
+                                    while k.level < l {
+                                        k = k.parent();
+                                    }
+                                    force.insert(k);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if force.is_empty() {
+            break;
+        }
+        for k in force {
+            leaves.remove(&k);
+            leaves.extend(k.children());
+        }
+    }
+    // 3. Masks, waits and nearest-first requests.
+    let post = PostState::current(&leaves);
+    let mut sent_masks = HashMap::new();
+    let mut waits = HashMap::new();
+    let ops_for = |key: ChunkKey| -> Option<Arc<Vec<CsgOp>>> {
+        provider.and_then(|f| {
+            let v = f(key);
+            if v.is_empty() {
+                None
+            } else {
+                Some(Arc::new(v))
+            }
+        })
+    };
+    let mut to_request = Vec::new();
+    for leaf in &leaves {
+        let mask = post.seam_mask(config.max_level, *leaf);
+        sent_masks.insert(*leaf, mask);
+        waits.insert(*leaf, mask);
+        to_request.push((*leaf, mask, false, ops_for(*leaf)));
+    }
+    to_request.sort_by(|a, b| {
+        aabb_distance(anchor, a.0).total_cmp(&aabb_distance(anchor, b.0))
+    });
+    info!(
+        "genesis: planned {} leaves in {:.1}s",
+        leaves.len(),
+        t0.elapsed().as_secs_f32()
+    );
+    GenesisPlan {
+        top_cells,
+        leaves,
+        sent_masks,
+        waits,
+        to_request,
+    }
+}
+
 /// One planned batch of LOD transitions, committed atomically.
 struct Epoch {
     /// When planning finished — a stall timer, not a profiler.
     born: std::time::Instant,
     /// Shown leaf → the 8 children replacing it.
-    splits: Vec<(ChunkKey, [ChunkKey; 8])>,
+    /// Shown leaf → the full field-wanted descendant set replacing it in
+    /// one transition. Deep: a leaf at L4 that the field wants at L0 goes
+    /// straight there — the intermediate rungs are never generated (the
+    /// ±1 rule constrains what is SHOWN together, and commits are atomic).
+    splits: Vec<(ChunkKey, Vec<ChunkKey>)>,
     /// Hidden parent → the 8 shown leaves it replaces.
     merges: Vec<(ChunkKey, [ChunkKey; 8])>,
     /// Every mesh the commit waits for → the seam mask it must carry
@@ -127,6 +252,10 @@ struct Epoch {
 
 /// Generation requests issued per frame while an epoch is in flight.
 const EPOCH_REQUEST_BUDGET: usize = 64;
+
+/// Requests per frame during the genesis bootstrap (nothing is shown
+/// yet, so bursting is safe; the GPU batches at its own budget).
+const GENESIS_REQUEST_BUDGET: usize = 256;
 
 /// Structural changes attempted per epoch. The split cap bounds the
 /// planning burst and generation load; the merge cap is much higher —
@@ -172,6 +301,10 @@ struct LodTree {
     /// In-flight async planning task (pure function of a tree snapshot;
     /// runs on the compute pool so the main thread never blocks on it).
     planning: Option<bevy::tasks::Task<Option<Epoch>>>,
+    /// Cold-start bootstrap: the converged configuration generating
+    /// hidden, revealed atomically when complete.
+    genesis_planning: Option<bevy::tasks::Task<GenesisPlan>>,
+    genesis: Option<GenesisPlan>,
     /// Something changed since the last plan (commit, anchor move, ring
     /// churn) — gates snapshotting so idle frames don't clone the tree.
     replan_needed: bool,
@@ -214,14 +347,14 @@ impl PostState<'_> {
 
     fn plan<'a>(
         leaves: &'a HashSet<ChunkKey>,
-        splits: &[ChunkKey],
+        splits: &[(ChunkKey, Vec<ChunkKey>)],
         merges: &[ChunkKey],
     ) -> PostState<'a> {
         let mut added = HashSet::new();
         let mut removed = HashSet::new();
-        for p in splits {
+        for (p, descendants) in splits {
             removed.insert(*p);
-            added.extend(p.children());
+            added.extend(descendants.iter().copied());
         }
         for p in merges {
             added.insert(*p);
@@ -396,7 +529,14 @@ fn top_ancestor(key: ChunkKey, max_level: u8) -> IVec3 {
 /// Pure over the snapshot — safe to run off-thread.
 #[cfg(test)]
 fn plan_epoch(tree: &LodTree, config: &LodConfig, anchor: DVec3) -> Option<Epoch> {
-    plan_epoch_snapshot(&tree.leaves, &tree.sent_masks, config, anchor, None, true)
+    plan_epoch_snapshot(
+        &tree.leaves,
+        &tree.sent_masks,
+        config,
+        anchor,
+        None,
+        EPOCH_MAX_SPLITS,
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -406,29 +546,45 @@ fn plan_epoch_snapshot(
     config: &LodConfig,
     anchor: DVec3,
     provider: Option<&(dyn Fn(ChunkKey) -> Vec<CsgOp> + Send + Sync)>,
-    allow_splits: bool,
+    split_cap: usize,
 ) -> Option<Epoch> {
-    let mut splits: Vec<ChunkKey> = leaves
+    // Deep splits: each wanted leaf is replaced by its full field-wanted
+    // descendant set in one transition — flying into a region goes
+    // straight to the target LOD; the intermediate rungs are never
+    // generated. Nearest-first, budgeted by NEW CHUNK COUNT (a deep split
+    // near the camera can be large): the chunk the player stands in
+    // always converges first.
+    fn descend(config: &LodConfig, anchor: DVec3, k: ChunkKey, out: &mut Vec<ChunkKey>) {
+        if split_wanted(config, anchor, k) {
+            for c in k.children() {
+                descend(config, anchor, c, out);
+            }
+        } else {
+            out.push(k);
+        }
+    }
+    let mut wanted: Vec<ChunkKey> = leaves
         .iter()
         .filter(|l| split_wanted(config, anchor, **l))
         .copied()
         .collect();
-    // Nearest-first, capped: with post-state masks a cap only slows
-    // refinement (the fixpoint keeps every intermediate config seam-legal),
-    // and it bounds both the planning burst and the per-epoch GPU load.
-    splits.sort_by(|a, b| {
-        aabb_distance(anchor, *a)
-            .total_cmp(&aabb_distance(anchor, *b))
-    });
-    // Big deficits (initial load, teleport) get big epochs: serialized
-    // epochs with a small cap leave the GPU idle while stragglers finish.
-    let split_cap = if splits.len() > 64 { 128 } else { EPOCH_MAX_SPLITS };
-    splits.truncate(split_cap);
-    // Governor: a bloated tree (fast flight ratchets leaves upward) or a
-    // caller-imposed merge-only phase stops splitting entirely; merges
-    // drain the population and free slab memory.
-    if !allow_splits || leaves.len() > LEAF_SOFT_CAP {
-        splits.clear();
+    wanted.sort_by(|a, b| aabb_distance(anchor, *a).total_cmp(&aabb_distance(anchor, *b)));
+    // Governor: a bloated tree (fast flight ratchets leaves upward)
+    // stops splitting; merges drain the population and free slab memory.
+    if leaves.len() > LEAF_SOFT_CAP {
+        wanted.clear();
+    }
+    let chunk_budget = split_cap * 8;
+    let mut splits: Vec<(ChunkKey, Vec<ChunkKey>)> = Vec::new();
+    let mut budget_used = 0usize;
+    for p in wanted {
+        if budget_used >= chunk_budget {
+            break;
+        }
+        let mut descendants = Vec::new();
+        descend(config, anchor, p, &mut descendants);
+        budget_used += descendants.len();
+        splits.push((p, descendants));
     }
 
     let mut sibling_count: HashMap<ChunkKey, u8> = HashMap::new();
@@ -460,27 +616,28 @@ fn plan_epoch_snapshot(
     loop {
         let post = PostState::plan(leaves, &splits, &merges);
         let mut forced: Vec<ChunkKey> = Vec::new();
-        for p in &splits {
-            let child_level = p.level - 1;
-            for dz in -1..=1 {
-                for dy in -1..=1 {
-                    for dx in -1..=1 {
-                        if dx == 0 && dy == 0 && dz == 0 {
-                            continue;
-                        }
-                        let n = ChunkKey::new(p.level, p.pos + IVec3::new(dx, dy, dz));
-                        let Some(l) = post.covering_level(config.max_level, n) else {
-                            continue;
-                        };
-                        if l <= child_level + 1 {
-                            continue;
-                        }
-                        let mut k = n;
-                        while k.level < l {
-                            k = k.parent();
-                        }
-                        if !splits.contains(&k) && !forced.contains(&k) {
-                            forced.push(k);
+        for (_, descendants) in &splits {
+            for d in descendants {
+                for dz in -1..=1 {
+                    for dy in -1..=1 {
+                        for dx in -1..=1 {
+                            if dx == 0 && dy == 0 && dz == 0 {
+                                continue;
+                            }
+                            let n = ChunkKey::new(d.level, d.pos + IVec3::new(dx, dy, dz));
+                            let Some(l) = post.covering_level(config.max_level, n) else {
+                                continue;
+                            };
+                            if l <= d.level + 1 {
+                                continue;
+                            }
+                            let mut k = n;
+                            while k.level < l {
+                                k = k.parent();
+                            }
+                            if !forced.contains(&k) && !splits.iter().any(|(p, _)| *p == k) {
+                                forced.push(k);
+                            }
                         }
                     }
                 }
@@ -490,9 +647,12 @@ fn plan_epoch_snapshot(
             break;
         }
         // A forced split overrides any merge that involves the same
-        // region (as the merge parent or one of its children).
+        // region (as the merge parent or one of its children). Forced
+        // splits are single-level (the field did not ask for them).
         merges.retain(|m| !forced.iter().any(|f| *m == *f || *m == f.parent()));
-        splits.extend(forced);
+        for k in forced {
+            splits.push((k, k.children().to_vec()));
+        }
     }
 
     // ±1 veto for merges: coarsening waits until the neighborhood can
@@ -532,14 +692,13 @@ fn plan_epoch_snapshot(
         waits: HashMap::new(),
         to_request: Vec::new(),
     };
-    for p in splits {
-        let children = p.children();
-        for c in children {
-            let m = post.seam_mask(config.max_level, c);
-            epoch.waits.insert(c, m);
-            epoch.to_request.push((c, m, false, ops_for(c)));
+    for (p, descendants) in splits {
+        for c in &descendants {
+            let m = post.seam_mask(config.max_level, *c);
+            epoch.waits.insert(*c, m);
+            epoch.to_request.push((*c, m, false, ops_for(*c)));
         }
-        epoch.splits.push((p, children));
+        epoch.splits.push((p, descendants));
     }
     for p in merges {
         let m = post.seam_mask(config.max_level, p);
@@ -554,7 +713,13 @@ fn plan_epoch_snapshot(
     // keys each, descending only into touching subtrees) — an all-leaves
     // scan is an O(leaves × changes) planning burst.
     let mut candidates: HashSet<ChunkKey> = HashSet::new();
-    for (r, _) in epoch.splits.iter().chain(epoch.merges.iter()) {
+    let changed_regions: Vec<ChunkKey> = epoch
+        .splits
+        .iter()
+        .map(|(p, _)| *p)
+        .chain(epoch.merges.iter().map(|(p, _)| *p))
+        .collect();
+    for r in &changed_regions {
         for dz in -1..=1 {
             for dy in -1..=1 {
                 for dx in -1..=1 {
@@ -661,6 +826,59 @@ fn lod_tick(
         tree.ready.insert(key, mask);
     }
 
+    // 1b. Cold start: an empty tree bootstraps through genesis — the
+    //    converged configuration generates hidden and reveals in one
+    //    atomic commit. No intermediate LODs are generated at all, and
+    //    the screen goes "loading -> world" instead of morphing through
+    //    refinement rungs.
+    if tree.leaves.is_empty() || tree.genesis.is_some() || tree.genesis_planning.is_some() {
+        if let Some(task) = &mut tree.genesis_planning {
+            if let Some(plan) = bevy::tasks::block_on(bevy::tasks::futures_lite::future::poll_once(task))
+            {
+                tree.genesis_planning = None;
+                tree.genesis = Some(plan);
+            }
+        } else if let Some(mut plan) = tree.genesis.take() {
+            let n = plan.to_request.len().min(GENESIS_REQUEST_BUDGET);
+            for (key, mask, _, ops) in plan.to_request.drain(..n) {
+                // Every genesis chunk's mask comes from the one final
+                // configuration, so any subset shown together is
+                // seam-consistent: stream each in the moment it is
+                // drawable. Requests are nearest-first, so the chunk the
+                // player stands in appears first and the world grows
+                // outward.
+                queue.push(ChunkCommand::Request {
+                    key,
+                    show_on_ready: true,
+                    hold: false,
+                    ops,
+                    face_mask: mask,
+                });
+            }
+            let done = plan.to_request.is_empty()
+                && plan
+                    .waits
+                    .iter()
+                    .all(|(k, m)| matches!(tree.ready.get(k), Some(&r) if r == *m || r == u32::MAX));
+            if done {
+                tree.top_cells = plan.top_cells;
+                tree.leaves = plan.leaves;
+                tree.sent_masks = plan.sent_masks;
+                tree.replan_needed = true;
+                info!("genesis: world revealed ({} chunks)", tree.leaves.len());
+            } else {
+                tree.genesis = Some(plan);
+            }
+        } else {
+            let config = config.clone();
+            let provider = ops_provider.0.clone();
+            tree.genesis_planning = Some(bevy::tasks::AsyncComputeTaskPool::get().spawn(
+                async move { plan_genesis(&config, anchor, provider.as_deref()) },
+            ));
+        }
+        return;
+    }
+
     // 2. Top-level ring maintenance. Additions are purely additive (their
     //    faces are equal-level or unstreamed) and show as soon as ready.
     let top_edge = ChunkKey::new(config.max_level, IVec3::ZERO).edge_m();
@@ -717,9 +935,14 @@ fn lod_tick(
             let sent_masks = tree.sent_masks.clone();
             let config = config.clone();
             let provider = ops_provider.0.clone();
-            let allow_splits = tree
+            let split_cap = if tree
                 .split_cooldown_until
-                .is_none_or(|until| std::time::Instant::now() >= until);
+                .is_none_or(|until| std::time::Instant::now() >= until)
+            {
+                EPOCH_MAX_SPLITS
+            } else {
+                0
+            };
             tree.planning = Some(bevy::tasks::AsyncComputeTaskPool::get().spawn(async move {
                 plan_epoch_snapshot(
                     &leaves,
@@ -727,7 +950,7 @@ fn lod_tick(
                     &config,
                     anchor,
                     provider.as_deref(),
-                    allow_splits,
+                    split_cap,
                 )
             }));
         }
@@ -922,9 +1145,20 @@ fn hud_stats(
         .iter()
         .map(|l| format!("L{l}:{}", histo[l]))
         .collect();
-    let epoch = match &tree.epoch {
-        Some(e) => format!("{} waiting", e.waits.len()),
-        None => "idle".to_string(),
+    let epoch = if let Some(g) = &tree.genesis {
+        let ready = g
+            .waits
+            .iter()
+            .filter(|(k, m)| matches!(tree.ready.get(*k), Some(&r) if r == **m || r == u32::MAX))
+            .count();
+        format!("loading {}/{}", ready, g.waits.len())
+    } else if tree.genesis_planning.is_some() {
+        "loading (planning)".to_string()
+    } else {
+        match &tree.epoch {
+            Some(e) => format!("{} waiting", e.waits.len()),
+            None => "idle".to_string(),
+        }
     };
     hud.0.push(format!(
         "leaves: {} [{}] | epoch: {}",
