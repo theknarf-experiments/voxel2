@@ -16,7 +16,8 @@ fn hash3(p: IVec3) -> f32 {
     let mut h: u32 = (p.x as u32)
         .wrapping_mul(374_761_393)
         .wrapping_add((p.y as u32).wrapping_mul(668_265_263))
-        .wrapping_add((p.z as u32).wrapping_mul(2_246_822_519));
+        .wrapping_add((p.z as u32).wrapping_mul(2_246_822_519))
+        .wrapping_add(seed().wrapping_mul(2_654_435_769));
     h = (h ^ (h >> 13)).wrapping_mul(1_274_126_177);
     h ^= h >> 16;
     (h & 0xFF_FFFF) as f32 / 16_777_216.0
@@ -215,11 +216,37 @@ pub fn vegetation_density(ops: &[WorldOp]) -> Option<f32> {
 // --- the process-wide current program ----------------------------------------
 
 static PROGRAM: RwLock<Option<Arc<Vec<WorldOp>>>> = RwLock::new(None);
+static SEED: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+static SUN: RwLock<glam::Vec3> = RwLock::new(DEFAULT_SUN_DIR);
+
+/// The engine-wide fallback sun direction (not normalized; twins normalize).
+pub const DEFAULT_SUN_DIR: glam::Vec3 = glam::Vec3::new(0.55, 0.5, 0.32);
 
 /// Install the level's generator program for the CPU mirrors
 /// ([`crate::terrain_height`], [`crate::mega::mega_sdf`], …).
 pub fn set_program(ops: Vec<WorldOp>) {
     *PROGRAM.write().unwrap() = Some(Arc::new(ops));
+}
+
+/// Install the level seed. Mixed into the generator hashes on both twins;
+/// seed 0 leaves them bit-identical to the unseeded formulas.
+pub fn set_seed(seed: u32) {
+    SEED.store(seed, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// The installed level seed (0 until a level sets one).
+pub fn seed() -> u32 {
+    SEED.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Install the level's sun direction — the single source for the baked
+/// shadow march (CPU + GPU) and blob shadows.
+pub fn set_sun_direction(dir: glam::Vec3) {
+    *SUN.write().unwrap() = dir;
+}
+
+pub fn sun_direction() -> glam::Vec3 {
+    *SUN.read().unwrap()
 }
 
 /// The current program (defaults to [`planet_program`] until a level

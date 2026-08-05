@@ -138,12 +138,27 @@ pub struct RenderStats {
     pub culled: usize,
 }
 
-/// The level's generator program — the data that *is* the world. Set by
-/// the level presenter; extracted every frame so hot-reloads apply. The
-/// density shader interprets it; the mesh (shadow bake) and water
+/// The level's generator program — the data that *is* the world — plus the
+/// seed mixed into its hashes and the sun direction for the shadow bake.
+/// Set by the level presenter; extracted every frame so hot-reloads apply.
+/// The density shader interprets it; the mesh (shadow bake) and water
 /// (shoreline) shaders read its height ops.
-#[derive(Resource, Clone, Default)]
-pub struct WorldProgram(pub std::sync::Arc<Vec<voxel_core::worldop::WorldOp>>);
+#[derive(Resource, Clone)]
+pub struct WorldProgram {
+    pub ops: std::sync::Arc<Vec<voxel_core::worldop::WorldOp>>,
+    pub seed: u32,
+    pub sun_dir: Vec3,
+}
+
+impl Default for WorldProgram {
+    fn default() -> Self {
+        Self {
+            ops: std::sync::Arc::new(Vec::new()),
+            seed: 0,
+            sun_dir: Vec3::new(0.55, 0.5, 0.32),
+        }
+    }
+}
 
 /// Renders a uniform base color modulated by grain, pour/mortar bands,
 /// grime, drip streaks, moss in upward crevices, and optional emissive
@@ -237,6 +252,8 @@ pub struct EnvParams {
     pub sky: Vec4,
     /// Ambient ground rgb | up-ness exponent.
     pub ground: Vec4,
+    /// Sun direction (world space, toward the sun) | unused.
+    pub sun_dir: Vec4,
 }
 
 impl Default for EnvParams {
@@ -248,6 +265,7 @@ impl Default for EnvParams {
             sun: Vec4::new(1.0, 0.96, 0.88, 0.85),
             sky: Vec4::new(0.55, 0.70, 0.95, 0.3),
             ground: Vec4::new(0.25, 0.24, 0.20, 1.0),
+            sun_dir: Vec4::new(0.55, 0.5, 0.32, 0.0),
         }
     }
 }
@@ -262,16 +280,19 @@ pub(crate) struct GpuWorldOp {
     p2: Vec4,
 }
 
-/// The program as bound in shaders. `count = (total, height ops, -, -)`.
+/// The program as bound in shaders.
+/// `count = (total, height ops, seed, -)`, `sun = direction | unused`.
 #[derive(ShaderType, Clone, Default)]
 pub(crate) struct GpuWorldProgram {
     count: UVec4,
+    sun: Vec4,
     #[shader(size(runtime))]
     ops: Vec<GpuWorldOp>,
 }
 
 impl GpuWorldProgram {
-    fn from_ops(ops: &[voxel_core::worldop::WorldOp]) -> Self {
+    fn from_program(program: &WorldProgram) -> Self {
+        let ops = &program.ops;
         let height_ops = ops.iter().filter(|op| op.is_height_op()).count() as u32;
         let mut gpu_ops: Vec<GpuWorldOp> = ops
             .iter()
@@ -287,7 +308,8 @@ impl GpuWorldProgram {
             gpu_ops.push(GpuWorldOp::default());
         }
         Self {
-            count: UVec4::new(ops.len() as u32, height_ops, 0, 0),
+            count: UVec4::new(ops.len() as u32, height_ops, program.seed, 0),
+            sun: program.sun_dir.extend(0.0),
             ops: gpu_ops,
         }
     }
@@ -1132,7 +1154,7 @@ fn plan_frame(
     gpu.draw_uniforms
         .write_buffer(&render_device, &render_queue);
     gpu.program_buffer
-        .set(GpuWorldProgram::from_ops(&program.0));
+        .set(GpuWorldProgram::from_program(&program));
     gpu.program_buffer
         .write_buffer(&render_device, &render_queue);
     gpu.materials_uniform

@@ -612,15 +612,35 @@ impl LevelDef {
 /// Pack the level's generator, install it in the CPU interpreter, and
 /// produce the resource the GPU interpreter extracts — one program, two
 /// twins.
+/// The level's sun direction (its `sun` field, or the engine default when
+/// sunless — the shadow-bake direction must still be defined).
+fn sun_dir(level: &LevelDef) -> Vec3 {
+    level
+        .sun
+        .as_ref()
+        .map(|s| Vec3::from(s.direction))
+        .unwrap_or(Vec3::from(
+            voxel_worldgen::program::DEFAULT_SUN_DIR.to_array(),
+        ))
+        .normalize()
+}
+
 fn apply_generator(level: &LevelDef) -> voxel_render::WorldProgram {
     let ops: Vec<WorldOp> = level.generator.iter().map(GenOpDef::pack).collect();
+    let sun = sun_dir(level);
     voxel_worldgen::program::set_program(ops.clone());
-    voxel_render::WorldProgram(Arc::new(ops))
+    voxel_worldgen::program::set_seed(level.seed as u32);
+    voxel_worldgen::program::set_sun_direction(sun);
+    voxel_render::WorldProgram {
+        ops: Arc::new(ops),
+        seed: level.seed as u32,
+        sun_dir: sun,
+    }
 }
 
 /// The generator's water surface (its `water` op, if present).
 fn water_surface(program: &voxel_render::WorldProgram) -> voxel_render::WaterSurface {
-    match voxel_worldgen::program::water_level(&program.0) {
+    match voxel_worldgen::program::water_level(&program.ops) {
         Some(level) => voxel_render::WaterSurface {
             enabled: true,
             level,
@@ -655,6 +675,7 @@ fn env_params(level: &LevelDef) -> voxel_render::EnvParams {
         sun: v(e.sun_color, e.sun_strength),
         sky: v(e.ambient_sky, e.ambient_strength),
         ground: v(e.ambient_ground, e.ambient_exponent),
+        sun_dir: sun_dir(level).extend(0.0),
     }
 }
 
@@ -896,15 +917,17 @@ fn reload_level(
     info!("level reload: presentation applied");
 
     // Generation-affecting changes: rebuild the streamed world. Water and
-    // vegetation are generator ops, so their toggles ride along.
-    let generator_changed = new.generator != level.generator;
+    // vegetation are generator ops, so their toggles ride along; the sun
+    // direction and seed live in the program header (baked shadows, hashes).
+    let sun_changed = sun_dir(&new) != sun_dir(level.as_ref());
+    let generator_changed =
+        new.generator != level.generator || new.seed != level.seed || sun_changed;
     if generator_changed {
         let program = apply_generator(&new);
         *water = water_surface(&program);
         commands.insert_resource(program);
     }
     let regen = generator_changed
-        || new.seed != level.seed
         || new.ops != level.ops
         || new.lod.max_level != level.lod.max_level
         || new.lod.top_radius != level.lod.top_radius

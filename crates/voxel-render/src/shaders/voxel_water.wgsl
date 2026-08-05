@@ -13,6 +13,11 @@
 struct WaterParams {
     // xz = grid origin (camera-snapped, world meters), y = sea level, w unused.
     origin: vec4<f32>,
+    // Level environment: ambient sky rgb (reflection tint) | unused.
+    sky: vec4<f32>,
+    // Haze rgb | density, and sun-direction tint rgb | power (0 = none).
+    haze: vec4<f32>,
+    haze_tint: vec4<f32>,
 }
 @group(0) @binding(2) var<uniform> params: WaterParams;
 
@@ -25,7 +30,8 @@ struct WorldOp {
     p2: vec4<f32>,
 }
 struct WorldProgram {
-    count: vec4<u32>,
+    count: vec4<u32>, // total ops, height ops, seed, unused
+    sun: vec4<f32>,   // sun direction | unused
     ops: array<WorldOp>,
 }
 @group(0) @binding(3) var<storage, read> prog: WorldProgram;
@@ -106,7 +112,8 @@ fn vertex(@builtin(vertex_index) vid: u32) -> VsOut {
 // --- coarse terrain height (shoreline) ---------------------------------------
 
 fn hash2(p: vec2<i32>) -> f32 {
-    var h: u32 = u32(p.x) * 374761393u + u32(p.y) * 668265263u;
+    var h: u32 = u32(p.x) * 374761393u + u32(p.y) * 668265263u
+        + prog.count.z * 2654435769u;
     h = (h ^ (h >> 13u)) * 1274126177u;
     h = h ^ (h >> 16u);
     return f32(h & 0xFFFFFFu) / 16777216.0;
@@ -165,7 +172,7 @@ fn fragment(in: VsOut) -> @location(0) vec4<f32> {
     let n = normalize(in.normal);
     let dist = length(in.cam_rel);
     let view_dir = normalize(-in.cam_rel);
-    let sun_dir = normalize(vec3<f32>(0.55, 0.5, 0.32));
+    let sun_dir = normalize(prog.sun.xyz);
 
     // Depth-based color from the seabed heightfield below sea level.
     let bed = seabed_height(in.world_xz);
@@ -181,7 +188,7 @@ fn fragment(in: VsOut) -> @location(0) vec4<f32> {
 
     // Fresnel toward the sky, sun glint.
     let fresnel = pow(1.0 - max(dot(n, view_dir), 0.0), 4.0);
-    let sky = vec3<f32>(0.55, 0.70, 0.95);
+    let sky = params.sky.rgb;
     var col = mix(water, sky, fresnel * 0.65);
     let half_dir = normalize(sun_dir + view_dir);
     let spec = pow(max(dot(n, half_dir), 0.0), 240.0) * 1.4;
@@ -190,9 +197,12 @@ fn fragment(in: VsOut) -> @location(0) vec4<f32> {
     // Sun light + haze, matching the terrain shader.
     let nd = max(dot(n, sun_dir), 0.0);
     col *= 0.35 + 0.75 * nd;
-    let haze_amount = 1.0 - exp(-dist * 0.00006);
-    let sun_amount = pow(max(dot(-view_dir, sun_dir), 0.0), 4.0);
-    let haze_color = mix(vec3<f32>(0.62, 0.72, 0.88), vec3<f32>(0.92, 0.85, 0.72), sun_amount);
+    let haze_amount = 1.0 - exp(-dist * params.haze.w);
+    var haze_color = params.haze.rgb;
+    if (params.haze_tint.w > 0.0) {
+        let sun_amount = pow(max(dot(-view_dir, sun_dir), 0.0), params.haze_tint.w);
+        haze_color = mix(haze_color, params.haze_tint.rgb, sun_amount);
+    }
     col = mix(col, haze_color, haze_amount);
     return vec4<f32>(col, 1.0);
 }

@@ -18,7 +18,13 @@ const TILE_M: f32 = 64.0;
 /// Radius (in tiles) around the camera to populate.
 const TILE_RADIUS: i32 = 6;
 const TREE_ATTEMPTS: u32 = 18;
-const WORLD_SEED: u64 = 0xF0857;
+const VEG_SEED_SALT: u64 = 0xF0857;
+
+/// Vegetation seed: the engine salt mixed with the level seed (via the
+/// installed generator program), so different levels grow different woods.
+fn world_seed() -> u64 {
+    VEG_SEED_SALT ^ (voxel_worldgen::program::seed() as u64)
+}
 const VEG_LAYER_ID: u64 = 0x7EE5;
 
 const GRASS_TILE_M: f32 = 16.0;
@@ -284,7 +290,7 @@ fn stream_grass(
 
 fn grass_tile(tile: IVec2) -> Vec<voxel_render::GrassInstance> {
     let mut rng = Rng::new(chunk_seed(
-        WORLD_SEED,
+        world_seed(),
         VEG_LAYER_ID ^ 0x6A55,
         IVec3::new(tile.x, 1, tile.y),
     ));
@@ -609,7 +615,7 @@ struct TreeInstance {
 
 fn tile_trees(tile: IVec2) -> Vec<TreeInstance> {
     let mut rng = Rng::new(chunk_seed(
-        WORLD_SEED,
+        world_seed(),
         VEG_LAYER_ID,
         IVec3::new(tile.x, 0, tile.y),
     ));
@@ -677,7 +683,8 @@ fn spawn_tile(commands: &mut Commands, assets: &TreeAssets, tile: IVec2) -> Vec<
         // Grounding blob shadow, stretched along the sun direction and
         // offset opposite it. Terrain-conforming shadows are future work;
         // on gentle tree-bearing slopes a flat disc reads fine.
-        let sun_xz = Vec2::new(0.55, 0.32).normalize();
+        let sun = voxel_worldgen::program::sun_direction();
+        let sun_xz = Vec2::new(sun.x, sun.z).normalize_or(Vec2::X);
         entities.push(
             commands
                 .spawn((
@@ -701,7 +708,7 @@ fn spawn_tile(commands: &mut Commands, assets: &TreeAssets, tile: IVec2) -> Vec<
     // A few boulders per tile, preferring rougher ground; any altitude
     // below the snow line.
     let mut rng = Rng::new(chunk_seed(
-        WORLD_SEED,
+        world_seed(),
         VEG_LAYER_ID ^ 0x0C4,
         IVec3::new(tile.x, 2, tile.y),
     ));

@@ -47,6 +47,9 @@ const SEA_SNAP: f64 = 64.0;
 #[derive(ShaderType, Clone, Copy, Default)]
 struct WaterParams {
     origin: Vec4,
+    sky: Vec4,
+    haze: Vec4,
+    haze_tint: Vec4,
 }
 
 /// Marker entity anchoring the water draw.
@@ -229,6 +232,7 @@ fn prepare_water_bind_group(
     pipeline: Option<Res<WaterPipeline>>,
     camera: Res<ExtractedWaterCamera>,
     surface: Res<WaterSurface>,
+    env: Res<crate::chunks::EnvParams>,
     gpu: Option<Res<crate::chunks::ChunkGpuResources>>,
     pipeline_cache: Res<PipelineCache>,
     render_device: Res<RenderDevice>,
@@ -248,6 +252,9 @@ fn prepare_water_bind_group(
     let oz = (camera.0.z as f64 / SEA_SNAP).floor() * SEA_SNAP;
     res.params.set(WaterParams {
         origin: Vec4::new(ox as f32, surface.level, oz as f32, 0.0),
+        sky: env.sky,
+        haze: env.haze,
+        haze_tint: env.haze_tint,
     });
     res.params.write_buffer(&render_device, &render_queue);
     // The chunk pipeline owns and writes the program buffer each frame.

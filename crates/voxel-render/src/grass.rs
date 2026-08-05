@@ -96,6 +96,7 @@ impl Plugin for GrassPlugin {
             .init_resource::<GrassBuffers>()
             .init_resource::<PendingGrassQueues>()
             .init_resource::<GrassBindGroupRes>()
+            .init_resource::<GrassEnvUniform>()
             .add_render_command::<Opaque3d, DrawGrassCommands>()
             .add_systems(RenderStartup, init_grass_pipeline)
             .add_systems(ExtractSchedule, extract_grass_instances)
@@ -180,6 +181,17 @@ struct GrassPipeline {
 #[derive(Resource, Default)]
 struct GrassBindGroupRes(Option<BindGroup>);
 
+/// Level environment slice for the grass shader (sun + haze).
+#[derive(bevy::render::render_resource::ShaderType, Clone, Copy, Default)]
+struct GrassEnv {
+    sun_dir: Vec4,
+    haze: Vec4,
+    haze_tint: Vec4,
+}
+
+#[derive(Resource, Default)]
+struct GrassEnvUniform(bevy::render::render_resource::UniformBuffer<GrassEnv>);
+
 fn init_grass_pipeline(
     mut commands: Commands,
     render_device: Res<RenderDevice>,
@@ -211,6 +223,7 @@ fn init_grass_pipeline(
             (
                 uniform_buffer::<ViewUniform>(true),
                 uniform_buffer::<GlobalsUniform>(false),
+                uniform_buffer::<GrassEnv>(false), // level sun + haze
             ),
         ),
     );
@@ -335,26 +348,38 @@ impl Specializer<RenderPipeline> for GrassSpecializer {
 #[derive(Default, Deref, DerefMut, Resource)]
 struct PendingGrassQueues(PendingQueues);
 
+#[allow(clippy::too_many_arguments)]
 fn prepare_grass_bind_group(
     view_uniforms: Res<ViewUniforms>,
     globals: Res<GlobalsBuffer>,
     pipeline: Option<Res<GrassPipeline>>,
     pipeline_cache: Res<PipelineCache>,
     render_device: Res<RenderDevice>,
+    render_queue: Res<bevy::render::renderer::RenderQueue>,
+    env: Res<crate::chunks::EnvParams>,
+    mut env_uniform: ResMut<GrassEnvUniform>,
     mut bind_group: ResMut<GrassBindGroupRes>,
 ) {
     let Some(pipeline) = pipeline else {
         return;
     };
-    let (Some(view_binding), Some(globals_binding)) =
-        (view_uniforms.uniforms.binding(), globals.buffer.binding())
-    else {
+    env_uniform.0.set(GrassEnv {
+        sun_dir: env.sun_dir,
+        haze: env.haze,
+        haze_tint: env.haze_tint,
+    });
+    env_uniform.0.write_buffer(&render_device, &render_queue);
+    let (Some(view_binding), Some(globals_binding), Some(env_binding)) = (
+        view_uniforms.uniforms.binding(),
+        globals.buffer.binding(),
+        env_uniform.0.binding(),
+    ) else {
         return;
     };
     bind_group.0 = Some(render_device.create_bind_group(
         "grass_bg",
         &pipeline_cache.get_bind_group_layout(&pipeline.layout),
-        &BindGroupEntries::sequential((view_binding, globals_binding)),
+        &BindGroupEntries::sequential((view_binding, globals_binding, env_binding)),
     ));
 }
 

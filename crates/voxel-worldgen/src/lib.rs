@@ -12,11 +12,12 @@ pub mod ruins;
 
 use glam::Vec2;
 
-/// Mirrors the WGSL `hash2`.
+/// Mirrors the WGSL `hash2` (level seed mixed in; 0 = identity).
 pub(crate) fn hash2(p: glam::IVec2) -> f32 {
     let mut h: u32 = (p.x as u32)
         .wrapping_mul(374_761_393)
-        .wrapping_add((p.y as u32).wrapping_mul(668_265_263));
+        .wrapping_add((p.y as u32).wrapping_mul(668_265_263))
+        .wrapping_add(program::seed().wrapping_mul(2_654_435_769));
     h = (h ^ (h >> 13)).wrapping_mul(1_274_126_177);
     h ^= h >> 16;
     (h & 0xFF_FFFF) as f32 / 16_777_216.0
@@ -75,7 +76,7 @@ pub fn forest_density(xz: Vec2) -> f32 {
 /// heightfield. Mirrors the WGSL bake in voxel_mesh_chunks.wgsl (sun
 /// direction and falloff must stay in sync).
 pub fn sun_shadow(pos: glam::Vec3) -> f32 {
-    let sun = glam::Vec3::new(0.55, 0.5, 0.32).normalize();
+    let sun = program::sun_direction().normalize();
     let mut occ = 0.0f32;
     let mut t = 8.0f32;
     for _ in 0..9 {

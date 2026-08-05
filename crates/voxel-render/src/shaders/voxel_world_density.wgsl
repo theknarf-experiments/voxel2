@@ -51,7 +51,8 @@ struct WorldOp {
     p2: vec4<f32>,
 }
 struct WorldProgram {
-    count: vec4<u32>,
+    count: vec4<u32>, // total ops, height ops, seed, unused
+    sun: vec4<f32>,   // sun direction | unused
     ops: array<WorldOp>,
 }
 @group(0) @binding(3) var<storage, read> prog: WorldProgram;
@@ -78,14 +79,16 @@ fn smin(a: f32, b: f32, k: f32) -> f32 {
 // --- deterministic hashes / noise --------------------------------------------
 
 fn hash2(p: vec2<i32>) -> f32 {
-    var h: u32 = u32(p.x) * 374761393u + u32(p.y) * 668265263u;
+    var h: u32 = u32(p.x) * 374761393u + u32(p.y) * 668265263u
+        + prog.count.z * 2654435769u;
     h = (h ^ (h >> 13u)) * 1274126177u;
     h = h ^ (h >> 16u);
     return f32(h & 0xFFFFFFu) / 16777216.0;
 }
 
 fn hash3(p: vec3<i32>) -> f32 {
-    var h: u32 = u32(p.x) * 374761393u + u32(p.y) * 668265263u + u32(p.z) * 2246822519u;
+    var h: u32 = u32(p.x) * 374761393u + u32(p.y) * 668265263u + u32(p.z) * 2246822519u
+        + prog.count.z * 2654435769u;
     h = (h ^ (h >> 13u)) * 1274126177u;
     h = h ^ (h >> 16u);
     return f32(h & 0xFFFFFFu) / 16777216.0;

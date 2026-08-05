@@ -9,6 +9,14 @@
 @group(0) @binding(0) var<uniform> view: View;
 @group(0) @binding(1) var<uniform> globals: Globals;
 
+// Level environment (sun + haze), matching the terrain shader.
+struct GrassEnv {
+    sun_dir: vec4<f32>,   // toward the sun | unused
+    haze: vec4<f32>,      // rgb | density
+    haze_tint: vec4<f32>, // rgb | power (0 = none)
+}
+@group(0) @binding(2) var<uniform> env: GrassEnv;
+
 struct VsIn {
     // Blade vertex (tuft-local).
     @location(0) pos: vec3<f32>,
@@ -77,10 +85,14 @@ fn vertex(in: VsIn) -> VsOut {
 @fragment
 fn fragment(in: VsOut) -> @location(0) vec4<f32> {
     // Match the terrain's sun + haze so grass sits in the scene.
-    let sun_dir = normalize(vec3<f32>(0.55, 0.5, 0.32));
+    let sun_dir = normalize(env.sun_dir.xyz);
     let lit = in.color * (0.55 + 0.45 * max(sun_dir.y, 0.0));
     let dist = length(in.cam_rel);
-    let haze_amount = 1.0 - exp(-dist * 0.00006);
-    let haze_color = vec3<f32>(0.62, 0.72, 0.88);
+    let haze_amount = 1.0 - exp(-dist * env.haze.w);
+    var haze_color = env.haze.rgb;
+    if (env.haze_tint.w > 0.0) {
+        let sun_amount = pow(max(dot(normalize(in.cam_rel), sun_dir), 0.0), env.haze_tint.w);
+        haze_color = mix(haze_color, env.haze_tint.rgb, sun_amount);
+    }
     return vec4<f32>(mix(lit, haze_color, haze_amount), 1.0);
 }

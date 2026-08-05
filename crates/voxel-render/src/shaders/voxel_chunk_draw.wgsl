@@ -44,6 +44,7 @@ struct EnvParams {
     sun: vec4<f32>,       // rgb | strength
     sky: vec4<f32>,       // ambient sky rgb | ambient strength
     ground: vec4<f32>,    // ambient ground rgb | up exponent
+    sun_dir: vec4<f32>,   // toward the sun | unused
 }
 @group(1) @binding(2) var<uniform> env: EnvParams;
 
@@ -211,7 +212,7 @@ fn fragment(in: VsOut) -> @location(0) vec4<f32> {
     }
 
     // --- lighting: sun (baked-shadowed) + hemispheric ambient ---------------
-    let sun_dir = normalize(vec3<f32>(0.55, 0.5, 0.32));
+    let sun_dir = normalize(env.sun_dir.xyz);
     let nd = max(dot(n, sun_dir), 0.0);
     let up = n.y * 0.5 + 0.5;
     let ambient = mix(env.ground.rgb, env.sky.rgb, pow(up, env.ground.w)) * env.sky.w;
