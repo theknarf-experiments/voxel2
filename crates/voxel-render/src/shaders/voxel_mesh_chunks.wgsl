@@ -309,12 +309,28 @@ fn sn_vertices(@builtin(global_invocation_id) id: vec3<u32>) {
                 i32(floor(f32(c.y) / 2.0)),
                 i32(floor(f32(c.z) / 2.0)),
             );
+            // Search ONLY along axes where this cell is safely interior
+            // (local coord 1..30). Cells at -1/0/31/32 on an axis are the
+            // ones two neighboring chunks both own under different local
+            // coordinates — searching along such an axis gives the two
+            // copies different candidate sets (one side's neighbor falls
+            // outside its sample range) and they weld to different
+            // targets: a crack exactly on the seam. Restricting to
+            // shared-interior axes keeps the weld a pure function of
+            // world position.
+            let free_axis = vec3<bool>(
+                c.x >= 1 && c.x <= 30,
+                c.y >= 1 && c.y <= 30,
+                c.z >= 1 && c.z <= 30,
+            );
             for (var dz = -1; dz <= 1 && snap_failed; dz++) {
+                if (dz != 0 && !free_axis.z) { continue; }
                 for (var dy = -1; dy <= 1 && snap_failed; dy++) {
+                    if (dy != 0 && !free_axis.y) { continue; }
                     for (var dx = -1; dx <= 1 && snap_failed; dx++) {
                         if (dx == 0 && dy == 0 && dz == 0) { continue; }
+                        if (dx != 0 && !free_axis.x) { continue; }
                         let nb = big + vec3<i32>(dx, dy, dz);
-                        // Keep parity samples (base .. base+2) in range.
                         if (any(nb < vec3<i32>(-1)) || any(nb > vec3<i32>(16))) {
                             continue;
                         }

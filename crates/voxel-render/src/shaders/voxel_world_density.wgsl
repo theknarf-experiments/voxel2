@@ -312,17 +312,6 @@ fn apply_csg(d_in: f32, mat_in: u32, p: vec3<f32>) -> vec2<f32> {
     if (params.csg_count > 0u) {
         for (var i = 0u; i < params.csg_count; i++) {
             let op = csg_ops[params.csg_offset + i];
-            // A cut narrower than the sampling resolution cannot carve a
-            // resolvable void — it only punches aliasing pinholes where a
-            // sample happens to land inside it. Skip it at this LOD.
-            // (Adds alias into extra sub-voxel specks, which are
-            // coverage-safe, so they stay.)
-            if ((op.kind & 1u) == 1u) {
-                let feat = min(op.half.x, min(op.half.y, op.half.z));
-                if (feat < 1.5 * params.origin.w) {
-                    continue;
-                }
-            }
             let od = op_sdf(op, p);
             if ((op.kind & 1u) == 0u) {
                 if (op.blend > 0.0) {

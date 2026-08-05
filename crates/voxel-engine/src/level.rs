@@ -1240,6 +1240,7 @@ impl Plugin for LevelPlugin {
 
         let program = apply_generator(&level);
         let water = water_surface(&program);
+        let (ops_provider, surface_cuts) = build_ops_provider(&level);
         app.insert_resource(program)
             .insert_resource(material_table(&level))
             .insert_resource(env_params(&level))
@@ -1255,7 +1256,8 @@ impl Plugin for LevelPlugin {
                 split_k: level.lod.split_k,
                 merge_k: level.lod.merge_k,
             })
-            .insert_resource(build_ops_provider(&level))
+            .insert_resource(ops_provider)
+            .insert_resource(surface_cuts)
             .insert_resource(water)
             .insert_resource(grass_style(&level))
             .insert_resource(level.clone())
@@ -1270,7 +1272,15 @@ impl Plugin for LevelPlugin {
 type OpsSource = Arc<dyn Fn(Vec3, Vec3) -> Vec<CsgOp> + Send + Sync>;
 
 /// Compose the named planning providers into one op source.
-fn build_ops_provider(level: &LevelDef) -> ChunkOpsProvider {
+/// Point/box query for CUT ops (carved voids): spawners consult it so
+/// props never seat on heightfield ground that a cave mouth or doorway
+/// has carved away.
+#[derive(Resource, Default, Clone)]
+pub struct SurfaceCutsQuery(
+    pub Option<Arc<dyn Fn(bevy::math::Vec3, bevy::math::Vec3) -> Vec<CsgOp> + Send + Sync>>,
+);
+
+fn build_ops_provider(level: &LevelDef) -> (ChunkOpsProvider, SurfaceCutsQuery) {
     let seed = level.seed;
     let mut sources: Vec<OpsSource> = Vec::new();
     for def in &level.ops {
@@ -1292,6 +1302,15 @@ fn build_ops_provider(level: &LevelDef) -> ChunkOpsProvider {
                 voxel_worldgen::mega::pockets_ops(seed, chance, min, max)
             })),
             OpsDef::Caves { chance, radius } => sources.push(Arc::new(move |min, max| {
+                // Meter-scale carved voids: served only to chunks that can
+                // resolve them. A per-chunk gate keeps every chunk's op
+                // list internally uniform (a per-op LOD gate in the shader
+                // desynchronizes neighboring LODs and cracks every seam
+                // near a cave); the carve horizon ring this creates is the
+                // same accepted class as the global ops horizon.
+                if max.x - min.x > 140.0 {
+                    return Vec::new();
+                }
                 voxel_worldgen::caves::caves_ops(seed, chance, radius, min, max)
             })),
         }
@@ -1347,9 +1366,19 @@ fn build_ops_provider(level: &LevelDef) -> ChunkOpsProvider {
     }
 
     if sources.is_empty() {
-        return ChunkOpsProvider(None);
+        return (ChunkOpsProvider(None), SurfaceCutsQuery(None));
     }
-    ChunkOpsProvider(Some(Arc::new(move |key: ChunkKey| {
+    let sources = Arc::new(sources);
+    let cut_sources = sources.clone();
+    let cuts = SurfaceCutsQuery(Some(Arc::new(move |min: Vec3, max: Vec3| {
+        let mut ops = Vec::new();
+        for source in cut_sources.iter() {
+            ops.extend(source(min, max));
+        }
+        ops.retain(|op| op.kind & 1 == 1);
+        ops
+    })));
+    let provider = ChunkOpsProvider(Some(Arc::new(move |key: ChunkKey| {
         // Meter-scale features apply on every level whose chunks can show
         // them at visible size: the ops horizon (where the SDF genuinely
         // loses the ops — a hard-cut seam by doctrine) must sit far enough
@@ -1366,11 +1395,12 @@ fn build_ops_provider(level: &LevelDef) -> ChunkOpsProvider {
         let min = key.min_corner_m().as_vec3() - Vec3::splat(pad);
         let max = key.min_corner_m().as_vec3() + Vec3::splat(key.edge_m() as f32 + pad);
         let mut ops = Vec::new();
-        for source in &sources {
+        for source in sources.iter() {
             ops.extend(source(min, max));
         }
         ops
-    })))
+    })));
+    (provider, cuts)
 }
 
 fn setup_level(mut commands: Commands, level: Res<LevelDef>) {
@@ -1530,7 +1560,9 @@ fn reload_level(
         lod.max_level = new.lod.max_level;
         lod.top_radius = new.lod.top_radius;
         lod.top_y = new.lod.top_y;
-        commands.insert_resource(build_ops_provider(&new));
+        let (ops_provider, surface_cuts) = build_ops_provider(&new);
+        commands.insert_resource(ops_provider);
+        commands.insert_resource(surface_cuts);
         rebuild.0 = true;
         info!("level reload: generation changed — rebuilding world");
     }

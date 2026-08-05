@@ -287,7 +287,9 @@ fn fragment(in: VsOut) -> @location(0) vec4<f32> {
             // Failed parity snap (thin feature) — debug-highlighted.
             return vec4<f32>(1.0, 0.0, 0.0, 1.0);
         }
-        let g = 1.0 - clamp(log2(chunk.offset.w), 0.0, 8.0) * 0.1;
+        // Tint per level relative to the finest voxel (0.1 m) so fine
+        // levels are distinguishable too.
+        let g = 1.0 - clamp(log2(chunk.offset.w / 0.1), 0.0, 12.0) * 0.07;
         return vec4<f32>(g, g, g, 1.0);
     }
     let n = normalize(in.normal);

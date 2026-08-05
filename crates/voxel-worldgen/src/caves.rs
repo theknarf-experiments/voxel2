@@ -14,8 +14,12 @@ const CELL_M: f32 = 256.0;
 const CAVE_SEED: u64 = 0xCAFE5;
 /// Steps per worm; with ~0.9 radius spacing this bounds tunnel length.
 const STEPS: u32 = 70;
-/// Conservative worm reach for the cell scan (steps × max step length).
-const REACH_M: f32 = 260.0;
+/// Conservative worm reach for the cell scan. Must dominate the true
+/// worst case (STEPS × max radius × 0.9 step + mouth offset + max
+/// radius ≈ 290 m for the default radius range) — a chunk just past an
+/// undersized reach misses a worm's tail while its neighbor carves it:
+/// an asymmetric-culling crack along their shared face.
+const REACH_M: f32 = 340.0;
 
 /// All cave ops from worms whose cells could reach the box `[min, max]`.
 pub fn caves_ops(seed: u64, chance: f32, radius: [f32; 2], min: Vec3, max: Vec3) -> Vec<CsgOp> {
