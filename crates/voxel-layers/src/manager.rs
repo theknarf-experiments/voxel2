@@ -14,12 +14,13 @@ use crate::layer::{chunk_bounds, chunk_range, Dep, IAabb, Layer};
 
 type ErasedChunk = Arc<dyn Any + Send + Sync>;
 type Slot = Arc<OnceLock<ErasedChunk>>;
-type GenerateFn = Box<dyn Fn(&LayerManager, IVec3) -> ErasedChunk + Send + Sync>;
+type GenerateFn = Box<dyn Fn(&LayerManager, IVec3, u32) -> ErasedChunk + Send + Sync>;
 
 struct LayerEntry {
     name: &'static str,
     stable_id: u64,
     extent: IVec3,
+    levels: u32,
     deps: Vec<Dep>,
     generate: GenerateFn,
 }
@@ -33,13 +34,13 @@ struct LayerEntry {
 pub struct LayerManager {
     world_seed: u64,
     layers: HashMap<TypeId, LayerEntry>,
-    cache: Mutex<HashMap<(TypeId, IVec3), Slot>>,
+    cache: Mutex<HashMap<(TypeId, u32, IVec3), Slot>>,
 }
 
 thread_local! {
     /// Generation stack for cycle detection (a cycle would otherwise
     /// deadlock on the chunk's `OnceLock`).
-    static GEN_STACK: RefCell<Vec<(TypeId, IVec3)>> = const { RefCell::new(Vec::new()) };
+    static GEN_STACK: RefCell<Vec<(TypeId, u32, IVec3)>> = const { RefCell::new(Vec::new()) };
 }
 
 impl LayerManager {
@@ -73,14 +74,19 @@ impl LayerManager {
             extent.cmpge(IVec3::ZERO).all(),
             "chunk_extent must be non-negative"
         );
+        let levels = layer.levels();
+        assert!(levels >= 1, "a layer needs at least one level");
         let arc = Arc::new(layer);
-        let generate: GenerateFn = Box::new(move |mgr, coord| {
+        let gen_arc = arc.clone();
+        let generate: GenerateFn = Box::new(move |mgr, coord, level| {
             let ctx = LayerCtx::<L> {
                 mgr,
                 coord,
+                level,
+                layer: gen_arc.clone(),
                 _layer: PhantomData,
             };
-            Arc::new(arc.generate(&ctx, coord))
+            Arc::new(gen_arc.generate(&ctx, coord))
         });
         let mut id_hash = splitmix64(0xC0FFEE);
         for b in L::NAME.bytes() {
@@ -92,6 +98,7 @@ impl LayerManager {
                 name: L::NAME,
                 stable_id: id_hash,
                 extent,
+                levels,
                 deps,
                 generate,
             },
@@ -102,6 +109,12 @@ impl LayerManager {
     /// that don't exist yet. This is the top-level entry point streaming
     /// code uses.
     pub fn get<L: Layer>(&self, bounds: IAabb) -> LayerView<L> {
+        let final_level = self.entry_of::<L>().levels - 1;
+        self.get_at_level::<L>(bounds, final_level)
+    }
+
+    /// Chunks of `L` at a specific internal level covering `bounds`.
+    pub fn get_at_level<L: Layer>(&self, bounds: IAabb, level: u32) -> LayerView<L> {
         let entry = self.entry_of::<L>();
         let (lo, hi) = chunk_range(entry.extent, bounds);
         let mut chunks = Vec::new();
@@ -109,23 +122,30 @@ impl LayerManager {
             for y in lo.y..=hi.y {
                 for x in lo.x..=hi.x {
                     let coord = IVec3::new(x, y, z);
-                    chunks.push((coord, self.get_chunk::<L>(coord)));
+                    chunks.push((coord, self.get_chunk_at::<L>(coord, level)));
                 }
             }
         }
         LayerView { chunks }
     }
 
-    /// A single chunk of `L`, generating it (and its dependencies) if needed.
+    /// A single final-level chunk of `L`, generating it (and its
+    /// dependencies) if needed.
     pub fn get_chunk<L: Layer>(&self, coord: IVec3) -> Arc<L::Chunk> {
-        let erased = self.get_chunk_erased(TypeId::of::<L>(), coord);
+        let final_level = self.entry_of::<L>().levels - 1;
+        self.get_chunk_at::<L>(coord, final_level)
+    }
+
+    /// A single chunk of `L` at a specific internal level.
+    pub fn get_chunk_at<L: Layer>(&self, coord: IVec3, level: u32) -> Arc<L::Chunk> {
+        let erased = self.get_chunk_erased(TypeId::of::<L>(), coord, level);
         erased
             .downcast::<L::Chunk>()
             .expect("layer chunk type mismatch")
     }
 
-    fn get_chunk_erased(&self, type_id: TypeId, coord: IVec3) -> ErasedChunk {
-        let key = (type_id, coord);
+    fn get_chunk_erased(&self, type_id: TypeId, coord: IVec3, level: u32) -> ErasedChunk {
+        let key = (type_id, level, coord);
         let slot: Slot = {
             let mut cache = self.cache.lock().unwrap();
             cache.entry(key).or_default().clone()
@@ -143,7 +163,7 @@ impl LayerManager {
             stack.borrow_mut().push(key);
         });
         let result = slot
-            .get_or_init(|| (self.layers[&type_id].generate)(self, coord))
+            .get_or_init(|| (self.layers[&type_id].generate)(self, coord, level))
             .clone();
         GEN_STACK.with(|stack| {
             stack.borrow_mut().pop();
@@ -157,9 +177,26 @@ impl LayerManager {
     }
 
     /// Drop every cached chunk. Safe at any quiescent point — everything is
-    /// regenerable. (Finer-grained rolling eviction arrives with streaming.)
+    /// regenerable.
     pub fn evict_all(&self) {
         self.cache.lock().unwrap().clear();
+    }
+
+    /// Rolling eviction: drop cached chunks whose bounds do not intersect
+    /// `keep` (world meters). In-flight chunks (still generating) are
+    /// retained regardless. Returns the number of chunks dropped —
+    /// everything is regenerable, so this is safe at any time.
+    pub fn evict_outside(&self, keep: IAabb) -> usize {
+        let mut cache = self.cache.lock().unwrap();
+        let before = cache.len();
+        cache.retain(|(type_id, _level, coord), slot| {
+            if slot.get().is_none() {
+                return true; // in-flight
+            }
+            let extent = self.layers[type_id].extent;
+            chunk_bounds(extent, *coord).intersects(keep)
+        });
+        before - cache.len()
     }
 
     fn entry_of<L: Layer>(&self) -> &LayerEntry {
@@ -174,14 +211,49 @@ impl LayerManager {
 pub struct LayerCtx<'a, L: Layer> {
     mgr: &'a LayerManager,
     coord: IVec3,
+    level: u32,
+    layer: Arc<L>,
     _layer: PhantomData<L>,
 }
 
 impl<L: Layer> LayerCtx<'_, L> {
-    /// Deterministic seed for this chunk.
+    /// Which internal level is being generated (0-based).
+    pub fn level(&self) -> u32 {
+        self.level
+    }
+
+    /// Read level `level() - 1` chunks of this same layer covering
+    /// `bounds` — the internal-levels contextual pattern. Panics at level
+    /// 0 or when `bounds` exceeds the declared
+    /// [`Layer::level_padding`].
+    pub fn get_self(&self, bounds: IAabb) -> LayerView<L> {
+        assert!(
+            self.level > 0,
+            "layer {:?} level 0 has no previous level to read",
+            L::NAME
+        );
+        let allowed = self
+            .chunk_bounds()
+            .inflate(self.layer.level_padding(self.level));
+        assert!(
+            allowed.contains(bounds),
+            "layer {:?} level {} reads outside its declared level padding: allowed {:?}, requested {:?}",
+            L::NAME,
+            self.level,
+            allowed,
+            bounds
+        );
+        self.mgr.get_at_level::<L>(bounds, self.level - 1)
+    }
+
+    /// Deterministic seed for this chunk (level-distinct).
     pub fn seed(&self) -> u64 {
         let entry = self.mgr.entry_of::<L>();
-        chunk_seed(self.mgr.world_seed, entry.stable_id, self.coord)
+        chunk_seed(
+            self.mgr.world_seed,
+            entry.stable_id ^ (self.level as u64).wrapping_mul(0x9E3779B97F4A7C15),
+            self.coord,
+        )
     }
 
     /// Deterministic RNG for this chunk.

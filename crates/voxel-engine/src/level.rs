@@ -1240,7 +1240,7 @@ impl Plugin for LevelPlugin {
 
         let program = apply_generator(&level);
         let water = water_surface(&program);
-        let (ops_provider, surface_cuts) = build_ops_provider(&level);
+        let (ops_provider, surface_cuts, planning_layers) = build_ops_provider(&level);
         app.insert_resource(program)
             .insert_resource(material_table(&level))
             .insert_resource(env_params(&level))
@@ -1258,13 +1258,15 @@ impl Plugin for LevelPlugin {
             })
             .insert_resource(ops_provider)
             .insert_resource(surface_cuts)
+            .insert_resource(planning_layers)
             .insert_resource(water)
             .insert_resource(grass_style(&level))
             .insert_resource(level.clone())
             .add_plugins(VoxelEnginePlugin { vegetation: true })
             .add_plugins(voxel_render::WaterPlugin)
             .add_systems(Startup, setup_level)
-            .add_systems(Update, (autopilot, walk_mode).chain());
+            .add_systems(Update, (autopilot, walk_mode).chain())
+            .add_systems(Update, roll_planning_caches);
     }
 }
 
@@ -1280,9 +1282,15 @@ pub struct SurfaceCutsQuery(
     pub Option<Arc<dyn Fn(bevy::math::Vec3, bevy::math::Vec3) -> Vec<CsgOp> + Send + Sync>>,
 );
 
-fn build_ops_provider(level: &LevelDef) -> (ChunkOpsProvider, SurfaceCutsQuery) {
+/// Layer managers backing the ops providers, exposed so the engine can
+/// roll their caches with the camera (they grow unboundedly otherwise).
+#[derive(Resource, Default, Clone)]
+pub struct PlanningLayers(pub Vec<Arc<voxel_layers::LayerManager>>);
+
+fn build_ops_provider(level: &LevelDef) -> (ChunkOpsProvider, SurfaceCutsQuery, PlanningLayers) {
     let seed = level.seed;
     let mut sources: Vec<OpsSource> = Vec::new();
+    let mut managers: Vec<Arc<voxel_layers::LayerManager>> = Vec::new();
     for def in &level.ops {
         match *def {
             OpsDef::Ruins { chance } => sources.push(Arc::new(move |min, max| {
@@ -1294,6 +1302,7 @@ fn build_ops_provider(level: &LevelDef) -> (ChunkOpsProvider, SurfaceCutsQuery) 
                     site_chance,
                     reach,
                 ));
+                managers.push(layers.clone());
                 sources.push(Arc::new(move |min, max| {
                     voxel_worldgen::roads::road_ops(&layers, min, max)
                 }));
@@ -1366,7 +1375,11 @@ fn build_ops_provider(level: &LevelDef) -> (ChunkOpsProvider, SurfaceCutsQuery) 
     }
 
     if sources.is_empty() {
-        return (ChunkOpsProvider(None), SurfaceCutsQuery(None));
+        return (
+            ChunkOpsProvider(None),
+            SurfaceCutsQuery(None),
+            PlanningLayers(managers),
+        );
     }
     let sources = Arc::new(sources);
     let cut_sources = sources.clone();
@@ -1400,7 +1413,35 @@ fn build_ops_provider(level: &LevelDef) -> (ChunkOpsProvider, SurfaceCutsQuery) 
         }
         ops
     })));
-    (provider, cuts)
+    (provider, cuts, PlanningLayers(managers))
+}
+
+/// Rolling eviction for the planning-layer caches: every few seconds,
+/// drop cached layer chunks far outside the region any chunk request can
+/// reach (ops horizon + the widest layer padding). Everything is
+/// regenerable, so the only cost of evicting too eagerly is regeneration.
+fn roll_planning_caches(
+    layers: Res<PlanningLayers>,
+    time: Res<Time>,
+    mut last: Local<f32>,
+    cameras: Query<&Transform, (With<Camera3d>, Without<voxel_render::HelperCamera>)>,
+) {
+    if time.elapsed_secs() - *last < 5.0 {
+        return;
+    }
+    *last = time.elapsed_secs();
+    let Ok(camera) = cameras.single() else {
+        return;
+    };
+    let p = camera.translation;
+    const KEEP_M: i32 = 8_000;
+    let keep = voxel_layers::IAabb::new(
+        bevy::math::IVec3::new(p.x as i32 - KEEP_M, i32::MIN / 2, p.z as i32 - KEEP_M),
+        bevy::math::IVec3::new(p.x as i32 + KEEP_M, i32::MAX / 2, p.z as i32 + KEEP_M),
+    );
+    for mgr in &layers.0 {
+        mgr.evict_outside(keep);
+    }
 }
 
 fn setup_level(mut commands: Commands, level: Res<LevelDef>) {
@@ -1560,9 +1601,10 @@ fn reload_level(
         lod.max_level = new.lod.max_level;
         lod.top_radius = new.lod.top_radius;
         lod.top_y = new.lod.top_y;
-        let (ops_provider, surface_cuts) = build_ops_provider(&new);
+        let (ops_provider, surface_cuts, planning_layers) = build_ops_provider(&new);
         commands.insert_resource(ops_provider);
         commands.insert_resource(surface_cuts);
+        commands.insert_resource(planning_layers);
         rebuild.0 = true;
         info!("level reload: generation changed — rebuilding world");
     }

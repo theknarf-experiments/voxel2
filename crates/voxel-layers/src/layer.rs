@@ -39,6 +39,11 @@ impl IAabb {
     pub fn contains(self, other: IAabb) -> bool {
         self.min.cmple(other.min).all() && self.max.cmpge(other.max).all()
     }
+
+    /// Half-open interval overlap on every axis.
+    pub fn intersects(self, other: IAabb) -> bool {
+        self.min.cmplt(other.max).all() && other.min.cmplt(self.max).all()
+    }
 }
 
 /// A declared dependency on a lower layer.
@@ -81,8 +86,25 @@ pub trait Layer: Sized + Send + Sync + 'static {
         Vec::new()
     }
 
-    /// Produce the chunk at `coord`. May read dependency layers through
-    /// `ctx` (within declared padding) and derive randomness from
+    /// Internal levels (LayerProcGen pattern): multiple generation passes
+    /// within one layer, sharing the chunk grid. Level `l` chunks may read
+    /// level `l-1` chunks of the same layer through
+    /// [`LayerCtx::get_self`] within [`Layer::level_padding`]. Outside
+    /// consumers (and inter-layer dependencies) always see the final
+    /// level. Default: a single level.
+    fn levels(&self) -> u32 {
+        1
+    }
+
+    /// Padded reach (meters) of level `level`'s reads into level
+    /// `level - 1` of the same layer.
+    fn level_padding(&self, _level: u32) -> IVec3 {
+        IVec3::ZERO
+    }
+
+    /// Produce the chunk at `coord` for `ctx.level()`. May read dependency
+    /// layers through `ctx` (within declared padding), the previous level
+    /// of this layer through `ctx.get_self`, and derive randomness from
     /// `ctx.seed()`/`ctx.rng()` — nothing else. That discipline is what
     /// makes generation deterministic under any thread count or order.
     fn generate(&self, ctx: &LayerCtx<'_, Self>, coord: IVec3) -> Self::Chunk;
