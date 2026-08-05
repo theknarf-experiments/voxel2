@@ -280,6 +280,17 @@ const ABORT_COOLDOWN: std::time::Duration = std::time::Duration::from_secs(5);
 /// the pipeline forever.
 const EPOCH_STALL_LIMIT: std::time::Duration = std::time::Duration::from_secs(20);
 
+/// Live epoch-machine probe for remote debugging (voxel/status).
+#[derive(Resource, Default, Clone)]
+pub struct StreamProbe {
+    pub leaves: usize,
+    pub planning: bool,
+    pub replan_needed: bool,
+    pub epoch_waits: usize,
+    pub epoch_to_request: usize,
+    pub epoch_age_s: f32,
+}
+
 #[derive(Resource, Default)]
 struct LodTree {
     /// Currently-shown chunks. Changes only at epoch commit (plus additive
@@ -310,6 +321,11 @@ struct LodTree {
     replan_needed: bool,
     /// Merge-only planning until this instant (set on epoch abort).
     split_cooldown_until: Option<std::time::Instant>,
+    /// The in-flight plan was spawned with splits suppressed (cooldown).
+    /// An empty result then means "try again later", not "converged" —
+    /// without this the machine idles at a coarse tree until the camera
+    /// happens to move 48 m (observed live after a teleport abort).
+    plan_split_capped: bool,
 }
 
 /// The shown configuration a plan would produce: current leaves minus
@@ -504,6 +520,7 @@ impl Plugin for VoxelStreamingPlugin {
             .init_resource::<ChunkOpsProvider>()
             .init_resource::<StreamingRebuild>()
             .init_resource::<LodTree>()
+            .init_resource::<StreamProbe>()
             .add_systems(Update, (lod_tick, hud_stats));
     }
 }
@@ -780,6 +797,7 @@ fn lod_tick(
     ready_rx: Res<ChunkReadyChannel>,
     mut field: ResMut<voxel_render::FieldParams>,
     stats: Res<SharedRenderStats>,
+    mut probe: ResMut<StreamProbe>,
     cameras: Query<&Transform, (With<Camera3d>, Without<voxel_render::HelperCamera>)>,
 ) {
     let Ok(camera) = cameras.single() else {
@@ -928,6 +946,9 @@ fn lod_tick(
             {
                 tree.planning = None;
                 tree.epoch = result;
+                if tree.epoch.is_none() && tree.plan_split_capped {
+                    tree.replan_needed = true;
+                }
             }
         } else if tree.replan_needed {
             tree.replan_needed = false;
@@ -943,6 +964,7 @@ fn lod_tick(
             } else {
                 0
             };
+            tree.plan_split_capped = split_cap == 0;
             tree.planning = Some(bevy::tasks::AsyncComputeTaskPool::get().spawn(async move {
                 plan_epoch_snapshot(
                     &leaves,
@@ -1049,6 +1071,16 @@ fn lod_tick(
             }
         }
     }
+
+    probe.leaves = tree.leaves.len();
+    probe.planning = tree.planning.is_some();
+    probe.replan_needed = tree.replan_needed;
+    probe.epoch_waits = tree.epoch.as_ref().map_or(0, |e| e.waits.len());
+    probe.epoch_to_request = tree.epoch.as_ref().map_or(0, |e| e.to_request.len());
+    probe.epoch_age_s = tree
+        .epoch
+        .as_ref()
+        .map_or(0.0, |e| e.born.elapsed().as_secs_f32());
 
     if std::env::var("VOXEL_LOG_FPS").is_ok() {
         let ms = tick_start.elapsed().as_secs_f32() * 1000.0;

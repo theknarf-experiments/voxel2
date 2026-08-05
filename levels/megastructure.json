@@ -1,31 +1,62 @@
 {
   "name": "Megastructure",
   "seed": 0,
-  "clear_color": [0.035, 0.045, 0.06],
+  "clear_color": [
+    0.035,
+    0.045,
+    0.06
+  ],
   "ambient": {
-    "color": [0.6, 0.7, 0.9],
+    "color": [
+      0.6,
+      0.7,
+      0.9
+    ],
     "brightness": 120.0
   },
   "lod": {
     "max_level": 8,
     "top_radius": 2,
-    "top_y": [-3, 3],
+    "top_y": [
+      -3,
+      3
+    ],
     "split_k": 1.6,
     "merge_k": 2.1
   },
   "camera": {
-    "start": [11.0, 12.0, 7.0],
-    "look": [0.7, 0.05, 0.7],
+    "start": [
+      11.0,
+      12.0,
+      7.0
+    ],
+    "look": [
+      0.7,
+      0.05,
+      0.7
+    ],
     "walk_speed": 8.0,
     "run_speed": 60.0
   },
   "environment": {
-    "haze_color": [0.035, 0.045, 0.06],
+    "haze_color": [
+      0.035,
+      0.045,
+      0.06
+    ],
     "haze_density": 0.0035,
     "haze_tint_power": 0.0,
     "sun_strength": 0.0,
-    "ambient_sky": [0.75, 0.78, 0.82],
-    "ambient_ground": [0.21, 0.23, 0.26],
+    "ambient_sky": [
+      0.75,
+      0.78,
+      0.82
+    ],
+    "ambient_ground": [
+      0.21,
+      0.23,
+      0.26
+    ],
     "ambient_strength": 0.67,
     "ambient_exponent": 2.0
   },
@@ -34,29 +65,102 @@
     {
       "type": "surface",
       "id": 2,
-      "base": [0.42, 0.42, 0.43],
+      "base": [
+        0.42,
+        0.42,
+        0.43
+      ],
       "grain": 0.35,
-      "band": { "freq": 0.22, "amp": 0.18, "lo": 0.1, "hi": 0.9, "warp": 0.4 },
-      "grime": { "tint": [0.55, 0.58, 0.55], "amount": 1.0 },
+      "band": {
+        "freq": 0.22,
+        "amp": 0.18,
+        "lo": 0.1,
+        "hi": 0.9,
+        "warp": 0.4
+      },
+      "grime": {
+        "tint": [
+          0.55,
+          0.58,
+          0.55
+        ],
+        "amount": 1.0
+      },
       "streaks": 0.35,
-      "emissive": { "color": [1.3, 1.25, 1.05], "intensity": 1.0, "spacing": 13.0, "level_spacing": 22.0, "chance": 0.65, "glow": 0.077 },
+      "emissive": {
+        "color": [
+          1.3,
+          1.25,
+          1.05
+        ],
+        "intensity": 1.0,
+        "spacing": 13.0,
+        "level_spacing": 22.0,
+        "chance": 0.65,
+        "glow": 0.077
+      },
       "detail_fade": 0.004
     }
   ],
   "generator": [
-    { "type": "shafts_xz", "spacing": 288.0, "jitter": 90.0, "radius": [24.0, 30.0] },
-    { "type": "coarse_solid", "material": 2 },
-    { "type": "lattice_y", "spacing": 44.0 },
-    { "type": "slabs_y", "half_thickness": 1.5, "material": 2 },
-    { "type": "grid_holes", "cell": 16.0, "chance": 0.16, "half": [7.0, 4.0, 7.0] },
-    { "type": "pillars_xz", "spacing": 34.0, "jitter": 8.0, "girth": [1.6, 2.2], "material": 2 },
+    {
+      "type": "shafts_xz",
+      "spacing": 288.0,
+      "jitter": 90.0,
+      "radius": [
+        24.0,
+        30.0
+      ]
+    },
+    {
+      "type": "coarse_solid",
+      "material": 2
+    },
+    {
+      "type": "lattice_y",
+      "spacing": 44.0
+    },
+    {
+      "type": "slabs_y",
+      "half_thickness": 1.5,
+      "material": 2
+    },
+    {
+      "type": "grid_holes",
+      "cell": 16.0,
+      "chance": 0.16,
+      "half": [
+        7.0,
+        4.0,
+        7.0
+      ]
+    },
+    {
+      "type": "pillars_xz",
+      "spacing": 34.0,
+      "jitter": 8.0,
+      "girth": [
+        1.6,
+        2.2
+      ],
+      "material": 2
+    },
     {
       "type": "walls",
       "axis": "x",
       "spacing": 104.0,
       "half_thickness": 1.2,
       "chance": 0.45,
-      "door": { "cell": 22.0, "chance": 0.5, "half": [4.0, 14.0, 5.0], "y": 12.0 },
+      "door": {
+        "cell": 22.0,
+        "chance": 0.5,
+        "half": [
+          4.0,
+          14.0,
+          5.0
+        ],
+        "y": 12.0
+      },
       "material": 2
     },
     {
@@ -66,13 +170,65 @@
       "half_thickness": 1.2,
       "chance": 0.45,
       "salt": 501,
-      "door": { "cell": 22.0, "chance": 0.5, "half": [4.0, 14.0, 5.0], "y": 12.0, "salt": 77 },
+      "door": {
+        "cell": 22.0,
+        "chance": 0.5,
+        "half": [
+          4.0,
+          14.0,
+          5.0
+        ],
+        "y": 12.0,
+        "salt": 77
+      },
       "material": 2
     },
-    { "type": "shafts_cut" },
-    { "type": "beams", "every": 3, "half_width": 2.2, "y": 1.0, "half_height": 0.7, "reach": 6.0, "material": 2 }
+    {
+      "type": "shafts_cut"
+    },
+    {
+      "type": "beams",
+      "every": 3,
+      "half_width": 2.2,
+      "y": 1.0,
+      "half_height": 0.7,
+      "reach": 6.0,
+      "material": 2
+    }
   ],
-  "ops": [
-    { "type": "pockets", "chance": 0.45 }
+  "stack": [
+    {
+      "kind": "scatter3",
+      "name": "sites:pockets",
+      "chance": 0.45,
+      "snap_y_m": 44.0
+    },
+    {
+      "kind": "emit",
+      "name": "pockets",
+      "source": "sites:pockets",
+      "cell_y_m": 132,
+      "pad_m": 0.0,
+      "emit": {
+        "type": "site_recipe3",
+        "recipe": "pocket",
+        "marker": "pocket"
+      }
+    },
+    {
+      "kind": "connect3",
+      "name": "links",
+      "source": "sites:pockets"
+    },
+    {
+      "kind": "emit",
+      "name": "tubes",
+      "source": "links",
+      "cell_y_m": 132,
+      "pad_m": 464.0,
+      "emit": {
+        "type": "tubes"
+      }
+    }
   ]
 }

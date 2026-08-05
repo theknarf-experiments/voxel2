@@ -126,6 +126,163 @@ impl Layer for ScatterSites {
     }
 }
 
+/// Configuration of a `scatter3` stack layer: volumetric sites for
+/// interior worlds (habitation pockets in a megastructure). No terrain
+/// filters — interiors have no heightfield.
+#[derive(Clone, Debug)]
+pub struct Scatter3Cfg {
+    /// Cell extent: (xz, y) meters.
+    pub cell_m: i32,
+    pub cell_y_m: i32,
+    pub chance: f32,
+    pub margin_m: f32,
+    /// Snap site y to multiples of this (structural floor lattice);
+    /// 0 = no snapping.
+    pub snap_y_m: f32,
+}
+
+impl Default for Scatter3Cfg {
+    fn default() -> Self {
+        Self {
+            cell_m: 128,
+            cell_y_m: 132,
+            chance: 0.45,
+            margin_m: 24.0,
+            snap_y_m: 0.0,
+        }
+    }
+}
+
+#[derive(Clone)]
+pub struct Scatter3Sites {
+    pub cfg: Scatter3Cfg,
+}
+
+pub struct Sites3Chunk {
+    pub sites: Vec<Vec3>,
+}
+
+impl Layer for Scatter3Sites {
+    type Chunk = Sites3Chunk;
+    const NAME: &'static str = "stack/scatter3";
+
+    fn chunk_extent(&self) -> IVec3 {
+        IVec3::new(self.cfg.cell_m, self.cfg.cell_y_m, self.cfg.cell_m)
+    }
+
+    fn generate(&self, ctx: &LayerCtx<'_, Self>, _coord: IVec3) -> Sites3Chunk {
+        let mut rng = ctx.rng();
+        if rng.next_f32() > self.cfg.chance {
+            return Sites3Chunk { sites: Vec::new() };
+        }
+        let b = ctx.chunk_bounds();
+        let m = self.cfg.margin_m.min(self.cfg.cell_m as f32 * 0.45);
+        let x = b.min.x as f32 + m + rng.next_f32() * (self.cfg.cell_m as f32 - 2.0 * m);
+        let z = b.min.z as f32 + m + rng.next_f32() * (self.cfg.cell_m as f32 - 2.0 * m);
+        let mut y = b.min.y as f32 + rng.next_f32() * self.cfg.cell_y_m as f32;
+        if self.cfg.snap_y_m > 0.0 {
+            y = (y / self.cfg.snap_y_m).round() * self.cfg.snap_y_m;
+        }
+        Sites3Chunk {
+            sites: vec![Vec3::new(x, y, z)],
+        }
+    }
+}
+
+/// Configuration of a `connect3` stack layer: orthogonal (axis-aligned)
+/// links between volumetric sites — walkway tubes in a megastructure.
+#[derive(Clone, Debug)]
+pub struct Connect3Cfg {
+    pub source: String,
+    pub reach_m: f32,
+}
+
+impl Default for Connect3Cfg {
+    fn default() -> Self {
+        Self {
+            source: String::new(),
+            reach_m: 400.0,
+        }
+    }
+}
+
+#[derive(Clone)]
+pub struct Connect3Paths {
+    pub cfg: Connect3Cfg,
+    pub cell_m: i32,
+    pub cell_y_m: i32,
+}
+
+pub struct Paths3Chunk {
+    /// Orthogonal waypoint chains (every segment varies along one axis).
+    pub paths: Vec<Vec<Vec3>>,
+}
+
+impl Layer for Connect3Paths {
+    type Chunk = Paths3Chunk;
+    const NAME: &'static str = "stack/connect3";
+
+    fn chunk_extent(&self) -> IVec3 {
+        IVec3::new(self.cell_m, self.cell_y_m, self.cell_m)
+    }
+
+    fn dependencies(&self) -> Vec<voxel_layers::Dep> {
+        let pad = self.cfg.reach_m as i32;
+        vec![voxel_layers::Dep::named(&self.cfg.source, IVec3::splat(pad))]
+    }
+
+    fn generate(&self, ctx: &LayerCtx<'_, Self>, _coord: IVec3) -> Paths3Chunk {
+        let own = ctx.chunk_bounds();
+        let pad = self.cfg.reach_m as i32;
+        let view = ctx.get_named::<Scatter3Sites>(&self.cfg.source, own.inflate(IVec3::splat(pad)));
+        let sites: Vec<Vec3> = view.iter().flat_map(|(_, c)| c.sites.iter().copied()).collect();
+        let in_own = |p: Vec3| {
+            p.x >= own.min.x as f32
+                && p.x < own.max.x as f32
+                && p.y >= own.min.y as f32
+                && p.y < own.max.y as f32
+                && p.z >= own.min.z as f32
+                && p.z < own.max.z as f32
+        };
+        let mut paths = Vec::new();
+        for &a in &sites {
+            let Some(&b) = sites
+                .iter()
+                .filter(|&&b| b != a && a.distance(b) < self.cfg.reach_m)
+                .min_by(|x, y| a.distance_squared(**x).total_cmp(&a.distance_squared(**y)))
+            else {
+                continue;
+            };
+            let (lo, hi) = if (a.x, a.y, a.z) <= (b.x, b.y, b.z) {
+                (a, b)
+            } else {
+                (b, a)
+            };
+            if !in_own((lo + hi) * 0.5) {
+                continue;
+            }
+            // Canonical L-route at right angles: run x at lo's level,
+            // then z, then rise to hi. Degenerate legs are dropped.
+            let mut waypoints = vec![lo];
+            let mut cur = lo;
+            for next in [
+                Vec3::new(hi.x, lo.y, lo.z),
+                Vec3::new(hi.x, lo.y, hi.z),
+                hi,
+            ] {
+                if next.distance(cur) > 0.01 {
+                    waypoints.push(next);
+                    cur = next;
+                }
+            }
+            if waypoints.len() >= 2 && !paths.contains(&waypoints) {
+                paths.push(waypoints);
+            }
+        }
+        Paths3Chunk { paths }
+    }
+}
+
 /// Configuration of a `connect` stack layer: pathfound links between
 /// sites of a scatter instance (roads, patrol routes, power lines...).
 #[derive(Clone, Debug)]
@@ -405,6 +562,17 @@ pub enum EmitKind {
         recipe: String,
         marker: Option<String>,
     },
+    /// A named recipe at each site of a `scatter3` source (interiors).
+    SiteRecipe3 {
+        recipe: String,
+        marker: Option<String>,
+    },
+    /// Shell tubes with bored interiors along a `connect3` source —
+    /// walkway corridors. The bore extends past segment ends so tubes
+    /// open into the rooms and shafts they meet. `lift_m` raises the
+    /// route above the site lattice plane so the bore floor lands on the
+    /// structural slab top instead of inside the slab.
+    Tubes { material: u32, bore: f32, lift_m: f32 },
 }
 
 /// Configuration of an `emit` stack layer: the only kind that produces
@@ -429,6 +597,10 @@ pub struct EmitCfg {
 pub struct EmitPatches {
     pub cfg: EmitCfg,
     pub cell_m: i32,
+    /// Cell height for volumetric sources (`scatter3`/`connect3`);
+    /// 0 = planar (y collapsed). MUST be non-zero when the source is
+    /// volumetric or the dependency view spans unbounded y.
+    pub cell_y_m: i32,
 }
 
 pub struct PatchChunk {
@@ -445,7 +617,7 @@ impl Layer for EmitPatches {
     const NAME: &'static str = "stack/emit";
 
     fn chunk_extent(&self) -> IVec3 {
-        IVec3::new(self.cell_m, 0, self.cell_m)
+        IVec3::new(self.cell_m, self.cell_y_m, self.cell_m)
     }
 
     fn dependencies(&self) -> Vec<voxel_layers::Dep> {
@@ -525,6 +697,59 @@ impl Layer for EmitPatches {
                     }
                 }
             }
+            EmitKind::SiteRecipe3 { recipe, marker } => {
+                let in_own_y = |y: f32| y >= own.min.y as f32 && y < own.max.y as f32;
+                let view = ctx.get_named::<Scatter3Sites>(&self.cfg.source, padded);
+                for (_, c) in view.iter() {
+                    for &site in &c.sites {
+                        let flat = Vec2::new(site.x, site.z);
+                        if !in_own(flat) || !in_own_y(site.y) {
+                            continue;
+                        }
+                        let mut rng = voxel_core::seed::Rng::new(voxel_core::seed::splitmix64(
+                            ctx.seed()
+                                ^ ((site.x.to_bits() as u64) << 32 | site.z.to_bits() as u64)
+                                ^ (site.y.to_bits() as u64) << 16,
+                        ));
+                        recipe3_ops(recipe, site, &mut rng, &mut out.ops);
+                        if let Some(kind) = marker {
+                            out.markers.push(Marker {
+                                pos: site,
+                                kind: kind.clone(),
+                            });
+                        }
+                    }
+                }
+            }
+            EmitKind::Tubes { material, bore, lift_m } => {
+                let in_own_y = |y: f32| y >= own.min.y as f32 && y < own.max.y as f32;
+                let lift = Vec3::Y * *lift_m;
+                let view = ctx.get_named::<Connect3Paths>(&self.cfg.source, padded);
+                for (_, c) in view.iter() {
+                    for path in &c.paths {
+                        for seg in path.windows(2) {
+                            let seg = [seg[0] + lift, seg[1] + lift];
+                            // Legs can span the whole link reach; bucket
+                            // short sub-segments so queries stay local.
+                            let len = seg[0].distance(seg[1]);
+                            let subs = (len / 24.0).ceil().max(1.0) as i32;
+                            for i in 0..subs {
+                                let t0 = i as f32 / subs as f32;
+                                let t1 = (i + 1) as f32 / subs as f32;
+                                let a = seg[0].lerp(seg[1], t0);
+                                let b = seg[0].lerp(seg[1], t1);
+                                let mid = (a + b) * 0.5;
+                                if !in_own(Vec2::new(mid.x, mid.z)) || !in_own_y(mid.y) {
+                                    continue;
+                                }
+                                // Overshoot the bore only at the real leg
+                                // ends (open into what the corridor meets).
+                                tube_segment_ops(a, b, *material, *bore, &mut out.ops);
+                            }
+                        }
+                    }
+                }
+            }
             EmitKind::SiteRecipe { recipe, marker } => {
                 for (_, c) in ctx.get_named::<ScatterSites>(&self.cfg.source, padded).iter() {
                     for &site in &c.sites {
@@ -561,6 +786,38 @@ fn recipe_ops(recipe: &str, site: Vec2, rng: &mut voxel_core::seed::Rng, out: &m
         "dungeon" => crate::dungeon::dungeon_recipe_ops(site, rng, out),
         other => panic!("unknown structure recipe {other:?}"),
     }
+}
+
+/// Volumetric recipes (`scatter3` sites).
+fn recipe3_ops(recipe: &str, site: Vec3, rng: &mut voxel_core::seed::Rng, out: &mut Vec<CsgOp>) {
+    match recipe {
+        "pocket" => crate::mega::pocket_recipe_ops(site, rng, out),
+        other => panic!("unknown structure recipe {other:?}"),
+    }
+}
+
+/// One orthogonal tube segment: a shell box around a bored interior.
+/// The bore overshoots the ends so consecutive tubes, rooms, and other
+/// voids the corridor meets open into each other.
+fn tube_segment_ops(a: Vec3, b: Vec3, material: u32, bore: f32, out: &mut Vec<CsgOp>) {
+    let d = b - a;
+    let len = d.length();
+    if len < 0.01 {
+        return;
+    }
+    let mid = (a + b) * 0.5;
+    let shell = bore + 0.6;
+    let half = |along: f32, r: f32| {
+        if d.x.abs() > d.y.abs() && d.x.abs() > d.z.abs() {
+            Vec3::new(along, r, r)
+        } else if d.y.abs() > d.z.abs() {
+            Vec3::new(r, along, r)
+        } else {
+            Vec3::new(r, r, along)
+        }
+    };
+    out.push(CsgOp::boxy(mid, half(len * 0.5 + shell, shell), 0.0, material, false));
+    out.push(CsgOp::boxy(mid, half(len * 0.5 + bore + 1.2, bore), 0.0, 0, true));
 }
 
 /// Terrain-seated slab chain along one path segment (roads).
@@ -860,6 +1117,7 @@ mod tests {
             mgr.register_as(
                 "ruins",
                 EmitPatches {
+                    cell_y_m: 0,
                     cfg: EmitCfg {
                         source: "sites:ruins".into(),
                         kind: EmitKind::SiteRecipe {
@@ -935,6 +1193,7 @@ mod tests {
         mgr.register_as(
             "roads",
             EmitPatches {
+                cell_y_m: 0,
                 cfg: EmitCfg {
                     source: "paths:roads".into(),
                     kind: EmitKind::PathSlabs {
@@ -1005,6 +1264,7 @@ mod tests {
         mgr.register_as(
             "rivers",
             EmitPatches {
+                cell_y_m: 0,
                 cfg: EmitCfg {
                     source: "flow:rivers".into(),
                     kind: EmitKind::CourseWater {
@@ -1041,6 +1301,7 @@ mod tests {
         mgr.register_as(
             "caves",
             EmitPatches {
+                cell_y_m: 0,
                 cfg: EmitCfg {
                     source: "worm:caves".into(),
                     kind: EmitKind::WormCuts,
@@ -1074,6 +1335,123 @@ mod tests {
         for op in &caves.ops {
             assert_eq!(op.kind, voxel_core::csg::CSG_KIND_SPHERE_CUT);
         }
+    }
+
+    #[test]
+    fn interior_stack_links_pockets_with_orthogonal_tubes() {
+        let mut mgr = LayerManager::new(9);
+        mgr.register_as(
+            "sites:pockets",
+            Scatter3Sites {
+                cfg: Scatter3Cfg {
+                    snap_y_m: 44.0,
+                    ..Default::default()
+                },
+            },
+        );
+        mgr.register_as(
+            "links",
+            Connect3Paths {
+                cfg: Connect3Cfg {
+                    source: "sites:pockets".into(),
+                    ..Default::default()
+                },
+                cell_m: 128,
+                cell_y_m: 132,
+            },
+        );
+        mgr.register_as(
+            "pockets",
+            EmitPatches {
+                cell_y_m: 132,
+                cfg: EmitCfg {
+                    source: "sites:pockets".into(),
+                    kind: EmitKind::SiteRecipe3 {
+                        recipe: "pocket".into(),
+                        marker: Some("pocket".into()),
+                    },
+                    pad_m: 0.0,
+                    max_chunk_edge_m: None,
+                },
+                cell_m: 128,
+            },
+        );
+        mgr.register_as(
+            "tubes",
+            EmitPatches {
+                cell_y_m: 132,
+                cfg: EmitCfg {
+                    source: "links".into(),
+                    kind: EmitKind::Tubes {
+                        material: 2,
+                        bore: 1.5,
+                        lift_m: 3.0,
+                    },
+                    pad_m: 400.0 + 64.0,
+                    max_chunk_edge_m: None,
+                },
+                cell_m: 128,
+            },
+        );
+        let b = IAabb::new(IVec3::new(-1024, -264, -1024), IVec3::new(1024, 264, 1024));
+
+        // Sites snap to the floor lattice.
+        let mut sites = Vec::new();
+        for (_, c) in mgr.get_named::<Scatter3Sites>("sites:pockets", b).iter() {
+            for s in &c.sites {
+                assert!((s.y / 44.0 - (s.y / 44.0).round()).abs() < 1e-3);
+                sites.push(*s);
+            }
+        }
+        assert!(sites.len() > 4, "too few pocket sites: {}", sites.len());
+
+        // Links exist, are orthogonal, and join real sites within reach.
+        let mut links = 0;
+        for (_, c) in mgr.get_named::<Connect3Paths>("links", b).iter() {
+            for path in &c.paths {
+                links += 1;
+                assert!(path[0].distance(*path.last().unwrap()) < 400.0);
+                for seg in path.windows(2) {
+                    let d = seg[1] - seg[0];
+                    let moving =
+                        (d.x.abs() > 0.01) as u8 + (d.y.abs() > 0.01) as u8 + (d.z.abs() > 0.01) as u8;
+                    assert_eq!(moving, 1, "diagonal corridor segment: {d:?}");
+                }
+            }
+        }
+        assert!(links > 0, "no links");
+
+        // Emissions: pocket shells + markers, tube shells enclosing bores.
+        let (min, max) = (
+            Vec3::new(-1024.0, -264.0, -1024.0),
+            Vec3::new(1024.0, 264.0, 1024.0),
+        );
+        let pockets = patches_in(&mgr, "pockets", min, max);
+        assert!(!pockets.ops.is_empty());
+        assert!(!pockets.markers.is_empty());
+        let tubes = patches_in(&mgr, "tubes", min, max);
+        assert!(!tubes.ops.is_empty(), "no tube geometry");
+        assert!(
+            tubes.ops.iter().any(|op| op.kind & 1 == 0)
+                && tubes.ops.iter().any(|op| op.kind & 1 == 1),
+            "tubes need both shell adds and bore cuts"
+        );
+        // Determinism.
+        let mut mgr2 = LayerManager::new(9);
+        mgr2.register_as(
+            "sites:pockets",
+            Scatter3Sites {
+                cfg: Scatter3Cfg {
+                    snap_y_m: 44.0,
+                    ..Default::default()
+                },
+            },
+        );
+        let mut sites2 = Vec::new();
+        for (_, c) in mgr2.get_named::<Scatter3Sites>("sites:pockets", b).iter() {
+            sites2.extend(c.sites.iter().copied());
+        }
+        assert_eq!(sites, sites2);
     }
 
     #[test]

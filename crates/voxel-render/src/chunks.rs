@@ -164,6 +164,9 @@ pub struct RenderStats {
     pub slab_occupancy: [(u32, u32); 4],
     pub drawn: usize,
     pub culled: usize,
+    /// Wedge forensics: (state name, count) over all tracked chunks,
+    /// including the pending track — every arena-slot holder is visible.
+    pub state_counts: Vec<(&'static str, usize)>,
 }
 
 /// The level's generator program — the data that *is* the world — plus the
@@ -1466,6 +1469,38 @@ fn plan_frame(
             .count();
         s.arena_free = gpu.arena_free.len() as u32;
         s.slab_occupancy = gpu.slab.occupancy();
+        let mut counts: std::collections::HashMap<&'static str, usize> = Default::default();
+        for c in table.chunks.values() {
+            let state = match c.state {
+                ChunkState::QueuedGen => "queued_gen",
+                ChunkState::CountsInFlight { .. } => "counts_in_flight",
+                ChunkState::Cancelled { .. } => "cancelled",
+                ChunkState::AwaitingAlloc { .. } => "awaiting_alloc",
+                ChunkState::Empty => "empty",
+                ChunkState::Meshed { .. } => "meshed",
+            };
+            *counts.entry(state).or_default() += 1;
+            let pending = match c.pending {
+                None => None,
+                Some(Pending::Queued) => Some("p_queued"),
+                Some(Pending::CountsInFlight { .. }) => Some("p_counts_in_flight"),
+                Some(Pending::AwaitingAlloc { .. }) => Some("p_awaiting_alloc"),
+                Some(Pending::Held { .. }) => Some("p_held"),
+                Some(Pending::HeldEmpty) => Some("p_held_empty"),
+            };
+            if let Some(p) = pending {
+                *counts.entry(p).or_default() += 1;
+            }
+        }
+        let with_ops = table.chunks.values().filter(|c| c.ops.is_some()).count();
+        let total_ops: usize = table
+            .chunks
+            .values()
+            .filter_map(|c| c.ops.as_ref().map(|o| o.len()))
+            .sum();
+        counts.insert("with_ops", with_ops);
+        counts.insert("total_ops", total_ops);
+        s.state_counts = counts.into_iter().collect();
         s.drawn = draw_list.0.len();
         s.culled = culled;
     }

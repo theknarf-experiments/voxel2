@@ -22,6 +22,7 @@ impl Plugin for VoxelRemotePlugin {
                 .with_method_main("voxel/teleport", teleport)
                 .with_method_main("voxel/water", water)
                 .with_method_main("voxel/markers", markers)
+                .with_method_main("voxel/ops", ops)
                 .with_method_main("voxel/screenshot", screenshot),
         )
         .add_plugins(RemoteHttpPlugin::default().with_port(self.port));
@@ -53,13 +54,41 @@ fn f32s(v: &Value, key: &str, n: usize) -> Result<Vec<f32>, BrpError> {
 type PlayerCamera<'w, 's, T> =
     Query<'w, 's, T, (With<voxel_debug::FreeCamera>, With<Camera3d>)>;
 
-fn status(In(_): In<Option<Value>>, cams: PlayerCamera<&Transform>) -> BrpResult {
+fn status(
+    In(_): In<Option<Value>>,
+    cams: PlayerCamera<&Transform>,
+    stats: Option<Res<voxel_render::SharedRenderStats>>,
+    probe: Option<Res<crate::streaming::StreamProbe>>,
+) -> BrpResult {
     let t = cams.single().map_err(|_| err("no player camera"))?;
     let f = t.forward();
-    Ok(json!({
+    let mut out = json!({
         "pos": [t.translation.x, t.translation.y, t.translation.z],
         "look": [f.x, f.y, f.z],
-    }))
+    });
+    if let Some(p) = probe {
+        out["stream"] = json!({
+            "leaves": p.leaves,
+            "planning": p.planning,
+            "replan_needed": p.replan_needed,
+            "epoch_waits": p.epoch_waits,
+            "epoch_to_request": p.epoch_to_request,
+            "epoch_age_s": p.epoch_age_s,
+        });
+    }
+    if let Some(s) = stats {
+        let s = s.0.lock().unwrap();
+        out["chunks"] = json!({
+            "tracked": s.tracked,
+            "meshed": s.meshed,
+            "awaiting": s.awaiting,
+            "drawn": s.drawn,
+            "arena_free": s.arena_free,
+            "slabs": s.slab_occupancy,
+            "states": s.state_counts.iter().cloned().collect::<std::collections::HashMap<_,_>>(),
+        });
+    }
+    Ok(out)
 }
 
 /// `{"pos": [x, y, z], "look": [dx, dy, dz]?}` — move the fly camera.
@@ -120,6 +149,36 @@ fn markers(In(params): In<Option<Value>>, world: Res<WorldQuery>) -> BrpResult {
         .map(|m| json!({"pos": [m.pos.x, m.pos.y, m.pos.z], "kind": m.kind}))
         .collect();
     Ok(json!({"count": found.len(), "markers": found}))
+}
+
+/// `{"center": [x, y, z], "radius": r, "edge": chunk_edge_m?}` — CSG ops
+/// the provider would serve around a point (debugging what a chunk sees).
+fn ops(In(params): In<Option<Value>>, world: Res<WorldQuery>) -> BrpResult {
+    let params = params.ok_or_else(|| err("params required"))?;
+    let c = f32s(&params, "center", 3)?;
+    let r = params.get("radius").and_then(Value::as_f64).unwrap_or(40.0) as f32;
+    let edge = params.get("edge").and_then(Value::as_f64).unwrap_or(12.8) as f32;
+    let center = Vec3::new(c[0], c[1], c[2]);
+    let found = world.ops_in(center - Vec3::splat(r), center + Vec3::splat(r), edge);
+    let adds = found.iter().filter(|o| o.kind & 1 == 0).count();
+    let sample: Vec<Value> = found
+        .iter()
+        .take(12)
+        .map(|o| {
+            json!({
+                "kind": o.kind,
+                "center": o.center,
+                "half": o.half,
+                "material": o.material,
+            })
+        })
+        .collect();
+    Ok(json!({
+        "count": found.len(),
+        "adds": adds,
+        "cuts": found.len() - adds,
+        "sample": sample,
+    }))
 }
 
 /// `{"path": "shot.png"}` — dump the next rendered frame through the

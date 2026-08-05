@@ -686,9 +686,6 @@ pub struct LevelDef {
     /// Prop populations on the heightfield surface (trees/grass/boulders).
     #[serde(default)]
     pub spawners: Vec<SpawnerDef>,
-    /// Planning-op providers, composed in order.
-    #[serde(default)]
-    pub ops: Vec<OpsDef>,
     /// The planning stack: generic layers composed into one LayerManager.
     #[serde(default)]
     pub stack: Vec<StackLayerDef>,
@@ -1045,22 +1042,6 @@ impl GenOpDef {
     }
 }
 
-/// A parameterized planning-op provider (legacy — features are moving
-/// into the generic `stack`; only the megastructure pockets remain).
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum OpsDef {
-    /// Megastructure habitation pockets (per-cell probability).
-    Pockets {
-        #[serde(default = "default_pocket_chance")]
-        chance: f32,
-    },
-}
-
-fn default_pocket_chance() -> f32 {
-    0.45
-}
-
 /// One layer of the level's planning stack — the generic vocabulary
 /// (scatter/connect/flow/worm/emit) every planned feature is expressed
 /// in. Layers register in author order into ONE LayerManager per level;
@@ -1118,6 +1099,31 @@ pub enum StackLayerDef {
         #[serde(default = "d_burial")]
         burial_radii: f32,
     },
+    /// Volumetric sites for interior worlds (no terrain filters).
+    Scatter3 {
+        name: String,
+        #[serde(default = "d_cell3")]
+        cell_m: i32,
+        #[serde(default = "d_cell3_y")]
+        cell_y_m: i32,
+        chance: f32,
+        #[serde(default = "d_margin3")]
+        margin_m: f32,
+        /// Snap site y to the structural floor lattice (0 = none).
+        #[serde(default)]
+        snap_y_m: f32,
+    },
+    /// Orthogonal links between volumetric sites (walkway tubes).
+    Connect3 {
+        name: String,
+        source: String,
+        #[serde(default = "d_cell3")]
+        cell_m: i32,
+        #[serde(default = "d_cell3_y")]
+        cell_y_m: i32,
+        #[serde(default = "d_reach3")]
+        reach_m: f32,
+    },
     /// Turn a source layer's data into world patches (the only kind that
     /// produces geometry; also the index that keeps queries local).
     Emit {
@@ -1125,6 +1131,9 @@ pub enum StackLayerDef {
         source: String,
         #[serde(default = "d_cell")]
         cell_m: i32,
+        /// Cell height for volumetric sources (0 = planar).
+        #[serde(default)]
+        cell_y_m: i32,
         /// Source reach beyond its owning cells (dependency padding, m).
         pad_m: f32,
         /// Carve-horizon gate: serve ops only to chunks at least this
@@ -1163,6 +1172,22 @@ pub enum EmitDef {
         recipe: String,
         #[serde(default)]
         marker: Option<String>,
+    },
+    /// A named volumetric recipe per `scatter3` site.
+    SiteRecipe3 {
+        recipe: String,
+        #[serde(default)]
+        marker: Option<String>,
+    },
+    /// Shell tubes with bored interiors along a `connect3` source.
+    Tubes {
+        #[serde(default = "d_tube_material")]
+        material: u32,
+        #[serde(default = "d_tube_bore")]
+        bore: f32,
+        /// Lift above the site lattice plane (bore floor on the slab top).
+        #[serde(default = "d_tube_lift")]
+        lift_m: f32,
     },
 }
 
@@ -1217,6 +1242,27 @@ fn d_true() -> bool {
 fn d_course_width() -> [f32; 2] {
     [2.0, 7.0]
 }
+fn d_cell3() -> i32 {
+    128
+}
+fn d_cell3_y() -> i32 {
+    132
+}
+fn d_margin3() -> f32 {
+    24.0
+}
+fn d_reach3() -> f32 {
+    400.0
+}
+fn d_tube_material() -> u32 {
+    2
+}
+fn d_tube_bore() -> f32 {
+    1.5
+}
+fn d_tube_lift() -> f32 {
+    3.0
+}
 
 impl EmitDef {
     fn to_kind(&self) -> voxel_worldgen::stack::EmitKind {
@@ -1236,6 +1282,16 @@ impl EmitDef {
             EmitDef::CourseWater { material, width } => EmitKind::CourseWater { material, width },
             EmitDef::WormCuts => EmitKind::WormCuts,
             EmitDef::SiteRecipe { recipe, marker } => EmitKind::SiteRecipe { recipe, marker },
+            EmitDef::SiteRecipe3 { recipe, marker } => EmitKind::SiteRecipe3 { recipe, marker },
+            EmitDef::Tubes {
+                material,
+                bore,
+                lift_m,
+            } => EmitKind::Tubes {
+                material,
+                bore,
+                lift_m,
+            },
         }
     }
 }
@@ -1319,10 +1375,44 @@ impl StackLayerDef {
                     cell_m,
                 },
             ),
+            StackLayerDef::Scatter3 {
+                name,
+                cell_m,
+                cell_y_m,
+                chance,
+                margin_m,
+                snap_y_m,
+            } => mgr.register_as(
+                &name,
+                Scatter3Sites {
+                    cfg: Scatter3Cfg {
+                        cell_m,
+                        cell_y_m,
+                        chance,
+                        margin_m,
+                        snap_y_m,
+                    },
+                },
+            ),
+            StackLayerDef::Connect3 {
+                name,
+                source,
+                cell_m,
+                cell_y_m,
+                reach_m,
+            } => mgr.register_as(
+                &name,
+                Connect3Paths {
+                    cfg: Connect3Cfg { source, reach_m },
+                    cell_m,
+                    cell_y_m,
+                },
+            ),
             StackLayerDef::Emit {
                 name,
                 source,
                 cell_m,
+                cell_y_m,
                 pad_m,
                 max_chunk_edge_m,
                 emit,
@@ -1336,19 +1426,10 @@ impl StackLayerDef {
                         max_chunk_edge_m,
                     },
                     cell_m,
+                    cell_y_m,
                 },
             ),
         }
-    }
-}
-
-impl LevelDef {
-    /// The pockets chance, if a pockets provider is configured (used by
-    /// walk-mode collision to mirror the GPU world).
-    pub fn pocket_chance(&self) -> Option<f32> {
-        self.ops.iter().find_map(|o| match o {
-            OpsDef::Pockets { chance } => Some(*chance),
-        })
     }
 }
 
@@ -1652,7 +1733,6 @@ impl WorldQuery {
 }
 
 fn build_ops_provider(level: &LevelDef) -> (ChunkOpsProvider, WorldQuery, PlanningLayers) {
-    let seed = level.seed;
     let mut sources: Vec<OpsSource> = Vec::new();
     let mut managers: Vec<Arc<voxel_layers::LayerManager>> = Vec::new();
 
@@ -1660,7 +1740,7 @@ fn build_ops_provider(level: &LevelDef) -> (ChunkOpsProvider, WorldQuery, Planni
     let (stack, emitters) = if level.stack.is_empty() {
         (None, Vec::new())
     } else {
-        let mut mgr = voxel_layers::LayerManager::new(seed);
+        let mut mgr = voxel_layers::LayerManager::new(level.seed);
         let mut emitters = Vec::new();
         for def in &level.stack {
             def.register(&mut mgr);
@@ -1678,13 +1758,7 @@ fn build_ops_provider(level: &LevelDef) -> (ChunkOpsProvider, WorldQuery, Planni
         (Some(mgr), emitters)
     };
 
-    for def in &level.ops {
-        match *def {
-            OpsDef::Pockets { chance } => sources.push(Arc::new(move |min, max| {
-                voxel_worldgen::mega::pockets_ops(seed, chance, min, max)
-            })),
-        }
-    }
+
     // Authored placements: resolve prefab refs, bake world-space ops once
     // (translate + yaw + uniform scale; optional terrain seating), then
     // serve them AABB-culled like any other source — ordered by priority
@@ -1942,7 +2016,6 @@ fn reload_level(
         commands.insert_resource(program);
     }
     let regen = generator_changed
-        || new.ops != level.ops
         || new.stack != level.stack
         || new.lod.max_level != level.lod.max_level
         || new.lod.top_radius != level.lod.top_radius
@@ -1994,13 +2067,14 @@ mod tests {
     fn shipped_levels_parse() {
         let planet = LevelDef::from_json(&shipped("planet.json")).unwrap();
         // The planet's features are stack data, not op providers.
-        assert!(planet.ops.is_empty());
         let names: Vec<&str> = planet
             .stack
             .iter()
             .map(|l| match l {
                 StackLayerDef::Scatter { name, .. }
+                | StackLayerDef::Scatter3 { name, .. }
                 | StackLayerDef::Connect { name, .. }
+                | StackLayerDef::Connect3 { name, .. }
                 | StackLayerDef::Flow { name, .. }
                 | StackLayerDef::Worm { name, .. }
                 | StackLayerDef::Emit { name, .. } => name.as_str(),
@@ -2029,7 +2103,22 @@ mod tests {
         assert!(planet.materials.iter().any(|m| m.id() == 3));
 
         let mega = LevelDef::from_json(&shipped("megastructure.json")).unwrap();
-        assert!(matches!(mega.ops[0], OpsDef::Pockets { .. }));
+        let mega_names: Vec<&str> = mega
+            .stack
+            .iter()
+            .map(|l| match l {
+                StackLayerDef::Scatter { name, .. }
+                | StackLayerDef::Scatter3 { name, .. }
+                | StackLayerDef::Connect { name, .. }
+                | StackLayerDef::Connect3 { name, .. }
+                | StackLayerDef::Flow { name, .. }
+                | StackLayerDef::Worm { name, .. }
+                | StackLayerDef::Emit { name, .. } => name.as_str(),
+            })
+            .collect();
+        for expect in ["sites:pockets", "pockets", "links", "tubes"] {
+            assert!(mega_names.contains(&expect), "mega stack missing {expect}");
+        }
         assert!(mega.sun.is_none());
         assert_eq!(mega.walk, WalkDef::Sdf);
         let packed: Vec<_> = mega.generator.iter().map(GenOpDef::pack).collect();
@@ -2047,14 +2136,57 @@ mod tests {
         assert_eq!(back.generator, planet.generator);
         assert_eq!(back.materials, planet.materials);
         assert_eq!(back.environment, planet.environment);
-        assert_eq!(back.ops, planet.ops);
         assert_eq!(back.stack, planet.stack);
         assert_eq!(back.camera.start, planet.camera.start);
     }
 
+    /// The generator program is process-global; stack tests that install
+    /// one must not interleave.
+    static PROGRAM_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[test]
+    fn mega_stack_serves_pockets_and_tubes_through_world_query() {
+        let _lock = PROGRAM_LOCK.lock().unwrap();
+        let mega = LevelDef::from_json(&shipped("megastructure.json")).unwrap();
+        let packed: Vec<_> = mega.generator.iter().map(GenOpDef::pack).collect();
+        voxel_worldgen::program::set_program(packed);
+        voxel_worldgen::program::set_seed(mega.seed as u32);
+        let (_, world, _) = build_ops_provider(&mega);
+        let min = Vec3::new(-1500.0, -260.0, -1500.0);
+        let max = Vec3::new(1500.0, 260.0, 1500.0);
+        let ops = world.ops_in(min, max, 12.8);
+        assert!(!ops.is_empty(), "mega stack served no ops");
+        // Room shells and tube shells: adds and cuts both present.
+        assert!(ops.iter().any(|op| op.kind & 1 == 0), "no shell adds");
+        assert!(ops.iter().any(|op| op.kind & 1 == 1), "no bore/room cuts");
+        // Markers reach the facade.
+        let min2 = bevy::math::Vec2::new(min.x, min.z);
+        let max2 = bevy::math::Vec2::new(max.x, max.z);
+        assert!(
+            !world.markers_in(min2, max2, Some("pocket")).is_empty(),
+            "no pocket markers"
+        );
+        // A specific marker's room shell exists near the site.
+        let m = &world.markers_in(min2, max2, Some("pocket"))[0];
+        let near = world.ops_in(
+            m.pos - Vec3::splat(40.0),
+            m.pos + Vec3::splat(40.0),
+            12.8,
+        );
+        assert!(
+            !near.is_empty(),
+            "no ops within 40 m of pocket marker at {:?}",
+            m.pos
+        );
+    }
+
     #[test]
     fn planet_stack_serves_gated_ops_through_world_query() {
+        let _lock = PROGRAM_LOCK.lock().unwrap();
         let planet = LevelDef::from_json(&shipped("planet.json")).unwrap();
+        let packed: Vec<_> = planet.generator.iter().map(GenOpDef::pack).collect();
+        voxel_worldgen::program::set_program(packed);
+        voxel_worldgen::program::set_seed(planet.seed as u32);
         let (_, world, _) = build_ops_provider(&planet);
         // A land region large enough to hold every feature kind.
         let min = Vec3::new(-31096.0, -200.0, -42096.0);
@@ -2123,6 +2255,7 @@ fn autopilot(mut cameras: Query<&mut Transform, With<Camera3d>>, time: Res<Time>
 /// collision against the full SDF mirror (including planned ops).
 fn walk_mode(
     level: Res<LevelDef>,
+    world: Res<WorldQuery>,
     mut cameras: Query<&mut Transform, With<Camera3d>>,
     time: Res<Time>,
     mut fall_speed: Local<f32>,
@@ -2142,21 +2275,20 @@ fn walk_mode(
             }
         }
         WalkDef::Sdf => {
-            use voxel_worldgen::mega::{mega_sdf, mega_sdf_with_ops, pockets_ops};
+            use voxel_worldgen::mega::{mega_sdf, mega_sdf_with_ops};
             const RADIUS: f32 = 0.5;
             const EYE: f32 = 1.6;
-            let seed = level.seed;
             let floor_spacing =
                 voxel_worldgen::program::lattice_y_spacing(&voxel_worldgen::program::program())
                     .unwrap_or(44.0);
 
-            let pocket_chance = level.pocket_chance().unwrap_or(0.0);
             for mut t in &mut cameras {
-                let local_ops = pockets_ops(
-                    seed,
-                    pocket_chance,
+                // Collision mirrors the GPU world: planned ops around the
+                // player come from the same facade chunks are served from.
+                let local_ops = world.ops_in(
                     t.translation - Vec3::splat(30.0),
                     t.translation + Vec3::splat(30.0),
+                    0.0,
                 );
                 let sdf = |p: Vec3| mega_sdf_with_ops(p, &local_ops);
                 let grad = |p: Vec3| {
