@@ -1,6 +1,7 @@
 //! Engine glue: Bevy plugins for chunk streaming lifecycle, generation
 //! budgets, edit application, and persistence.
 
+pub mod debug_viz;
 pub mod level;
 pub mod remote;
 pub mod streaming;

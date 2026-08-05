@@ -23,6 +23,7 @@ impl Plugin for VoxelRemotePlugin {
                 .with_method_main("voxel/water", water)
                 .with_method_main("voxel/markers", markers)
                 .with_method_main("voxel/ops", ops)
+                .with_method_main("voxel/viz", viz)
                 .with_method_main("voxel/screenshot", screenshot),
         )
         .add_plugins(RemoteHttpPlugin::default().with_port(self.port));
@@ -179,6 +180,18 @@ fn ops(In(params): In<Option<Value>>, world: Res<WorldQuery>) -> BrpResult {
         "cuts": found.len() - adds,
         "sample": sample,
     }))
+}
+
+/// `{"chunks": bool?, "layers": bool?}` — toggle the debug overlays.
+fn viz(In(params): In<Option<Value>>, mut viz: ResMut<crate::debug_viz::DebugViz>) -> BrpResult {
+    let params = params.ok_or_else(|| err("params required"))?;
+    if let Some(v) = params.get("chunks").and_then(Value::as_bool) {
+        viz.chunks = v;
+    }
+    if let Some(v) = params.get("layers").and_then(Value::as_bool) {
+        viz.layers = v;
+    }
+    Ok(json!({"chunks": viz.chunks, "layers": viz.layers}))
 }
 
 /// `{"path": "shot.png"}` — dump the next rendered frame through the

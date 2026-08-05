@@ -1671,7 +1671,12 @@ impl Plugin for LevelPlugin {
             .add_systems(Update, (autopilot, walk_mode).chain())
             .add_systems(Update, roll_planning_caches)
             .init_resource::<crate::water_mesh::WaterMeshTiles>()
-            .add_systems(Update, crate::water_mesh::stream_water_meshes);
+            .add_systems(Update, crate::water_mesh::stream_water_meshes)
+            .init_resource::<crate::debug_viz::DebugViz>()
+            .add_systems(
+                Update,
+                (crate::debug_viz::toggle_debug_viz, crate::debug_viz::draw_debug_viz),
+            );
         // Live tooling: VOXEL_REMOTE=1 (or a port) starts the BRP server
         // the voxctl CLI talks to.
         if let Ok(v) = std::env::var("VOXEL_REMOTE") {
