@@ -618,6 +618,9 @@ pub enum GenOpDef {
     },
     /// Constant meters added to the height register.
     HeightOffset { value: f32 },
+    /// Cliff step: terrain crossing the `[start, end]` altitude band grows
+    /// an `amp`-meter wall (iq's Rainforest cliff term).
+    HeightStep { start: f32, end: f32, amp: f32 },
     /// Turn the accumulated height into ground.
     HeightSurface {
         #[serde(default = "mat_grass")]
@@ -773,6 +776,9 @@ impl GenOpDef {
                 .p2([octaves as f32, 0.0, 0.0, 0.0]),
             GenOpDef::HeightOffset { value } => {
                 WorldOp::new(WOP_HEIGHT_OFFSET).p0([value, 0.0, 0.0, 0.0])
+            }
+            GenOpDef::HeightStep { start, end, amp } => {
+                WorldOp::new(WOP_HEIGHT_STEP).p0([start, end, amp, 0.0])
             }
             GenOpDef::HeightSurface { material } => {
                 WorldOp::new(WOP_HEIGHT_SURFACE).material(material)

@@ -107,6 +107,12 @@
       "octaves": 5
     },
     {
+      "type": "height_step",
+      "start": 180.0,
+      "end": 230.0,
+      "amp": 90.0
+    },
+    {
       "type": "height_fbm",
       "offset": [
         37.0,

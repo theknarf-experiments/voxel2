@@ -176,6 +176,8 @@ fn seabed_height(xz: vec2<f32>) -> f32 {
             h += coarse_fbm(xz + warp + op.p0.xy, op.p0.z, i32(op.p1.x), u32(op.p1.y)) * op.p0.w;
         } else if (op.head.x == 1u) {
             h += op.p0.x;
+        } else if (op.head.x == 16u) {
+            h += op.p0.z * smoothstep(op.p0.x, op.p0.y, h);
         } else if (op.head.x == 14u) {
             let q = xz + op.p0.zw;
             let oct = i32(op.p1.x);

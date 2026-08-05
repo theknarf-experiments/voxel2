@@ -201,6 +201,9 @@ fn eval_program(p: vec3<f32>, vs: f32) -> WorldSample {
             case 1u: { // height offset
                 h += op.p0.x;
             }
+            case 16u: { // cliff step: terrain crossing the band grows a wall
+                h += op.p0.z * smoothstep(op.p0.x, op.p0.y, h);
+            }
             case 14u: { // domain warp for later height ops
                 let q = pxz + op.p0.zw;
                 let oct = i32(op.p1.x);

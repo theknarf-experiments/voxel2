@@ -50,6 +50,10 @@ pub const WOP_WATER: u32 = 12;
 /// Domain-warp the XZ coordinate that later height ops sample.
 /// `p0 = (cycles_per_m, amplitude_m, offset_x, offset_z)`, `p1.x = octaves`.
 pub const WOP_WARP_XZ: u32 = 14;
+/// Cliff step: adds `amp * smoothstep(start, end, h)` to the height
+/// register — terrain crossing the band grows a wall (iq's Rainforest
+/// cliff term). `p0 = (start_m, end_m, amp_m)`.
+pub const WOP_HEIGHT_STEP: u32 = 16;
 /// Anisotropic 3D FBM solid: union or carve by a noise iso-surface —
 /// caves, overhangs, floating islands. `p0 = (cycles_per_m_xz,
 /// cycles_per_m_y, threshold, width_m)`, `p1 = (offset x, y, z, mode)`
@@ -126,7 +130,9 @@ impl WorldOp {
     /// True for ops that only touch the height register (the height-only
     /// interpreters in the mesh/water shaders evaluate exactly these).
     pub fn is_height_op(&self) -> bool {
-        self.kind == WOP_HEIGHT_FBM || self.kind == WOP_HEIGHT_OFFSET
+        self.kind == WOP_HEIGHT_FBM
+            || self.kind == WOP_HEIGHT_OFFSET
+            || self.kind == WOP_HEIGHT_STEP
     }
 }
 

@@ -101,6 +101,7 @@ pub fn eval(ops: &[WorldOp], p: Vec3, vs: f32) -> (f32, u32) {
                 ) * op.p0[3];
             }
             WOP_HEIGHT_OFFSET => h += op.p0[0],
+            WOP_HEIGHT_STEP => h += op.p0[2] * smoothstep(op.p0[0], op.p0[1], h),
             WOP_WARP_XZ => {
                 let q = pxz + Vec2::new(op.p0[2], op.p0[3]);
                 let oct = op.p1[0] as i32;
@@ -245,6 +246,7 @@ pub fn eval_height(ops: &[WorldOp], xz: Vec2, vs: f32) -> f32 {
                 ) * op.p0[3];
             }
             WOP_HEIGHT_OFFSET => h += op.p0[0],
+            WOP_HEIGHT_STEP => h += op.p0[2] * smoothstep(op.p0[0], op.p0[1], h),
             WOP_WARP_XZ => {
                 let q = xz + Vec2::new(op.p0[2], op.p0[3]);
                 let oct = op.p1[0] as i32;
@@ -266,6 +268,12 @@ pub fn lattice_y_spacing(ops: &[WorldOp]) -> Option<f32> {
 }
 
 /// Sea level of the program's water surface, if it has one.
+/// WGSL-identical smoothstep (the height-op twins must agree).
+fn smoothstep(e0: f32, e1: f32, x: f32) -> f32 {
+    let t = ((x - e0) / (e1 - e0)).clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
+}
+
 pub fn water_level(ops: &[WorldOp]) -> Option<f32> {
     ops.iter()
         .find(|op| op.kind == WOP_WATER)
@@ -331,6 +339,7 @@ pub fn planet_program() -> Vec<WorldOp> {
         band([0.0, 0.0], 0.00005, 800.0, 3.0),
         band([510.0, -770.0], 0.0008, 420.0, 5.0),
         band([1337.0, 55.0], 0.01, 36.0, 5.0),
+        WorldOp::new(WOP_HEIGHT_STEP).p0([180.0, 230.0, 90.0, 0.0]),
         band([37.0, 91.0], 0.06, 5.0, 4.0),
         WorldOp::new(WOP_HEIGHT_OFFSET).p0([-8.0, 0.0, 0.0, 0.0]),
         WorldOp::new(WOP_HEIGHT_SURFACE).material(1),
@@ -395,11 +404,11 @@ mod tests {
         for i in 0..500 {
             let p = Vec2::new((i * 37) as f32 * 13.7, (i * 91) as f32 * -7.3);
             for vs in [1.0, 8.0, 64.0] {
-                let legacy = fbm(p, 0.00005, 3, vs) * 800.0
+                let base = fbm(p, 0.00005, 3, vs) * 800.0
                     + fbm(p + Vec2::new(510.0, -770.0), 0.0008, 5, vs) * 420.0
-                    + fbm(p + Vec2::new(1337.0, 55.0), 0.01, 5, vs) * 36.0
-                    + fbm(p + Vec2::new(37.0, 91.0), 0.06, 4, vs) * 5.0
-                    - 8.0;
+                    + fbm(p + Vec2::new(1337.0, 55.0), 0.01, 5, vs) * 36.0;
+                let stepped = base + 90.0 * smoothstep(180.0, 230.0, base);
+                let legacy = stepped + fbm(p + Vec2::new(37.0, 91.0), 0.06, 4, vs) * 5.0 - 8.0;
                 assert_eq!(eval_height(&ops, p, vs), legacy);
                 // (h - 3) - h is not exactly -3 in f32; the height itself is
                 // bit-exact (asserted above), the SDF just subtracts it.
