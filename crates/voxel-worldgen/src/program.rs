@@ -268,6 +268,38 @@ pub fn lattice_y_spacing(ops: &[WorldOp]) -> Option<f32> {
 }
 
 /// Sea level of the program's water surface, if it has one.
+/// Evaluate the field registers at a column. Fields are author-defined
+/// world data (forest density, moisture, ...) consumed by spawners and
+/// gameplay queries; they never touch the SDF. Warp ops accumulated
+/// before a field op affect its sample, mirroring the height loop.
+pub fn eval_fields(ops: &[WorldOp], xz: Vec2, vs: f32) -> [f32; FIELD_SLOTS] {
+    let mut fields = [0.0f32; FIELD_SLOTS];
+    let mut warp = Vec2::ZERO;
+    for op in ops {
+        match op.kind {
+            WOP_WARP_XZ => {
+                let q = xz + Vec2::new(op.p0[2], op.p0[3]);
+                let oct = op.p1[0] as i32;
+                warp.x += fbm_mode(q, op.p0[0], oct, vs, 0) * op.p0[1];
+                warp.y += fbm_mode(q + Vec2::new(713.0, -337.0), op.p0[0], oct, vs, 0) * op.p0[1];
+            }
+            WOP_FIELD => {
+                let slot = (op.p1[2] as usize).min(FIELD_SLOTS - 1);
+                fields[slot] += op.p1[3]
+                    + fbm_mode(
+                        xz + warp + Vec2::new(op.p0[0], op.p0[1]),
+                        op.p0[2],
+                        op.p1[0] as i32,
+                        vs,
+                        op.p1[1] as u32,
+                    ) * op.p0[3];
+            }
+            _ => {}
+        }
+    }
+    fields
+}
+
 /// WGSL-identical smoothstep (the height-op twins must agree).
 fn smoothstep(e0: f32, e1: f32, x: f32) -> f32 {
     let t = ((x - e0) / (e1 - e0)).clamp(0.0, 1.0);
@@ -342,6 +374,11 @@ pub fn planet_program() -> Vec<WorldOp> {
         WorldOp::new(WOP_HEIGHT_STEP).p0([180.0, 230.0, 90.0, 0.0]),
         band([37.0, 91.0], 0.06, 5.0, 4.0),
         WorldOp::new(WOP_HEIGHT_OFFSET).p0([-8.0, 0.0, 0.0, 0.0]),
+        // Field 0: forest coverage (was the trees spawner's private patch
+        // noise; a shared field so any consumer can reference it).
+        WorldOp::new(WOP_FIELD)
+            .p0([-4200.0, 8800.0, 0.004, 1.6])
+            .p1([3.0, 0.0, 0.0, 0.15]),
         WorldOp::new(WOP_HEIGHT_SURFACE).material(1),
         WorldOp::new(WOP_WATER),
     ]
@@ -417,6 +454,42 @@ mod tests {
                 assert_eq!(mat, 1);
             }
         }
+    }
+
+    #[test]
+    fn fields_accumulate_and_respect_warp() {
+        let mut f0 = WorldOp::new(WOP_FIELD);
+        f0.p0 = [10.0, -5.0, 0.01, 2.0];
+        f0.p1 = [3.0, 0.0, 0.0, 0.25];
+        let mut f0b = WorldOp::new(WOP_FIELD);
+        f0b.p0 = [0.0, 0.0, 0.05, 0.5];
+        f0b.p1 = [2.0, 0.0, 0.0, 0.0];
+        let mut f2 = WorldOp::new(WOP_FIELD);
+        f2.p0 = [0.0, 0.0, 0.02, 1.0];
+        f2.p1 = [2.0, 0.0, 2.0, -0.1];
+        let mut warp = WorldOp::new(WOP_WARP_XZ);
+        warp.p0 = [0.002, 40.0, 7.0, 13.0];
+        warp.p1 = [2.0, 0.0, 0.0, 0.0];
+
+        let p = Vec2::new(812.0, -3355.0);
+        let vs = 4.0;
+        // Warp placed after the first field op only affects later ones.
+        let ops = [f0, warp, f0b, f2];
+        let got = eval_fields(&ops, p, vs);
+
+        let q = p + Vec2::new(0.002 * 0.0 + 7.0, 13.0);
+        let w = Vec2::new(
+            fbm_mode(q, 0.002, 2, vs, 0) * 40.0,
+            fbm_mode(q + Vec2::new(713.0, -337.0), 0.002, 2, vs, 0) * 40.0,
+        );
+        let want0 = 0.25
+            + fbm_mode(p + Vec2::new(10.0, -5.0), 0.01, 3, vs, 0) * 2.0
+            + fbm_mode(p + w, 0.05, 2, vs, 0) * 0.5;
+        let want2 = -0.1 + fbm_mode(p + w, 0.02, 2, vs, 0) * 1.0;
+        assert_eq!(got[0], want0);
+        assert_eq!(got[1], 0.0);
+        assert_eq!(got[2], want2);
+        assert_eq!(got[3], 0.0);
     }
 
     #[test]

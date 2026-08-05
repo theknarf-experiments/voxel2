@@ -50,6 +50,19 @@ pub const WOP_WATER: u32 = 12;
 /// Domain-warp the XZ coordinate that later height ops sample.
 /// `p0 = (cycles_per_m, amplitude_m, offset_x, offset_z)`, `p1.x = octaves`.
 pub const WOP_WARP_XZ: u32 = 14;
+/// Meta op (no SDF effect): accumulate a 2D FBM band into a field
+/// register — named world data consumed by spawner densities and other
+/// CPU-side queries, never by the density itself (the GPU interpreter
+/// skips it via its default arm). Multiple field ops targeting one slot
+/// accumulate, and domain warps applied by earlier `WOP_WARP_XZ` ops
+/// affect field samples exactly like height samples.
+/// `p0 = (offset_x, offset_z, cycles_per_m, amplitude)`,
+/// `p1 = (octaves, noise_mode, slot, bias)`.
+pub const WOP_FIELD: u32 = 17;
+
+/// Number of field registers.
+pub const FIELD_SLOTS: usize = 4;
+
 /// Cliff step: adds `amp * smoothstep(start, end, h)` to the height
 /// register — terrain crossing the band grows a wall (iq's Rainforest
 /// cliff term). `p0 = (start_m, end_m, amp_m)`.

@@ -326,6 +326,14 @@ fn stream_grass(
     }
 }
 
+/// Field-register density gate for spawner candidates (see `WOP_FIELD`).
+fn field_gate(density: &Option<crate::level::FieldDensityDef>, xz: Vec2) -> f32 {
+    density.as_ref().map_or(1.0, |d| {
+        let f = voxel_worldgen::world_fields(xz)[(d.field as usize).min(3)];
+        (f * d.scale + d.offset).clamp(0.0, 1.0)
+    })
+}
+
 fn grass_tile(tile: IVec2, grass: &crate::level::GrassDef) -> Vec<voxel_render::GrassInstance> {
     let mut rng = Rng::new(chunk_seed(
         world_seed(),
@@ -338,6 +346,9 @@ fn grass_tile(tile: IVec2, grass: &crate::level::GrassDef) -> Vec<voxel_render::
         let x = origin.x + rng.next_f32() * GRASS_TILE_M;
         let z = origin.y + rng.next_f32() * GRASS_TILE_M;
         let xz = Vec2::new(x, z);
+        if rng.next_f32() > field_gate(&grass.density, xz) {
+            continue;
+        }
         let y = terrain_height(xz, 1.0);
         if !(grass.altitude[0]..grass.altitude[1]).contains(&y)
             || terrain_up(xz, 1.0) < grass.min_up
@@ -721,6 +732,9 @@ fn tile_trees(tile: IVec2, trees: &crate::level::TreesDef) -> Vec<TreeInstance> 
         let xz = Vec2::new(x, z);
         // Seat on the band-limited surface mid-LOD terrain shows across the
         // detail radius (tiles spawn at the rim, where the ground is ~L2).
+        if rng.next_f32() > field_gate(&trees.density, xz) {
+            continue;
+        }
         let y = terrain_height(xz, 4.0);
         if !(trees.altitude[0]..trees.altitude[1]).contains(&y)
             || terrain_up(xz, 4.0) < trees.min_up
@@ -827,6 +841,9 @@ fn spawn_tile(
         let x = origin.x + rng.next_f32() * TILE_M;
         let z = origin.y + rng.next_f32() * TILE_M;
         let xz = Vec2::new(x, z);
+        if rng.next_f32() > field_gate(&b.density, xz) {
+            continue;
+        }
         let y = terrain_height(xz, 4.0);
         let up = terrain_up(xz, 4.0);
         if !(b.altitude[0]..b.altitude[1]).contains(&y)

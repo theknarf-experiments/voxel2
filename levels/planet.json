@@ -127,6 +127,18 @@
       "value": -8.0
     },
     {
+      "type": "field",
+      "slot": 0,
+      "offset": [
+        -4200.0,
+        8800.0
+      ],
+      "scale": 0.004,
+      "amp": 1.6,
+      "octaves": 3,
+      "bias": 0.15
+    },
+    {
       "type": "height_surface",
       "material": 1
     },
@@ -239,15 +251,6 @@
         340.0
       ],
       "min_up": 0.86,
-      "patch": {
-        "scale": 0.004,
-        "offset": [
-          -4200.0,
-          8800.0
-        ],
-        "contrast": 1.6,
-        "bias": -0.35
-      },
       "species": [
         {
           "model": "broadleaf",
@@ -309,7 +312,10 @@
             ]
           }
         }
-      ]
+      ],
+      "density": {
+        "field": 0
+      }
     },
     {
       "type": "grass",

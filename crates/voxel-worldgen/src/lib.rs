@@ -78,6 +78,12 @@ pub fn terrain_height(xz: Vec2, voxel_size: f32) -> f32 {
     program::eval_height(&program::program(), xz, voxel_size)
 }
 
+/// The current program's field registers at a column (spawner densities,
+/// gameplay queries). See `WOP_FIELD`.
+pub fn world_fields(xz: Vec2) -> [f32; voxel_core::worldop::FIELD_SLOTS] {
+    program::eval_fields(&program::program(), xz, 4.0)
+}
+
 /// Patch density in [0, 1]: slow spatial noise so scattered props come in
 /// coherent patches with clearings. `contrast` sharpens the patch edges,
 /// `bias` shifts the clearing threshold.

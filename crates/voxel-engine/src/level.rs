@@ -105,6 +105,18 @@ pub enum SpawnerDef {
     Boulders(BouldersDef),
 }
 
+/// Spawn density driven by a generator field register (`field` op):
+/// gate = clamp(field[slot] * scale + offset, 0, 1). Shared world data —
+/// several spawners (and future consumers) can reference one field.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct FieldDensityDef {
+    pub field: u32,
+    #[serde(default = "default_one")]
+    pub scale: f32,
+    #[serde(default)]
+    pub offset: f32,
+}
+
 /// Coherent-patch noise for spawn density (clearings in a forest).
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct PatchDef {
@@ -128,6 +140,9 @@ pub struct TreesDef {
     /// Density patchiness (None = uniform forests).
     #[serde(default)]
     pub patch: Option<PatchDef>,
+    /// Density from a generator field register.
+    #[serde(default)]
+    pub density: Option<FieldDensityDef>,
     pub species: Vec<SpeciesDef>,
 }
 
@@ -176,6 +191,9 @@ pub struct GrassDef {
     /// View-distance fade (start, end) in meters.
     #[serde(default = "d_grass_fade")]
     pub fade: [f32; 2],
+    /// Density from a generator field register.
+    #[serde(default)]
+    pub density: Option<FieldDensityDef>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -193,6 +211,9 @@ pub struct BouldersDef {
     pub scale: [f32; 2],
     #[serde(default = "d_rock_color")]
     pub color: [f32; 3],
+    /// Density from a generator field register.
+    #[serde(default)]
+    pub density: Option<FieldDensityDef>,
 }
 
 fn d_tree_attempts() -> u32 {
@@ -621,6 +642,20 @@ pub enum GenOpDef {
     /// Cliff step: terrain crossing the `[start, end]` altitude band grows
     /// an `amp`-meter wall (iq's Rainforest cliff term).
     HeightStep { start: f32, end: f32, amp: f32 },
+    /// Accumulate an FBM band into a field register: named world data for
+    /// spawner densities and gameplay queries (never the SDF itself).
+    Field {
+        slot: u32,
+        #[serde(default)]
+        offset: [f32; 2],
+        scale: f32,
+        amp: f32,
+        octaves: u32,
+        #[serde(default)]
+        mode: NoiseModeDef,
+        #[serde(default)]
+        bias: f32,
+    },
     /// Turn the accumulated height into ground.
     HeightSurface {
         #[serde(default = "mat_grass")]
@@ -780,6 +815,17 @@ impl GenOpDef {
             GenOpDef::HeightStep { start, end, amp } => {
                 WorldOp::new(WOP_HEIGHT_STEP).p0([start, end, amp, 0.0])
             }
+            GenOpDef::Field {
+                slot,
+                offset,
+                scale,
+                amp,
+                octaves,
+                mode,
+                bias,
+            } => WorldOp::new(WOP_FIELD)
+                .p0([offset[0], offset[1], scale, amp])
+                .p1([octaves as f32, mode as u32 as f32, slot as f32, bias]),
             GenOpDef::HeightSurface { material } => {
                 WorldOp::new(WOP_HEIGHT_SURFACE).material(material)
             }
