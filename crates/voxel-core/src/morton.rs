@@ -56,7 +56,11 @@ mod tests {
 
     #[test]
     fn roundtrip_max_coords() {
-        for p in [UVec3::splat(1023), UVec3::new(1023, 0, 511), UVec3::new(7, 1000, 3)] {
+        for p in [
+            UVec3::splat(1023),
+            UVec3::new(1023, 0, 511),
+            UVec3::new(7, 1000, 3),
+        ] {
             assert_eq!(morton_decode(morton_encode(p)), p);
         }
     }

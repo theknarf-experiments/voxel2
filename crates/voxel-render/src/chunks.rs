@@ -44,17 +44,18 @@ use bevy::{
         },
         render_resource::{
             binding_types::{storage_buffer_sized, uniform_buffer},
-            BindGroup, BindGroupEntries, BindGroupLayoutDescriptor, BindGroupLayoutEntries,
-            Buffer, BufferDescriptor, BufferInitDescriptor, BufferUsages,
-            CachedComputePipelineId, Canonical,
-            ColorTargetState, ColorWrites, CompareFunction, ComputePassDescriptor,
+            BindGroup, BindGroupEntries, BindGroupLayoutDescriptor, BindGroupLayoutEntries, Buffer,
+            BufferDescriptor, BufferInitDescriptor, BufferUsages, CachedComputePipelineId,
+            Canonical, ColorTargetState, ColorWrites, CompareFunction, ComputePassDescriptor,
             ComputePipelineDescriptor, DepthStencilState, DynamicUniformBuffer, FragmentState,
-            IndexFormat, MapMode, PipelineCache, RenderPipeline,
-            RenderPipelineDescriptor, ShaderStages, ShaderType, Specializer, SpecializerKey,
-            TextureFormat, Variants, VertexAttribute, VertexFormat, VertexState, VertexStepMode,
+            IndexFormat, MapMode, PipelineCache, RenderPipeline, RenderPipelineDescriptor,
+            ShaderStages, ShaderType, Specializer, SpecializerKey, TextureFormat, Variants,
+            VertexAttribute, VertexFormat, VertexState, VertexStepMode,
         },
         renderer::{RenderContext, RenderDevice, RenderGraph, RenderQueue},
-        view::{ExtractedView, RenderVisibleEntities, ViewUniform, ViewUniformOffset, ViewUniforms},
+        view::{
+            ExtractedView, RenderVisibleEntities, ViewUniform, ViewUniformOffset, ViewUniforms,
+        },
         Extract, Render, RenderApp, RenderStartup, RenderSystems,
     },
 };
@@ -187,7 +188,10 @@ impl Plugin for VoxelChunksPlugin {
             .init_resource::<ViewBindGroupRes>()
             .add_render_command::<Opaque3d, DrawVoxelChunksCommands>()
             .add_systems(RenderStartup, init_chunk_resources)
-            .add_systems(ExtractSchedule, (extract_chunk_commands, extract_camera_pos))
+            .add_systems(
+                ExtractSchedule,
+                (extract_chunk_commands, extract_camera_pos),
+            )
             .add_systems(Render, plan_frame.in_set(RenderSystems::Prepare))
             .add_systems(
                 Render,
@@ -299,9 +303,13 @@ struct ChunkDrawUniform {
 enum StagingState {
     Free,
     /// Copy recorded this frame; mapping requested next frame.
-    PendingMap { entries: Vec<(ChunkKey, u32)> },
+    PendingMap {
+        entries: Vec<(ChunkKey, u32)>,
+    },
     /// map_async issued; waiting for the callback.
-    Mapping { entries: Vec<(ChunkKey, u32)> },
+    Mapping {
+        entries: Vec<(ChunkKey, u32)>,
+    },
 }
 
 struct StagingSlot {
@@ -434,9 +442,9 @@ fn init_chunk_resources(
         &BindGroupLayoutEntries::sequential(
             ShaderStages::COMPUTE,
             (
-                storage_buffer_sized(false, None),     // density arena
-                uniform_buffer::<ChunkParams>(true),   // per-chunk params
-                storage_buffer_sized(false, None),     // planning CSG ops
+                storage_buffer_sized(false, None),   // density arena
+                uniform_buffer::<ChunkParams>(true), // per-chunk params
+                storage_buffer_sized(false, None),   // planning CSG ops
             ),
         ),
     );
@@ -445,12 +453,12 @@ fn init_chunk_resources(
         &BindGroupLayoutEntries::sequential(
             ShaderStages::COMPUTE,
             (
-                storage_buffer_sized(false, None),     // density arena
-                uniform_buffer::<ChunkParams>(true),   // per-chunk params
-                storage_buffer_sized(false, None),     // cell_indices scratch
-                storage_buffer_sized(false, None),     // vertex slab
-                storage_buffer_sized(false, None),     // index slab
-                storage_buffer_sized(false, None),     // counts
+                storage_buffer_sized(false, None),   // density arena
+                uniform_buffer::<ChunkParams>(true), // per-chunk params
+                storage_buffer_sized(false, None),   // cell_indices scratch
+                storage_buffer_sized(false, None),   // vertex slab
+                storage_buffer_sized(false, None),   // index slab
+                storage_buffer_sized(false, None),   // counts
             ),
         ),
     );
@@ -484,9 +492,19 @@ fn init_chunk_resources(
         })
     };
     commands.insert_resource(ChunkPipelines {
-        density: compute("voxel_density", &density_shader, "density_main", &gen_layout),
+        density: compute(
+            "voxel_density",
+            &density_shader,
+            "density_main",
+            &gen_layout,
+        ),
         count: compute("voxel_sn_count", &mesh_shader, "sn_count", &mesh_layout),
-        vertices: compute("voxel_sn_vertices", &mesh_shader, "sn_vertices", &mesh_layout),
+        vertices: compute(
+            "voxel_sn_vertices",
+            &mesh_shader,
+            "sn_vertices",
+            &mesh_layout,
+        ),
         quads: compute("voxel_sn_quads", &mesh_shader, "sn_quads", &mesh_layout),
         gen_layout,
         mesh_layout,
@@ -536,7 +554,6 @@ fn init_chunk_resources(
                     },
                 ],
             }],
-            ..default()
         },
         fragment: Some(FragmentState {
             shader: draw_shader,
@@ -547,7 +564,6 @@ fn init_chunk_resources(
                 blend: None,
                 write_mask: ColorWrites::ALL,
             })],
-            ..default()
         }),
         depth_stencil: Some(DepthStencilState {
             format: CORE_3D_DEPTH_FORMAT,
@@ -678,7 +694,11 @@ fn plan_frame(
     // 1. Apply commands from the LOD controller.
     for command in extracted.0.drain(..) {
         match command {
-            ChunkCommand::Request { key, show_on_ready, ops } => {
+            ChunkCommand::Request {
+                key,
+                show_on_ready,
+                ops,
+            } => {
                 match table.chunks.get_mut(&key) {
                     None => {
                         table.chunks.insert(
@@ -708,7 +728,10 @@ fn plan_frame(
                 }
             }
             ChunkCommand::Free(key) => match table.chunks.remove(&key) {
-                Some(RenderChunk { state: ChunkState::CountsInFlight { slot }, .. }) => {
+                Some(RenderChunk {
+                    state: ChunkState::CountsInFlight { slot },
+                    ..
+                }) => {
                     // Result still coming; readback will recycle the slot.
                     table.chunks.insert(
                         key,
@@ -720,12 +743,14 @@ fn plan_frame(
                         },
                     );
                 }
-                Some(RenderChunk { state: ChunkState::AwaitingAlloc { slot, .. }, .. }) => {
-                    gpu.arena_free.push(slot)
-                }
-                Some(RenderChunk { state: ChunkState::Meshed { alloc, .. }, .. }) => {
-                    gpu.slab.free(alloc)
-                }
+                Some(RenderChunk {
+                    state: ChunkState::AwaitingAlloc { slot, .. },
+                    ..
+                }) => gpu.arena_free.push(slot),
+                Some(RenderChunk {
+                    state: ChunkState::Meshed { alloc, .. },
+                    ..
+                }) => gpu.slab.free(alloc),
                 _ => {}
             },
         }
@@ -766,7 +791,11 @@ fn plan_frame(
                         chunk.state = ChunkState::Empty;
                         let _ = ready_tx.0.send(*key);
                     } else {
-                        chunk.state = ChunkState::AwaitingAlloc { slot, verts, indices: quads * 6 };
+                        chunk.state = ChunkState::AwaitingAlloc {
+                            slot,
+                            verts,
+                            indices: quads * 6,
+                        };
                     }
                 }
                 _ => {}
@@ -794,7 +823,12 @@ fn plan_frame(
     };
     for key in mesh_keys {
         let chunk = table.chunks.get_mut(&key).unwrap();
-        let ChunkState::AwaitingAlloc { slot, verts, indices } = chunk.state else {
+        let ChunkState::AwaitingAlloc {
+            slot,
+            verts,
+            indices,
+        } = chunk.state
+        else {
             unreachable!()
         };
         let Some(alloc) = gpu.slab.alloc(verts, indices) else {
@@ -802,13 +836,22 @@ fn plan_frame(
             continue;
         };
         mesh_counts_slot -= 1;
-        let offset = gpu
-            .gen_uniforms
-            .push(&make_params(key, slot, Some(&alloc), mesh_counts_slot, (0, 0)));
-        batches.mesh.push(MeshEntry { uniform_offset: offset });
+        let offset = gpu.gen_uniforms.push(&make_params(
+            key,
+            slot,
+            Some(&alloc),
+            mesh_counts_slot,
+            (0, 0),
+        ));
+        batches.mesh.push(MeshEntry {
+            uniform_offset: offset,
+        });
         // The mesh compute is recorded later this frame, before the main
         // pass, so the chunk is immediately drawable.
-        chunk.state = ChunkState::Meshed { alloc, index_count: indices };
+        chunk.state = ChunkState::Meshed {
+            alloc,
+            index_count: indices,
+        };
         if chunk.show_on_ready {
             chunk.visible = true;
         }
@@ -853,7 +896,9 @@ fn plan_frame(
             let offset = gpu
                 .gen_uniforms
                 .push(&make_params(key, slot, None, counts_slot, csg));
-            batches.gen.push(GenEntry { uniform_offset: offset });
+            batches.gen.push(GenEntry {
+                uniform_offset: offset,
+            });
             entries.push((key, counts_slot));
             chunk.state = ChunkState::CountsInFlight { slot };
         }
@@ -865,11 +910,13 @@ fn plan_frame(
         gpu.csg_buffer = if frame_ops.is_empty() {
             None
         } else {
-            Some(render_device.create_buffer_with_data(&BufferInitDescriptor {
-                label: Some("voxel_csg_ops"),
-                contents: bytemuck::cast_slice(&frame_ops),
-                usage: BufferUsages::STORAGE,
-            }))
+            Some(
+                render_device.create_buffer_with_data(&BufferInitDescriptor {
+                    label: Some("voxel_csg_ops"),
+                    contents: bytemuck::cast_slice(&frame_ops),
+                    usage: BufferUsages::STORAGE,
+                }),
+            )
         };
     }
 
@@ -919,7 +966,8 @@ fn plan_frame(
     }
 
     gpu.gen_uniforms.write_buffer(&render_device, &render_queue);
-    gpu.draw_uniforms.write_buffer(&render_device, &render_queue);
+    gpu.draw_uniforms
+        .write_buffer(&render_device, &render_queue);
 
     // 7. HUD stats.
     if let Ok(mut s) = stats.0.lock() {
@@ -933,9 +981,7 @@ fn plan_frame(
         s.awaiting = table
             .chunks
             .values()
-            .filter(|c| {
-                !matches!(c.state, ChunkState::Meshed { .. } | ChunkState::Empty)
-            })
+            .filter(|c| !matches!(c.state, ChunkState::Meshed { .. } | ChunkState::Empty))
             .count();
         s.arena_free = gpu.arena_free.len() as u32;
         s.slab_occupancy = gpu.slab.occupancy();

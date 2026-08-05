@@ -33,7 +33,9 @@ use bevy::{
             TextureFormat, UniformBuffer, Variants, VertexState,
         },
         renderer::{RenderDevice, RenderQueue},
-        view::{ExtractedView, RenderVisibleEntities, ViewUniform, ViewUniformOffset, ViewUniforms},
+        view::{
+            ExtractedView, RenderVisibleEntities, ViewUniform, ViewUniformOffset, ViewUniforms,
+        },
         Extract, Render, RenderApp, RenderStartup, RenderSystems,
     },
 };
@@ -114,10 +116,7 @@ fn extract_water_camera(
     }
 }
 
-fn init_water_pipeline(
-    mut commands: Commands,
-    asset_server: Res<AssetServer>,
-) {
+fn init_water_pipeline(mut commands: Commands, asset_server: Res<AssetServer>) {
     let layout = BindGroupLayoutDescriptor::new(
         "water_layout",
         &BindGroupLayoutEntries::sequential(
@@ -185,6 +184,7 @@ impl Specializer<RenderPipeline> for WaterSpecializer {
 #[derive(Default, Deref, DerefMut, Resource)]
 struct PendingWaterQueues(PendingQueues);
 
+#[allow(clippy::too_many_arguments)]
 fn prepare_water_bind_group(
     view_uniforms: Res<ViewUniforms>,
     globals: Res<GlobalsBuffer>,

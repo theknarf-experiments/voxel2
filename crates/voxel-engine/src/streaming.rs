@@ -36,7 +36,11 @@ fn request(
         .map(|f| f(key))
         .filter(|v| !v.is_empty())
         .map(Arc::new);
-    queue.push(ChunkCommand::Request { key, show_on_ready, ops });
+    queue.push(ChunkCommand::Request {
+        key,
+        show_on_ready,
+        ops,
+    });
 }
 
 /// LOD configuration.
@@ -240,8 +244,7 @@ fn lod_tick(
 }
 
 fn in_merge(tree: &LodTree, key: ChunkKey) -> bool {
-    tree.merging.contains_key(&key)
-        || (key.level < 30 && tree.merging.contains_key(&key.parent()))
+    tree.merging.contains_key(&key) || (key.level < 30 && tree.merging.contains_key(&key.parent()))
 }
 
 /// Free every requested chunk whose subtree hangs under `cell`.
@@ -256,13 +259,23 @@ fn free_subtree(tree: &mut LodTree, queue: &ChunkCommandQueue, cell: IVec3, max_
         }
         !stale
     });
-    let stale_splits: Vec<ChunkKey> = tree.splitting.keys().filter(|k| in_subtree(k)).copied().collect();
+    let stale_splits: Vec<ChunkKey> = tree
+        .splitting
+        .keys()
+        .filter(|k| in_subtree(k))
+        .copied()
+        .collect();
     for parent in stale_splits {
         if let Some(children) = tree.splitting.remove(&parent) {
             to_free.extend(children);
         }
     }
-    let stale_merges: Vec<ChunkKey> = tree.merging.keys().filter(|k| in_subtree(k)).copied().collect();
+    let stale_merges: Vec<ChunkKey> = tree
+        .merging
+        .keys()
+        .filter(|k| in_subtree(k))
+        .copied()
+        .collect();
     for parent in stale_merges {
         tree.merging.remove(&parent);
         to_free.insert(parent);
@@ -307,7 +320,10 @@ fn hud_stats(
     }
     let mut levels: Vec<u8> = histo.keys().copied().collect();
     levels.sort_unstable();
-    let parts: Vec<String> = levels.iter().map(|l| format!("L{l}:{}", histo[l])).collect();
+    let parts: Vec<String> = levels
+        .iter()
+        .map(|l| format!("L{l}:{}", histo[l]))
+        .collect();
     hud.0.push(format!(
         "leaves: {} [{}] | splits: {} merges: {}",
         tree.leaves.len(),

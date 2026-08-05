@@ -85,7 +85,11 @@ impl Layer for RoadsLayer {
             };
             // Each road appears once: owned by its midpoint's chunk, with a
             // canonical endpoint order.
-            let (lo, hi) = if (a.x, a.y) <= (b.x, b.y) { (a, b) } else { (b, a) };
+            let (lo, hi) = if (a.x, a.y) <= (b.x, b.y) {
+                (a, b)
+            } else {
+                (b, a)
+            };
             if in_own((lo + hi) * 0.5) && !roads.contains(&(lo, hi)) {
                 roads.push((lo, hi));
             }
@@ -131,8 +135,7 @@ fn road_segment_ops(a: Vec2, b: Vec2, out: &mut Vec<CsgOp>) {
         let wiggle = (t * std::f32::consts::TAU).sin() * len * 0.03;
         let p = a + dir * (t * len) + perp * wiggle;
         let y = terrain_height(p, 1.0);
-        let yaw = (dir + perp * (t * std::f32::consts::TAU).cos() * 0.19)
-            .to_angle();
+        let yaw = (dir + perp * (t * std::f32::consts::TAU).cos() * 0.19).to_angle();
         out.push(CsgOp::boxy(
             Vec3::new(p.x, y - 0.15, p.y),
             Vec3::new(2.2, 0.5, 1.2),

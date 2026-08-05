@@ -44,7 +44,10 @@ impl GlobalPos {
     pub fn from_dvec3(p: DVec3) -> Self {
         let chunk = (p / CHUNK_EDGE_M).floor();
         let chunk_i = IVec3::new(chunk.x as i32, chunk.y as i32, chunk.z as i32);
-        Self { chunk: chunk_i, local: (p - chunk * CHUNK_EDGE_M).as_vec3() }
+        Self {
+            chunk: chunk_i,
+            local: (p - chunk * CHUNK_EDGE_M).as_vec3(),
+        }
     }
 
     /// Position relative to a chunk origin, exact in integers then f32.
@@ -55,7 +58,11 @@ impl GlobalPos {
 
     /// Offset by a small (f32-sized) displacement.
     pub fn offset(self, delta: Vec3) -> Self {
-        Self { chunk: self.chunk, local: self.local + delta }.normalize()
+        Self {
+            chunk: self.chunk,
+            local: self.local + delta,
+        }
+        .normalize()
     }
 }
 

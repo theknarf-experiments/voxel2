@@ -47,7 +47,10 @@ impl ChunkKey {
     pub fn parent(&self) -> ChunkKey {
         // Arithmetic shift right floors toward negative infinity, which is the
         // correct containment rule for negative chunk coordinates.
-        ChunkKey::new(self.level + 1, IVec3::new(self.pos.x >> 1, self.pos.y >> 1, self.pos.z >> 1))
+        ChunkKey::new(
+            self.level + 1,
+            IVec3::new(self.pos.x >> 1, self.pos.y >> 1, self.pos.z >> 1),
+        )
     }
 
     /// The eight children one LOD level finer. Panics at level 0.
@@ -85,8 +88,14 @@ mod tests {
 
     #[test]
     fn parent_of_negative_coords_floors() {
-        assert_eq!(ChunkKey::new(0, IVec3::new(-1, -2, 1)).parent().pos, IVec3::new(-1, -1, 0));
-        assert_eq!(ChunkKey::new(0, IVec3::new(-2, 3, -3)).parent().pos, IVec3::new(-1, 1, -2));
+        assert_eq!(
+            ChunkKey::new(0, IVec3::new(-1, -2, 1)).parent().pos,
+            IVec3::new(-1, -1, 0)
+        );
+        assert_eq!(
+            ChunkKey::new(0, IVec3::new(-2, 3, -3)).parent().pos,
+            IVec3::new(-1, 1, -2)
+        );
     }
 
     #[test]

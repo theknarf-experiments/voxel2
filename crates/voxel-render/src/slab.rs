@@ -63,7 +63,9 @@ impl SlabAllocator {
 
     /// Total vertex capacity of all classes (buffer sizing).
     pub fn total_vertices() -> u64 {
-        (0..4).map(|c| CLASS_VERTS[c] as u64 * CLASS_SLOTS[c] as u64).sum()
+        (0..4)
+            .map(|c| CLASS_VERTS[c] as u64 * CLASS_SLOTS[c] as u64)
+            .sum()
     }
 
     /// Total index capacity of all classes (buffer sizing).
@@ -74,9 +76,8 @@ impl SlabAllocator {
     /// Allocate the smallest slot fitting the exact counts, or `None` if the
     /// counts exceed the largest class or every fitting class is exhausted.
     pub fn alloc(&mut self, vertex_count: u32, index_count: u32) -> Option<SlabAlloc> {
-        for class in 0..4 {
-            if vertex_count > CLASS_VERTS[class] || index_count > CLASS_VERTS[class] * INDEX_FACTOR
-            {
+        for (class, &class_verts) in CLASS_VERTS.iter().enumerate() {
+            if vertex_count > class_verts || index_count > class_verts * INDEX_FACTOR {
                 continue;
             }
             if let Some(slot) = self.free[class].pop() {
@@ -118,7 +119,9 @@ mod tests {
         assert_eq!(slab.alloc(CLASS_VERTS[1] + 1, 600).unwrap().class, 2);
         // Index count alone can push into a bigger class.
         assert_eq!(
-            slab.alloc(100, CLASS_VERTS[0] * INDEX_FACTOR + 1).unwrap().class,
+            slab.alloc(100, CLASS_VERTS[0] * INDEX_FACTOR + 1)
+                .unwrap()
+                .class,
             1
         );
         // Too big entirely.
@@ -154,11 +157,52 @@ mod tests {
     }
 
     #[test]
+    fn fuzz_alloc_free_never_overlaps() {
+        use voxel_core::seed::Rng;
+        let mut slab = SlabAllocator::new();
+        let mut live: Vec<(SlabAlloc, u32, u32)> = Vec::new();
+        let mut rng = Rng::new(0xF422);
+        for _ in 0..20_000 {
+            if rng.next_f32() < 0.55 || live.is_empty() {
+                let verts = 1 + rng.next_range(CLASS_VERTS[3]);
+                let indices = 1 + rng.next_range(CLASS_VERTS[3] * INDEX_FACTOR);
+                if let Some(a) = slab.alloc(verts, indices) {
+                    // The granted ranges must hold the request…
+                    assert!(CLASS_VERTS[a.class as usize] >= verts);
+                    // …and never overlap any live allocation.
+                    for (b, bv, bi) in &live {
+                        let av_end = a.base_vertex + verts;
+                        let bv_end = b.base_vertex + bv;
+                        assert!(
+                            av_end <= b.base_vertex || bv_end <= a.base_vertex,
+                            "vertex overlap"
+                        );
+                        let ai_end = a.first_index + indices;
+                        let bi_end = b.first_index + bi;
+                        assert!(
+                            ai_end <= b.first_index || bi_end <= a.first_index,
+                            "index overlap"
+                        );
+                    }
+                    live.push((a, verts, indices));
+                }
+            } else {
+                let i = rng.next_range(live.len() as u32) as usize;
+                let (a, _, _) = live.swap_remove(i);
+                slab.free(a);
+            }
+        }
+    }
+
+    #[test]
     fn capacity_math_matches_class_tables() {
         let expected: u64 = (0..4)
             .map(|c| CLASS_VERTS[c] as u64 * CLASS_SLOTS[c] as u64)
             .sum();
         assert_eq!(SlabAllocator::total_vertices(), expected);
-        assert_eq!(SlabAllocator::total_indices(), expected * INDEX_FACTOR as u64);
+        assert_eq!(
+            SlabAllocator::total_indices(),
+            expected * INDEX_FACTOR as u64
+        );
     }
 }

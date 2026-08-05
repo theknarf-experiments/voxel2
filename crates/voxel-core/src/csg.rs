@@ -31,7 +31,11 @@ impl CsgOp {
     pub fn boxy(center: Vec3, half: Vec3, yaw: f32, material: u32, cut: bool) -> Self {
         Self {
             center: center.to_array(),
-            kind: if cut { CSG_KIND_BOX_CUT } else { CSG_KIND_BOX_ADD },
+            kind: if cut {
+                CSG_KIND_BOX_CUT
+            } else {
+                CSG_KIND_BOX_ADD
+            },
             half: half.to_array(),
             material,
             yaw,
@@ -43,7 +47,11 @@ impl CsgOp {
     pub fn cylinder(center: Vec3, radius: f32, half_height: f32, material: u32, cut: bool) -> Self {
         Self {
             center: center.to_array(),
-            kind: if cut { CSG_KIND_CYLINDER_CUT } else { CSG_KIND_CYLINDER_ADD },
+            kind: if cut {
+                CSG_KIND_CYLINDER_CUT
+            } else {
+                CSG_KIND_CYLINDER_ADD
+            },
             half: [radius, half_height, radius],
             material,
             yaw: 0.0,
@@ -91,7 +99,12 @@ impl CsgOp {
     /// Does this op affect the chunk box `[min, max]` (meters)?
     pub fn touches(&self, min: Vec3, max: Vec3) -> bool {
         let (lo, hi) = self.aabb();
-        lo.x <= max.x && hi.x >= min.x && lo.y <= max.y && hi.y >= min.y && lo.z <= max.z && hi.z >= min.z
+        lo.x <= max.x
+            && hi.x >= min.x
+            && lo.y <= max.y
+            && hi.y >= min.y
+            && lo.z <= max.z
+            && hi.z >= min.z
     }
 }
 
@@ -117,7 +130,11 @@ mod tests {
             for sz in [-1.0f32, 1.0] {
                 let corner = Vec3::new(4.0 * sx, 0.0, 1.0 * sz);
                 let (s, c) = (0.7f32.sin(), 0.7f32.cos());
-                let world = Vec3::new(corner.x * c - corner.z * s, 0.0, corner.x * s + corner.z * c);
+                let world = Vec3::new(
+                    corner.x * c - corner.z * s,
+                    0.0,
+                    corner.x * s + corner.z * c,
+                );
                 assert!(world.x >= lo.x && world.x <= hi.x);
                 assert!(world.z >= lo.z && world.z <= hi.z);
             }

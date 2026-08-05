@@ -33,7 +33,11 @@ fn main() {
                 ops
             })
         })))
-        .add_plugins((VoxelDebugPlugin, VoxelEnginePlugin::default(), voxel_render::WaterPlugin))
+        .add_plugins((
+            VoxelDebugPlugin,
+            VoxelEnginePlugin::default(),
+            voxel_render::WaterPlugin,
+        ))
         .add_systems(Startup, setup)
         .add_systems(Update, (autopilot, walk_mode).chain())
         .run();

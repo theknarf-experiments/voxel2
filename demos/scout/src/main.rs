@@ -9,8 +9,17 @@ fn main() {
         for &(a, b) in &chunk.roads {
             let m = (a + b) * 0.5;
             let h = voxel_worldgen::terrain_height(m, 1.0);
-            println!("road: {:.0},{:.0} <-> {:.0},{:.0}  mid {:.0},{:.0},{:.0} len={:.0}",
-                a.x, a.y, b.x, b.y, m.x, h + 25.0, m.y, a.distance(b));
+            println!(
+                "road: {:.0},{:.0} <-> {:.0},{:.0}  mid {:.0},{:.0},{:.0} len={:.0}",
+                a.x,
+                a.y,
+                b.x,
+                b.y,
+                m.x,
+                h + 25.0,
+                m.y,
+                a.distance(b)
+            );
         }
     }
 }

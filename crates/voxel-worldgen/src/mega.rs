@@ -73,10 +73,7 @@ pub fn mega_sdf(p: Vec3) -> f32 {
         (p.x / PILLAR_SPACING).round() as i32,
         (p.z / PILLAR_SPACING).round() as i32,
     );
-    let jit = Vec2::new(
-        hash2(pc) - 0.5,
-        hash2(pc + IVec2::new(311, 77)) - 0.5,
-    ) * 8.0;
+    let jit = Vec2::new(hash2(pc) - 0.5, hash2(pc + IVec2::new(311, 77)) - 0.5) * 8.0;
     let pp = pxz - Vec2::new(pc.x as f32, pc.y as f32) * PILLAR_SPACING - jit;
     let girth = 1.6 + hash2(pc + IVec2::new(9, -4)) * 2.2;
     let pillar = pp.x.abs().max(pp.y.abs()) - girth;
@@ -90,10 +87,7 @@ pub fn mega_sdf(p: Vec3) -> f32 {
         let cz = (p.z / 22.0).round();
         let czl = p.z - cz * 22.0;
         if hash3(IVec3::new(wxi as i32, cz as i32, level as i32)) < 0.5 {
-            let doorway = sd_box(
-                Vec3::new(wx, fy + 12.0, czl),
-                Vec3::new(4.0, 14.0, 5.0),
-            );
+            let doorway = sd_box(Vec3::new(wx, fy + 12.0, czl), Vec3::new(4.0, 14.0, 5.0));
             wall = wall.max(-doorway);
         }
         d = d.min(wall);
@@ -106,10 +100,7 @@ pub fn mega_sdf(p: Vec3) -> f32 {
         let cx = (p.x / 22.0).round();
         let cxl = p.x - cx * 22.0;
         if hash3(IVec3::new(wzi as i32, cx as i32, level as i32 + 77)) < 0.5 {
-            let doorway = sd_box(
-                Vec3::new(wz, fy + 12.0, cxl),
-                Vec3::new(4.0, 14.0, 5.0),
-            );
+            let doorway = sd_box(Vec3::new(wz, fy + 12.0, cxl), Vec3::new(4.0, 14.0, 5.0));
             wall = wall.max(-doorway);
         }
         d = d.min(wall);

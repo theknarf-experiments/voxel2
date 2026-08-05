@@ -124,7 +124,9 @@ mod tests {
     #[test]
     fn f16_roundtrip_exact_values() {
         // Values exactly representable in f16 must roundtrip bit-perfectly.
-        for x in [0.0f32, 1.0, -1.0, 0.5, 2.0, 4.0, -4.0, 0.25, 1.5, -3.75, 100.0] {
+        for x in [
+            0.0f32, 1.0, -1.0, 0.5, 2.0, 4.0, -4.0, 0.25, 1.5, -3.75, 100.0,
+        ] {
             assert_eq!(f16_bits_to_f32(f32_to_f16_bits(x)), x, "value {x}");
         }
     }

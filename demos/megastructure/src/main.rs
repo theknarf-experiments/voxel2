@@ -86,8 +86,8 @@ fn walk_mode(
             *spawned = true;
             'probe: for r in 0..40 {
                 for (dx, dz) in [(1.0, 0.3), (-0.7, 1.0), (0.4, -1.0), (-1.0, -0.5)] {
-                    let p = t.translation
-                        + Vec3::new(dx * r as f32 * 4.0, 0.0, dz * r as f32 * 4.0);
+                    let p =
+                        t.translation + Vec3::new(dx * r as f32 * 4.0, 0.0, dz * r as f32 * 4.0);
                     let level = (p.y / 44.0).round() * 44.0;
                     let foot = Vec3::new(p.x, level, p.z);
                     if mega_sdf(foot) < -1.0 {

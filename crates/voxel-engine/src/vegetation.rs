@@ -44,7 +44,12 @@ impl Plugin for VegetationPlugin {
             .add_systems(Startup, build_tree_assets)
             .add_systems(
                 Update,
-                (stream_vegetation, stream_grass, stream_far_forest, far_forest_visibility),
+                (
+                    stream_vegetation,
+                    stream_grass,
+                    stream_far_forest,
+                    far_forest_visibility,
+                ),
             );
     }
 }
@@ -364,7 +369,8 @@ impl MeshBuilder {
             let n = (p1 - p0).cross(apex - p0).normalize();
             let n = [-n.x, -n.y, -n.z];
             let s = self.positions.len() as u32;
-            self.positions.extend([p0.to_array(), p1.to_array(), apex.to_array()]);
+            self.positions
+                .extend([p0.to_array(), p1.to_array(), apex.to_array()]);
             self.normals.extend([n, n, n]);
             self.indices.extend([s, s + 2, s + 1]);
         }
@@ -404,7 +410,9 @@ impl MeshBuilder {
                     ring_verts[(r + 1) as usize][s1 as usize],
                     ring_verts[(r + 1) as usize][s as usize],
                 ];
-                let n = (quad[1] - quad[0]).cross(quad[3] - quad[0]).normalize_or_zero();
+                let n = (quad[1] - quad[0])
+                    .cross(quad[3] - quad[0])
+                    .normalize_or_zero();
                 let n = if n == Vec3::ZERO { Vec3::Y } else { n };
                 let base = self.positions.len() as u32;
                 for p in quad {
@@ -491,7 +499,8 @@ fn cylinder_mesh(radius: f32, height: f32, sides: u32) -> Mesh {
             (n0 * radius + Vec3::Y * height).to_array(),
             (n1 * radius + Vec3::Y * height).to_array(),
         ]);
-        b.normals.extend([n0.to_array(), n1.to_array(), n0.to_array(), n1.to_array()]);
+        b.normals
+            .extend([n0.to_array(), n1.to_array(), n0.to_array(), n1.to_array()]);
         b.indices.extend([s, s + 2, s + 1, s + 1, s + 2, s + 3]);
     }
     b.build()
@@ -661,7 +670,9 @@ fn spawn_tile(commands: &mut Commands, assets: &TreeAssets, tile: IVec2) -> Vec<
                     Mesh3d(assets.rock_mesh.clone()),
                     MeshMaterial3d(assets.rock_mat.clone()),
                     Transform::from_xyz(x, y - 0.2 * scale, z)
-                        .with_rotation(Quat::from_rotation_y(rng.next_f32() * 6.28))
+                        .with_rotation(Quat::from_rotation_y(
+                            rng.next_f32() * std::f32::consts::TAU,
+                        ))
                         .with_scale(Vec3::new(scale, scale * 0.75, scale)),
                 ))
                 .id(),

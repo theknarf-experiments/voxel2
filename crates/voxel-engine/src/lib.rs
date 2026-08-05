@@ -7,8 +7,8 @@ pub mod vegetation;
 use bevy::prelude::*;
 
 pub use streaming::{LodConfig, VoxelStreamingPlugin};
-pub use voxel_core::ChunkKey;
 pub use vegetation::VegetationPlugin;
+pub use voxel_core::ChunkKey;
 pub use voxel_render::WorldKind;
 
 /// Everything needed for a streamed voxel world.

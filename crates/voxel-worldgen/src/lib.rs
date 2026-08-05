@@ -140,7 +140,10 @@ mod tests {
             let fine = terrain_height(p, 1.0);
             let coarse = terrain_height(p, 64.0);
             // Bands below 256 m wavelength carry at most ~±30 m.
-            assert!((fine - coarse).abs() < 60.0, "fine {fine} vs coarse {coarse}");
+            assert!(
+                (fine - coarse).abs() < 60.0,
+                "fine {fine} vs coarse {coarse}"
+            );
         }
     }
 

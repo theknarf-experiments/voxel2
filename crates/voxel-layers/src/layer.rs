@@ -51,7 +51,10 @@ pub struct Dep {
 
 impl Dep {
     pub fn of<L: Layer>(padding: IVec3) -> Self {
-        Self { layer: TypeId::of::<L>(), padding }
+        Self {
+            layer: TypeId::of::<L>(),
+            padding,
+        }
     }
 }
 
@@ -131,7 +134,10 @@ mod tests {
         assert_eq!(b.min, IVec3::new(-256, i32::MIN, 512));
         assert_eq!(b.max, IVec3::new(0, i32::MAX, 768));
 
-        let (lo, hi) = chunk_range(extent, IAabb::new(IVec3::new(-10, 5, 0), IVec3::new(10, 6, 257)));
+        let (lo, hi) = chunk_range(
+            extent,
+            IAabb::new(IVec3::new(-10, 5, 0), IVec3::new(10, 6, 257)),
+        );
         assert_eq!(lo, IVec3::new(-1, 0, 0));
         assert_eq!(hi, IVec3::new(0, 0, 1));
     }

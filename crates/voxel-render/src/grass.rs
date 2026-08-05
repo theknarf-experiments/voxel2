@@ -32,12 +32,14 @@ use bevy::{
             binding_types::uniform_buffer, BindGroup, BindGroupEntries, BindGroupLayoutDescriptor,
             BindGroupLayoutEntries, Buffer, BufferInitDescriptor, BufferUsages, Canonical,
             ColorTargetState, ColorWrites, CompareFunction, DepthStencilState, FragmentState,
-            IndexFormat, PipelineCache, PrimitiveState, RenderPipeline,
-            RenderPipelineDescriptor, ShaderStages, Specializer, SpecializerKey, TextureFormat,
-            Variants, VertexAttribute, VertexFormat, VertexState, VertexStepMode,
+            IndexFormat, PipelineCache, PrimitiveState, RenderPipeline, RenderPipelineDescriptor,
+            ShaderStages, Specializer, SpecializerKey, TextureFormat, Variants, VertexAttribute,
+            VertexFormat, VertexState, VertexStepMode,
         },
         renderer::RenderDevice,
-        view::{ExtractedView, RenderVisibleEntities, ViewUniform, ViewUniformOffset, ViewUniforms},
+        view::{
+            ExtractedView, RenderVisibleEntities, ViewUniform, ViewUniformOffset, ViewUniforms,
+        },
         Extract, Render, RenderApp, RenderStartup, RenderSystems,
     },
 };
@@ -141,8 +143,14 @@ fn build_tuft() -> (Vec<BladeVertex>, Vec<u32>) {
         let lean = dir * (0.10 + (i as f32 * 0.53).fract() * 0.12);
         let side = Vec3::new(-s, 0.0, c) * 0.035;
         let base = verts.len() as u32;
-        verts.push(BladeVertex { pos: (root - side).to_array(), tip: 0.0 });
-        verts.push(BladeVertex { pos: (root + side).to_array(), tip: 0.0 });
+        verts.push(BladeVertex {
+            pos: (root - side).to_array(),
+            tip: 0.0,
+        });
+        verts.push(BladeVertex {
+            pos: (root + side).to_array(),
+            tip: 0.0,
+        });
         verts.push(BladeVertex {
             pos: (root + lean + Vec3::Y * height).to_array(),
             tip: 1.0,
@@ -180,16 +188,20 @@ fn init_grass_pipeline(
 ) {
     // Static tuft geometry.
     let (verts, indices) = build_tuft();
-    buffers.tuft_vertices = Some(render_device.create_buffer_with_data(&BufferInitDescriptor {
-        label: Some("grass_tuft_vertices"),
-        contents: bytemuck::cast_slice(&verts),
-        usage: BufferUsages::VERTEX,
-    }));
-    buffers.tuft_indices = Some(render_device.create_buffer_with_data(&BufferInitDescriptor {
-        label: Some("grass_tuft_indices"),
-        contents: bytemuck::cast_slice(&indices),
-        usage: BufferUsages::INDEX,
-    }));
+    buffers.tuft_vertices = Some(
+        render_device.create_buffer_with_data(&BufferInitDescriptor {
+            label: Some("grass_tuft_vertices"),
+            contents: bytemuck::cast_slice(&verts),
+            usage: BufferUsages::VERTEX,
+        }),
+    );
+    buffers.tuft_indices = Some(
+        render_device.create_buffer_with_data(&BufferInitDescriptor {
+            label: Some("grass_tuft_indices"),
+            contents: bytemuck::cast_slice(&indices),
+            usage: BufferUsages::INDEX,
+        }),
+    );
     buffers.tuft_index_count = indices.len() as u32;
 
     let layout = BindGroupLayoutDescriptor::new(
@@ -291,11 +303,13 @@ fn extract_grass_instances(
         buffers.instances = None;
         return;
     }
-    buffers.instances = Some(render_device.create_buffer_with_data(&BufferInitDescriptor {
-        label: Some("grass_instances"),
-        contents: bytemuck::cast_slice(&inner.instances),
-        usage: BufferUsages::VERTEX,
-    }));
+    buffers.instances = Some(
+        render_device.create_buffer_with_data(&BufferInitDescriptor {
+            label: Some("grass_instances"),
+            contents: bytemuck::cast_slice(&inner.instances),
+            usage: BufferUsages::VERTEX,
+        }),
+    );
 }
 
 // --- drawing -----------------------------------------------------------------
