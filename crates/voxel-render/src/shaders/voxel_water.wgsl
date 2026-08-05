@@ -152,7 +152,7 @@ fn coarse_fbm(p: vec2<f32>, base_scale: f32, octaves: i32, mode: u32) -> f32 {
     var amp = 0.5;
     var freq = base_scale;
     for (var o = 0; o < octaves; o++) {
-        let fade = smoothstep(16.0, 32.0, 1.0 / freq);
+        let fade = 1.0;
         let n = value_noise2(p * freq);
         var v = n - 0.5;
         if (mode == 1u) {

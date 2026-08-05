@@ -1,17 +1,24 @@
-//! Main-world LOD controller: a retained chunk octree around the camera.
+//! Main-world LOD controller: a retained chunk octree around the camera,
+//! advanced in atomic epochs.
 //!
-//! Leaves are the currently-shown chunks. A leaf closer than
-//! `split_k × edge` refines into its 8 children; 8 sibling leaves farther
-//! than `merge_k × parent_edge` coarsen back (the gap between the constants
-//! is the hysteresis band that prevents flicker at thresholds).
+//! Every LOD change is planned as an *epoch*: one batch of splits, merges
+//! and seam remeshes whose meshes are generated hidden (or held, for
+//! in-place remeshes) and committed in a single frame only when every
+//! member is drawable. Between commits the shown configuration never
+//! changes, so every shown mesh's seam mask is consistent with its shown
+//! neighbors at every frame — cracks are structurally impossible, not just
+//! transiently unlikely. (GDVoxelTerrain serializes the same way — its LOD
+//! camera is frozen while a build or any meshing is in flight; the atomic
+//! commit is the strict version of that.)
 //!
-//! Swaps are ready-before-swap: the replacement chunks are requested hidden,
-//! and only when *all* of them are drawable (meshed or classified empty)
-//! does one command batch show them and free the replaced chunk — so the
-//! terrain never has holes and never shows two LODs of the same region.
+//! Seam masks derive from the *post-epoch shown configuration*, not from
+//! the desired LOD field: the field (a pure function of the sticky anchor)
+//! only chooses which splits/merges an epoch attempts, and a ±1-adjacency
+//! fixpoint filters out transitions the shown tree isn't ready for.
 
-use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+
+use bevy::platform::collections::{HashMap, HashSet};
 
 use bevy::math::DVec3;
 use bevy::prelude::*;
@@ -29,6 +36,7 @@ fn request(
     provider: &ChunkOpsProvider,
     key: ChunkKey,
     show_on_ready: bool,
+    hold: bool,
     face_mask: u32,
 ) {
     let ops = provider
@@ -40,6 +48,7 @@ fn request(
     queue.push(ChunkCommand::Request {
         key,
         show_on_ready,
+        hold,
         ops,
         face_mask,
     });
@@ -56,32 +65,10 @@ const FACE_DIRS: [IVec3; 6] = [
 ];
 
 /// The LOD field: does the field want this chunk refined? A pure function
-/// of (chunk, quantized camera anchor) — every observer computes the same
-/// answer, so seam masks can never disagree between neighbors.
+/// of (chunk, quantized camera anchor). Advisory only — it drives which
+/// transitions an epoch attempts; seam masks come from the shown tree.
 fn split_wanted(config: &LodConfig, anchor: DVec3, key: ChunkKey) -> bool {
     key.level > 0 && aabb_distance(anchor, key) < config.split_k * key.edge_m()
-}
-
-/// Whether the field represents `region` at its own level (leaf), coarser,
-/// or finer. Depends only on the anchor — not on tree state.
-fn field_code(config: &LodConfig, anchor: DVec3, region: ChunkKey) -> u32 {
-    if split_wanted(config, anchor, region) {
-        return 2; // finer
-    }
-    if region.level < config.max_level && !split_wanted(config, anchor, region.parent()) {
-        return 1; // coarser
-    }
-    0 // equal
-}
-
-/// Seam mask for a chunk from the LOD field (2 bits per face).
-fn face_mask(config: &LodConfig, anchor: DVec3, key: ChunkKey) -> u32 {
-    let mut mask = 0u32;
-    for (i, d) in FACE_DIRS.iter().enumerate() {
-        let n = ChunkKey::new(key.level, key.pos + *d);
-        mask |= field_code(config, anchor, n) << (2 * i);
-    }
-    mask
 }
 
 /// LOD configuration.
@@ -119,27 +106,190 @@ impl Default for LodConfig {
 #[derive(Resource, Default)]
 pub struct StreamingRebuild(pub bool);
 
+/// One planned batch of LOD transitions, committed atomically.
+struct Epoch {
+    /// Shown leaf → the 8 children replacing it.
+    splits: Vec<(ChunkKey, [ChunkKey; 8])>,
+    /// Hidden parent → the 8 shown leaves it replaces.
+    merges: Vec<(ChunkKey, [ChunkKey; 8])>,
+    /// Every mesh the commit waits for → the seam mask it must carry
+    /// (empty chunks report `u32::MAX` and satisfy any expectation).
+    waits: HashMap<ChunkKey, u32>,
+    /// Requests not yet issued, trickled a budget per frame (safe: nothing
+    /// swaps until commit, so deferral can't show stale seams).
+    /// (key, mask, hold) — hold marks in-place remeshes of shown chunks.
+    to_request: Vec<(ChunkKey, u32, bool)>,
+}
+
+/// Generation requests issued per frame while an epoch is in flight.
+const EPOCH_REQUEST_BUDGET: usize = 64;
+
+/// Structural changes attempted per epoch. Caps bound the planning burst
+/// and the epoch's generation load; refinement just takes more epochs.
+const EPOCH_MAX_SPLITS: usize = 48;
+const EPOCH_MAX_MERGES: usize = 48;
+
 #[derive(Resource, Default)]
 struct LodTree {
-    /// Currently-shown chunks (some may still be generating right after
-    /// being requested with show-on-ready).
+    /// Currently-shown chunks. Changes only at epoch commit (plus additive
+    /// top-ring arrivals and evictions between epochs).
     leaves: HashSet<ChunkKey>,
-    /// Parent → its 8 requested children, awaiting readiness.
-    splitting: HashMap<ChunkKey, [ChunkKey; 8]>,
-    /// Parent (requested, hidden) → the 8 active children it will replace.
-    merging: HashMap<ChunkKey, [ChunkKey; 8]>,
-    /// Chunks the render world reported drawable.
-    /// Drawable chunks, with the seam mask their mesh was built with
-    /// (u32::MAX = empty, accepts any).
+    /// The single in-flight epoch, if any.
+    epoch: Option<Epoch>,
+    /// Latest drawable mesh per chunk, with the seam mask it was built
+    /// with (u32::MAX = empty, satisfies any expectation).
     ready: HashMap<ChunkKey, u32>,
     /// Top-level cells whose subtree is live.
     top_cells: HashSet<IVec3>,
-    /// Face mask baked into each chunk's last requested generation.
+    /// Seam mask of each shown chunk's committed (or in-flight requested)
+    /// mesh; the remesh scan compares against post-epoch masks.
     sent_masks: HashMap<ChunkKey, u32>,
-    /// Quantized camera anchor the LOD field is evaluated at. Sticky
-    /// (moves only when the camera leaves its vicinity) — this is the
-    /// hysteresis, and the single input every seam decision derives from.
+    /// Quantized camera anchor the LOD field is evaluated at. Sticky —
+    /// this is the hysteresis; it is only read when planning an epoch.
     anchor: Option<DVec3>,
+}
+
+/// The shown configuration a plan would produce: current leaves minus
+/// `removed` (split parents, merge children) plus `added` (split children,
+/// merge parents). All seam masks and adjacency checks evaluate against
+/// this — the state the commit will make real.
+/// Do the two chunks' closed axis-aligned boxes share at least a point
+/// (face-, edge- or corner-touch)? Coordinates in level-0 cells.
+fn boxes_touch(a: ChunkKey, b: ChunkKey) -> bool {
+    let (amin, amax) = key_box(a);
+    let (bmin, bmax) = key_box(b);
+    amin.cmple(bmax).all() && bmin.cmple(amax).all()
+}
+
+fn key_box(k: ChunkKey) -> (bevy::math::I64Vec3, bevy::math::I64Vec3) {
+    let min = k.pos.as_i64vec3() << (k.level as i64);
+    let max = (k.pos + IVec3::ONE).as_i64vec3() << (k.level as i64);
+    (min, max)
+}
+
+struct PostState<'a> {
+    leaves: &'a HashSet<ChunkKey>,
+    added: HashSet<ChunkKey>,
+    removed: HashSet<ChunkKey>,
+}
+
+impl PostState<'_> {
+    fn current(leaves: &HashSet<ChunkKey>) -> PostState<'_> {
+        PostState {
+            leaves,
+            added: HashSet::new(),
+            removed: HashSet::new(),
+        }
+    }
+
+    fn plan<'a>(
+        leaves: &'a HashSet<ChunkKey>,
+        splits: &[ChunkKey],
+        merges: &[ChunkKey],
+    ) -> PostState<'a> {
+        let mut added = HashSet::new();
+        let mut removed = HashSet::new();
+        for p in splits {
+            removed.insert(*p);
+            added.extend(p.children());
+        }
+        for p in merges {
+            added.insert(*p);
+            removed.extend(p.children());
+        }
+        PostState {
+            leaves,
+            added,
+            removed,
+        }
+    }
+
+    fn is_leaf(&self, key: ChunkKey) -> bool {
+        self.added.contains(&key) || (self.leaves.contains(&key) && !self.removed.contains(&key))
+    }
+
+    /// Level of the leaf covering `key`'s region at `key.level` or above.
+    fn covering_level(&self, max_level: u8, key: ChunkKey) -> Option<u8> {
+        let mut k = key;
+        loop {
+            if self.is_leaf(k) {
+                return Some(k.level);
+            }
+            if k.level >= max_level {
+                return None;
+            }
+            k = k.parent();
+        }
+    }
+
+    /// Any leaf strictly finer than `min_level` inside `region` that
+    /// actually touches `target`'s box (shares at least a corner)? Leaves
+    /// deep inside the region can't produce a seam with `target`, so they
+    /// must not veto its transitions.
+    fn has_touching_finer_than(&self, region: ChunkKey, target: ChunkKey, min_level: u8) -> bool {
+        if !boxes_touch(region, target) {
+            return false;
+        }
+        if self.is_leaf(region) {
+            return region.level < min_level;
+        }
+        if region.level == 0 {
+            return false;
+        }
+        region
+            .children()
+            .iter()
+            .any(|c| self.has_touching_finer_than(*c, target, min_level))
+    }
+
+    /// May `region` be shown at `level` without a ≥2-level jump anywhere in
+    /// its 26-neighborhood? (Seams only bridge one level.)
+    fn adjacency_ok(&self, max_level: u8, region: ChunkKey, level: u8) -> bool {
+        for dz in -1..=1 {
+            for dy in -1..=1 {
+                for dx in -1..=1 {
+                    if dx == 0 && dy == 0 && dz == 0 {
+                        continue;
+                    }
+                    let n = ChunkKey::new(region.level, region.pos + IVec3::new(dx, dy, dz));
+                    if let Some(l) = self.covering_level(max_level, n) {
+                        if l > level + 1 {
+                            return false;
+                        }
+                    }
+                    if level >= 2 && self.has_touching_finer_than(n, region, level - 1) {
+                        return false;
+                    }
+                }
+            }
+        }
+        true
+    }
+
+    /// Seam mask: one coarser-neighbor bit per direction of the
+    /// 26-neighborhood, in scan order (dz, dy, dx in -1..=1, center
+    /// skipped) — twin of `snap_to_parity` in the mesh shader. Diagonal
+    /// (edge/corner) coarser neighbors must snap too, or pinholes open at
+    /// junctions where only the face neighbors snap.
+    fn seam_mask(&self, max_level: u8, key: ChunkKey) -> u32 {
+        let mut mask = 0u32;
+        let mut idx = 0;
+        for dz in -1..=1 {
+            for dy in -1..=1 {
+                for dx in -1..=1 {
+                    if dx == 0 && dy == 0 && dz == 0 {
+                        continue;
+                    }
+                    let n = ChunkKey::new(key.level, key.pos + IVec3::new(dx, dy, dz));
+                    if matches!(self.covering_level(max_level, n), Some(l) if l > key.level) {
+                        mask |= 1 << idx;
+                    }
+                    idx += 1;
+                }
+            }
+        }
+        mask
+    }
 }
 
 pub struct VoxelStreamingPlugin;
@@ -169,9 +319,146 @@ fn top_ancestor(key: ChunkKey, max_level: u8) -> IVec3 {
     k.pos
 }
 
+/// Plan the next epoch: field-wanted splits/merges filtered to transitions
+/// the shown tree can absorb (±1 fixpoint), plus every seam remesh the
+/// resulting configuration requires. Returns None when nothing changes.
+fn plan_epoch(tree: &LodTree, config: &LodConfig, anchor: DVec3) -> Option<Epoch> {
+    let mut splits: Vec<ChunkKey> = tree
+        .leaves
+        .iter()
+        .filter(|l| split_wanted(config, anchor, **l))
+        .copied()
+        .collect();
+    // Nearest-first, capped: with post-state masks a cap only slows
+    // refinement (the fixpoint keeps every intermediate config seam-legal),
+    // and it bounds both the planning burst and the per-epoch GPU load.
+    splits.sort_by(|a, b| {
+        aabb_distance(anchor, *a)
+            .total_cmp(&aabb_distance(anchor, *b))
+    });
+    splits.truncate(EPOCH_MAX_SPLITS);
+
+    let mut sibling_count: HashMap<ChunkKey, u8> = HashMap::new();
+    for leaf in &tree.leaves {
+        if leaf.level >= config.max_level {
+            continue;
+        }
+        *sibling_count.entry(leaf.parent()).or_default() += 1;
+    }
+    let mut merges: Vec<ChunkKey> = sibling_count
+        .into_iter()
+        .filter(|(p, c)| *c == 8 && !split_wanted(config, anchor, *p))
+        .map(|(p, _)| p)
+        .collect();
+    merges.sort_by(|a, b| {
+        aabb_distance(anchor, *b)
+            .total_cmp(&aabb_distance(anchor, *a))
+    });
+    merges.truncate(EPOCH_MAX_MERGES);
+
+    // ±1 fixpoint: drop transitions that would put a 2-level jump on
+    // screen; a rejection can cascade, so iterate until stable.
+    loop {
+        let n0 = splits.len() + merges.len();
+        let post = PostState::plan(&tree.leaves, &splits, &merges);
+        let keep_splits: Vec<ChunkKey> = splits
+            .iter()
+            .filter(|p| post.adjacency_ok(config.max_level, **p, p.level - 1))
+            .copied()
+            .collect();
+        splits = keep_splits;
+        let post = PostState::plan(&tree.leaves, &splits, &merges);
+        let keep_merges: Vec<ChunkKey> = merges
+            .iter()
+            .filter(|p| post.adjacency_ok(config.max_level, **p, p.level))
+            .copied()
+            .collect();
+        merges = keep_merges;
+        if splits.len() + merges.len() == n0 {
+            break;
+        }
+    }
+    if splits.is_empty() && merges.is_empty() {
+        return None;
+    }
+
+    let post = PostState::plan(&tree.leaves, &splits, &merges);
+    let mut epoch = Epoch {
+        splits: Vec::new(),
+        merges: Vec::new(),
+        waits: HashMap::new(),
+        to_request: Vec::new(),
+    };
+    for p in splits {
+        let children = p.children();
+        for c in children {
+            let m = post.seam_mask(config.max_level, c);
+            epoch.waits.insert(c, m);
+            epoch.to_request.push((c, m, false));
+        }
+        epoch.splits.push((p, children));
+    }
+    for p in merges {
+        let m = post.seam_mask(config.max_level, p);
+        epoch.waits.insert(p, m);
+        epoch.to_request.push((p, m, false));
+        epoch.merges.push((p, p.children()));
+    }
+    // Seam remeshes: every kept leaf whose mask changes under the
+    // post-epoch configuration regenerates (held) and commits with it.
+    // A mask can only change if the leaf touches a region whose level
+    // changes, so filter by box-touch before the (much costlier) mask
+    // recomputation — the scan is per-epoch over every leaf otherwise.
+    let changed: Vec<ChunkKey> = post
+        .removed
+        .iter()
+        .chain(post.added.iter())
+        .copied()
+        .collect();
+    for leaf in &tree.leaves {
+        if post.removed.contains(leaf) {
+            continue;
+        }
+        if !changed.iter().any(|c| boxes_touch(*c, *leaf)) {
+            continue;
+        }
+        let m = post.seam_mask(config.max_level, *leaf);
+        if tree.sent_masks.get(leaf) != Some(&m) {
+            epoch.waits.insert(*leaf, m);
+            epoch.to_request.push((*leaf, m, true));
+        }
+    }
+    Some(epoch)
+}
+
+fn commit_epoch(tree: &mut LodTree, queue: &ChunkCommandQueue, epoch: Epoch) {
+    for (parent, children) in &epoch.splits {
+        tree.leaves.remove(parent);
+        tree.ready.remove(parent);
+        tree.sent_masks.remove(parent);
+        queue.push(ChunkCommand::Free(*parent));
+        tree.leaves.extend(children.iter().copied());
+    }
+    for (parent, children) in &epoch.merges {
+        tree.leaves.insert(*parent);
+        for c in children {
+            tree.leaves.remove(c);
+            tree.ready.remove(c);
+            tree.sent_masks.remove(c);
+            queue.push(ChunkCommand::Free(*c));
+        }
+    }
+    // One command batch: every member becomes visible / swaps its held
+    // mesh in the same frame the replaced chunks are freed.
+    for key in epoch.waits.keys() {
+        queue.push(ChunkCommand::Commit(*key));
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn lod_tick(
     config: Res<LodConfig>,
+    mut tick_worst: Local<(f32, f32)>,
     mut tree: ResMut<LodTree>,
     queue: Res<ChunkCommandQueue>,
     ops_provider: Res<ChunkOpsProvider>,
@@ -183,11 +470,12 @@ fn lod_tick(
     let Ok(camera) = cameras.single() else {
         return;
     };
+    let tick_start = std::time::Instant::now();
     let camera = camera.translation.as_dvec3();
     let tree = &mut *tree;
 
-    // Sticky quantized anchor: the LOD field's only input. Updating it is
-    // the one moment masks can change; every leaf revalidates below.
+    // Sticky quantized anchor. Only read when planning an epoch, so it may
+    // move freely while one is in flight.
     let anchor_moved = match tree.anchor {
         Some(a) if camera.distance(a) < 48.0 => false,
         _ => {
@@ -197,8 +485,6 @@ fn lod_tick(
     };
     let anchor = tree.anchor.unwrap();
     if anchor_moved {
-        // Publish the field to the density band: every chunk samples at
-        // vs(p) = clamp(|p - anchor| / (split_k * 32), 1, max).
         field.anchor = anchor.as_vec3();
         field.dist_scale = (config.split_k * 32.0) as f32;
         field.max_vs = (1u32 << config.max_level) as f32;
@@ -209,10 +495,9 @@ fn lod_tick(
     if rebuild.0 {
         rebuild.0 = false;
         let mut requested: HashSet<ChunkKey> = tree.leaves.iter().copied().collect();
-        for children in tree.splitting.values() {
-            requested.extend(children.iter().copied());
+        if let Some(epoch) = &tree.epoch {
+            requested.extend(epoch.waits.keys().copied());
         }
-        requested.extend(tree.merging.keys().copied());
         for key in requested {
             queue.push(ChunkCommand::Free(key));
         }
@@ -224,55 +509,8 @@ fn lod_tick(
         tree.ready.insert(key, mask);
     }
 
-    // 2. Complete splits whose 8 children are all drawable: atomic swap.
-    let done_splits: Vec<(ChunkKey, [ChunkKey; 8])> = tree
-        .splitting
-        .iter()
-        .filter(|(_, children)| {
-            children.iter().all(|c| {
-                // Only a mesh built with the seams the field currently
-                // prescribes may swap in — stale-seam meshes show cracks.
-                match tree.ready.get(c) {
-                    Some(&m) => m == u32::MAX || m == face_mask(&config, anchor, *c),
-                    None => false,
-                }
-            })
-        })
-        .map(|(p, c)| (*p, *c))
-        .collect();
-    for (parent, children) in done_splits {
-        tree.splitting.remove(&parent);
-        for child in children {
-            queue.push(ChunkCommand::Show(child));
-            tree.leaves.insert(child);
-        }
-        tree.leaves.remove(&parent);
-        tree.ready.remove(&parent);
-        queue.push(ChunkCommand::Free(parent));
-    }
-
-    // 3. Complete merges whose parent is drawable: atomic swap.
-    let done_merges: Vec<(ChunkKey, [ChunkKey; 8])> = tree
-        .merging
-        .iter()
-        .filter(|(parent, _)| match tree.ready.get(parent) {
-            Some(&m) => m == u32::MAX || m == face_mask(&config, anchor, **parent),
-            None => false,
-        })
-        .map(|(p, c)| (*p, *c))
-        .collect();
-    for (parent, children) in done_merges {
-        tree.merging.remove(&parent);
-        queue.push(ChunkCommand::Show(parent));
-        tree.leaves.insert(parent);
-        for child in children {
-            tree.leaves.remove(&child);
-            tree.ready.remove(&child);
-            queue.push(ChunkCommand::Free(child));
-        }
-    }
-
-    // 4. Top-level ring maintenance.
+    // 2. Top-level ring maintenance. Additions are purely additive (their
+    //    faces are equal-level or unstreamed) and show as soon as ready.
     let top_edge = ChunkKey::new(config.max_level, IVec3::ZERO).edge_m();
     let center_x = (camera.x / top_edge).floor() as i32;
     let center_z = (camera.z / top_edge).floor() as i32;
@@ -283,101 +521,76 @@ fn lod_tick(
                 let cell = IVec3::new(center_x + dx, y, center_z + dz);
                 if tree.top_cells.insert(cell) {
                     let key = ChunkKey::new(config.max_level, cell);
-                    let mask = face_mask(&config, anchor, key);
+                    let mask = PostState::current(&tree.leaves).seam_mask(config.max_level, key);
                     tree.sent_masks.insert(key, mask);
-                    request(&queue, &ops_provider, key, true, mask);
+                    request(&queue, &ops_provider, key, true, false, mask);
                     tree.leaves.insert(key);
                 }
             }
         }
     }
-    let keep = r + 1;
-    let stale: Vec<IVec3> = tree
-        .top_cells
-        .iter()
-        .filter(|c| (c.x - center_x).abs() > keep || (c.z - center_z).abs() > keep)
-        .copied()
-        .collect();
-    for cell in stale {
-        tree.top_cells.remove(&cell);
-        free_subtree(tree, &queue, cell, config.max_level);
-    }
-
-    // 5. Splits: the field wants these leaves refined.
-    let to_split: Vec<ChunkKey> = tree
-        .leaves
-        .iter()
-        .filter(|leaf| {
-            !tree.splitting.contains_key(leaf)
-                && !in_merge(tree, **leaf)
-                && split_wanted(&config, anchor, **leaf)
-        })
-        .copied()
-        .collect();
-    for leaf in to_split {
-        let children = leaf.children();
-        for child in children {
-            let mask = face_mask(&config, anchor, child);
-            tree.sent_masks.insert(child, mask);
-            request(&queue, &ops_provider, child, false, mask);
-        }
-        tree.splitting.insert(leaf, children);
-    }
-
-    // 6. Merges: complete sibling sets the field no longer wants refined.
-    let mut sibling_count: HashMap<ChunkKey, u8> = HashMap::new();
-    for leaf in &tree.leaves {
-        if leaf.level >= config.max_level {
-            continue;
-        }
-        *sibling_count.entry(leaf.parent()).or_default() += 1;
-    }
-    for (parent, count) in sibling_count {
-        if count != 8 || tree.merging.contains_key(&parent) || split_wanted(&config, anchor, parent)
-        {
-            continue;
-        }
-        let children = parent.children();
-        if children.iter().any(|c| tree.splitting.contains_key(c)) {
-            continue;
-        }
-        let mask = face_mask(&config, anchor, parent);
-        tree.sent_masks.insert(parent, mask);
-        request(&queue, &ops_provider, parent, false, mask);
-        tree.merging.insert(parent, children);
-    }
-
-    // 7. Revalidate: whenever the anchor moves, every leaf's field mask may
-    // change; any leaf whose baked mask disagrees regenerates in place.
-    // Pure re-derivation — no event choreography, misses self-heal here.
-    if anchor_moved {
-        let mut candidates: Vec<ChunkKey> = tree
-            .leaves
+    // Evictions wait for the epoch: freeing a member would wedge its
+    // commit, and the stale ring is far behind the camera anyway.
+    if tree.epoch.is_none() {
+        let keep = r + 1;
+        let stale: Vec<IVec3> = tree
+            .top_cells
             .iter()
-            .filter(|leaf| !tree.splitting.contains_key(*leaf) && !in_merge(tree, **leaf))
+            .filter(|c| (c.x - center_x).abs() > keep || (c.z - center_z).abs() > keep)
             .copied()
             .collect();
-        // In-flight replacements regenerate for the new anchor too, or the
-        // seam-gated swaps above would wait forever on their stale masks.
-        for children in tree.splitting.values() {
-            candidates.extend(children.iter().copied());
+        for cell in stale {
+            tree.top_cells.remove(&cell);
+            free_subtree(tree, &queue, cell, config.max_level);
         }
-        candidates.extend(tree.merging.keys().copied());
-        for key in candidates {
-            let mask = face_mask(&config, anchor, key);
-            if tree.sent_masks.get(&key) != Some(&mask) {
-                tree.sent_masks.insert(key, mask);
-                request(&queue, &ops_provider, key, false, mask);
-            }
+    }
+
+    // 3. Plan the next epoch when none is in flight.
+    if tree.epoch.is_none() {
+        let t = std::time::Instant::now();
+        tree.epoch = plan_epoch(tree, &config, anchor);
+        let ms = t.elapsed().as_secs_f32() * 1000.0;
+        if ms > 8.0 && std::env::var("VOXEL_LOG_FPS").is_ok() {
+            info!(
+                "plan_epoch {ms:.1} ms ({} waits)",
+                tree.epoch.as_ref().map_or(0, |e| e.waits.len())
+            );
+        }
+    }
+
+    // 4. Advance the in-flight epoch: trickle its generation requests,
+    //    then commit atomically once every member is drawable.
+    if let Some(mut epoch) = tree.epoch.take() {
+        let n = epoch.to_request.len().min(EPOCH_REQUEST_BUDGET);
+        for (key, mask, hold) in epoch.to_request.drain(..n) {
+            tree.sent_masks.insert(key, mask);
+            request(&queue, &ops_provider, key, false, hold, mask);
+        }
+        let done = epoch.to_request.is_empty()
+            && epoch
+                .waits
+                .iter()
+                .all(|(k, m)| matches!(tree.ready.get(k), Some(&r) if r == *m || r == u32::MAX));
+        if done {
+            commit_epoch(tree, &queue, epoch);
+        } else {
+            tree.epoch = Some(epoch);
+        }
+    }
+
+    if std::env::var("VOXEL_LOG_FPS").is_ok() {
+        let ms = tick_start.elapsed().as_secs_f32() * 1000.0;
+        tick_worst.0 += ms;
+        tick_worst.1 = tick_worst.1.max(ms);
+        if tick_worst.0 > 250.0 {
+            info!("lod_tick worst {:.1} ms in window", tick_worst.1);
+            *tick_worst = (0.0, 0.0);
         }
     }
 }
 
-fn in_merge(tree: &LodTree, key: ChunkKey) -> bool {
-    tree.merging.contains_key(&key) || (key.level < 30 && tree.merging.contains_key(&key.parent()))
-}
-
-/// Free every requested chunk whose subtree hangs under `cell`.
+/// Free every requested chunk whose subtree hangs under `cell`. Only
+/// called between epochs, so no in-flight members are touched.
 fn free_subtree(tree: &mut LodTree, queue: &ChunkCommandQueue, cell: IVec3, max_level: u8) {
     let in_subtree = |key: &ChunkKey| top_ancestor(*key, max_level) == cell;
 
@@ -389,40 +602,38 @@ fn free_subtree(tree: &mut LodTree, queue: &ChunkCommandQueue, cell: IVec3, max_
         }
         !stale
     });
-    let stale_splits: Vec<ChunkKey> = tree
-        .splitting
-        .keys()
-        .filter(|k| in_subtree(k))
-        .copied()
-        .collect();
-    for parent in stale_splits {
-        if let Some(children) = tree.splitting.remove(&parent) {
-            to_free.extend(children);
-        }
-    }
-    let stale_merges: Vec<ChunkKey> = tree
-        .merging
-        .keys()
-        .filter(|k| in_subtree(k))
-        .copied()
-        .collect();
-    for parent in stale_merges {
-        tree.merging.remove(&parent);
-        to_free.insert(parent);
-    }
     for key in to_free {
         tree.ready.remove(&key);
         tree.sent_masks.remove(&key);
         queue.push(ChunkCommand::Free(key));
     }
     tree.ready.retain(|k, _| !in_subtree(k));
+    tree.sent_masks.retain(|k, _| !in_subtree(k));
 }
 
 fn hud_stats(
     stats: Res<SharedRenderStats>,
     tree: Res<LodTree>,
+    time: Res<Time>,
+    mut slow_accum: Local<(f32, u32, f32)>,
     hud: Option<ResMut<voxel_debug::DebugHudExtra>>,
 ) {
+    // VOXEL_LOG_FPS=1: log worst frame time every 2 s so perf regressions
+    // are measurable in headless eval runs, not just felt interactively.
+    if std::env::var("VOXEL_LOG_FPS").is_ok() {
+        let dt = time.delta_secs();
+        slow_accum.0 += dt;
+        slow_accum.1 += 1;
+        slow_accum.2 = slow_accum.2.max(dt);
+        if slow_accum.0 >= 2.0 {
+            info!(
+                "fps avg {:.0} | worst frame {:.0} ms",
+                slow_accum.1 as f32 / slow_accum.0,
+                slow_accum.2 * 1000.0
+            );
+            *slow_accum = (0.0, 0, 0.0);
+        }
+    }
     let Some(mut hud) = hud else {
         return;
     };
@@ -455,22 +666,33 @@ fn hud_stats(
         .iter()
         .map(|l| format!("L{l}:{}", histo[l]))
         .collect();
+    let epoch = match &tree.epoch {
+        Some(e) => format!("{} waiting", e.waits.len()),
+        None => "idle".to_string(),
+    };
     hud.0.push(format!(
-        "leaves: {} [{}] | splits: {} merges: {}",
+        "leaves: {} [{}] | epoch: {}",
         tree.leaves.len(),
         parts.join(" "),
-        tree.splitting.len(),
-        tree.merging.len(),
+        epoch,
     ));
 }
 
 #[cfg(test)]
-mod field_invariants {
+mod epoch_invariants {
     use super::*;
     use voxel_core::seed::Rng;
 
     fn cfg() -> LodConfig {
         LodConfig::default()
+    }
+
+    fn rand_anchor(rng: &mut Rng) -> DVec3 {
+        DVec3::new(
+            (rng.next_f32() as f64 - 0.5) * 40000.0,
+            (rng.next_f32() as f64) * 2000.0,
+            (rng.next_f32() as f64 - 0.5) * 40000.0,
+        )
     }
 
     /// The field's leaf level at a world position: descend from the top
@@ -502,65 +724,185 @@ mod field_invariants {
         k
     }
 
-    fn rand_anchor(rng: &mut Rng) -> DVec3 {
-        DVec3::new(
-            (rng.next_f32() as f64 - 0.5) * 40000.0,
-            (rng.next_f32() as f64) * 2000.0,
-            (rng.next_f32() as f64 - 0.5) * 40000.0,
-        )
+    /// Fresh tree with the top-level ring shown, like startup.
+    fn top_ring_tree(config: &LodConfig, anchor: DVec3) -> LodTree {
+        let mut tree = LodTree::default();
+        let top_edge = ChunkKey::new(config.max_level, IVec3::ZERO).edge_m();
+        let cx = (anchor.x / top_edge).floor() as i32;
+        let cz = (anchor.z / top_edge).floor() as i32;
+        for dz in -config.top_radius..=config.top_radius {
+            for dx in -config.top_radius..=config.top_radius {
+                for y in config.top_y.0..=config.top_y.1 {
+                    let cell = IVec3::new(cx + dx, y, cz + dz);
+                    tree.top_cells.insert(cell);
+                    tree.leaves.insert(ChunkKey::new(config.max_level, cell));
+                }
+            }
+        }
+        let masks: Vec<(ChunkKey, u32)> = tree
+            .leaves
+            .iter()
+            .map(|l| {
+                (
+                    *l,
+                    PostState::current(&tree.leaves).seam_mask(config.max_level, *l),
+                )
+            })
+            .collect();
+        tree.sent_masks.extend(masks);
+        tree
     }
 
-    /// Both sides of every seam classify it identically: equal is
-    /// symmetric, and "my neighbor is coarser" reciprocates as "my
-    /// neighbor's representation sees my region as finer".
-    #[test]
-    fn seam_masks_reciprocate() {
-        let config = cfg();
-        let mut rng = Rng::new(0xE7A1);
-        for _ in 0..2000 {
-            let anchor = rand_anchor(&mut rng);
-            let p = rand_anchor(&mut rng);
-            let a = leaf_at(&config, anchor, p);
-            for d in FACE_DIRS {
-                let n = ChunkKey::new(a.level, a.pos + d);
-                match field_code(&config, anchor, n) {
-                    0 => {
-                        // Equal: the neighbor leaf must see us as equal.
-                        assert_eq!(field_code(&config, anchor, a), 0, "equal not symmetric");
+    /// Plan and apply epochs toward `anchor` until quiescent, asserting
+    /// the shown configuration's crack-freedom along the way. The
+    /// per-epoch structural caps mean convergence takes many small
+    /// epochs; the consistency scan is expensive, so it samples commits.
+    fn chain_epochs(config: &LodConfig, tree: &mut LodTree, anchor: DVec3) {
+        for round in 0..600 {
+            let Some(epoch) = plan_epoch(tree, config, anchor) else {
+                assert_consistent(config, &tree.leaves, &tree.sent_masks);
+                return;
+            };
+            let _ = round;
+            assert!(!epoch.waits.is_empty());
+            for (key, mask, _) in &epoch.to_request {
+                tree.sent_masks.insert(*key, *mask);
+            }
+            for (parent, children) in &epoch.splits {
+                tree.leaves.remove(parent);
+                tree.sent_masks.remove(parent);
+                tree.leaves.extend(children.iter().copied());
+            }
+            for (parent, children) in &epoch.merges {
+                tree.leaves.insert(*parent);
+                for c in children {
+                    tree.leaves.remove(c);
+                    tree.sent_masks.remove(c);
+                }
+            }
+            if round % 7 == 0 {
+                assert_consistent(config, &tree.leaves, &tree.sent_masks);
+            }
+        }
+        panic!("epochs did not quiesce");
+    }
+
+    /// The 26 neighborhood directions in seam-mask scan order.
+    fn scan_dirs() -> Vec<IVec3> {
+        let mut dirs = Vec::new();
+        for dz in -1..=1 {
+            for dy in -1..=1 {
+                for dx in -1..=1 {
+                    if dx != 0 || dy != 0 || dz != 0 {
+                        dirs.push(IVec3::new(dx, dy, dz));
                     }
-                    1 => {
-                        // Coarser: the parent representing that region must
-                        // see our region as finer.
-                        assert_eq!(
-                            field_code(&config, anchor, ChunkKey::new(a.level, a.pos).parent()),
-                            2,
-                            "coarser/finer not reciprocal"
-                        );
-                    }
-                    2 => {
-                        // Finer: its children facing us see our region not
-                        // finer than themselves-level (never 2 both ways
-                        // across one face — that would be a 2-level jump).
-                        for c in n.children() {
-                            assert_ne!(
-                                field_code(&config, anchor, ChunkKey::new(c.level, a.pos * 2)),
-                                2,
-                                "two-level jump across a face"
+                }
+            }
+        }
+        dirs
+    }
+
+    /// Assert the crack-freedom invariants of a shown configuration whose
+    /// meshes carry `masks`: neighborhood levels within ±1, and the snap
+    /// bit set exactly on the finer side of every unequal pair.
+    fn assert_consistent(
+        config: &LodConfig,
+        leaves: &HashSet<ChunkKey>,
+        masks: &HashMap<ChunkKey, u32>,
+    ) {
+        let post = PostState::current(leaves);
+        for leaf in leaves {
+            let mask = *masks.get(leaf).expect("shown leaf without a mask");
+            assert_eq!(
+                mask,
+                post.seam_mask(config.max_level, *leaf),
+                "shown mesh mask inconsistent with shown neighbors for {leaf:?}"
+            );
+            for (i, d) in scan_dirs().iter().enumerate() {
+                let n = ChunkKey::new(leaf.level, leaf.pos + *d);
+                if let Some(l) = post.covering_level(config.max_level, n) {
+                    assert!(
+                        (l as i32 - leaf.level as i32) <= 1,
+                        "2-level jump shown across the neighborhood: {leaf:?} vs level {l}"
+                    );
+                }
+                if leaf.level >= 2 {
+                    assert!(
+                        !post.has_touching_finer_than(n, *leaf, leaf.level - 1),
+                        "touching leaves jump 2 levels (finer side): {leaf:?} dir {d:?}"
+                    );
+                }
+                // Reciprocity: if we snap toward n, the covering coarser
+                // neighbor is a shown leaf and must not snap back toward
+                // our region (both sides snapping = a real crack).
+                if (mask >> i) & 1 == 1 {
+                    let cover = n.parent();
+                    assert!(post.is_leaf(cover), "snap toward a non-leaf neighbor");
+                    let n_mask = *masks.get(&cover).expect("neighbor without a mask");
+                    for (j, e) in scan_dirs().iter().enumerate() {
+                        let back = ChunkKey::new(cover.level, cover.pos + *e);
+                        // Any direction of the coarser leaf that points at
+                        // our region must not carry a snap bit.
+                        if back == ChunkKey::new(leaf.level, leaf.pos).parent() {
+                            assert_eq!(
+                                (n_mask >> j) & 1,
+                                0,
+                                "both sides of a seam snap: {leaf:?} vs {cover:?}"
                             );
                         }
                     }
-                    _ => unreachable!(),
                 }
             }
         }
     }
 
-    /// Face-adjacent leaf levels never differ by more than one (the parity
-    /// snap only bridges one level).
+    /// Refining from a fresh top ring stays consistent after every epoch
+    /// commit and quiesces.
     #[test]
-    fn face_neighbors_within_one_level() {
+    fn refinement_from_scratch_is_consistent() {
+        let config = cfg();
+        let mut rng = Rng::new(0xE7A1);
+        for _ in 0..12 {
+            let anchor = rand_anchor(&mut rng);
+            let mut tree = top_ring_tree(&config, anchor);
+            chain_epochs(&config, &mut tree, anchor);
+        }
+    }
+
+    /// Moving the anchor mid-flight (small nudges and teleports) replans
+    /// through consistent configurations only.
+    #[test]
+    fn anchor_moves_stay_consistent() {
         let config = cfg();
         let mut rng = Rng::new(0x51EA);
+        for _ in 0..8 {
+            let a1 = rand_anchor(&mut rng);
+            let mut tree = top_ring_tree(&config, a1);
+            chain_epochs(&config, &mut tree, a1);
+            // Mix of long jumps and small nudges.
+            let a2 = if rng.next_f32() < 0.5 {
+                a1 + DVec3::new(
+                    (rng.next_f32() as f64 - 0.5) * 40000.0,
+                    0.0,
+                    (rng.next_f32() as f64 - 0.5) * 40000.0,
+                )
+            } else {
+                a1 + DVec3::new(
+                    (rng.next_f32() as f64 - 0.5) * 400.0,
+                    0.0,
+                    (rng.next_f32() as f64 - 0.5) * 400.0,
+                )
+            };
+            chain_epochs(&config, &mut tree, a2);
+        }
+    }
+
+    /// Face-adjacent leaf levels of the pure field never differ by more
+    /// than one (the parity snap only bridges one level).
+    #[test]
+    fn field_neighbors_within_one_level() {
+        let config = cfg();
+        let mut rng = Rng::new(0xADD1);
         for _ in 0..2000 {
             let anchor = rand_anchor(&mut rng);
             let p = rand_anchor(&mut rng);
@@ -575,22 +917,6 @@ mod field_invariants {
                     "leaf levels jump >1 across a face: {a:?} vs {b:?}"
                 );
             }
-        }
-    }
-
-    /// The anchor is the field's only input: masks are identical for any
-    /// camera position within the anchor's stickiness radius.
-    #[test]
-    fn masks_depend_only_on_anchor() {
-        let config = cfg();
-        let mut rng = Rng::new(0xADD1);
-        for _ in 0..500 {
-            let anchor = rand_anchor(&mut rng);
-            let p = rand_anchor(&mut rng);
-            let a = leaf_at(&config, anchor, p);
-            let m1 = face_mask(&config, anchor, a);
-            let m2 = face_mask(&config, anchor, a);
-            assert_eq!(m1, m2);
         }
     }
 }

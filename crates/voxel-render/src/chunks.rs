@@ -74,8 +74,11 @@ const VERTEX_BYTES: u64 = 12;
 
 const ARENA_SLOTS: u32 = 128;
 const COUNTS_SLOTS: u32 = 128;
-const GEN_BUDGET: usize = 48;
-const MESH_BUDGET: usize = 64;
+// Sized for throughput ~2k chunks/s at 120 fps while keeping each frame's
+// GPU batch small enough not to blow a ~8 ms vsync slot (spiky batches
+// read as missed-vsync 17 ms frames even when average load is fine).
+const GEN_BUDGET: usize = 16;
+const MESH_BUDGET: usize = 24;
 const STAGING_BUFFERS: usize = 3;
 
 // --- main-world <-> render-world plumbing ------------------------------------
@@ -90,14 +93,26 @@ pub enum ChunkCommand {
     Request {
         key: ChunkKey,
         show_on_ready: bool,
+        /// In-place regens only: keep drawing the old mesh after the new
+        /// one is ready and swap on [`ChunkCommand::Commit`] — lets the LOD
+        /// controller land a whole epoch of seam-coupled meshes in one
+        /// frame (readiness is reported when the held mesh is drawable).
+        hold: bool,
         ops: Option<Arc<Vec<CsgOp>>>,
         /// 2 bits per face (+x,-x,+y,-y,+z,-z): 0 equal/none, 1 = neighbor
         /// coarser, 2 = neighbor finer. Drives seam ownership + band blend.
         face_mask: u32,
     },
     Show(ChunkKey),
+    /// Make visible and swap in any held regen result.
+    Commit(ChunkKey),
     Free(ChunkKey),
 }
+
+/// Sentinel gen mask for meshes whose seam mask is unknown (resurrected
+/// pre-free results): never equals a real 12-bit mask or the empty
+/// accept-any marker, so readiness gates can't be satisfied by them.
+const STALE_MASK: u32 = u32::MAX - 1;
 
 /// Main-world queue of chunk lifecycle commands (filled by the LOD
 /// controller in voxel-engine, drained by extraction). Interior mutability
@@ -450,6 +465,8 @@ struct RenderChunk {
     state: ChunkState,
     visible: bool,
     show_on_ready: bool,
+    /// Hold a finished in-place regen until [`ChunkCommand::Commit`].
+    hold: bool,
     /// Planning-layer ops, held until the density pass consumes them.
     ops: Option<Arc<Vec<CsgOp>>>,
     /// Seam ownership mask (see [`ChunkCommand::Request`]); baked into both
@@ -467,6 +484,10 @@ enum Pending {
     Queued,
     CountsInFlight { slot: u32 },
     AwaitingAlloc { slot: u32, verts: u32, indices: u32 },
+    /// Regen meshed but held: the old mesh keeps drawing until Commit.
+    Held { alloc: SlabAlloc, index_count: u32 },
+    /// Regen classified empty but held: emptiness applies at Commit.
+    HeldEmpty,
 }
 
 #[derive(Resource, Default)]
@@ -938,6 +959,7 @@ fn plan_frame(
             ChunkCommand::Request {
                 key,
                 show_on_ready,
+                hold,
                 ops,
                 face_mask,
             } => {
@@ -949,6 +971,7 @@ fn plan_frame(
                                 state: ChunkState::QueuedGen,
                                 visible: false,
                                 show_on_ready,
+                                hold,
                                 ops,
                                 face_mask,
                                 gen_mask: face_mask,
@@ -963,18 +986,37 @@ fn plan_frame(
                             chunk.state = ChunkState::CountsInFlight { slot };
                             chunk.visible = false;
                             chunk.show_on_ready = show_on_ready;
+                            chunk.hold = hold;
                             chunk.face_mask = face_mask;
+                            // The in-flight result was generated pre-free
+                            // with an unknown mask: report it as such and
+                            // regenerate with the requested mask after it
+                            // lands.
+                            chunk.gen_mask = STALE_MASK;
+                            chunk.pending = Some(Pending::Queued);
                         }
                         // Not yet generating: the new mask/ops just apply.
                         ChunkState::QueuedGen => {
                             chunk.ops = ops;
+                            chunk.hold = hold;
                             chunk.face_mask = face_mask;
                         }
                         // Live or mid-generation: regenerate in place with
                         // the new mask; the old mesh draws until it's ready.
                         _ => {
                             chunk.ops = ops;
+                            chunk.hold = hold;
                             chunk.face_mask = face_mask;
+                            // A superseded held result is stale: drop it and
+                            // regenerate with the new mask.
+                            match chunk.pending.take() {
+                                Some(Pending::Held { alloc, .. }) => gpu.slab.free(alloc),
+                                Some(p @ (Pending::CountsInFlight { .. }
+                                | Pending::AwaitingAlloc { .. })) => {
+                                    chunk.pending = Some(p);
+                                }
+                                _ => {}
+                            }
                             if chunk.pending.is_none() {
                                 chunk.pending = Some(Pending::Queued);
                             }
@@ -987,6 +1029,26 @@ fn plan_frame(
                     chunk.visible = true;
                 }
             }
+            ChunkCommand::Commit(key) => {
+                if let Some(chunk) = table.chunks.get_mut(&key) {
+                    chunk.visible = true;
+                    match chunk.pending.take() {
+                        Some(Pending::Held { alloc, index_count }) => {
+                            if let ChunkState::Meshed { alloc: old, .. } = chunk.state {
+                                gpu.slab.free(old);
+                            }
+                            chunk.state = ChunkState::Meshed { alloc, index_count };
+                        }
+                        Some(Pending::HeldEmpty) => {
+                            if let ChunkState::Meshed { alloc, .. } = chunk.state {
+                                gpu.slab.free(alloc);
+                            }
+                            chunk.state = ChunkState::Empty;
+                        }
+                        other => chunk.pending = other,
+                    }
+                }
+            }
             ChunkCommand::Free(key) => {
                 let Some(chunk) = table.chunks.remove(&key) else {
                     continue;
@@ -996,6 +1058,7 @@ fn plan_frame(
                 match chunk.pending {
                     Some(Pending::CountsInFlight { slot }) => inflight_slot = Some(slot),
                     Some(Pending::AwaitingAlloc { slot, .. }) => gpu.arena_free.push(slot),
+                    Some(Pending::Held { alloc, .. }) => gpu.slab.free(alloc),
                     _ => {}
                 }
                 match chunk.state {
@@ -1012,6 +1075,7 @@ fn plan_frame(
                             state: ChunkState::Cancelled { slot },
                             visible: false,
                             show_on_ready: false,
+                            hold: false,
                             ops: None,
                             face_mask: 0,
                             gen_mask: 0,
@@ -1048,13 +1112,21 @@ fn plan_frame(
                     warn!("chunk {key:?} regen exceeds largest slab class; kept old mesh");
                     gpu.arena_free.push(slot);
                     chunk.pending = None;
+                    // Report anyway so an epoch waiting on this chunk can
+                    // complete instead of wedging on a pathological mesh.
+                    let _ = ready_tx.0.send((*key, chunk.gen_mask));
                 } else if verts == 0 || quads == 0 {
                     gpu.arena_free.push(slot);
-                    chunk.pending = None;
-                    if let ChunkState::Meshed { alloc, .. } = chunk.state {
-                        gpu.slab.free(alloc);
+                    if chunk.hold {
+                        chunk.pending = Some(Pending::HeldEmpty);
+                    } else {
+                        chunk.pending = None;
+                        if let ChunkState::Meshed { alloc, .. } = chunk.state {
+                            gpu.slab.free(alloc);
+                        }
+                        chunk.state = ChunkState::Empty;
                     }
-                    chunk.state = ChunkState::Empty;
+                    let _ = ready_tx.0.send((*key, u32::MAX));
                 } else {
                     chunk.pending = Some(Pending::AwaitingAlloc {
                         slot,
@@ -1158,10 +1230,22 @@ fn plan_frame(
         // pass, so the chunk is immediately drawable. A pending regen swaps
         // its new mesh in atomically (the old one drew until now).
         if is_pending {
+            if chunk.hold {
+                // Held: old mesh keeps drawing; Commit swaps. Readiness is
+                // reported now — the mesh compute records this frame.
+                chunk.pending = Some(Pending::Held {
+                    alloc,
+                    index_count: indices,
+                });
+                let _ = ready_tx.0.send((key, chunk.gen_mask));
+                freed_slots.push(slot);
+                continue;
+            }
             if let ChunkState::Meshed { alloc: old, .. } = chunk.state {
                 gpu.slab.free(old);
             }
             chunk.pending = None;
+            let _ = ready_tx.0.send((key, chunk.gen_mask));
         } else {
             if chunk.show_on_ready {
                 chunk.visible = true;

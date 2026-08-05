@@ -104,19 +104,42 @@ fn cell_slot_index(c: vec3<i32>) -> u32 {
     return params.slot * CELL_STRIDE + i.x + CELLS_EXT * (i.y + CELLS_EXT * i.z);
 }
 
-// Face codes from the seam mask (face order +x,-x,+y,-y,+z,-z).
-fn face_code(f: u32) -> u32 {
-    return (params._pad.x >> (2u * f)) & 3u;
+// Seam mask: one coarser-neighbor bit per direction of the 26-neighborhood,
+// in scan order (dz, dy, dx in -1..=1, center skipped) — twin of
+// PostState::seam_mask in voxel-engine streaming. Faces alone are not
+// enough: a chunk whose *diagonal* neighbor is coarser while both face
+// neighbors are equal must still snap its shared edge/corner cells, or a
+// pinhole opens at the junction where the face neighbors do snap.
+fn dir_coarser(bit: u32) -> bool {
+    return ((params._pad.x >> bit) & 1u) == 1u;
 }
 
-// Apron cells on a face toward a coarser neighbor snap fully onto the
-// coarse-parity vertex (bit-equal to that neighbor's own vertex, thanks to
-// the density band-blend in this shell).
+// Apron cells snap onto the coarse-parity vertex (bit-equal to the coarser
+// neighbor's own vertex — the density field is a pure function of
+// position) whenever ANY neighbor region the cell touches is coarser.
 fn snap_to_parity(c: vec3<i32>) -> bool {
-    return (c.x == 32 && face_code(0u) == 1u) || (c.x == -1 && face_code(1u) == 1u)
-        || (c.y == 32 && face_code(2u) == 1u) || (c.y == -1 && face_code(3u) == 1u)
-        || (c.z == 32 && face_code(4u) == 1u) || (c.z == -1 && face_code(5u) == 1u);
+    var idx = 0u;
+    for (var dz = -1; dz <= 1; dz++) {
+        for (var dy = -1; dy <= 1; dy++) {
+            for (var dx = -1; dx <= 1; dx++) {
+                if (dx == 0 && dy == 0 && dz == 0) { continue; }
+                if (dir_coarser(idx)) {
+                    let on_x = (dx == 0) || (dx == 1 && c.x == 32) || (dx == -1 && c.x == -1);
+                    let on_y = (dy == 0) || (dy == 1 && c.y == 32) || (dy == -1 && c.y == -1);
+                    let on_z = (dz == 0) || (dz == 1 && c.z == 32) || (dz == -1 && c.z == -1);
+                    if (on_x && on_y && on_z) {
+                        return true;
+                    }
+                }
+                idx++;
+            }
+        }
+    }
+    return false;
 }
+
+// Scan-order bits of the three +axis face directions (+x, +y, +z).
+const PLUS_FACE_BITS = vec3<u32>(13u, 15u, 21u);
 
 // Seam-aware quad ownership. Default: edge-origin in [0, 32)³. Toward a
 // coarser +face the chunk additionally owns the seam-plane quads (origin
@@ -130,7 +153,7 @@ fn owns_quad(c: vec3<i32>, axis: u32) -> bool {
         if (ca < 0 || ca > 32) {
             return false;
         }
-        if (ca == 32 && !(axis != a && face_code(2u * a) == 1u)) {
+        if (ca == 32 && !(axis != a && dir_coarser(PLUS_FACE_BITS[a]))) {
             return false;
         }
     }
@@ -334,7 +357,7 @@ fn coarse_fbm(p: vec2<f32>, base_scale: f32, octaves: i32, mode: u32) -> f32 {
     var amp = 0.5;
     var freq = base_scale;
     for (var o = 0; o < octaves; o++) {
-        let fade = smoothstep(16.0, 32.0, 1.0 / freq);
+        let fade = 1.0;
         let n = svalue_noise2(p * freq);
         var v = n - 0.5;
         if (mode == 1u) {

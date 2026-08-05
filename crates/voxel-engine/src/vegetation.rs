@@ -258,29 +258,42 @@ fn far_forest_visibility(
 #[derive(Resource, Default)]
 struct GrassTiles {
     tiles: HashMap<IVec2, Vec<voxel_render::GrassInstance>>,
+    /// Tiles changed since the last merged-buffer rebuild.
+    dirty: bool,
+    last_merge: f32,
 }
 
 fn stream_grass(
     mut tiles: ResMut<GrassTiles>,
     instances: Res<voxel_render::GrassInstances>,
     level: Res<crate::LevelDef>,
+    time: Res<Time>,
     cameras: Query<&Transform, (With<Camera3d>, Without<voxel_render::HelperCamera>)>,
 ) {
     let (Some(grass), Ok(camera)) = (level.grass(), cameras.single()) else {
         return;
     };
+    let t0 = std::time::Instant::now();
     let center = IVec2::new(
         (camera.translation.x / GRASS_TILE_M).floor() as i32,
         (camera.translation.z / GRASS_TILE_M).floor() as i32,
     );
 
+    // One tile per frame: a tile costs hundreds of height evaluations and
+    // a sun-shadow march per blade; at speed many tiles enter the radius
+    // at once and bursting them is a spike frame.
+    let mut budget = 1;
     let mut changed = false;
-    for dz in -GRASS_TILE_RADIUS..=GRASS_TILE_RADIUS {
+    'outer: for dz in -GRASS_TILE_RADIUS..=GRASS_TILE_RADIUS {
         for dx in -GRASS_TILE_RADIUS..=GRASS_TILE_RADIUS {
             let tile = center + IVec2::new(dx, dz);
             if tiles.tiles.contains_key(&tile) {
                 continue;
             }
+            if budget == 0 {
+                break 'outer;
+            }
+            budget -= 1;
             tiles.tiles.insert(tile, grass_tile(tile, grass));
             changed = true;
         }
@@ -292,10 +305,24 @@ fn stream_grass(
         .retain(|t, _| (t.x - center.x).abs() <= keep && (t.y - center.y).abs() <= keep);
     changed |= tiles.tiles.len() != before;
 
+    // Rebuilding + re-uploading the merged instance buffer is the other
+    // spike (hundreds of tiles copied); batch it to a few Hz — grass
+    // popping in a few hundred ms late is invisible, a hitch is not.
     if changed {
+        tiles.dirty = true;
+    }
+    if tiles.dirty && time.elapsed_secs() - tiles.last_merge > 0.25 {
+        tiles.dirty = false;
+        tiles.last_merge = time.elapsed_secs();
         let merged: Vec<voxel_render::GrassInstance> =
             tiles.tiles.values().flatten().copied().collect();
         instances.set(merged);
+    }
+    if std::env::var("VOXEL_LOG_FPS").is_ok() {
+        let ms = t0.elapsed().as_secs_f32() * 1000.0;
+        if ms > 4.0 {
+            info!("stream_grass {ms:.1} ms");
+        }
     }
 }
 
@@ -607,18 +634,25 @@ fn stream_vegetation(
     let (Some(assets), Ok(camera)) = (assets, cameras.single()) else {
         return;
     };
+    let t0 = std::time::Instant::now();
     let center = IVec2::new(
         (camera.translation.x / TILE_M).floor() as i32,
         (camera.translation.z / TILE_M).floor() as i32,
     );
 
-    // Spawn new tiles in range.
-    for dz in -TILE_RADIUS..=TILE_RADIUS {
+    // Spawn new tiles in range, a few per frame (placement runs many
+    // height/shadow evaluations per tile).
+    let mut budget = 2;
+    'outer: for dz in -TILE_RADIUS..=TILE_RADIUS {
         for dx in -TILE_RADIUS..=TILE_RADIUS {
             let tile = center + IVec2::new(dx, dz);
             if tiles.tiles.contains_key(&tile) {
                 continue;
             }
+            if budget == 0 {
+                break 'outer;
+            }
+            budget -= 1;
             let entities = spawn_tile(&mut commands, &assets, &level, tile);
             tiles.tiles.insert(tile, entities);
         }
@@ -637,6 +671,12 @@ fn stream_vegetation(
             for e in entities {
                 commands.entity(e).despawn();
             }
+        }
+    }
+    if std::env::var("VOXEL_LOG_FPS").is_ok() {
+        let ms = t0.elapsed().as_secs_f32() * 1000.0;
+        if ms > 4.0 {
+            info!("stream_vegetation {ms:.1} ms");
         }
     }
 }

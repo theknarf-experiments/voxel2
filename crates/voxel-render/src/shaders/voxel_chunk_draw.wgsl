@@ -195,9 +195,11 @@ fn zoned_albedo(m: WorldMaterial, world: vec3<f32>, n: vec3<f32>, dist: f32) -> 
 
 @fragment
 fn fragment(in: VsOut) -> @location(0) vec4<f32> {
-    // Coverage-eval mode: monotone geometry against a magenta background.
+    // Coverage-eval mode: monotone geometry against a magenta background,
+    // tinted by LOD level so cracks identify the leaking seam pair.
     if (env.sun_dir.w > 0.5) {
-        return vec4<f32>(1.0, 1.0, 1.0, 1.0);
+        let g = 1.0 - clamp(log2(chunk.offset.w), 0.0, 8.0) * 0.1;
+        return vec4<f32>(g, g, g, 1.0);
     }
     let n = normalize(in.normal);
     let world = vec3<f32>(

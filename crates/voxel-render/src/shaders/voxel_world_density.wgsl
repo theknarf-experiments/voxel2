@@ -108,9 +108,11 @@ fn value_noise(p: vec2<f32>) -> f32 {
     return mix(mix(a, b, u.x), mix(c, d, u.x), u.y);
 }
 
-// Octave weight: full at wavelength >= 4 voxels, gone below 2 voxels.
+// The generator is a pure function of position: no band-limiting, so
+// every chunk at every LOD samples bit-identical values at shared
+// corners — seams cannot disagree, at any LOD pair, in any epoch.
 fn band_fade(wavelength: f32, voxel_size: f32) -> f32 {
-    return smoothstep(2.0 * voxel_size, 4.0 * voxel_size, wavelength);
+    return 1.0;
 }
 
 // FBM with a per-octave shaping mode: 0 plain, 1 ridged (sharp crests),
@@ -298,19 +300,10 @@ fn eval_program(p: vec3<f32>, vs: f32) -> WorldSample {
     return WorldSample(d, mat);
 }
 
-// The continuous LOD field: the band every sample is evaluated at is a
-// pure function of world position and the field anchor — identical for
-// every chunk that samples this corner, at every LOD. Seam values cannot
-// disagree, including at shell corners.
-fn field_vs(p: vec3<f32>) -> f32 {
-    let d = distance(p, prog.anchor.xyz);
-    return clamp(d / prog.anchor.w, 1.0, prog.field.x);
-}
-
-fn apply_csg(d_in: f32, mat_in: u32, p: vec3<f32>, bvs: f32) -> vec2<f32> {
+fn apply_csg(d_in: f32, mat_in: u32, p: vec3<f32>) -> vec2<f32> {
     var d_m = d_in;
     var mat = mat_in;
-    if (params.csg_count > 0u && bvs < COARSE_VOXEL_M) {
+    if (params.csg_count > 0u) {
         for (var i = 0u; i < params.csg_count; i++) {
             let op = csg_ops[params.csg_offset + i];
             let od = op_sdf(op, p);
@@ -341,11 +334,10 @@ fn density_main(@builtin(global_invocation_id) id: vec3<u32>) {
     let c = vec3<i32>(id) - vec3<i32>(2);
     let p = params.origin.xyz + vec3<f32>(c) * vs;
 
-    let bvs = field_vs(p);
-    let s = eval_program(p, bvs);
+    let s = eval_program(p, vs);
     var d_m = s.d;
     var mat = s.mat;
-    let fine = apply_csg(d_m, mat, p, bvs);
+    let fine = apply_csg(d_m, mat, p);
     d_m = fine.x;
     mat = bitcast<u32>(fine.y);
 

@@ -38,11 +38,12 @@ fn value_noise(p: Vec2) -> f32 {
     ab + (cd - ab) * u.y
 }
 
-pub(crate) fn band_fade(wavelength: f32, voxel_size: f32) -> f32 {
-    let lo = 2.0 * voxel_size;
-    let hi = 4.0 * voxel_size;
-    let t = ((wavelength - lo) / (hi - lo)).clamp(0.0, 1.0);
-    t * t * (3.0 - 2.0 * t)
+/// The generator is unbanded: a pure function of position, so all LODs
+/// sample identical values and seams cannot disagree. (Kept as a hook —
+/// per-LOD band-limiting must never return without a seam-exactness
+/// story.)
+pub(crate) fn band_fade(_wavelength: f32, _voxel_size: f32) -> f32 {
+    1.0
 }
 
 pub(crate) fn fbm(p: Vec2, base_scale: f32, octaves: i32, voxel_size: f32) -> f32 {

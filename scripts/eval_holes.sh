@@ -13,8 +13,9 @@ VOXEL_EVAL_HOLES=1 VOXEL_AUTOPILOT_LEVEL=1 VOXEL_START="-29840,2400,-36767" VOXE
   caffeinate -dis ./target/debug/voxel2 "$LEVEL" > "$OUT/run.log" 2>&1 &
 PID=$!
 # Warmup: let the initial world stream in before judging coverage
-# (cold-start loading is a loading-screen concern, not a hole).
-sleep 20
+# (cold-start loading is a loading-screen concern, not a hole; the
+# running-world invariant is what must never break).
+sleep 30
 rm -f "$OUT/frame_%.png"
 # Rotate capture files so every interval is kept, not overwritten.
 for i in $(seq 1 $((SECS / 4))); do
