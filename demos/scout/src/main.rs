@@ -1,31 +1,17 @@
-// Scout for scenic start positions.
+// Scout for ruin sites near the scenic default spawn.
 fn main() {
     let mut found = 0;
-    'outer: for zi in -100..100 {
-        for xi in -100..100 {
-            let x = xi as f32 * 400.0;
-            let z = zi as f32 * 400.0;
-            let p = glam::Vec2::new(x, z);
-            let h = voxel_worldgen::terrain_height(p, 1.0);
-            if !(15.0..60.0).contains(&h) { continue; }
-            if voxel_worldgen::terrain_up(p, 1.0) < 0.92 { continue; }
-            if voxel_worldgen::forest_density(p) < 0.75 { continue; }
-            // Mountain within 4 km?
-            let mut peak = 0.0f32;
-            for dz in -8..8 { for dx in -8..8 {
-                let q = p + glam::Vec2::new(dx as f32 * 500.0, dz as f32 * 500.0);
-                peak = peak.max(voxel_worldgen::terrain_height(q, 1.0));
-            }}
-            // Water within 4 km?
-            let mut low = f32::MAX;
-            for dz in -8..8 { for dx in -8..8 {
-                let q = p + glam::Vec2::new(dx as f32 * 500.0, dz as f32 * 500.0);
-                low = low.min(voxel_worldgen::terrain_height(q, 1.0));
-            }}
-            if peak > 300.0 && low < -5.0 {
-                println!("start: {x},{},{z}  h={h:.0} peak={peak:.0} low={low:.0}", h + 30.0);
+    for cz in -160..-120 {
+        for cx in -120..-90 {
+            let min = glam::Vec3::new(cx as f32 * 256.0, -500.0, cz as f32 * 256.0);
+            let max = min + glam::Vec3::new(256.0, 1000.0, 256.0);
+            let ops = voxel_worldgen::ruins::ruins_ops(min, max);
+            if ops.len() >= 8 {
+                let c = ops[0].center;
+                let h = voxel_worldgen::terrain_height(glam::Vec2::new(c[0], c[2]), 1.0);
+                println!("ruin: {:.0},{:.0},{:.0}  ops={} ground={h:.0}", c[0], c[1], c[2], ops.len());
                 found += 1;
-                if found >= 8 { break 'outer; }
+                if found >= 10 { return; }
             }
         }
     }

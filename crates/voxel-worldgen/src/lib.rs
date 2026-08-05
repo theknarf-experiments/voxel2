@@ -5,6 +5,8 @@
 //! `voxel-render/src/shaders/voxel_terrain_density.wgsl` — vegetation and
 //! gameplay place things on the surface the GPU generates.
 
+pub mod ruins;
+
 use glam::Vec2;
 
 /// Mirrors the WGSL `hash2`.

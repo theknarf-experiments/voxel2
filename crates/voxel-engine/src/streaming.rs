@@ -11,11 +11,33 @@
 //! terrain never has holes and never shows two LODs of the same region.
 
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 use bevy::math::DVec3;
 use bevy::prelude::*;
+use voxel_core::csg::CsgOp;
 use voxel_core::ChunkKey;
 use voxel_render::{ChunkCommand, ChunkCommandQueue, ChunkReadyChannel, SharedRenderStats};
+
+/// Optional hook supplying planning-layer CSG ops for a requested chunk
+/// (already AABB-culled to the chunk). Installed by the app/worldgen.
+#[derive(Resource, Default)]
+pub struct ChunkOpsProvider(pub Option<Arc<dyn Fn(ChunkKey) -> Vec<CsgOp> + Send + Sync>>);
+
+fn request(
+    queue: &ChunkCommandQueue,
+    provider: &ChunkOpsProvider,
+    key: ChunkKey,
+    show_on_ready: bool,
+) {
+    let ops = provider
+        .0
+        .as_ref()
+        .map(|f| f(key))
+        .filter(|v| !v.is_empty())
+        .map(Arc::new);
+    queue.push(ChunkCommand::Request { key, show_on_ready, ops });
+}
 
 /// LOD configuration.
 #[derive(Resource)]
@@ -66,6 +88,7 @@ pub struct VoxelStreamingPlugin;
 impl Plugin for VoxelStreamingPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<LodConfig>()
+            .init_resource::<ChunkOpsProvider>()
             .init_resource::<LodTree>()
             .add_systems(Update, (lod_tick, hud_stats));
     }
@@ -91,6 +114,7 @@ fn lod_tick(
     config: Res<LodConfig>,
     mut tree: ResMut<LodTree>,
     queue: Res<ChunkCommandQueue>,
+    ops_provider: Res<ChunkOpsProvider>,
     ready_rx: Res<ChunkReadyChannel>,
     cameras: Query<&Transform, With<Camera3d>>,
 ) {
@@ -152,7 +176,7 @@ fn lod_tick(
                 let cell = IVec3::new(center_x + dx, y, center_z + dz);
                 if tree.top_cells.insert(cell) {
                     let key = ChunkKey::new(config.max_level, cell);
-                    queue.push(ChunkCommand::Request { key, show_on_ready: true });
+                    request(&queue, &ops_provider, key, true);
                     tree.leaves.insert(key);
                 }
             }
@@ -185,7 +209,7 @@ fn lod_tick(
     for leaf in candidates {
         let children = leaf.children();
         for child in children {
-            queue.push(ChunkCommand::Request { key: child, show_on_ready: false });
+            request(&queue, &ops_provider, child, false);
         }
         tree.splitting.insert(leaf, children);
     }
@@ -210,7 +234,7 @@ fn lod_tick(
         if children.iter().any(|c| tree.splitting.contains_key(c)) {
             continue;
         }
-        queue.push(ChunkCommand::Request { key: parent, show_on_ready: false });
+        request(&queue, &ops_provider, parent, false);
         tree.merging.insert(parent, children);
     }
 }

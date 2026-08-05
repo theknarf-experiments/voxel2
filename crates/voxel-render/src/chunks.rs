@@ -45,7 +45,8 @@ use bevy::{
         render_resource::{
             binding_types::{storage_buffer_sized, uniform_buffer},
             BindGroup, BindGroupEntries, BindGroupLayoutDescriptor, BindGroupLayoutEntries,
-            Buffer, BufferDescriptor, BufferUsages, CachedComputePipelineId, Canonical,
+            Buffer, BufferDescriptor, BufferInitDescriptor, BufferUsages,
+            CachedComputePipelineId, Canonical,
             ColorTargetState, ColorWrites, CompareFunction, ComputePassDescriptor,
             ComputePipelineDescriptor, DepthStencilState, DynamicUniformBuffer, FragmentState,
             IndexFormat, MapMode, PipelineCache, RenderPipeline,
@@ -58,6 +59,7 @@ use bevy::{
     },
 };
 
+use voxel_core::csg::CsgOp;
 use voxel_core::ChunkKey;
 
 use crate::slab::{SlabAlloc, SlabAllocator};
@@ -78,12 +80,17 @@ const STAGING_BUFFERS: usize = 3;
 // --- main-world <-> render-world plumbing ------------------------------------
 
 /// Chunk lifecycle commands from the main-world LOD controller.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub enum ChunkCommand {
     /// Generate (and mesh, if non-empty) this chunk. `show_on_ready` makes
     /// it visible as soon as it is drawable; otherwise it stays hidden until
     /// an explicit [`ChunkCommand::Show`] (ready-before-swap LOD flips).
-    Request { key: ChunkKey, show_on_ready: bool },
+    /// `ops` are planning-layer CSG operations applied by the density pass.
+    Request {
+        key: ChunkKey,
+        show_on_ready: bool,
+        ops: Option<Arc<Vec<CsgOp>>>,
+    },
     Show(ChunkKey),
     Free(ChunkKey),
 }
@@ -234,6 +241,8 @@ struct RenderChunk {
     state: ChunkState,
     visible: bool,
     show_on_ready: bool,
+    /// Planning-layer ops, held until the density pass consumes them.
+    ops: Option<Arc<Vec<CsgOp>>>,
 }
 
 #[derive(Resource, Default)]
@@ -276,6 +285,10 @@ struct ChunkParams {
     base_vertex: u32,
     first_index: u32,
     counts_slot: u32,
+    /// Range into this frame's concatenated CSG op buffer.
+    csg_offset: u32,
+    csg_count: u32,
+    _pad: UVec2,
 }
 
 #[derive(ShaderType, Clone, Copy)]
@@ -303,6 +316,9 @@ struct ChunkGpuResources {
     vertex_slab: Buffer,
     index_slab: Buffer,
     counts: Buffer,
+    /// This frame's concatenated planning ops (None → bind the dummy).
+    csg_buffer: Option<Buffer>,
+    csg_dummy: Buffer,
     staging: Vec<StagingSlot>,
     arena_free: Vec<u32>,
     slab: SlabAllocator,
@@ -392,6 +408,18 @@ fn init_chunk_resources(
             COUNTS_SLOTS as u64 * 8,
             BufferUsages::STORAGE | BufferUsages::COPY_SRC | BufferUsages::COPY_DST,
         ),
+        csg_buffer: None,
+        csg_dummy: render_device.create_buffer_with_data(&BufferInitDescriptor {
+            label: Some("voxel_csg_dummy"),
+            contents: bytemuck::bytes_of(&CsgOp::boxy(
+                bevy::math::Vec3::ZERO,
+                bevy::math::Vec3::ZERO,
+                0.0,
+                0,
+                true,
+            )),
+            usage: BufferUsages::STORAGE,
+        }),
         staging,
         arena_free: (0..ARENA_SLOTS).rev().collect(),
         slab: SlabAllocator::new(),
@@ -408,6 +436,7 @@ fn init_chunk_resources(
             (
                 storage_buffer_sized(false, None),     // density arena
                 uniform_buffer::<ChunkParams>(true),   // per-chunk params
+                storage_buffer_sized(false, None),     // planning CSG ops
             ),
         ),
     );
@@ -560,7 +589,13 @@ fn extract_camera_pos(
 
 // --- planning (Prepare) ------------------------------------------------------
 
-fn make_params(key: ChunkKey, slot: u32, alloc: Option<&SlabAlloc>, counts_slot: u32) -> ChunkParams {
+fn make_params(
+    key: ChunkKey,
+    slot: u32,
+    alloc: Option<&SlabAlloc>,
+    counts_slot: u32,
+    csg: (u32, u32),
+) -> ChunkParams {
     let origin = key.min_corner_m();
     ChunkParams {
         origin: Vec4::new(
@@ -573,6 +608,9 @@ fn make_params(key: ChunkKey, slot: u32, alloc: Option<&SlabAlloc>, counts_slot:
         base_vertex: alloc.map_or(0, |a| a.base_vertex),
         first_index: alloc.map_or(0, |a| a.first_index),
         counts_slot,
+        csg_offset: csg.0,
+        csg_count: csg.1,
+        _pad: UVec2::ZERO,
     }
 }
 
@@ -640,7 +678,7 @@ fn plan_frame(
     // 1. Apply commands from the LOD controller.
     for command in extracted.0.drain(..) {
         match command {
-            ChunkCommand::Request { key, show_on_ready } => {
+            ChunkCommand::Request { key, show_on_ready, ops } => {
                 match table.chunks.get_mut(&key) {
                     None => {
                         table.chunks.insert(
@@ -649,6 +687,7 @@ fn plan_frame(
                                 state: ChunkState::QueuedGen,
                                 visible: false,
                                 show_on_ready,
+                                ops,
                             },
                         );
                     }
@@ -677,6 +716,7 @@ fn plan_frame(
                             state: ChunkState::Cancelled { slot },
                             visible: false,
                             show_on_ready: false,
+                            ops: None,
                         },
                     );
                 }
@@ -764,7 +804,7 @@ fn plan_frame(
         mesh_counts_slot -= 1;
         let offset = gpu
             .gen_uniforms
-            .push(&make_params(key, slot, Some(&alloc), mesh_counts_slot));
+            .push(&make_params(key, slot, Some(&alloc), mesh_counts_slot, (0, 0)));
         batches.mesh.push(MeshEntry { uniform_offset: offset });
         // The mesh compute is recorded later this frame, before the main
         // pass, so the chunk is immediately drawable.
@@ -787,6 +827,7 @@ fn plan_frame(
     };
     if let Some(staging_idx) = staging_idx {
         let mut entries = Vec::new();
+        let mut frame_ops: Vec<CsgOp> = Vec::new();
         let mut queued: Vec<(ChunkKey, f64)> = table
             .chunks
             .iter()
@@ -798,16 +839,38 @@ fn plan_frame(
             let Some(slot) = gpu.arena_free.pop() else {
                 break;
             };
+            let chunk = table.chunks.get_mut(&key).unwrap();
+            // Consume this chunk's planning ops into the frame buffer.
+            let csg = match chunk.ops.take() {
+                Some(ops) => {
+                    let offset = frame_ops.len() as u32;
+                    frame_ops.extend_from_slice(&ops);
+                    (offset, ops.len() as u32)
+                }
+                None => (0, 0),
+            };
             let counts_slot = entries.len() as u32;
-            let offset = gpu.gen_uniforms.push(&make_params(key, slot, None, counts_slot));
+            let offset = gpu
+                .gen_uniforms
+                .push(&make_params(key, slot, None, counts_slot, csg));
             batches.gen.push(GenEntry { uniform_offset: offset });
             entries.push((key, counts_slot));
-            table.chunks.get_mut(&key).unwrap().state = ChunkState::CountsInFlight { slot };
+            chunk.state = ChunkState::CountsInFlight { slot };
         }
         if !entries.is_empty() {
             batches.staging_idx = Some(staging_idx);
             gpu.staging[staging_idx].state = StagingState::PendingMap { entries };
         }
+        // Upload this frame's op set (dummy is kept bound when empty).
+        gpu.csg_buffer = if frame_ops.is_empty() {
+            None
+        } else {
+            Some(render_device.create_buffer_with_data(&BufferInitDescriptor {
+                label: Some("voxel_csg_ops"),
+                contents: bytemuck::cast_slice(&frame_ops),
+                usage: BufferUsages::STORAGE,
+            }))
+        };
     }
 
     // 5. Arena slots freed by meshing become reusable next frame.
@@ -911,12 +974,14 @@ fn dispatch_chunk_work(
         return;
     };
 
+    let csg = gpu.csg_buffer.as_ref().unwrap_or(&gpu.csg_dummy);
     let gen_bg = render_context.render_device().create_bind_group(
         "voxel_gen_bg",
         &pipeline_cache.get_bind_group_layout(&pipelines.gen_layout),
         &BindGroupEntries::sequential((
             gpu.density_arena.as_entire_buffer_binding(),
             gen_uniform_binding.clone(),
+            csg.as_entire_buffer_binding(),
         )),
     );
     let mesh_bg = render_context.render_device().create_bind_group(

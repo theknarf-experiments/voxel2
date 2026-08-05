@@ -12,6 +12,9 @@ struct ChunkParams {
     base_vertex: u32,
     first_index: u32,
     counts_slot: u32,
+    csg_offset: u32,
+    csg_count: u32,
+    _pad: vec2<u32>,
 }
 
 @group(0) @binding(0) var<storage, read_write> density: array<u32>;

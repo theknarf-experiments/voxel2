@@ -5,6 +5,7 @@
 
 use bevy::prelude::*;
 use voxel_debug::prelude::*;
+use voxel_engine::streaming::ChunkOpsProvider;
 use voxel_engine::VoxelEnginePlugin;
 
 fn main() {
@@ -17,6 +18,15 @@ fn main() {
             ..default()
         }))
         .insert_resource(ClearColor(Color::srgb(0.65, 0.77, 0.94)))
+        // Planning-layer CSG: ruin sites carved/merged into fine-LOD chunks.
+        .insert_resource(ChunkOpsProvider(Some(std::sync::Arc::new(|key| {
+            if key.level > 2 {
+                return Vec::new(); // meter-scale features: fine LODs only
+            }
+            let min = key.min_corner_m().as_vec3();
+            let max = min + Vec3::splat(key.edge_m() as f32);
+            voxel_worldgen::ruins::ruins_ops(min, max)
+        }))))
         .add_plugins((VoxelDebugPlugin, VoxelEnginePlugin::default()))
         .add_systems(Startup, setup)
         .add_systems(Update, (autopilot, walk_mode, follow_ocean).chain())

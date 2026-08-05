@@ -16,10 +16,44 @@ struct ChunkParams {
     base_vertex: u32,
     first_index: u32,
     counts_slot: u32,
+    csg_offset: u32,
+    csg_count: u32,
+    _pad: vec2<u32>,
 }
 
 @group(0) @binding(0) var<storage, read_write> density: array<u32>;
 @group(0) @binding(1) var<uniform> params: ChunkParams;
+
+// Planning-layer CSG ops (48 B, layout mirrors voxel-core CsgOp).
+struct CsgOp {
+    center: vec3<f32>,
+    kind: u32, // 0 box add, 1 box cut, 2 cylinder add, 3 cylinder cut
+    half: vec3<f32>,
+    material: u32,
+    yaw: f32,
+    blend: f32,
+    _pad: vec2<u32>,
+}
+@group(0) @binding(2) var<storage, read_write> csg_ops: array<CsgOp>;
+
+fn op_sdf(op: CsgOp, p: vec3<f32>) -> f32 {
+    var q = p - op.center;
+    let c = cos(-op.yaw);
+    let s = sin(-op.yaw);
+    q = vec3<f32>(q.x * c - q.z * s, q.y, q.x * s + q.z * c);
+    if (op.kind < 2u) {
+        let a = abs(q) - op.half;
+        return length(max(a, vec3<f32>(0.0))) + min(max(a.x, max(a.y, a.z)), 0.0);
+    }
+    let dr = length(q.xz) - op.half.x;
+    let dy = abs(q.y) - op.half.y;
+    return length(vec2<f32>(max(dr, 0.0), max(dy, 0.0))) + min(max(dr, dy), 0.0);
+}
+
+fn smin(a: f32, b: f32, k: f32) -> f32 {
+    let h = clamp(0.5 + 0.5 * (b - a) / k, 0.0, 1.0);
+    return mix(b, a, h) - k * h * (1.0 - h);
+}
 
 // --- deterministic value noise -----------------------------------------------
 
@@ -79,9 +113,35 @@ fn density_main(@builtin(global_invocation_id) id: vec3<u32>) {
     let vs = params.origin.w;
     // Sample i holds cell corner i - 2 (apron covers coarse-parity cells).
     let p = params.origin.xyz + vec3<f32>(vec3<i32>(id) - vec3<i32>(2)) * vs;
+
+    var d_m = p.y - terrain_height(p.xz, vs); // meters
+    var mat = 1u;
+
+    // Planning-layer CSG: additions merge (optionally smoothly) into the
+    // terrain, cuts carve it. Ops are meter-scale, so they only apply at
+    // fine LODs (they are also only provided there).
+    if (params.csg_count > 0u && vs < 4.0) {
+        for (var i = 0u; i < params.csg_count; i++) {
+            let op = csg_ops[params.csg_offset + i];
+            let od = op_sdf(op, p);
+            if ((op.kind & 1u) == 0u) {
+                if (op.blend > 0.0) {
+                    d_m = smin(d_m, od, op.blend);
+                } else {
+                    d_m = min(d_m, od);
+                }
+                if (od < 0.3) {
+                    mat = op.material;
+                }
+            } else {
+                d_m = max(d_m, -od);
+            }
+        }
+    }
+
     // SDF stored in voxel-size units, narrow band ±4.
-    let sdf = clamp((p.y - terrain_height(p.xz, vs)) / vs, -4.0, 4.0);
-    let material = select(0u, 1u, sdf < 0.0);
+    let sdf = clamp(d_m / vs, -4.0, 4.0);
+    let material = select(0u, mat, sdf < 0.0);
     let packed = (pack2x16float(vec2<f32>(sdf, 0.0)) & 0xFFFFu) | (material << 16u);
     let base = params.slot * SLOT_STRIDE;
     density[base + id.x + SAMPLES * (id.y + SAMPLES * id.z)] = packed;
