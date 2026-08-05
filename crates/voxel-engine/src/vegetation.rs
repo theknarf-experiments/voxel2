@@ -25,15 +25,163 @@ const GRASS_TILE_M: f32 = 16.0;
 const GRASS_TILE_RADIUS: i32 = 7; // ~112 m of dense grass
 const GRASS_PER_TILE: u32 = 550;
 
+/// Far-forest impostors: merged silhouette meshes per 128 m super-tile.
+const SUPER_M: f32 = 128.0;
+const SUPER_RADIUS: i32 = 24; // ~3 km of visible forest
+/// Super-tiles closer than this hide (detailed tree meshes take over).
+const SUPER_HIDE_M: f32 = 320.0;
+/// Super-tile builds per frame (amortize the height/shadow evaluation).
+const SUPER_BUDGET: usize = 8;
+
 pub struct VegetationPlugin;
 
 impl Plugin for VegetationPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<VegTiles>()
             .init_resource::<GrassTiles>()
+            .init_resource::<FarForest>()
             .add_plugins(voxel_render::GrassPlugin)
             .add_systems(Startup, build_tree_assets)
-            .add_systems(Update, (stream_vegetation, stream_grass));
+            .add_systems(
+                Update,
+                (stream_vegetation, stream_grass, stream_far_forest, far_forest_visibility),
+            );
+    }
+}
+
+// --- far-forest impostors ----------------------------------------------------
+
+#[derive(Component)]
+struct FarForestTile;
+
+#[derive(Resource, Default)]
+struct FarForest {
+    /// Super-tile → impostor entity (None if the tile has no trees).
+    tiles: HashMap<IVec2, Option<Entity>>,
+}
+
+fn stream_far_forest(
+    mut commands: Commands,
+    mut far: ResMut<FarForest>,
+    mut meshes: ResMut<Assets<Mesh>>,
+    assets: Option<Res<TreeAssets>>,
+    cameras: Query<&Transform, With<Camera3d>>,
+) {
+    let (Some(assets), Ok(camera)) = (assets, cameras.single()) else {
+        return;
+    };
+    let center = IVec2::new(
+        (camera.translation.x / SUPER_M).floor() as i32,
+        (camera.translation.z / SUPER_M).floor() as i32,
+    );
+
+    // Build missing super-tiles nearest-first, a few per frame.
+    let mut missing: Vec<(i32, IVec2)> = Vec::new();
+    for dz in -SUPER_RADIUS..=SUPER_RADIUS {
+        for dx in -SUPER_RADIUS..=SUPER_RADIUS {
+            let tile = center + IVec2::new(dx, dz);
+            if !far.tiles.contains_key(&tile) {
+                missing.push((dx * dx + dz * dz, tile));
+            }
+        }
+    }
+    missing.sort_by_key(|(d, _)| *d);
+    for (_, tile) in missing.into_iter().take(SUPER_BUDGET) {
+        let entity = build_super_tile(&mut commands, &mut meshes, &assets, tile);
+        far.tiles.insert(tile, entity);
+    }
+
+    // Despawn far out of range.
+    let keep = SUPER_RADIUS + 2;
+    let stale: Vec<IVec2> = far
+        .tiles
+        .keys()
+        .filter(|t| (t.x - center.x).abs() > keep || (t.y - center.y).abs() > keep)
+        .copied()
+        .collect();
+    for tile in stale {
+        if let Some(Some(entity)) = far.tiles.remove(&tile) {
+            commands.entity(entity).despawn();
+        }
+    }
+}
+
+/// Merge crossed-quad silhouettes for every tree in the super-tile's 2×2
+/// detail tiles, colored by species and the baked sun shadow.
+fn build_super_tile(
+    commands: &mut Commands,
+    meshes: &mut Assets<Mesh>,
+    assets: &TreeAssets,
+    tile: IVec2,
+) -> Option<Entity> {
+    let sub = (SUPER_M / TILE_M) as i32;
+    let mut b = MeshBuilder::default();
+    for dz in 0..sub {
+        for dx in 0..sub {
+            let detail = IVec2::new(tile.x * sub + dx, tile.y * sub + dz);
+            for tree in tile_trees(detail) {
+                let shade = 0.45 + 0.55 * voxel_worldgen::sun_shadow(tree.pos);
+                if tree.pine {
+                    let c = [0.10 * shade, 0.22 * shade, 0.09 * shade, 1.0];
+                    b.cross_cone(tree.pos, 1.7 * tree.scale, 6.5 * tree.scale, c);
+                } else {
+                    let c = [0.16 * shade, 0.26 * shade, 0.08 * shade, 1.0];
+                    b.cross_diamond(tree.pos, 2.3 * tree.scale, 5.5 * tree.scale, c);
+                }
+            }
+        }
+    }
+    if b.positions.is_empty() {
+        return None;
+    }
+    Some(
+        commands
+            .spawn((
+                FarForestTile,
+                Mesh3d(meshes.add(b.build())),
+                MeshMaterial3d(assets.impostor_mat.clone()),
+                Transform::default(),
+            ))
+            .id(),
+    )
+}
+
+/// Hide super-tiles inside the detailed-tree radius so silhouettes don't
+/// poke through the real canopies.
+fn far_forest_visibility(
+    mut tiles: Query<(&mut Visibility, &Mesh3d), With<FarForestTile>>,
+    meshes: Res<Assets<Mesh>>,
+    cameras: Query<&Transform, With<Camera3d>>,
+) {
+    let Ok(camera) = cameras.single() else {
+        return;
+    };
+    let cam = Vec2::new(camera.translation.x, camera.translation.z);
+    for (mut vis, mesh) in &mut tiles {
+        // Cheap center estimate from the mesh's first vertex tile.
+        let Some(mesh) = meshes.get(&mesh.0) else {
+            continue;
+        };
+        let Some(bevy::mesh::VertexAttributeValues::Float32x3(pos)) =
+            mesh.attribute(Mesh::ATTRIBUTE_POSITION)
+        else {
+            continue;
+        };
+        let Some(first) = pos.first() else {
+            continue;
+        };
+        let tile = Vec2::new(
+            (first[0] / SUPER_M).floor() * SUPER_M + SUPER_M * 0.5,
+            (first[2] / SUPER_M).floor() * SUPER_M + SUPER_M * 0.5,
+        );
+        let target = if cam.distance(tile) < SUPER_HIDE_M {
+            Visibility::Hidden
+        } else {
+            Visibility::Inherited
+        };
+        if *vis != target {
+            *vis = target;
+        }
     }
 }
 
@@ -123,6 +271,7 @@ struct TreeAssets {
     trunk_mat: Handle<StandardMaterial>,
     canopy_mat: Handle<StandardMaterial>,
     rock_mat: Handle<StandardMaterial>,
+    impostor_mat: Handle<StandardMaterial>,
 }
 
 /// Procedural low-poly conifer: an 8-sided trunk cylinder and three stacked
@@ -174,6 +323,14 @@ fn build_tree_assets(
             perceptual_roughness: 0.95,
             ..default()
         }),
+        // Silhouette impostors: unlit + vertex colors (shadow baked in),
+        // double-sided so the crossed quads read from every direction.
+        impostor_mat: materials.add(StandardMaterial {
+            base_color: Color::WHITE,
+            unlit: true,
+            cull_mode: None,
+            ..default()
+        }),
     });
 }
 
@@ -181,6 +338,7 @@ fn build_tree_assets(
 struct MeshBuilder {
     positions: Vec<[f32; 3]>,
     normals: Vec<[f32; 3]>,
+    colors: Vec<[f32; 4]>,
     indices: Vec<u32>,
 }
 
@@ -250,6 +408,51 @@ impl MeshBuilder {
         }
     }
 
+    /// Two crossed triangles: a conifer silhouette.
+    fn cross_cone(&mut self, at: Vec3, half_w: f32, height: f32, color: [f32; 4]) {
+        for axis in 0..2 {
+            let side = if axis == 0 {
+                Vec3::new(half_w, 0.0, 0.0)
+            } else {
+                Vec3::new(0.0, 0.0, half_w)
+            };
+            let n = if axis == 0 { Vec3::Z } else { Vec3::X };
+            let base = self.positions.len() as u32;
+            self.positions.extend([
+                (at - side).to_array(),
+                (at + side).to_array(),
+                (at + Vec3::Y * height).to_array(),
+            ]);
+            self.normals.extend([n.to_array(); 3]);
+            self.colors.extend([color; 3]);
+            self.indices.extend([base, base + 1, base + 2]);
+        }
+    }
+
+    /// Two crossed diamonds: a broadleaf silhouette.
+    fn cross_diamond(&mut self, at: Vec3, half_w: f32, height: f32, color: [f32; 4]) {
+        let mid = at + Vec3::Y * (height * 0.55);
+        for axis in 0..2 {
+            let side = if axis == 0 {
+                Vec3::new(half_w, 0.0, 0.0)
+            } else {
+                Vec3::new(0.0, 0.0, half_w)
+            };
+            let n = if axis == 0 { Vec3::Z } else { Vec3::X };
+            let base = self.positions.len() as u32;
+            self.positions.extend([
+                at.to_array(),
+                (mid - side).to_array(),
+                (at + Vec3::Y * height).to_array(),
+                (mid + side).to_array(),
+            ]);
+            self.normals.extend([n.to_array(); 4]);
+            self.colors.extend([color; 4]);
+            self.indices
+                .extend([base, base + 1, base + 2, base, base + 2, base + 3]);
+        }
+    }
+
     fn build(self) -> Mesh {
         let mut mesh = Mesh::new(
             PrimitiveTopology::TriangleList,
@@ -257,6 +460,9 @@ impl MeshBuilder {
         );
         mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, self.positions);
         mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, self.normals);
+        if !self.colors.is_empty() {
+            mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, self.colors);
+        }
         mesh.insert_indices(Indices::U32(self.indices));
         mesh
     }
@@ -325,19 +531,27 @@ fn stream_vegetation(
     }
 }
 
-fn spawn_tile(commands: &mut Commands, assets: &TreeAssets, tile: IVec2) -> Vec<Entity> {
+/// One deterministic tree placement (shared by near meshes and far
+/// impostors so trees never teleport across the detail boundary).
+struct TreeInstance {
+    pos: Vec3,
+    yaw: f32,
+    scale: f32,
+    pine: bool,
+}
+
+fn tile_trees(tile: IVec2) -> Vec<TreeInstance> {
     let mut rng = Rng::new(chunk_seed(
         WORLD_SEED,
         VEG_LAYER_ID,
         IVec3::new(tile.x, 0, tile.y),
     ));
     let origin = Vec2::new(tile.x as f32, tile.y as f32) * TILE_M;
-    let mut entities = Vec::new();
-
     // Forest density gated by slow noise so woods come in coherent patches.
     let density = voxel_worldgen::forest_density(origin + Vec2::splat(TILE_M * 0.5));
     let attempts = (TREE_ATTEMPTS as f32 * density) as u32;
 
+    let mut out = Vec::new();
     for _ in 0..attempts {
         let x = origin.x + rng.next_f32() * TILE_M;
         let z = origin.y + rng.next_f32() * TILE_M;
@@ -349,12 +563,25 @@ fn spawn_tile(commands: &mut Commands, assets: &TreeAssets, tile: IVec2) -> Vec<
         }
         let yaw = rng.next_f32() * std::f32::consts::TAU;
         let scale = 0.8 + rng.next_f32() * 0.9;
-        let transform = Transform::from_xyz(x, y - 0.15, z)
-            .with_rotation(Quat::from_rotation_y(yaw))
-            .with_scale(Vec3::splat(scale));
         // Pines dominate the highlands, broadleaves the lowlands.
         let pine = y > 140.0 || rng.next_f32() < 0.45;
-        let (top_mesh, top_mat) = if pine {
+        out.push(TreeInstance {
+            pos: Vec3::new(x, y - 0.15, z),
+            yaw,
+            scale,
+            pine,
+        });
+    }
+    out
+}
+
+fn spawn_tile(commands: &mut Commands, assets: &TreeAssets, tile: IVec2) -> Vec<Entity> {
+    let mut entities = Vec::new();
+    for tree in tile_trees(tile) {
+        let transform = Transform::from_translation(tree.pos)
+            .with_rotation(Quat::from_rotation_y(tree.yaw))
+            .with_scale(Vec3::splat(tree.scale));
+        let (top_mesh, top_mat) = if tree.pine {
             (&assets.foliage_mesh, &assets.foliage_mat)
         } else {
             (&assets.canopy_mesh, &assets.canopy_mat)
@@ -381,6 +608,12 @@ fn spawn_tile(commands: &mut Commands, assets: &TreeAssets, tile: IVec2) -> Vec<
 
     // A few boulders per tile, preferring rougher ground; any altitude
     // below the snow line.
+    let mut rng = Rng::new(chunk_seed(
+        WORLD_SEED,
+        VEG_LAYER_ID ^ 0x0C4,
+        IVec3::new(tile.x, 2, tile.y),
+    ));
+    let origin = Vec2::new(tile.x as f32, tile.y as f32) * TILE_M;
     for _ in 0..4 {
         let x = origin.x + rng.next_f32() * TILE_M;
         let z = origin.y + rng.next_f32() * TILE_M;
