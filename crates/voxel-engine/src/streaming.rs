@@ -105,13 +105,26 @@ fn face_mask(tree: &LodTree, max_level: u8, key: ChunkKey) -> u32 {
 /// Re-request a live chunk with a freshly computed mask (regenerates in
 /// place; the old mesh draws until the replacement is ready).
 fn refresh(
-    tree: &LodTree,
+    tree: &mut LodTree,
     queue: &ChunkCommandQueue,
     provider: &ChunkOpsProvider,
-    max_level: u8,
+    config: &LodConfig,
+    camera: DVec3,
     key: ChunkKey,
 ) {
-    let mask = face_mask(tree, max_level, key);
+    // A chunk that is itself mid-swap (or about to split) regenerates with
+    // a fresh mask anyway — refreshing it now would only add churn.
+    if tree.splitting.contains_key(&key)
+        || in_merge(tree, key)
+        || (key.level > 0 && aabb_distance(camera, key) < config.split_k * key.edge_m())
+    {
+        return;
+    }
+    let mask = face_mask(tree, config.max_level, key);
+    if tree.sent_masks.get(&key) == Some(&mask) {
+        return;
+    }
+    tree.sent_masks.insert(key, mask);
     request(queue, provider, key, false, mask);
 }
 
@@ -119,16 +132,18 @@ fn refresh(
 /// refresh the equal-level neighbor leaf, or the finer leaves touching the
 /// face.
 fn refresh_neighbors(
-    tree: &LodTree,
+    tree: &mut LodTree,
     queue: &ChunkCommandQueue,
     provider: &ChunkOpsProvider,
-    max_level: u8,
+    config: &LodConfig,
+    camera: DVec3,
     region: ChunkKey,
 ) {
+    let max_level = config.max_level;
     for (i, d) in FACE_DIRS.iter().enumerate() {
         let n = ChunkKey::new(region.level, region.pos + *d);
         if tree.leaves.contains(&n) {
-            refresh(tree, queue, provider, max_level, n);
+            refresh(tree, queue, provider, config, camera, n);
             continue;
         }
         if region.level == 0 {
@@ -150,7 +165,7 @@ fn refresh_neighbors(
             }
             let fine_n = ChunkKey::new(child.level, child.pos + *d);
             if tree.leaves.contains(&fine_n) {
-                refresh(tree, queue, provider, max_level, fine_n);
+                refresh(tree, queue, provider, config, camera, fine_n);
             }
         }
     }
@@ -204,6 +219,8 @@ struct LodTree {
     ready: HashSet<ChunkKey>,
     /// Top-level cells whose subtree is live.
     top_cells: HashSet<IVec3>,
+    /// Last face mask sent per chunk (suppresses no-op refreshes).
+    sent_masks: HashMap<ChunkKey, u32>,
 }
 
 pub struct VoxelStreamingPlugin;
@@ -285,7 +302,12 @@ fn lod_tick(
         tree.leaves.remove(&parent);
         tree.ready.remove(&parent);
         queue.push(ChunkCommand::Free(parent));
-        refresh_neighbors(tree, &queue, &ops_provider, config.max_level, parent);
+        refresh_neighbors(tree, &queue, &ops_provider, &config, camera, parent);
+        // The children's own masks were computed at request time and may be
+        // stale by now — regenerate any that changed while in flight.
+        for child in children {
+            refresh(tree, &queue, &ops_provider, &config, camera, child);
+        }
     }
 
     // 3. Complete merges whose parent is drawable: atomic swap.
@@ -304,7 +326,8 @@ fn lod_tick(
             tree.ready.remove(&child);
             queue.push(ChunkCommand::Free(child));
         }
-        refresh_neighbors(tree, &queue, &ops_provider, config.max_level, parent);
+        refresh_neighbors(tree, &queue, &ops_provider, &config, camera, parent);
+        refresh(tree, &queue, &ops_provider, &config, camera, parent);
     }
 
     // 4. Top-level ring maintenance.
@@ -319,6 +342,7 @@ fn lod_tick(
                 if tree.top_cells.insert(cell) {
                     let key = ChunkKey::new(config.max_level, cell);
                     let mask = face_mask(tree, config.max_level, key);
+                    tree.sent_masks.insert(key, mask);
                     request(&queue, &ops_provider, key, true, mask);
                     tree.leaves.insert(key);
                 }
@@ -351,6 +375,7 @@ fn lod_tick(
         .collect();
     // Restricted octree: a split may not create a >1 LOD difference across
     // any of the 26 neighbors; coarser neighbors cascade-split first.
+    let mut queued_splits: HashSet<ChunkKey> = to_split.iter().copied().collect();
     let mut i = 0;
     while i < to_split.len() {
         let leaf = to_split[i];
@@ -373,7 +398,7 @@ fn lod_tick(
                             while c.level < l {
                                 c = c.parent();
                             }
-                            if !to_split.contains(&c) {
+                            if queued_splits.insert(c) {
                                 to_split.push(c);
                             }
                         }
@@ -387,6 +412,7 @@ fn lod_tick(
         let children = leaf.children();
         for child in children {
             let mask = face_mask(tree, config.max_level, child);
+            tree.sent_masks.insert(child, mask);
             request(&queue, &ops_provider, child, false, mask);
         }
         tree.splitting.insert(leaf, children);
@@ -430,6 +456,7 @@ fn lod_tick(
             }
         }
         let mask = face_mask(tree, config.max_level, parent);
+        tree.sent_masks.insert(parent, mask);
         request(&queue, &ops_provider, parent, false, mask);
         tree.merging.insert(parent, children);
     }
@@ -474,6 +501,7 @@ fn free_subtree(tree: &mut LodTree, queue: &ChunkCommandQueue, cell: IVec3, max_
     }
     for key in to_free {
         tree.ready.remove(&key);
+        tree.sent_masks.remove(&key);
         queue.push(ChunkCommand::Free(key));
     }
     tree.ready.retain(|k| !in_subtree(k));
