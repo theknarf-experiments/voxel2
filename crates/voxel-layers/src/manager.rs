@@ -10,14 +10,15 @@ use std::sync::{Arc, Mutex, OnceLock};
 use glam::IVec3;
 use voxel_core::seed::{chunk_seed, splitmix64, Rng};
 
-use crate::layer::{chunk_bounds, chunk_range, Dep, IAabb, Layer};
+use crate::layer::{chunk_bounds, chunk_range, layer_key, Dep, IAabb, Layer, LayerKey};
 
 type ErasedChunk = Arc<dyn Any + Send + Sync>;
 type Slot = Arc<OnceLock<ErasedChunk>>;
 type GenerateFn = Box<dyn Fn(&LayerManager, IVec3, u32) -> ErasedChunk + Send + Sync>;
 
 struct LayerEntry {
-    name: &'static str,
+    name: String,
+    type_id: TypeId,
     stable_id: u64,
     extent: IVec3,
     levels: u32,
@@ -33,14 +34,14 @@ struct LayerEntry {
 /// regenerable, so the cache can be dropped at any time.
 pub struct LayerManager {
     world_seed: u64,
-    layers: HashMap<TypeId, LayerEntry>,
-    cache: Mutex<HashMap<(TypeId, u32, IVec3), Slot>>,
+    layers: HashMap<LayerKey, LayerEntry>,
+    cache: Mutex<HashMap<(LayerKey, u32, IVec3), Slot>>,
 }
 
 thread_local! {
     /// Generation stack for cycle detection (a cycle would otherwise
     /// deadlock on the chunk's `OnceLock`).
-    static GEN_STACK: RefCell<Vec<(TypeId, u32, IVec3)>> = const { RefCell::new(Vec::new()) };
+    static GEN_STACK: RefCell<Vec<(LayerKey, u32, IVec3)>> = const { RefCell::new(Vec::new()) };
 }
 
 impl LayerManager {
@@ -52,21 +53,28 @@ impl LayerManager {
         }
     }
 
-    /// Register a layer. Its dependencies must already be registered, which
+    /// Register the default instance of a layer (instance name =
+    /// `L::NAME`). Its dependencies must already be registered, which
     /// makes the layer graph a DAG by construction.
     pub fn register<L: Layer>(&mut self, layer: L) {
+        self.register_as(L::NAME, layer);
+    }
+
+    /// Register a NAMED instance: data-driven stacks register several
+    /// differently-parameterized instances of one layer type, each with
+    /// its own cache and seed stream.
+    pub fn register_as<L: Layer>(&mut self, instance: &str, layer: L) {
+        let key = layer_key(instance);
         let deps = layer.dependencies();
         for dep in &deps {
             assert!(
-                self.layers.contains_key(&dep.layer),
-                "layer {:?} depends on an unregistered layer; register dependencies first",
-                L::NAME
+                self.layers.contains_key(&dep.key),
+                "layer {instance:?} depends on an unregistered layer; register dependencies first",
             );
         }
         assert!(
-            !self.layers.contains_key(&TypeId::of::<L>()),
-            "layer {:?} registered twice",
-            L::NAME
+            !self.layers.contains_key(&key),
+            "layer instance {instance:?} registered twice",
         );
 
         let extent = layer.chunk_extent();
@@ -81,6 +89,7 @@ impl LayerManager {
         let generate: GenerateFn = Box::new(move |mgr, coord, level| {
             let ctx = LayerCtx::<L> {
                 mgr,
+                key,
                 coord,
                 level,
                 layer: gen_arc.clone(),
@@ -88,15 +97,12 @@ impl LayerManager {
             };
             Arc::new(gen_arc.generate(&ctx, coord))
         });
-        let mut id_hash = splitmix64(0xC0FFEE);
-        for b in L::NAME.bytes() {
-            id_hash = splitmix64(id_hash ^ b as u64);
-        }
         self.layers.insert(
-            TypeId::of::<L>(),
+            key,
             LayerEntry {
-                name: L::NAME,
-                stable_id: id_hash,
+                name: instance.to_string(),
+                type_id: TypeId::of::<L>(),
+                stable_id: key,
                 extent,
                 levels,
                 deps,
@@ -109,43 +115,69 @@ impl LayerManager {
     /// that don't exist yet. This is the top-level entry point streaming
     /// code uses.
     pub fn get<L: Layer>(&self, bounds: IAabb) -> LayerView<L> {
-        let final_level = self.entry_of::<L>().levels - 1;
-        self.get_at_level::<L>(bounds, final_level)
+        self.get_named::<L>(L::NAME, bounds)
+    }
+
+    /// Final-level chunks of a NAMED instance covering `bounds`.
+    pub fn get_named<L: Layer>(&self, instance: &str, bounds: IAabb) -> LayerView<L> {
+        let key = layer_key(instance);
+        let final_level = self.entry(key).levels - 1;
+        self.get_named_at_level::<L>(instance, bounds, final_level)
     }
 
     /// Chunks of `L` at a specific internal level covering `bounds`.
     pub fn get_at_level<L: Layer>(&self, bounds: IAabb, level: u32) -> LayerView<L> {
-        let entry = self.entry_of::<L>();
+        self.get_named_at_level::<L>(L::NAME, bounds, level)
+    }
+
+    pub fn get_named_at_level<L: Layer>(
+        &self,
+        instance: &str,
+        bounds: IAabb,
+        level: u32,
+    ) -> LayerView<L> {
+        let key = layer_key(instance);
+        let entry = self.entry(key);
+        assert_eq!(
+            entry.type_id,
+            TypeId::of::<L>(),
+            "layer instance {instance:?} is not a {:?}",
+            std::any::type_name::<L>()
+        );
         let (lo, hi) = chunk_range(entry.extent, bounds);
         let mut chunks = Vec::new();
         for z in lo.z..=hi.z {
             for y in lo.y..=hi.y {
                 for x in lo.x..=hi.x {
                     let coord = IVec3::new(x, y, z);
-                    chunks.push((coord, self.get_chunk_at::<L>(coord, level)));
+                    let erased = self.get_chunk_erased(key, coord, level);
+                    chunks.push((
+                        coord,
+                        erased.downcast::<L::Chunk>().expect("layer chunk type mismatch"),
+                    ));
                 }
             }
         }
         LayerView { chunks }
     }
 
-    /// A single final-level chunk of `L`, generating it (and its
-    /// dependencies) if needed.
+    /// A single final-level chunk of `L`'s default instance.
     pub fn get_chunk<L: Layer>(&self, coord: IVec3) -> Arc<L::Chunk> {
-        let final_level = self.entry_of::<L>().levels - 1;
+        let key = layer_key(L::NAME);
+        let final_level = self.entry(key).levels - 1;
         self.get_chunk_at::<L>(coord, final_level)
     }
 
-    /// A single chunk of `L` at a specific internal level.
+    /// A single chunk of `L`'s default instance at a specific level.
     pub fn get_chunk_at<L: Layer>(&self, coord: IVec3, level: u32) -> Arc<L::Chunk> {
-        let erased = self.get_chunk_erased(TypeId::of::<L>(), coord, level);
+        let erased = self.get_chunk_erased(layer_key(L::NAME), coord, level);
         erased
             .downcast::<L::Chunk>()
             .expect("layer chunk type mismatch")
     }
 
-    fn get_chunk_erased(&self, type_id: TypeId, coord: IVec3, level: u32) -> ErasedChunk {
-        let key = (type_id, level, coord);
+    fn get_chunk_erased(&self, layer: LayerKey, coord: IVec3, level: u32) -> ErasedChunk {
+        let key = (layer, level, coord);
         let slot: Slot = {
             let mut cache = self.cache.lock().unwrap();
             cache.entry(key).or_default().clone()
@@ -158,12 +190,12 @@ impl LayerManager {
             assert!(
                 !stack.borrow().contains(&key),
                 "layer dependency cycle detected at {:?} {coord}",
-                self.layers[&type_id].name
+                self.layers[&layer].name
             );
             stack.borrow_mut().push(key);
         });
         let result = slot
-            .get_or_init(|| (self.layers[&type_id].generate)(self, coord, level))
+            .get_or_init(|| (self.layers[&layer].generate)(self, coord, level))
             .clone();
         GEN_STACK.with(|stack| {
             stack.borrow_mut().pop();
@@ -189,20 +221,20 @@ impl LayerManager {
     pub fn evict_outside(&self, keep: IAabb) -> usize {
         let mut cache = self.cache.lock().unwrap();
         let before = cache.len();
-        cache.retain(|(type_id, _level, coord), slot| {
+        cache.retain(|(layer, _level, coord), slot| {
             if slot.get().is_none() {
                 return true; // in-flight
             }
-            let extent = self.layers[type_id].extent;
+            let extent = self.layers[layer].extent;
             chunk_bounds(extent, *coord).intersects(keep)
         });
         before - cache.len()
     }
 
-    fn entry_of<L: Layer>(&self) -> &LayerEntry {
+    fn entry(&self, key: LayerKey) -> &LayerEntry {
         self.layers
-            .get(&TypeId::of::<L>())
-            .unwrap_or_else(|| panic!("layer {:?} is not registered", L::NAME))
+            .get(&key)
+            .unwrap_or_else(|| panic!("layer instance is not registered"))
     }
 }
 
@@ -210,6 +242,7 @@ impl LayerManager {
 /// plus padded views of declared dependency layers.
 pub struct LayerCtx<'a, L: Layer> {
     mgr: &'a LayerManager,
+    key: LayerKey,
     coord: IVec3,
     level: u32,
     layer: Arc<L>,
@@ -243,12 +276,14 @@ impl<L: Layer> LayerCtx<'_, L> {
             allowed,
             bounds
         );
-        self.mgr.get_at_level::<L>(bounds, self.level - 1)
+        let name = self.mgr.entry(self.key).name.clone();
+        self.mgr
+            .get_named_at_level::<L>(&name, bounds, self.level - 1)
     }
 
-    /// Deterministic seed for this chunk (level-distinct).
+    /// Deterministic seed for this chunk (instance- and level-distinct).
     pub fn seed(&self) -> u64 {
-        let entry = self.mgr.entry_of::<L>();
+        let entry = self.mgr.entry(self.key);
         chunk_seed(
             self.mgr.world_seed,
             entry.stable_id ^ (self.level as u64).wrapping_mul(0x9E3779B97F4A7C15),
@@ -263,37 +298,42 @@ impl<L: Layer> LayerCtx<'_, L> {
 
     /// World-space bounds of this chunk.
     pub fn chunk_bounds(&self) -> IAabb {
-        chunk_bounds(self.mgr.entry_of::<L>().extent, self.coord)
+        chunk_bounds(self.mgr.entry(self.key).extent, self.coord)
     }
 
-    /// Read chunks of dependency layer `D` covering `bounds`.
-    ///
-    /// Panics if `D` was not declared in [`Layer::dependencies`], or if
-    /// `bounds` exceeds this chunk's bounds inflated by the declared padding
-    /// — the LayerProcGen containment rule that determinism rests on.
+    /// Read chunks of dependency layer `D`'s default instance.
     pub fn get<D: Layer>(&self, bounds: IAabb) -> LayerView<D> {
-        let entry = self.mgr.entry_of::<L>();
+        self.get_named::<D>(D::NAME, bounds)
+    }
+
+    /// Read chunks of a NAMED dependency instance covering `bounds`.
+    ///
+    /// Panics if the instance was not declared in
+    /// [`Layer::dependencies`], or if `bounds` exceeds this chunk's
+    /// bounds inflated by the declared padding — the LayerProcGen
+    /// containment rule that determinism rests on.
+    pub fn get_named<D: Layer>(&self, instance: &str, bounds: IAabb) -> LayerView<D> {
+        let entry = self.mgr.entry(self.key);
+        let dep_key = layer_key(instance);
         let dep = entry
             .deps
             .iter()
-            .find(|d| d.layer == TypeId::of::<D>())
+            .find(|d| d.key == dep_key)
             .unwrap_or_else(|| {
                 panic!(
-                    "layer {:?} reads {:?} without declaring it as a dependency",
-                    L::NAME,
-                    D::NAME
+                    "layer {:?} reads {instance:?} without declaring it as a dependency",
+                    entry.name,
                 )
             });
         let allowed = self.chunk_bounds().inflate(dep.padding);
         assert!(
             allowed.contains(bounds),
-            "layer {:?} reads {:?} outside its declared padding: allowed {:?}, requested {:?}",
-            L::NAME,
-            D::NAME,
+            "layer {:?} reads {instance:?} outside its declared padding: allowed {:?}, requested {:?}",
+            entry.name,
             allowed,
             bounds
         );
-        self.mgr.get::<D>(bounds)
+        self.mgr.get_named::<D>(instance, bounds)
     }
 }
 

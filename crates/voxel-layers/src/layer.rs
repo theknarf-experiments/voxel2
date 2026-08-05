@@ -48,19 +48,40 @@ impl IAabb {
 
 /// A declared dependency on a lower layer.
 pub struct Dep {
-    pub layer: TypeId,
+    /// Instance key (hashed instance name) of the depended-on layer.
+    pub key: LayerKey,
     /// How far outside its own chunk bounds (in meters, per axis) the
     /// dependent layer may read from `layer`.
     pub padding: IVec3,
 }
 
 impl Dep {
+    /// Depend on the default instance of `L` (instance name = `L::NAME`).
     pub fn of<L: Layer>(padding: IVec3) -> Self {
+        Self::named(L::NAME, padding)
+    }
+
+    /// Depend on a named instance (data-driven stacks register several
+    /// differently-parameterized instances of one layer type).
+    pub fn named(name: &str, padding: IVec3) -> Self {
         Self {
-            layer: TypeId::of::<L>(),
+            key: layer_key(name),
             padding,
         }
     }
+}
+
+/// Stable instance key: hash of the instance name. Also seeds the
+/// instance's RNG streams, so renaming an instance reshuffles its
+/// randomness — treat like a save-format change.
+pub type LayerKey = u64;
+
+pub fn layer_key(name: &str) -> LayerKey {
+    let mut h = voxel_core::seed::splitmix64(0xC0FFEE);
+    for b in name.bytes() {
+        h = voxel_core::seed::splitmix64(h ^ b as u64);
+    }
+    h
 }
 
 /// One data layer of the procedural world.
