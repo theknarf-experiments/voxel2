@@ -19,7 +19,9 @@ use crate::terrain_height;
 const CELL_M: i32 = 256;
 const ROAD_REACH_M: f32 = 700.0;
 
-pub struct SitesLayer;
+pub struct SitesLayer {
+    pub seed: u64,
+}
 
 pub struct SitesChunk {
     pub site: Option<Vec2>,
@@ -35,7 +37,7 @@ impl Layer for SitesLayer {
 
     fn generate(&self, _ctx: &LayerCtx<'_, Self>, coord: IVec3) -> SitesChunk {
         SitesChunk {
-            site: site_center(coord.x, coord.z),
+            site: site_center(self.seed, coord.x, coord.z),
         }
     }
 }
@@ -101,7 +103,7 @@ impl Layer for RoadsLayer {
 /// Build the standard planning stack.
 pub fn planning_layers(world_seed: u64) -> LayerManager {
     let mut mgr = LayerManager::new(world_seed);
-    mgr.register(SitesLayer);
+    mgr.register(SitesLayer { seed: world_seed });
     mgr.register(RoadsLayer);
     mgr
 }
@@ -163,8 +165,8 @@ mod tests {
                 // Both endpoints are genuine sites.
                 let ca = (a / CELL_M as f32).floor();
                 let cb = (b / CELL_M as f32).floor();
-                assert_eq!(site_center(ca.x as i32, ca.y as i32), Some(a));
-                assert_eq!(site_center(cb.x as i32, cb.y as i32), Some(b));
+                assert_eq!(site_center(0, ca.x as i32, ca.y as i32), Some(a));
+                assert_eq!(site_center(0, cb.x as i32, cb.y as i32), Some(b));
                 assert!(a.distance(b) < ROAD_REACH_M);
             }
         }

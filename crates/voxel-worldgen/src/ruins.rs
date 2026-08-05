@@ -19,7 +19,7 @@ pub const MAT_STONE: u32 = 3;
 
 /// All ops from ruin cells overlapping the box `[min, max]` (world meters),
 /// filtered to ops that actually touch it.
-pub fn ruins_ops(min: Vec3, max: Vec3) -> Vec<CsgOp> {
+pub fn ruins_ops(seed: u64, min: Vec3, max: Vec3) -> Vec<CsgOp> {
     let lo_x = ((min.x - 40.0) / CELL_M).floor() as i32;
     let hi_x = ((max.x + 40.0) / CELL_M).floor() as i32;
     let lo_z = ((min.z - 40.0) / CELL_M).floor() as i32;
@@ -27,7 +27,7 @@ pub fn ruins_ops(min: Vec3, max: Vec3) -> Vec<CsgOp> {
     let mut out = Vec::new();
     for cz in lo_z..=hi_z {
         for cx in lo_x..=hi_x {
-            cell_ops(cx, cz, &mut out);
+            cell_ops(seed, cx, cz, &mut out);
         }
     }
     out.retain(|op| op.touches(min, max));
@@ -36,8 +36,8 @@ pub fn ruins_ops(min: Vec3, max: Vec3) -> Vec<CsgOp> {
 
 /// The ruin site of a 256 m planning cell, if any. Shared by the ruin
 /// geometry below and the sites/roads layers.
-pub fn site_center(cx: i32, cz: i32) -> Option<Vec2> {
-    let mut rng = Rng::new(chunk_seed(RUIN_SEED, 0x101, IVec3::new(cx, 0, cz)));
+pub fn site_center(seed: u64, cx: i32, cz: i32) -> Option<Vec2> {
+    let mut rng = Rng::new(chunk_seed(RUIN_SEED ^ seed, 0x101, IVec3::new(cx, 0, cz)));
     if rng.next_f32() > 0.32 {
         return None; // most cells have no ruin
     }
@@ -53,12 +53,12 @@ pub fn site_center(cx: i32, cz: i32) -> Option<Vec2> {
     Some(center_xz)
 }
 
-fn cell_ops(cx: i32, cz: i32, out: &mut Vec<CsgOp>) {
-    let Some(center_xz) = site_center(cx, cz) else {
+fn cell_ops(seed: u64, cx: i32, cz: i32, out: &mut Vec<CsgOp>) {
+    let Some(center_xz) = site_center(seed, cx, cz) else {
         return;
     };
     // Fresh sub-seeded stream for the layout, independent of site selection.
-    let mut rng = Rng::new(chunk_seed(RUIN_SEED, 0x202, IVec3::new(cx, 0, cz)));
+    let mut rng = Rng::new(chunk_seed(RUIN_SEED ^ seed, 0x202, IVec3::new(cx, 0, cz)));
 
     let radius = 8.0 + rng.next_f32() * 9.0;
     let segments = 6 + rng.next_range(4);
@@ -134,8 +134,8 @@ mod tests {
     fn deterministic_and_culled() {
         let min = Vec3::new(-2048.0, -100.0, -2048.0);
         let max = Vec3::new(2048.0, 400.0, 2048.0);
-        let a = ruins_ops(min, max);
-        let b = ruins_ops(min, max);
+        let a = ruins_ops(0, min, max);
+        let b = ruins_ops(0, min, max);
         assert_eq!(a.len(), b.len());
         for (x, y) in a.iter().zip(&b) {
             assert_eq!(x, y);
@@ -150,6 +150,7 @@ mod tests {
     fn some_region_has_ruins() {
         // Over a large area at least one ruin site must exist.
         let ops = ruins_ops(
+            0,
             Vec3::new(-8192.0, -500.0, -8192.0),
             Vec3::new(8192.0, 600.0, 8192.0),
         );

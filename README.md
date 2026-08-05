@@ -13,13 +13,20 @@ Inspirations: [LayerProcGen] (layered deterministic contextual generation),
 [Voxel Plugin]: https://github.com/VoxelPlugin/VoxelPluginFreeLegacy
 [GDVoxelTerrain]: https://github.com/JorisAR/GDVoxelTerrain
 
-## Demos
+## Running levels
+
+Worlds are data: one binary presents a JSON level definition.
 
 ```sh
-cargo run -p planet          # grasslands, forests, ocean, ruins, roads
-cargo run -p megastructure   # endless concrete interior with light strips
-cargo run -p scout --release # offline: scan for scenic locations
+cargo run -p voxel2 -- levels/planet.json         # grasslands, forests, ocean, ruins, roads
+cargo run -p voxel2 -- levels/megastructure.json  # endless concrete interior
+cargo run -p scout --release                      # offline: scan for scenic locations
 ```
+
+A level file describes the world kind, seed, LOD configuration, lighting,
+camera, feature toggles (water/vegetation), and which named planning-op
+providers author structures ("ruins", "roads", "pockets"). See
+`levels/*.json` and `voxel_engine::level::LevelDef`.
 
 Flycam: mouse look (hold right button), WASD + QE, shift to run, scroll for
 speed. Env vars:
@@ -75,7 +82,7 @@ speed. Env vars:
 | `voxel-layers` | LayerProcGen framework: padded deps, recursive on-demand generation |
 | `voxel-worldgen` | CPU world mirrors + planning layers (sites, roads, ruins, mega SDF) |
 | `voxel-render` | Density/meshing compute, slab allocator, LOD draw, grass, materials |
-| `voxel-engine` | LOD controller, vegetation streaming, walk modes, plugin glue |
+| `voxel-engine` | LOD controller, level definitions (JSON), vegetation streaming, walk modes |
 | `voxel-debug` | Flycam + HUD (fps, chunk/arena/slab occupancy, LOD histogram) |
 
 `cargo test --workspace` runs the property tests (determinism under racing

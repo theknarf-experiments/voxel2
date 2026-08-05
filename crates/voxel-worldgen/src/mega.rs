@@ -143,14 +143,14 @@ const POCKET_SEED: u64 = 0xB10C;
 /// Planned features overlapping `[min, max]`: hollow room shells with
 /// doorways on floor tops, and vertical light wells cut through several
 /// levels. Shared by the GPU density pass and CPU collision.
-pub fn pockets_ops(min: Vec3, max: Vec3) -> Vec<CsgOp> {
+pub fn pockets_ops(seed: u64, min: Vec3, max: Vec3) -> Vec<CsgOp> {
     let lo = |v: f32, c: f32| ((v - 20.0) / c).floor() as i32;
     let hi = |v: f32, c: f32| ((v + 20.0) / c).floor() as i32;
     let mut out = Vec::new();
     for cy in lo(min.y, POCKET_CELL_Y)..=hi(max.y, POCKET_CELL_Y) {
         for cz in lo(min.z, POCKET_CELL_XZ)..=hi(max.z, POCKET_CELL_XZ) {
             for cx in lo(min.x, POCKET_CELL_XZ)..=hi(max.x, POCKET_CELL_XZ) {
-                pocket_cell_ops(cx, cy, cz, &mut out);
+                pocket_cell_ops(seed, cx, cy, cz, &mut out);
             }
         }
     }
@@ -158,8 +158,8 @@ pub fn pockets_ops(min: Vec3, max: Vec3) -> Vec<CsgOp> {
     out
 }
 
-fn pocket_cell_ops(cx: i32, cy: i32, cz: i32, out: &mut Vec<CsgOp>) {
-    let mut rng = Rng::new(chunk_seed(POCKET_SEED, 0x1, IVec3::new(cx, cy, cz)));
+fn pocket_cell_ops(seed: u64, cx: i32, cy: i32, cz: i32, out: &mut Vec<CsgOp>) {
+    let mut rng = Rng::new(chunk_seed(POCKET_SEED ^ seed, 0x1, IVec3::new(cx, cy, cz)));
     let roll = rng.next_f32();
     if roll > 0.45 {
         return;
@@ -284,8 +284,8 @@ mod tests {
     fn pockets_are_deterministic_and_culled() {
         let min = Vec3::new(-500.0, -100.0, -500.0);
         let max = Vec3::new(500.0, 150.0, 500.0);
-        let a = pockets_ops(min, max);
-        let b = pockets_ops(min, max);
+        let a = pockets_ops(0, min, max);
+        let b = pockets_ops(0, min, max);
         assert_eq!(a, b);
         assert!(!a.is_empty(), "no pockets in 1 km cube");
         for op in &a {

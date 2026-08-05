@@ -12,3 +12,5 @@ voxel-gpu.workspace = true
 voxel-render.workspace = true
 voxel-debug.workspace = true
 bevy.workspace = true
+serde.workspace = true
+serde_json.workspace = true

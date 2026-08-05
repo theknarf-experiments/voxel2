@@ -6,7 +6,7 @@ architecture. Design plan: `~/.claude/plans/binary-twirling-brooks.md`.
 ## Build / test / run
 
 - `cargo test --workspace` — property tests; keep green.
-- `cargo run -p planet` / `-p megastructure` — visual verification is
+- `cargo run -p voxel2 -- levels/<name>.json` — visual verification is
   mandatory for render changes: run ~35 s (LOD refinement needs time),
   screenshot, and look. Use `caffeinate -dis` so the display can't sleep,
   and capture only the app window region: `screencapture -x -R390,160,1245,730 out.png`.
