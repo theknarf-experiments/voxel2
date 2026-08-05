@@ -240,6 +240,10 @@
       "type": "roads",
       "site_chance": 0.32,
       "reach": 700.0
+    },
+    {
+      "type": "caves",
+      "chance": 0.45
     }
   ],
   "spawners": [

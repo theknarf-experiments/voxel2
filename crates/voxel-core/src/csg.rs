@@ -9,6 +9,8 @@ pub const CSG_KIND_BOX_ADD: u32 = 0;
 pub const CSG_KIND_BOX_CUT: u32 = 1;
 pub const CSG_KIND_CYLINDER_ADD: u32 = 2;
 pub const CSG_KIND_CYLINDER_CUT: u32 = 3;
+pub const CSG_KIND_SPHERE_ADD: u32 = 4;
+pub const CSG_KIND_SPHERE_CUT: u32 = 5;
 
 /// One CSG operation, 48 bytes, `#[repr(C)]` — uploaded verbatim.
 ///
@@ -60,13 +62,32 @@ impl CsgOp {
         }
     }
 
+    /// Sphere: `half.x` = radius (spheres ignore yaw).
+    pub fn sphere(center: Vec3, radius: f32, material: u32, cut: bool) -> Self {
+        Self {
+            center: center.to_array(),
+            kind: if cut {
+                CSG_KIND_SPHERE_CUT
+            } else {
+                CSG_KIND_SPHERE_ADD
+            },
+            half: [radius; 3],
+            material,
+            yaw: 0.0,
+            blend: 0.0,
+            _pad: [0; 2],
+        }
+    }
+
     /// Signed distance to this op's primitive (mirrors the WGSL `op_sdf`).
     pub fn sdf(&self, p: Vec3) -> f32 {
         let mut q = p - Vec3::from(self.center);
         let (s, c) = (-self.yaw).sin_cos();
         q = Vec3::new(q.x * c - q.z * s, q.y, q.x * s + q.z * c);
         let h = Vec3::from(self.half);
-        if self.kind < 2 {
+        if self.kind >= 4 {
+            q.length() - h.x
+        } else if self.kind < 2 {
             let a = q.abs() - h;
             a.max(Vec3::ZERO).length() + a.x.max(a.y.max(a.z)).min(0.0)
         } else {

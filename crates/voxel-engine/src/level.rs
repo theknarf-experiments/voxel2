@@ -1058,6 +1058,14 @@ pub enum OpsDef {
         #[serde(default = "default_road_reach")]
         reach: f32,
     },
+    /// Perlin-worm cave tunnels (per-256 m-cell probability).
+    Caves {
+        #[serde(default = "default_ruin_chance")]
+        chance: f32,
+        /// Tunnel radius range (meters).
+        #[serde(default = "default_cave_radius")]
+        radius: [f32; 2],
+    },
     /// Megastructure habitation pockets (per-cell probability).
     Pockets {
         #[serde(default = "default_pocket_chance")]
@@ -1065,6 +1073,9 @@ pub enum OpsDef {
     },
 }
 
+fn default_cave_radius() -> [f32; 2] {
+    [2.2, 3.6]
+}
 fn default_ruin_chance() -> f32 {
     0.32
 }
@@ -1279,6 +1290,9 @@ fn build_ops_provider(level: &LevelDef) -> ChunkOpsProvider {
             }
             OpsDef::Pockets { chance } => sources.push(Arc::new(move |min, max| {
                 voxel_worldgen::mega::pockets_ops(seed, chance, min, max)
+            })),
+            OpsDef::Caves { chance, radius } => sources.push(Arc::new(move |min, max| {
+                voxel_worldgen::caves::caves_ops(seed, chance, radius, min, max)
             })),
         }
     }

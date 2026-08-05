@@ -65,6 +65,9 @@ fn op_sdf(op: CsgOp, p: vec3<f32>) -> f32 {
     let c = cos(-op.yaw);
     let s = sin(-op.yaw);
     q = vec3<f32>(q.x * c - q.z * s, q.y, q.x * s + q.z * c);
+    if (op.kind >= 4u) {
+        return length(q) - op.half.x;
+    }
     if (op.kind < 2u) {
         let a = abs(q) - op.half;
         return length(max(a, vec3<f32>(0.0))) + min(max(a.x, max(a.y, a.z)), 0.0);
