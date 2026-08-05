@@ -95,6 +95,173 @@ impl Default for EnvDef {
     }
 }
 
+/// A scattered-prop population rule — what grows/lies on the generator's
+/// heightfield surface. All rules and looks are level data.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum SpawnerDef {
+    Trees(TreesDef),
+    Grass(GrassDef),
+    Boulders(BouldersDef),
+}
+
+/// Coherent-patch noise for spawn density (clearings in a forest).
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct PatchDef {
+    pub scale: f32,
+    #[serde(default)]
+    pub offset: [f32; 2],
+    pub contrast: f32,
+    pub bias: f32,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct TreesDef {
+    /// Placement attempts per 64 m tile at full patch density.
+    #[serde(default = "d_tree_attempts")]
+    pub max_per_tile: u32,
+    /// Altitude band trees grow in (meters).
+    pub altitude: [f32; 2],
+    /// Minimum surface up-ness (1 = flat).
+    #[serde(default = "d_tree_up")]
+    pub min_up: f32,
+    /// Density patchiness (None = uniform forests).
+    #[serde(default)]
+    pub patch: Option<PatchDef>,
+    pub species: Vec<SpeciesDef>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct SpeciesDef {
+    /// Procedural model: "conifer" (trunk + stacked cones) or "broadleaf"
+    /// (trunk + blob canopy).
+    pub model: String,
+    /// Selection weight among species whose altitude band contains the
+    /// candidate point.
+    #[serde(default = "default_one")]
+    pub weight: f32,
+    pub altitude: [f32; 2],
+    #[serde(default = "d_trunk_color")]
+    pub trunk: [f32; 3],
+    pub foliage: [f32; 3],
+    /// Uniform scale range.
+    #[serde(default = "d_tree_scale")]
+    pub scale: [f32; 2],
+    pub impostor: ImpostorDef,
+}
+
+/// Far-forest silhouette: crossed quads colored per species.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct ImpostorDef {
+    /// "cone" or "diamond".
+    pub shape: String,
+    pub color: [f32; 3],
+    /// (half width, height) before per-tree scale.
+    pub size: [f32; 2],
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct GrassDef {
+    #[serde(default = "d_grass_per_tile")]
+    pub per_tile: u32,
+    pub altitude: [f32; 2],
+    #[serde(default = "d_grass_up")]
+    pub min_up: f32,
+    /// Blade base colors, two hues mixed per instance.
+    #[serde(default = "d_grass_base")]
+    pub base: [[f32; 3]; 2],
+    /// Blade tip colors.
+    #[serde(default = "d_grass_tip")]
+    pub tip: [[f32; 3]; 2],
+    /// View-distance fade (start, end) in meters.
+    #[serde(default = "d_grass_fade")]
+    pub fade: [f32; 2],
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct BouldersDef {
+    #[serde(default = "d_boulder_per_tile")]
+    pub per_tile: u32,
+    /// Chance each candidate is kept.
+    #[serde(default = "d_boulder_chance")]
+    pub chance: f32,
+    pub altitude: [f32; 2],
+    #[serde(default = "d_boulder_up")]
+    pub min_up: f32,
+    /// Scale range (quadratic bias toward small).
+    #[serde(default = "d_boulder_scale")]
+    pub scale: [f32; 2],
+    #[serde(default = "d_rock_color")]
+    pub color: [f32; 3],
+}
+
+fn d_tree_attempts() -> u32 {
+    18
+}
+fn d_tree_up() -> f32 {
+    0.86
+}
+fn d_trunk_color() -> [f32; 3] {
+    [0.35, 0.24, 0.15]
+}
+fn d_tree_scale() -> [f32; 2] {
+    [0.8, 1.7]
+}
+fn d_grass_per_tile() -> u32 {
+    550
+}
+fn d_grass_up() -> f32 {
+    0.8
+}
+fn d_grass_base() -> [[f32; 3]; 2] {
+    [[0.10, 0.22, 0.06], [0.16, 0.30, 0.09]]
+}
+fn d_grass_tip() -> [[f32; 3]; 2] {
+    [[0.35, 0.52, 0.16], [0.55, 0.62, 0.22]]
+}
+fn d_grass_fade() -> [f32; 2] {
+    [70.0, 110.0]
+}
+fn d_boulder_per_tile() -> u32 {
+    4
+}
+fn d_boulder_chance() -> f32 {
+    0.45
+}
+fn d_boulder_up() -> f32 {
+    0.55
+}
+fn d_boulder_scale() -> [f32; 2] {
+    [0.4, 2.6]
+}
+fn d_rock_color() -> [f32; 3] {
+    [0.44, 0.42, 0.40]
+}
+
+impl LevelDef {
+    /// The first spawner of each kind, if configured.
+    pub fn trees(&self) -> Option<&TreesDef> {
+        self.spawners.iter().find_map(|s| match s {
+            SpawnerDef::Trees(t) => Some(t),
+            _ => None,
+        })
+    }
+
+    pub fn grass(&self) -> Option<&GrassDef> {
+        self.spawners.iter().find_map(|s| match s {
+            SpawnerDef::Grass(g) => Some(g),
+            _ => None,
+        })
+    }
+
+    pub fn boulders(&self) -> Option<&BouldersDef> {
+        self.spawners.iter().find_map(|s| match s {
+            SpawnerDef::Boulders(b) => Some(b),
+            _ => None,
+        })
+    }
+}
+
 /// One material recipe, referenced by the material ids generator ops emit.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -296,6 +463,9 @@ pub struct LevelDef {
     /// Material recipes for the ids the generator ops emit.
     #[serde(default)]
     pub materials: Vec<MaterialDef>,
+    /// Prop populations on the heightfield surface (trees/grass/boulders).
+    #[serde(default)]
+    pub spawners: Vec<SpawnerDef>,
     /// Planning-op providers, composed in order.
     #[serde(default)]
     pub ops: Vec<OpsDef>,
@@ -452,12 +622,6 @@ pub enum GenOpDef {
         #[serde(default)]
         level: f32,
     },
-    /// Meta: vegetation grows on the heightfield surface (density scales
-    /// the forest noise; no SDF effect).
-    Vegetation {
-        #[serde(default = "default_one")]
-        density: f32,
-    },
     /// Catwalk beams bridging the shafts on every Nth lattice level.
     Beams {
         every: u32,
@@ -610,9 +774,6 @@ impl GenOpDef {
             } => WorldOp::new(WOP_SHAFTS_XZ).p0([spacing, jitter, radius[0], radius[1]]),
             GenOpDef::ShaftsCut => WorldOp::new(WOP_SHAFTS_CUT),
             GenOpDef::Water { level } => WorldOp::new(WOP_WATER).p0([level, 0.0, 0.0, 0.0]),
-            GenOpDef::Vegetation { density } => {
-                WorldOp::new(WOP_VEGETATION).p0([density, 0.0, 0.0, 0.0])
-            }
             GenOpDef::Beams {
                 every,
                 half_width,
@@ -750,6 +911,21 @@ fn env_params(level: &LevelDef) -> voxel_render::EnvParams {
     }
 }
 
+/// The grass shader's style block (colors/fade), from the grass spawner.
+fn grass_style(level: &LevelDef) -> voxel_render::GrassStyle {
+    let v = |c: [f32; 3]| Vec4::new(c[0], c[1], c[2], 0.0);
+    match level.grass() {
+        Some(g) => voxel_render::GrassStyle {
+            base_a: v(g.base[0]),
+            base_b: v(g.base[1]),
+            tip_a: v(g.tip[0]),
+            tip_b: v(g.tip[1]),
+            fade: Vec4::new(g.fade[0], g.fade[1], 0.0, 0.0),
+        },
+        None => voxel_render::GrassStyle::default(),
+    }
+}
+
 /// Presents a [`LevelDef`]: engine plugins, lighting, camera, planning
 /// providers, autopilot/walk controls — everything the old hardcoded demos
 /// did, from data. With a `source` path, the file is watched and edits
@@ -802,6 +978,7 @@ impl Plugin for LevelPlugin {
             })
             .insert_resource(build_ops_provider(&level))
             .insert_resource(water)
+            .insert_resource(grass_style(&level))
             .insert_resource(level.clone())
             .add_plugins(VoxelEnginePlugin { vegetation: true })
             .add_plugins(voxel_render::WaterPlugin)
@@ -1011,7 +1188,8 @@ fn reload_level(
         rebuild.0 = true;
         info!("level reload: generation changed — rebuilding world");
     }
-    if generator_changed {
+    if generator_changed || new.spawners != level.spawners {
+        commands.insert_resource(grass_style(&new));
         if let Some(veg) = veg_rebuild.as_mut() {
             veg.0 = true;
         }
@@ -1049,13 +1227,11 @@ mod tests {
         assert!(matches!(planet.ops[1], OpsDef::Roads { .. }));
         assert!(planet.sun.is_some());
         assert_eq!(planet.walk, WalkDef::Terrain);
-        // Water and vegetation are generator ops, not features.
+        // Water is a generator op; vegetation is spawner data.
         let packed: Vec<_> = planet.generator.iter().map(GenOpDef::pack).collect();
         assert_eq!(voxel_worldgen::program::water_level(&packed), Some(0.0));
-        assert_eq!(
-            voxel_worldgen::program::vegetation_density(&packed),
-            Some(1.0)
-        );
+        assert!(planet.trees().is_some_and(|t| t.species.len() == 2));
+        assert!(planet.grass().is_some() && planet.boulders().is_some());
         // Materials cover the ids the generator emits.
         assert!(planet.materials.iter().any(|m| m.id() == 1));
         assert!(planet.materials.iter().any(|m| m.id() == 3));
@@ -1066,7 +1242,7 @@ mod tests {
         assert_eq!(mega.walk, WalkDef::Sdf);
         let packed: Vec<_> = mega.generator.iter().map(GenOpDef::pack).collect();
         assert_eq!(voxel_worldgen::program::water_level(&packed), None);
-        assert_eq!(voxel_worldgen::program::vegetation_density(&packed), None);
+        assert!(mega.spawners.is_empty());
         assert!(mega.materials.iter().any(|m| m.id() == 2));
         assert!(mega.environment.sun_strength == 0.0);
     }

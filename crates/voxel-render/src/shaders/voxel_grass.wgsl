@@ -14,6 +14,11 @@ struct GrassEnv {
     sun_dir: vec4<f32>,   // toward the sun | unused
     haze: vec4<f32>,      // rgb | density
     haze_tint: vec4<f32>, // rgb | power (0 = none)
+    base_a: vec4<f32>,    // blade base hue A
+    base_b: vec4<f32>,    // blade base hue B
+    tip_a: vec4<f32>,     // blade tip hue A
+    tip_b: vec4<f32>,     // blade tip hue B
+    fade: vec4<f32>,      // fade start, fade end, -, -
 }
 @group(0) @binding(2) var<uniform> env: GrassEnv;
 
@@ -33,8 +38,6 @@ struct VsOut {
     @location(1) cam_rel: vec3<f32>,
 }
 
-const FADE_START: f32 = 70.0;
-const FADE_END: f32 = 110.0;
 
 @vertex
 fn vertex(in: VsIn) -> VsOut {
@@ -55,7 +58,7 @@ fn vertex(in: VsIn) -> VsOut {
     // Distance fade: shrink blades into the ground instead of popping.
     let cam_rel_root = in.inst_pos - view.world_position;
     let dist = length(cam_rel_root);
-    let fade = 1.0 - smoothstep(FADE_START, FADE_END, dist);
+    let fade = 1.0 - smoothstep(env.fade.x, env.fade.y, dist);
     p.y *= fade;
 
     // Wind: two phases so neighbors don't sway in lockstep.
@@ -71,8 +74,8 @@ fn vertex(in: VsIn) -> VsOut {
 
     // Color: rooted dark, tip lighter, hue variation by hash, dimmed by the
     // baked terrain shadow (ambient floor keeps shaded grass readable).
-    let base = mix(vec3<f32>(0.10, 0.22, 0.06), vec3<f32>(0.16, 0.30, 0.09), h02);
-    let tip_col = mix(vec3<f32>(0.35, 0.52, 0.16), vec3<f32>(0.55, 0.62, 0.22), h03);
+    let base = mix(env.base_a.rgb, env.base_b.rgb, h02);
+    let tip_col = mix(env.tip_a.rgb, env.tip_b.rgb, h03);
     let color = mix(base, tip_col, in.tip) * (0.45 + 0.55 * shadow);
 
     var out: VsOut;

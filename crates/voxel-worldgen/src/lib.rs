@@ -77,11 +77,12 @@ pub fn terrain_height(xz: Vec2, voxel_size: f32) -> f32 {
     program::eval_height(&program::program(), xz, voxel_size)
 }
 
-/// Forest density in [0, 1]: slow spatial noise so woods come in coherent
-/// patches with clearings.
-pub fn forest_density(xz: Vec2) -> f32 {
-    let n = fbm(xz + Vec2::new(-4200.0, 8800.0), 0.004, 3, 1.0) + 0.5;
-    (n * 1.6 - 0.35).clamp(0.0, 1.0)
+/// Patch density in [0, 1]: slow spatial noise so scattered props come in
+/// coherent patches with clearings. `contrast` sharpens the patch edges,
+/// `bias` shifts the clearing threshold.
+pub fn patch_density(xz: Vec2, scale: f32, offset: Vec2, contrast: f32, bias: f32) -> f32 {
+    let n = fbm(xz + offset, scale, 3, 1.0) + 0.5;
+    (n * contrast + bias).clamp(0.0, 1.0)
 }
 
 /// Soft sun shadow at a world position: horizon march over the band-limited

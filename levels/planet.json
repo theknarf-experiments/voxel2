@@ -1,75 +1,325 @@
 {
   "name": "Planet",
   "seed": 0,
-  "clear_color": [0.65, 0.77, 0.94],
+  "clear_color": [
+    0.65,
+    0.77,
+    0.94
+  ],
   "ambient": {
-    "color": [0.7, 0.8, 1.0],
+    "color": [
+      0.7,
+      0.8,
+      1.0
+    ],
     "brightness": 400.0
   },
   "sun": {
-    "direction": [0.55, 0.5, 0.32],
+    "direction": [
+      0.55,
+      0.5,
+      0.32
+    ],
     "illuminance": 25000.0
   },
   "lod": {
     "max_level": 8,
     "top_radius": 3,
-    "top_y": [-1, 0],
+    "top_y": [
+      -1,
+      0
+    ],
     "split_k": 2.5,
     "merge_k": 3.0
   },
   "camera": {
-    "start": [-27570.0, 80.0, -36770.0],
-    "look": [0.4, -0.35, 0.4],
+    "start": [
+      -27570.0,
+      80.0,
+      -36770.0
+    ],
+    "look": [
+      0.4,
+      -0.35,
+      0.4
+    ],
     "walk_speed": 60.0,
     "run_speed": 600.0
   },
   "environment": {
-    "haze_color": [0.62, 0.72, 0.88],
+    "haze_color": [
+      0.62,
+      0.72,
+      0.88
+    ],
     "haze_density": 6e-05,
-    "haze_sun_tint": [0.92, 0.85, 0.72],
+    "haze_sun_tint": [
+      0.92,
+      0.85,
+      0.72
+    ],
     "haze_tint_power": 4.0,
-    "sun_color": [1.0, 0.96, 0.88],
+    "sun_color": [
+      1.0,
+      0.96,
+      0.88
+    ],
     "sun_strength": 0.85,
-    "ambient_sky": [0.55, 0.7, 0.95],
-    "ambient_ground": [0.25, 0.24, 0.2],
+    "ambient_sky": [
+      0.55,
+      0.7,
+      0.95
+    ],
+    "ambient_ground": [
+      0.25,
+      0.24,
+      0.2
+    ],
     "ambient_strength": 0.3,
     "ambient_exponent": 1.0
   },
   "walk": "terrain",
   "generator": [
-    { "type": "height_fbm", "scale": 5e-05, "amp": 800.0, "octaves": 3 },
-    { "type": "height_fbm", "offset": [510.0, -770.0], "scale": 0.0008, "amp": 420.0, "octaves": 5 },
-    { "type": "height_fbm", "offset": [1337.0, 55.0], "scale": 0.01, "amp": 36.0, "octaves": 5 },
-    { "type": "height_fbm", "offset": [37.0, 91.0], "scale": 0.06, "amp": 5.0, "octaves": 4 },
-    { "type": "height_offset", "value": -8.0 },
-    { "type": "height_surface", "material": 1 },
-    { "type": "water", "level": 0.0 },
-    { "type": "vegetation", "density": 1.0 }
+    {
+      "type": "height_fbm",
+      "scale": 5e-05,
+      "amp": 800.0,
+      "octaves": 3
+    },
+    {
+      "type": "height_fbm",
+      "offset": [
+        510.0,
+        -770.0
+      ],
+      "scale": 0.0008,
+      "amp": 420.0,
+      "octaves": 5
+    },
+    {
+      "type": "height_fbm",
+      "offset": [
+        1337.0,
+        55.0
+      ],
+      "scale": 0.01,
+      "amp": 36.0,
+      "octaves": 5
+    },
+    {
+      "type": "height_fbm",
+      "offset": [
+        37.0,
+        91.0
+      ],
+      "scale": 0.06,
+      "amp": 5.0,
+      "octaves": 4
+    },
+    {
+      "type": "height_offset",
+      "value": -8.0
+    },
+    {
+      "type": "height_surface",
+      "material": 1
+    },
+    {
+      "type": "water",
+      "level": 0.0
+    }
   ],
   "materials": [
     {
       "type": "zoned",
       "id": 1,
-      "low": [0.62, 0.56, 0.42],
-      "mid": [[0.21, 0.35, 0.12], [0.34, 0.42, 0.16]],
-      "high": [[0.33, 0.30, 0.27], [0.46, 0.42, 0.38]],
-      "peak": [0.82, 0.85, 0.92],
-      "zones": { "mid": [1.5, 3.5], "high": [340.0, 280.0], "peak": [820.0, 230.0], "border": 60.0 },
-      "steep": [0.72, 0.45],
+      "low": [
+        0.62,
+        0.56,
+        0.42
+      ],
+      "mid": [
+        [
+          0.21,
+          0.35,
+          0.12
+        ],
+        [
+          0.34,
+          0.42,
+          0.16
+        ]
+      ],
+      "high": [
+        [
+          0.33,
+          0.3,
+          0.27
+        ],
+        [
+          0.46,
+          0.42,
+          0.38
+        ]
+      ],
+      "peak": [
+        0.82,
+        0.85,
+        0.92
+      ],
+      "zones": {
+        "mid": [
+          1.5,
+          3.5
+        ],
+        "high": [
+          340.0,
+          280.0
+        ],
+        "peak": [
+          820.0,
+          230.0
+        ],
+        "border": 60.0
+      },
+      "steep": [
+        0.72,
+        0.45
+      ],
       "detail_fade": 0.002
     },
     {
       "type": "surface",
       "id": 3,
-      "base": [0.52, 0.50, 0.46],
+      "base": [
+        0.52,
+        0.5,
+        0.46
+      ],
       "grain": 0.4,
-      "band": { "freq": 0.55, "amp": 0.18, "lo": 0.08, "hi": 0.25, "warp": 0.7 },
-      "moss": { "color": [0.27, 0.38, 0.14], "amount": 0.5 },
+      "band": {
+        "freq": 0.55,
+        "amp": 0.18,
+        "lo": 0.08,
+        "hi": 0.25,
+        "warp": 0.7
+      },
+      "moss": {
+        "color": [
+          0.27,
+          0.38,
+          0.14
+        ],
+        "amount": 0.5
+      },
       "detail_fade": 0.002
     }
   ],
   "ops": [
-    { "type": "ruins", "chance": 0.32 },
-    { "type": "roads", "site_chance": 0.32, "reach": 700.0 }
+    {
+      "type": "ruins",
+      "chance": 0.32
+    },
+    {
+      "type": "roads",
+      "site_chance": 0.32,
+      "reach": 700.0
+    }
+  ],
+  "spawners": [
+    {
+      "type": "trees",
+      "max_per_tile": 18,
+      "altitude": [
+        3.0,
+        340.0
+      ],
+      "min_up": 0.86,
+      "patch": {
+        "scale": 0.004,
+        "offset": [
+          -4200.0,
+          8800.0
+        ],
+        "contrast": 1.6,
+        "bias": -0.35
+      },
+      "species": [
+        {
+          "model": "broadleaf",
+          "weight": 0.55,
+          "altitude": [
+            3.0,
+            140.0
+          ],
+          "trunk": [
+            0.35,
+            0.24,
+            0.15
+          ],
+          "foliage": [
+            0.3,
+            0.44,
+            0.16
+          ],
+          "impostor": {
+            "shape": "diamond",
+            "color": [
+              0.16,
+              0.26,
+              0.08
+            ],
+            "size": [
+              2.3,
+              5.5
+            ]
+          }
+        },
+        {
+          "model": "conifer",
+          "weight": 0.45,
+          "altitude": [
+            3.0,
+            340.0
+          ],
+          "trunk": [
+            0.35,
+            0.24,
+            0.15
+          ],
+          "foliage": [
+            0.18,
+            0.38,
+            0.16
+          ],
+          "impostor": {
+            "shape": "cone",
+            "color": [
+              0.1,
+              0.22,
+              0.09
+            ],
+            "size": [
+              1.7,
+              6.5
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "type": "grass",
+      "altitude": [
+        2.5,
+        300.0
+      ]
+    },
+    {
+      "type": "boulders",
+      "altitude": [
+        2.0,
+        800.0
+      ]
+    }
   ]
 }

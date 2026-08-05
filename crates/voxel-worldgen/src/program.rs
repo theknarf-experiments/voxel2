@@ -272,13 +272,6 @@ pub fn water_level(ops: &[WorldOp]) -> Option<f32> {
         .map(|op| op.p0[0])
 }
 
-/// Vegetation density multiplier, if the program grows vegetation.
-pub fn vegetation_density(ops: &[WorldOp]) -> Option<f32> {
-    ops.iter()
-        .find(|op| op.kind == WOP_VEGETATION)
-        .map(|op| op.p0[0])
-}
-
 // --- the process-wide current program ----------------------------------------
 
 static PROGRAM: RwLock<Option<Arc<Vec<WorldOp>>>> = RwLock::new(None);
@@ -342,7 +335,6 @@ pub fn planet_program() -> Vec<WorldOp> {
         WorldOp::new(WOP_HEIGHT_OFFSET).p0([-8.0, 0.0, 0.0, 0.0]),
         WorldOp::new(WOP_HEIGHT_SURFACE).material(1),
         WorldOp::new(WOP_WATER),
-        WorldOp::new(WOP_VEGETATION).p0([1.0, 0.0, 0.0, 0.0]),
     ]
 }
 

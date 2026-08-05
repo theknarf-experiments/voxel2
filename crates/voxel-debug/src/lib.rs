@@ -79,6 +79,7 @@ fn auto_screenshot(
             .spawn((
                 Camera3d::default(),
                 bevy::camera::RenderTarget::Image(handle.clone().into()),
+                voxel_render::HelperCamera,
                 Transform::default(),
             ))
             .id();

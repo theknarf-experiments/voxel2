@@ -17,7 +17,6 @@ use voxel_worldgen::{terrain_height, terrain_up};
 const TILE_M: f32 = 64.0;
 /// Radius (in tiles) around the camera to populate.
 const TILE_RADIUS: i32 = 6;
-const TREE_ATTEMPTS: u32 = 18;
 const VEG_SEED_SALT: u64 = 0xF0857;
 
 /// Vegetation seed: the engine salt mixed with the level seed (via the
@@ -29,7 +28,6 @@ const VEG_LAYER_ID: u64 = 0x7EE5;
 
 const GRASS_TILE_M: f32 = 16.0;
 const GRASS_TILE_RADIUS: i32 = 7; // ~112 m of dense grass
-const GRASS_PER_TILE: u32 = 550;
 
 /// Far-forest impostors: merged silhouette meshes per 128 m super-tile.
 const SUPER_M: f32 = 128.0;
@@ -52,10 +50,10 @@ impl Plugin for VegetationPlugin {
             .init_resource::<FarForest>()
             .init_resource::<VegetationRebuild>()
             .add_plugins(voxel_render::GrassPlugin)
-            .add_systems(Startup, build_tree_assets)
             .add_systems(
                 Update,
                 (
+                    sync_spawner_assets,
                     rebuild_vegetation,
                     (
                         stream_vegetation,
@@ -70,11 +68,11 @@ impl Plugin for VegetationPlugin {
     }
 }
 
-/// Vegetation grows only when the generator program says so (a
-/// `vegetation` op) — a runtime gate, so a hot-reload can switch worlds
-/// (rebuild still runs, so removing the op clears what grew).
-fn vegetation_enabled() -> bool {
-    voxel_worldgen::program::vegetation_density(&voxel_worldgen::program::program()).is_some()
+/// Prop populations run only when the level declares spawners — a runtime
+/// gate, so a hot-reload can switch worlds (rebuild still runs, so
+/// removing the spawners clears what grew).
+fn vegetation_enabled(level: Option<Res<crate::LevelDef>>) -> bool {
+    level.is_some_and(|l| !l.spawners.is_empty())
 }
 
 /// Despawn everything grown; the streaming systems regrow it on the (new)
@@ -121,9 +119,13 @@ fn stream_far_forest(
     mut far: ResMut<FarForest>,
     mut meshes: ResMut<Assets<Mesh>>,
     assets: Option<Res<TreeAssets>>,
-    cameras: Query<&Transform, With<Camera3d>>,
+    level: Res<crate::LevelDef>,
+    cameras: Query<&Transform, (With<Camera3d>, Without<voxel_render::HelperCamera>)>,
 ) {
     let (Some(assets), Ok(camera)) = (assets, cameras.single()) else {
+        return;
+    };
+    let Some(trees) = level.trees() else {
         return;
     };
     let center = IVec2::new(
@@ -143,7 +145,7 @@ fn stream_far_forest(
     }
     missing.sort_by_key(|(d, _)| *d);
     for (_, tile) in missing.into_iter().take(SUPER_BUDGET) {
-        let entity = build_super_tile(&mut commands, &mut meshes, &assets, tile);
+        let entity = build_super_tile(&mut commands, &mut meshes, &assets, trees, tile);
         far.tiles.insert(tile, entity);
     }
 
@@ -168,6 +170,7 @@ fn build_super_tile(
     commands: &mut Commands,
     meshes: &mut Assets<Mesh>,
     assets: &TreeAssets,
+    trees: &crate::level::TreesDef,
     tile: IVec2,
 ) -> Option<Entity> {
     let sub = (SUPER_M / TILE_M) as i32;
@@ -175,18 +178,25 @@ fn build_super_tile(
     for dz in 0..sub {
         for dx in 0..sub {
             let detail = IVec2::new(tile.x * sub + dx, tile.y * sub + dz);
-            for mut tree in tile_trees(detail) {
+            for mut tree in tile_trees(detail, trees) {
                 // Seat impostors on the band-limited height that coarse-LOD
                 // terrain actually shows at their distance, not the full-
                 // detail surface — otherwise they float over smoothed hills.
                 tree.pos.y = terrain_height(Vec2::new(tree.pos.x, tree.pos.z), 16.0) - 0.15;
                 let shade = 0.45 + 0.55 * voxel_worldgen::sun_shadow(tree.pos);
-                if tree.pine {
-                    let c = [0.10 * shade, 0.22 * shade, 0.09 * shade, 1.0];
-                    b.cross_cone(tree.pos, 1.7 * tree.scale, 6.5 * tree.scale, c);
+                let Some(sp) = assets.species.get(tree.species) else {
+                    continue;
+                };
+                let ic = sp.impostor_color;
+                let c = [ic[0] * shade, ic[1] * shade, ic[2] * shade, 1.0];
+                let (hw, h) = (
+                    sp.impostor_size[0] * tree.scale,
+                    sp.impostor_size[1] * tree.scale,
+                );
+                if sp.impostor_cone {
+                    b.cross_cone(tree.pos, hw, h, c);
                 } else {
-                    let c = [0.16 * shade, 0.26 * shade, 0.08 * shade, 1.0];
-                    b.cross_diamond(tree.pos, 2.3 * tree.scale, 5.5 * tree.scale, c);
+                    b.cross_diamond(tree.pos, hw, h, c);
                 }
             }
         }
@@ -211,7 +221,7 @@ fn build_super_tile(
 fn far_forest_visibility(
     mut tiles: Query<(&mut Visibility, &Mesh3d), With<FarForestTile>>,
     meshes: Res<Assets<Mesh>>,
-    cameras: Query<&Transform, With<Camera3d>>,
+    cameras: Query<&Transform, (With<Camera3d>, Without<voxel_render::HelperCamera>)>,
 ) {
     let Ok(camera) = cameras.single() else {
         return;
@@ -253,9 +263,10 @@ struct GrassTiles {
 fn stream_grass(
     mut tiles: ResMut<GrassTiles>,
     instances: Res<voxel_render::GrassInstances>,
-    cameras: Query<&Transform, With<Camera3d>>,
+    level: Res<crate::LevelDef>,
+    cameras: Query<&Transform, (With<Camera3d>, Without<voxel_render::HelperCamera>)>,
 ) {
-    let Ok(camera) = cameras.single() else {
+    let (Some(grass), Ok(camera)) = (level.grass(), cameras.single()) else {
         return;
     };
     let center = IVec2::new(
@@ -270,7 +281,7 @@ fn stream_grass(
             if tiles.tiles.contains_key(&tile) {
                 continue;
             }
-            tiles.tiles.insert(tile, grass_tile(tile));
+            tiles.tiles.insert(tile, grass_tile(tile, grass));
             changed = true;
         }
     }
@@ -288,7 +299,7 @@ fn stream_grass(
     }
 }
 
-fn grass_tile(tile: IVec2) -> Vec<voxel_render::GrassInstance> {
+fn grass_tile(tile: IVec2, grass: &crate::level::GrassDef) -> Vec<voxel_render::GrassInstance> {
     let mut rng = Rng::new(chunk_seed(
         world_seed(),
         VEG_LAYER_ID ^ 0x6A55,
@@ -296,13 +307,14 @@ fn grass_tile(tile: IVec2) -> Vec<voxel_render::GrassInstance> {
     ));
     let origin = Vec2::new(tile.x as f32, tile.y as f32) * GRASS_TILE_M;
     let mut out = Vec::new();
-    for _ in 0..GRASS_PER_TILE {
+    for _ in 0..grass.per_tile {
         let x = origin.x + rng.next_f32() * GRASS_TILE_M;
         let z = origin.y + rng.next_f32() * GRASS_TILE_M;
         let xz = Vec2::new(x, z);
         let y = terrain_height(xz, 1.0);
-        // Grass grows where the terrain shader paints grass.
-        if !(2.5..300.0).contains(&y) || terrain_up(xz, 1.0) < 0.8 {
+        if !(grass.altitude[0]..grass.altitude[1]).contains(&y)
+            || terrain_up(xz, 1.0) < grass.min_up
+        {
             continue;
         }
         // Top byte of the hash carries the baked sun-shadow factor.
@@ -321,70 +333,90 @@ struct VegTiles {
     tiles: HashMap<IVec2, Vec<Entity>>,
 }
 
+/// Per-species meshes/materials + impostor style, built from the level's
+/// tree spawner.
+struct SpeciesAssets {
+    parts: Vec<(Handle<Mesh>, Handle<StandardMaterial>)>,
+    impostor_cone: bool,
+    impostor_color: [f32; 3],
+    impostor_size: [f32; 2],
+}
+
 #[derive(Resource)]
 struct TreeAssets {
-    foliage_mesh: Handle<Mesh>,
-    trunk_mesh: Handle<Mesh>,
-    canopy_mesh: Handle<Mesh>,
+    species: Vec<SpeciesAssets>,
     rock_mesh: Handle<Mesh>,
-    foliage_mat: Handle<StandardMaterial>,
-    trunk_mat: Handle<StandardMaterial>,
-    canopy_mat: Handle<StandardMaterial>,
     rock_mat: Handle<StandardMaterial>,
     impostor_mat: Handle<StandardMaterial>,
     blob_shadow_mesh: Handle<Mesh>,
     blob_shadow_mat: Handle<StandardMaterial>,
 }
 
-/// Procedural low-poly conifer: an 8-sided trunk cylinder and three stacked
-/// foliage cones, generated as two meshes so the two materials batch.
-fn build_tree_assets(
+/// The spawner list the current [`TreeAssets`] were built from.
+#[derive(Resource, Default)]
+struct SpawnerStamp(Option<Vec<crate::level::SpawnerDef>>);
+
+/// (Re)build prop assets whenever the level's spawners change; also
+/// triggers a vegetation rebuild so everything regrows with the new looks.
+fn sync_spawner_assets(
     mut commands: Commands,
+    level: Option<Res<crate::LevelDef>>,
+    mut stamp: Local<SpawnerStamp>,
+    mut rebuild: ResMut<VegetationRebuild>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
-    let trunk = cylinder_mesh(0.14, 1.6, 8);
-    let mut foliage = MeshBuilder::default();
-    foliage.cone(Vec3::new(0.0, 1.0, 0.0), 1.5, 2.3, 9);
-    foliage.cone(Vec3::new(0.0, 2.2, 0.0), 1.2, 2.0, 9);
-    foliage.cone(Vec3::new(0.0, 3.3, 0.0), 0.85, 1.7, 8);
-    foliage.cone(Vec3::new(0.0, 4.3, 0.0), 0.5, 1.2, 7);
+    let Some(level) = level else {
+        return;
+    };
+    if stamp.0.as_deref() == Some(&level.spawners[..]) {
+        return;
+    }
+    stamp.0 = Some(level.spawners.clone());
+    rebuild.0 = true;
 
-    // Broadleaf canopy: a cluster of jittered blobs above the trunk.
-    let mut canopy = MeshBuilder::default();
-    canopy.blob(Vec3::new(0.0, 3.2, 0.0), 1.6, 0.12, 11);
-    canopy.blob(Vec3::new(0.9, 2.7, 0.4), 1.1, 0.14, 23);
-    canopy.blob(Vec3::new(-0.8, 2.8, -0.3), 1.0, 0.14, 47);
+    let srgb = |c: [f32; 3], rough: f32| StandardMaterial {
+        base_color: Color::srgb(c[0], c[1], c[2]),
+        perceptual_roughness: rough,
+        ..default()
+    };
+    let mut species = Vec::new();
+    if let Some(trees) = level.trees() {
+        for def in &trees.species {
+            let trunk_mat = materials.add(srgb(def.trunk, 0.95));
+            let foliage_mat = materials.add(srgb(def.foliage, 0.9));
+            let trunk_mesh = meshes.add(cylinder_mesh(0.14, 1.6, 8));
+            let mut top = MeshBuilder::default();
+            if def.model == "broadleaf" {
+                top.blob(Vec3::new(0.0, 3.2, 0.0), 1.6, 0.12, 11);
+                top.blob(Vec3::new(0.9, 2.7, 0.4), 1.1, 0.14, 23);
+                top.blob(Vec3::new(-0.8, 2.8, -0.3), 1.0, 0.14, 47);
+            } else {
+                top.cone(Vec3::new(0.0, 1.0, 0.0), 1.5, 2.3, 9);
+                top.cone(Vec3::new(0.0, 2.2, 0.0), 1.2, 2.0, 9);
+                top.cone(Vec3::new(0.0, 3.3, 0.0), 0.85, 1.7, 8);
+                top.cone(Vec3::new(0.0, 4.3, 0.0), 0.5, 1.2, 7);
+            }
+            species.push(SpeciesAssets {
+                parts: vec![
+                    (trunk_mesh, trunk_mat),
+                    (meshes.add(top.build()), foliage_mat),
+                ],
+                impostor_cone: def.impostor.shape != "diamond",
+                impostor_color: def.impostor.color,
+                impostor_size: def.impostor.size,
+            });
+        }
+    }
 
-    // Boulder: heavily jittered squashed blob.
     let mut rock = MeshBuilder::default();
     rock.blob(Vec3::new(0.0, 0.25, 0.0), 1.0, 0.35, 5);
+    let rock_color = level.boulders().map(|b| b.color).unwrap_or(d_rock());
 
     commands.insert_resource(TreeAssets {
-        trunk_mesh: meshes.add(trunk),
-        foliage_mesh: meshes.add(foliage.build()),
-        canopy_mesh: meshes.add(canopy.build()),
+        species,
         rock_mesh: meshes.add(rock.build()),
-        trunk_mat: materials.add(StandardMaterial {
-            base_color: Color::srgb(0.35, 0.24, 0.15),
-            perceptual_roughness: 0.95,
-            ..default()
-        }),
-        foliage_mat: materials.add(StandardMaterial {
-            base_color: Color::srgb(0.18, 0.38, 0.16),
-            perceptual_roughness: 0.9,
-            ..default()
-        }),
-        canopy_mat: materials.add(StandardMaterial {
-            base_color: Color::srgb(0.30, 0.44, 0.16),
-            perceptual_roughness: 0.9,
-            ..default()
-        }),
-        rock_mat: materials.add(StandardMaterial {
-            base_color: Color::srgb(0.44, 0.42, 0.40),
-            perceptual_roughness: 0.95,
-            ..default()
-        }),
+        rock_mat: materials.add(srgb(rock_color, 0.95)),
         // Silhouette impostors: unlit + vertex colors (shadow baked in),
         // double-sided so the crossed quads read from every direction.
         impostor_mat: materials.add(StandardMaterial {
@@ -401,6 +433,10 @@ fn build_tree_assets(
             ..default()
         }),
     });
+}
+
+fn d_rock() -> [f32; 3] {
+    [0.44, 0.42, 0.40]
 }
 
 #[derive(Default)]
@@ -565,7 +601,8 @@ fn stream_vegetation(
     mut commands: Commands,
     mut tiles: ResMut<VegTiles>,
     assets: Option<Res<TreeAssets>>,
-    cameras: Query<&Transform, With<Camera3d>>,
+    level: Res<crate::LevelDef>,
+    cameras: Query<&Transform, (With<Camera3d>, Without<voxel_render::HelperCamera>)>,
 ) {
     let (Some(assets), Ok(camera)) = (assets, cameras.single()) else {
         return;
@@ -582,7 +619,7 @@ fn stream_vegetation(
             if tiles.tiles.contains_key(&tile) {
                 continue;
             }
-            let entities = spawn_tile(&mut commands, &assets, tile);
+            let entities = spawn_tile(&mut commands, &assets, &level, tile);
             tiles.tiles.insert(tile, entities);
         }
     }
@@ -610,22 +647,32 @@ struct TreeInstance {
     pos: Vec3,
     yaw: f32,
     scale: f32,
-    pine: bool,
+    species: usize,
 }
 
-fn tile_trees(tile: IVec2) -> Vec<TreeInstance> {
+fn tile_trees(tile: IVec2, trees: &crate::level::TreesDef) -> Vec<TreeInstance> {
     let mut rng = Rng::new(chunk_seed(
         world_seed(),
         VEG_LAYER_ID,
         IVec3::new(tile.x, 0, tile.y),
     ));
     let origin = Vec2::new(tile.x as f32, tile.y as f32) * TILE_M;
-    // Forest density gated by slow noise so woods come in coherent patches,
-    // scaled by the generator's vegetation-op multiplier.
-    let scale = voxel_worldgen::program::vegetation_density(&voxel_worldgen::program::program())
-        .unwrap_or(0.0);
-    let density = voxel_worldgen::forest_density(origin + Vec2::splat(TILE_M * 0.5)) * scale;
-    let attempts = (TREE_ATTEMPTS as f32 * density.min(1.0)) as u32;
+    // Density gated by the spawner's patch noise so woods come in coherent
+    // patches with clearings.
+    let density = trees
+        .patch
+        .as_ref()
+        .map(|p| {
+            voxel_worldgen::patch_density(
+                origin + Vec2::splat(TILE_M * 0.5),
+                p.scale,
+                Vec2::from(p.offset),
+                p.contrast,
+                p.bias,
+            )
+        })
+        .unwrap_or(1.0);
+    let attempts = (trees.max_per_tile as f32 * density) as u32;
 
     let mut out = Vec::new();
     for _ in 0..attempts {
@@ -633,53 +680,72 @@ fn tile_trees(tile: IVec2) -> Vec<TreeInstance> {
         let z = origin.y + rng.next_f32() * TILE_M;
         let xz = Vec2::new(x, z);
         let y = terrain_height(xz, 1.0);
-        // Trees grow on gentle grassland: above the beach, below the rocks.
-        if !(3.0..340.0).contains(&y) || terrain_up(xz, 1.0) < 0.86 {
+        if !(trees.altitude[0]..trees.altitude[1]).contains(&y)
+            || terrain_up(xz, 1.0) < trees.min_up
+        {
             continue;
         }
         let yaw = rng.next_f32() * std::f32::consts::TAU;
-        let scale = 0.8 + rng.next_f32() * 0.9;
-        // Pines dominate the highlands, broadleaves the lowlands.
-        let pine = y > 140.0 || rng.next_f32() < 0.45;
+        let roll = rng.next_f32();
+        // Weighted pick among species whose altitude band contains y.
+        let total: f32 = trees
+            .species
+            .iter()
+            .filter(|sp| (sp.altitude[0]..sp.altitude[1]).contains(&y))
+            .map(|sp| sp.weight)
+            .sum();
+        if total <= 0.0 {
+            continue;
+        }
+        let mut pick = roll * total;
+        let mut species = usize::MAX;
+        for (i, sp) in trees.species.iter().enumerate() {
+            if !(sp.altitude[0]..sp.altitude[1]).contains(&y) {
+                continue;
+            }
+            if pick < sp.weight {
+                species = i;
+                break;
+            }
+            pick -= sp.weight;
+        }
+        if species == usize::MAX {
+            continue;
+        }
+        let sr = trees.species[species].scale;
+        let scale = sr[0] + rng.next_f32() * (sr[1] - sr[0]);
         out.push(TreeInstance {
             pos: Vec3::new(x, y - 0.15, z),
             yaw,
             scale,
-            pine,
+            species,
         });
     }
     out
 }
 
-fn spawn_tile(commands: &mut Commands, assets: &TreeAssets, tile: IVec2) -> Vec<Entity> {
+fn spawn_tile(
+    commands: &mut Commands,
+    assets: &TreeAssets,
+    level: &crate::LevelDef,
+    tile: IVec2,
+) -> Vec<Entity> {
     let mut entities = Vec::new();
-    for tree in tile_trees(tile) {
+    let trees = level.trees();
+    for tree in trees.map(|t| tile_trees(tile, t)).unwrap_or_default() {
         let transform = Transform::from_translation(tree.pos)
             .with_rotation(Quat::from_rotation_y(tree.yaw))
             .with_scale(Vec3::splat(tree.scale));
-        let (top_mesh, top_mat) = if tree.pine {
-            (&assets.foliage_mesh, &assets.foliage_mat)
-        } else {
-            (&assets.canopy_mesh, &assets.canopy_mat)
+        let Some(sp) = assets.species.get(tree.species) else {
+            continue;
         };
-        entities.push(
-            commands
-                .spawn((
-                    Mesh3d(assets.trunk_mesh.clone()),
-                    MeshMaterial3d(assets.trunk_mat.clone()),
-                    transform,
-                ))
-                .id(),
-        );
-        entities.push(
-            commands
-                .spawn((
-                    Mesh3d(top_mesh.clone()),
-                    MeshMaterial3d(top_mat.clone()),
-                    transform,
-                ))
-                .id(),
-        );
+        for (mesh, mat) in &sp.parts {
+            entities.push(
+                commands
+                    .spawn((Mesh3d(mesh.clone()), MeshMaterial3d(mat.clone()), transform))
+                    .id(),
+            );
+        }
         // Grounding blob shadow, stretched along the sun direction and
         // offset opposite it. Terrain-conforming shadows are future work;
         // on gentle tree-bearing slopes a flat disc reads fine.
@@ -705,24 +771,29 @@ fn spawn_tile(commands: &mut Commands, assets: &TreeAssets, tile: IVec2) -> Vec<
         );
     }
 
-    // A few boulders per tile, preferring rougher ground; any altitude
-    // below the snow line.
+    // Boulders per the level's boulder spawner.
+    let Some(b) = level.boulders() else {
+        return entities;
+    };
     let mut rng = Rng::new(chunk_seed(
         world_seed(),
         VEG_LAYER_ID ^ 0x0C4,
         IVec3::new(tile.x, 2, tile.y),
     ));
     let origin = Vec2::new(tile.x as f32, tile.y as f32) * TILE_M;
-    for _ in 0..4 {
+    for _ in 0..b.per_tile {
         let x = origin.x + rng.next_f32() * TILE_M;
         let z = origin.y + rng.next_f32() * TILE_M;
         let xz = Vec2::new(x, z);
         let y = terrain_height(xz, 1.0);
         let up = terrain_up(xz, 1.0);
-        if !(2.0..800.0).contains(&y) || up < 0.55 || rng.next_f32() < 0.55 {
+        if !(b.altitude[0]..b.altitude[1]).contains(&y)
+            || up < b.min_up
+            || rng.next_f32() >= b.chance
+        {
             continue;
         }
-        let scale = 0.4 + rng.next_f32() * rng.next_f32() * 2.2;
+        let scale = b.scale[0] + rng.next_f32() * rng.next_f32() * (b.scale[1] - b.scale[0]);
         entities.push(
             commands
                 .spawn((

@@ -769,7 +769,7 @@ fn extract_program(
 }
 
 fn extract_camera_pos(
-    cameras: Extract<Query<(&GlobalTransform, &Frustum), With<Camera3d>>>,
+    cameras: Extract<Query<(&GlobalTransform, &Frustum), crate::PlayerCameraFilter>>,
     mut commands: Commands,
 ) {
     let (pos, frustum) = cameras

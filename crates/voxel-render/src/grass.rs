@@ -84,6 +84,7 @@ pub struct GrassPlugin;
 
 impl Plugin for GrassPlugin {
     fn build(&self, app: &mut App) {
+        app.init_resource::<GrassStyle>();
         embedded_asset!(app, "shaders/voxel_grass.wgsl");
         app.init_resource::<GrassInstances>()
             .add_plugins(ExtractComponentPlugin::<GrassMarker>::default())
@@ -97,9 +98,13 @@ impl Plugin for GrassPlugin {
             .init_resource::<PendingGrassQueues>()
             .init_resource::<GrassBindGroupRes>()
             .init_resource::<GrassEnvUniform>()
+            .init_resource::<GrassStyle>()
             .add_render_command::<Opaque3d, DrawGrassCommands>()
             .add_systems(RenderStartup, init_grass_pipeline)
-            .add_systems(ExtractSchedule, extract_grass_instances)
+            .add_systems(
+                ExtractSchedule,
+                (extract_grass_instances, extract_grass_style),
+            )
             .add_systems(
                 Render,
                 prepare_grass_bind_group.in_set(RenderSystems::PrepareBindGroups),
@@ -181,12 +186,45 @@ struct GrassPipeline {
 #[derive(Resource, Default)]
 struct GrassBindGroupRes(Option<BindGroup>);
 
-/// Level environment slice for the grass shader (sun + haze).
+/// Grass look, from the level's grass spawner. Main-world resource,
+/// extracted every frame so hot-reloads apply.
+#[derive(Resource, Clone, Copy)]
+pub struct GrassStyle {
+    pub base_a: Vec4,
+    pub base_b: Vec4,
+    pub tip_a: Vec4,
+    pub tip_b: Vec4,
+    /// x = fade start (m), y = fade end.
+    pub fade: Vec4,
+}
+
+impl Default for GrassStyle {
+    fn default() -> Self {
+        Self {
+            base_a: Vec4::new(0.10, 0.22, 0.06, 0.0),
+            base_b: Vec4::new(0.16, 0.30, 0.09, 0.0),
+            tip_a: Vec4::new(0.35, 0.52, 0.16, 0.0),
+            tip_b: Vec4::new(0.55, 0.62, 0.22, 0.0),
+            fade: Vec4::new(70.0, 110.0, 0.0, 0.0),
+        }
+    }
+}
+
+fn extract_grass_style(style: Extract<Res<GrassStyle>>, mut commands: Commands) {
+    commands.insert_resource(**style);
+}
+
+/// Level environment slice for the grass shader (sun + haze + style).
 #[derive(bevy::render::render_resource::ShaderType, Clone, Copy, Default)]
 struct GrassEnv {
     sun_dir: Vec4,
     haze: Vec4,
     haze_tint: Vec4,
+    base_a: Vec4,
+    base_b: Vec4,
+    tip_a: Vec4,
+    tip_b: Vec4,
+    fade: Vec4,
 }
 
 #[derive(Resource, Default)]
@@ -357,6 +395,7 @@ fn prepare_grass_bind_group(
     render_device: Res<RenderDevice>,
     render_queue: Res<bevy::render::renderer::RenderQueue>,
     env: Res<crate::chunks::EnvParams>,
+    style: Res<GrassStyle>,
     mut env_uniform: ResMut<GrassEnvUniform>,
     mut bind_group: ResMut<GrassBindGroupRes>,
 ) {
@@ -367,6 +406,11 @@ fn prepare_grass_bind_group(
         sun_dir: env.sun_dir,
         haze: env.haze,
         haze_tint: env.haze_tint,
+        base_a: style.base_a,
+        base_b: style.base_b,
+        tip_a: style.tip_a,
+        tip_b: style.tip_b,
+        fade: style.fade,
     });
     env_uniform.0.write_buffer(&render_device, &render_queue);
     let (Some(view_binding), Some(globals_binding), Some(env_binding)) = (

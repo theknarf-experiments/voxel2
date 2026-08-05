@@ -45,9 +45,8 @@ pub const WOP_BEAMS: u32 = 11;
 /// Meta op (no SDF effect): the world has a water surface. `p0.x = sea
 /// level (m)`. Drives the ocean draw and shoreline shading.
 pub const WOP_WATER: u32 = 12;
-/// Meta op (no SDF effect): vegetation grows on the heightfield surface.
-/// `p0.x = density multiplier`. Drives tree/grass streaming.
-pub const WOP_VEGETATION: u32 = 13;
+// Kind 13 is retired (was the vegetation meta op; spawners are level
+// data now).
 /// Domain-warp the XZ coordinate that later height ops sample.
 /// `p0 = (cycles_per_m, amplitude_m, offset_x, offset_z)`, `p1.x = octaves`.
 pub const WOP_WARP_XZ: u32 = 14;

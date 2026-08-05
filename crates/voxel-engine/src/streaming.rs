@@ -128,7 +128,7 @@ fn lod_tick(
     ops_provider: Res<ChunkOpsProvider>,
     mut rebuild: ResMut<StreamingRebuild>,
     ready_rx: Res<ChunkReadyChannel>,
-    cameras: Query<&Transform, With<Camera3d>>,
+    cameras: Query<&Transform, (With<Camera3d>, Without<voxel_render::HelperCamera>)>,
 ) {
     let Ok(camera) = cameras.single() else {
         return;

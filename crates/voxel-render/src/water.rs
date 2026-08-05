@@ -146,7 +146,7 @@ struct WaterBindGroupRes {
 struct ExtractedWaterCamera(Vec3);
 
 fn extract_water_camera(
-    cameras: Extract<Query<&GlobalTransform, With<Camera3d>>>,
+    cameras: Extract<Query<&GlobalTransform, crate::PlayerCameraFilter>>,
     mut out: ResMut<ExtractedWaterCamera>,
 ) {
     if let Some(t) = cameras.iter().next() {
