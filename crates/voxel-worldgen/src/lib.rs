@@ -9,6 +9,7 @@ pub mod mega;
 pub mod program;
 pub mod roads;
 pub mod caves;
+pub mod path;
 pub mod ruins;
 
 use glam::Vec2;

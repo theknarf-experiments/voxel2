@@ -1240,7 +1240,8 @@ impl Plugin for LevelPlugin {
 
         let program = apply_generator(&level);
         let water = water_surface(&program);
-        let (ops_provider, surface_cuts, planning_layers) = build_ops_provider(&level);
+        let (ops_provider, surface_cuts, planning_layers, roads_query) =
+            build_ops_provider(&level);
         app.insert_resource(program)
             .insert_resource(material_table(&level))
             .insert_resource(env_params(&level))
@@ -1259,6 +1260,7 @@ impl Plugin for LevelPlugin {
             .insert_resource(ops_provider)
             .insert_resource(surface_cuts)
             .insert_resource(planning_layers)
+            .insert_resource(roads_query)
             .insert_resource(water)
             .insert_resource(grass_style(&level))
             .insert_resource(level.clone())
@@ -1287,10 +1289,20 @@ pub struct SurfaceCutsQuery(
 #[derive(Resource, Default, Clone)]
 pub struct PlanningLayers(pub Vec<Arc<voxel_layers::LayerManager>>);
 
-fn build_ops_provider(level: &LevelDef) -> (ChunkOpsProvider, SurfaceCutsQuery, PlanningLayers) {
+/// Road segments overlapping a box (world xz meters): spawner clearance
+/// so props never grow on the roadbed.
+#[derive(Resource, Default, Clone)]
+pub struct RoadsQuery(
+    pub Option<Arc<dyn Fn(bevy::math::Vec2, bevy::math::Vec2) -> Vec<[bevy::math::Vec2; 2]> + Send + Sync>>,
+);
+
+fn build_ops_provider(
+    level: &LevelDef,
+) -> (ChunkOpsProvider, SurfaceCutsQuery, PlanningLayers, RoadsQuery) {
     let seed = level.seed;
     let mut sources: Vec<OpsSource> = Vec::new();
     let mut managers: Vec<Arc<voxel_layers::LayerManager>> = Vec::new();
+    let mut roads_query = RoadsQuery(None);
     for def in &level.ops {
         match *def {
             OpsDef::Ruins { chance } => sources.push(Arc::new(move |min, max| {
@@ -1303,6 +1315,10 @@ fn build_ops_provider(level: &LevelDef) -> (ChunkOpsProvider, SurfaceCutsQuery, 
                     reach,
                 ));
                 managers.push(layers.clone());
+                let roads_layers = layers.clone();
+                roads_query = RoadsQuery(Some(Arc::new(move |min, max| {
+                    voxel_worldgen::roads::roads_near(&roads_layers, min, max)
+                })));
                 sources.push(Arc::new(move |min, max| {
                     voxel_worldgen::roads::road_ops(&layers, min, max)
                 }));
@@ -1379,6 +1395,7 @@ fn build_ops_provider(level: &LevelDef) -> (ChunkOpsProvider, SurfaceCutsQuery, 
             ChunkOpsProvider(None),
             SurfaceCutsQuery(None),
             PlanningLayers(managers),
+            roads_query,
         );
     }
     let sources = Arc::new(sources);
@@ -1413,7 +1430,7 @@ fn build_ops_provider(level: &LevelDef) -> (ChunkOpsProvider, SurfaceCutsQuery, 
         }
         ops
     })));
-    (provider, cuts, PlanningLayers(managers))
+    (provider, cuts, PlanningLayers(managers), roads_query)
 }
 
 /// Rolling eviction for the planning-layer caches: every few seconds,
@@ -1601,10 +1618,12 @@ fn reload_level(
         lod.max_level = new.lod.max_level;
         lod.top_radius = new.lod.top_radius;
         lod.top_y = new.lod.top_y;
-        let (ops_provider, surface_cuts, planning_layers) = build_ops_provider(&new);
+        let (ops_provider, surface_cuts, planning_layers, roads_query) =
+            build_ops_provider(&new);
         commands.insert_resource(ops_provider);
         commands.insert_resource(surface_cuts);
         commands.insert_resource(planning_layers);
+        commands.insert_resource(roads_query);
         rebuild.0 = true;
         info!("level reload: generation changed — rebuilding world");
     }

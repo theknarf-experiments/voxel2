@@ -121,6 +121,7 @@ fn stream_far_forest(
     assets: Option<Res<TreeAssets>>,
     level: Res<crate::LevelDef>,
     cuts: Res<crate::level::SurfaceCutsQuery>,
+    roads: Res<crate::level::RoadsQuery>,
     cameras: Query<&Transform, (With<Camera3d>, Without<voxel_render::HelperCamera>)>,
 ) {
     let (Some(assets), Ok(camera)) = (assets, cameras.single()) else {
@@ -146,7 +147,8 @@ fn stream_far_forest(
     }
     missing.sort_by_key(|(d, _)| *d);
     for (_, tile) in missing.into_iter().take(SUPER_BUDGET) {
-        let entity = build_super_tile(&mut commands, &mut meshes, &assets, trees, &cuts, tile);
+        let entity =
+            build_super_tile(&mut commands, &mut meshes, &assets, trees, &cuts, &roads, tile);
         far.tiles.insert(tile, entity);
     }
 
@@ -173,6 +175,7 @@ fn build_super_tile(
     assets: &TreeAssets,
     trees: &crate::level::TreesDef,
     cuts: &crate::level::SurfaceCutsQuery,
+    roads: &crate::level::RoadsQuery,
     tile: IVec2,
 ) -> Option<Entity> {
     let sub = (SUPER_M / TILE_M) as i32;
@@ -180,7 +183,7 @@ fn build_super_tile(
     for dz in 0..sub {
         for dx in 0..sub {
             let detail = IVec2::new(tile.x * sub + dx, tile.y * sub + dz);
-            for mut tree in tile_trees(detail, trees, cuts) {
+            for mut tree in tile_trees(detail, trees, cuts, roads) {
                 // Seat impostors on the band-limited height that coarse-LOD
                 // terrain actually shows at their distance, not the full-
                 // detail surface — otherwise they float over smoothed hills.
@@ -270,6 +273,7 @@ fn stream_grass(
     instances: Res<voxel_render::GrassInstances>,
     level: Res<crate::LevelDef>,
     cuts: Res<crate::level::SurfaceCutsQuery>,
+    roads: Res<crate::level::RoadsQuery>,
     time: Res<Time>,
     cameras: Query<&Transform, (With<Camera3d>, Without<voxel_render::HelperCamera>)>,
 ) {
@@ -297,7 +301,7 @@ fn stream_grass(
                 break 'outer;
             }
             budget -= 1;
-            tiles.tiles.insert(tile, grass_tile(tile, grass, &cuts));
+            tiles.tiles.insert(tile, grass_tile(tile, grass, &cuts, &roads));
             changed = true;
         }
     }
@@ -351,6 +355,28 @@ fn carved(cut_ops: &[voxel_core::csg::CsgOp], p: Vec3) -> bool {
     cut_ops.iter().any(|op| op.sdf(p) < 0.6)
 }
 
+/// Clearance to keep props off the roadbed (road half-width + margin).
+const ROAD_CLEAR_M: f32 = 4.5;
+
+fn tile_road_segments(
+    roads: &crate::level::RoadsQuery,
+    origin: Vec2,
+    size: f32,
+) -> Vec<[Vec2; 2]> {
+    roads.0.as_ref().map_or_else(Vec::new, |q| {
+        q(
+            origin - Vec2::splat(ROAD_CLEAR_M),
+            origin + Vec2::splat(size + ROAD_CLEAR_M),
+        )
+    })
+}
+
+fn on_road(segments: &[[Vec2; 2]], p: Vec2) -> bool {
+    segments
+        .iter()
+        .any(|[a, b]| voxel_worldgen::roads::dist_to_segment(p, *a, *b) < ROAD_CLEAR_M)
+}
+
 /// Soft altitude-band gate: 1 inside, fading linearly to 0 across
 /// `falloff` meters at each edge (0 falloff = hard band).
 fn altitude_gate(alt: [f32; 2], falloff: f32, y: f32) -> f32 {
@@ -396,6 +422,7 @@ fn grass_tile(
     tile: IVec2,
     grass: &crate::level::GrassDef,
     cuts: &crate::level::SurfaceCutsQuery,
+    roads: &crate::level::RoadsQuery,
 ) -> Vec<voxel_render::GrassInstance> {
     let mut rng = Rng::new(chunk_seed(
         world_seed(),
@@ -404,11 +431,15 @@ fn grass_tile(
     ));
     let origin = Vec2::new(tile.x as f32, tile.y as f32) * GRASS_TILE_M;
     let cut_ops = tile_cut_ops(cuts, origin, GRASS_TILE_M);
+    let road_segs = tile_road_segments(roads, origin, GRASS_TILE_M);
     let mut out = Vec::new();
     for _ in 0..grass.per_tile {
         let x = origin.x + rng.next_f32() * GRASS_TILE_M;
         let z = origin.y + rng.next_f32() * GRASS_TILE_M;
         let xz = Vec2::new(x, z);
+        if on_road(&road_segs, xz) {
+            continue;
+        }
         if rng.next_f32() > field_gate(&grass.density, xz) {
             continue;
         }
@@ -710,6 +741,7 @@ fn stream_vegetation(
     assets: Option<Res<TreeAssets>>,
     level: Res<crate::LevelDef>,
     cuts: Res<crate::level::SurfaceCutsQuery>,
+    roads: Res<crate::level::RoadsQuery>,
     cameras: Query<&Transform, (With<Camera3d>, Without<voxel_render::HelperCamera>)>,
 ) {
     let (Some(assets), Ok(camera)) = (assets, cameras.single()) else {
@@ -734,7 +766,7 @@ fn stream_vegetation(
                 break 'outer;
             }
             budget -= 1;
-            let entities = spawn_tile(&mut commands, &assets, &level, &cuts, tile);
+            let entities = spawn_tile(&mut commands, &assets, &level, &cuts, &roads, tile);
             tiles.tiles.insert(tile, entities);
         }
     }
@@ -778,6 +810,7 @@ fn tile_trees(
     tile: IVec2,
     trees: &crate::level::TreesDef,
     cuts: &crate::level::SurfaceCutsQuery,
+    roads: &crate::level::RoadsQuery,
 ) -> Vec<TreeInstance> {
     let mut rng = Rng::new(chunk_seed(
         world_seed(),
@@ -786,6 +819,7 @@ fn tile_trees(
     ));
     let origin = Vec2::new(tile.x as f32, tile.y as f32) * TILE_M;
     let cut_ops = tile_cut_ops(cuts, origin, TILE_M);
+    let road_segs = tile_road_segments(roads, origin, TILE_M);
     // Density gated by the spawner's patch noise so woods come in coherent
     // patches with clearings.
     let density = trees
@@ -811,6 +845,9 @@ fn tile_trees(
         // Seat on the band-limited surface mid-LOD terrain shows across the
         // detail radius (tiles spawn at the rim, where the ground is ~L2).
         if rng.next_f32() > field_gate(&trees.density, xz) {
+            continue;
+        }
+        if on_road(&road_segs, xz) {
             continue;
         }
         let y = terrain_height(xz, 4.0);
@@ -871,11 +908,12 @@ fn spawn_tile(
     assets: &TreeAssets,
     level: &crate::LevelDef,
     cuts: &crate::level::SurfaceCutsQuery,
+    roads: &crate::level::RoadsQuery,
     tile: IVec2,
 ) -> Vec<Entity> {
     let mut entities = Vec::new();
     let trees = level.trees();
-    for tree in trees.map(|t| tile_trees(tile, t, cuts)).unwrap_or_default() {
+    for tree in trees.map(|t| tile_trees(tile, t, cuts, roads)).unwrap_or_default() {
         let transform = Transform::from_translation(tree.pos)
             .with_rotation(tree.rot)
             .with_scale(Vec3::splat(tree.scale));
@@ -920,6 +958,7 @@ fn spawn_tile(
     };
     let boulder_origin = Vec2::new(tile.x as f32, tile.y as f32) * TILE_M;
     let boulder_cuts = tile_cut_ops(cuts, boulder_origin, TILE_M);
+    let boulder_roads = tile_road_segments(roads, boulder_origin, TILE_M);
     let mut rng = Rng::new(chunk_seed(
         world_seed(),
         VEG_LAYER_ID ^ 0x0C4,
@@ -930,7 +969,7 @@ fn spawn_tile(
         let x = origin.x + rng.next_f32() * TILE_M;
         let z = origin.y + rng.next_f32() * TILE_M;
         let xz = Vec2::new(x, z);
-        if rng.next_f32() > field_gate(&b.density, xz) {
+        if on_road(&boulder_roads, xz) || rng.next_f32() > field_gate(&b.density, xz) {
             continue;
         }
         let y = terrain_height(xz, 4.0);
