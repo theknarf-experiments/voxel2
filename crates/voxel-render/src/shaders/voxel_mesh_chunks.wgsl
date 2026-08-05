@@ -22,8 +22,8 @@
 
 const CELLS: u32 = 32u;
 const CELLS_EXT: u32 = 34u;        // cells -1..=32
-const SAMPLES: u32 = 36u;
-const SLOT_STRIDE: u32 = 46656u;   // 36^3
+const SAMPLES: u32 = 38u;          // corners -2..=35
+const SLOT_STRIDE: u32 = 54872u;   // 38^3
 const CELL_STRIDE: u32 = 39304u;   // 34^3
 const NONE16: u32 = 0xFFFFu;
 const NONE: u32 = 0xFFFFFFFFu;
@@ -64,9 +64,9 @@ fn corner_offset(i: u32) -> vec3<i32> {
 }
 
 fn sample_sdf(c: vec3<i32>) -> f32 {
-    // Clamp keeps apron-cell gradient probes in range (corner -2 / 35).
-    let cc = clamp(c, vec3<i32>(-1), vec3<i32>(34));
-    let i = vec3<u32>(cc + vec3<i32>(1));
+    // Clamp keeps gradient probes at the apron edge in range.
+    let cc = clamp(c, vec3<i32>(-2), vec3<i32>(35));
+    let i = vec3<u32>(cc + vec3<i32>(2));
     let packed = density[params.slot * SLOT_STRIDE + i.x + SAMPLES * (i.y + SAMPLES * i.z)];
     return unpack2x16float(packed & 0xFFFFu).x;
 }
@@ -81,6 +81,56 @@ fn cell_slot_index(c: vec3<i32>) -> u32 {
 // each face (the crack sits on the face plane between them).
 fn is_boundary_cell(c: vec3<i32>) -> bool {
     return any(c <= vec3<i32>(0)) || any(c >= vec3<i32>(31));
+}
+
+// Stitched-surface-nets snap factor: 1 at the outermost (apron) cell layer,
+// 0.5 one cell in, 0 in the interior. Corner parity is global (chunk
+// origins are even in voxel units), so equal-LOD neighbors snap to the same
+// coarse solution and a fine chunk's face vertices land exactly on a
+// coarser neighbor's vertices — watertight in both cases.
+fn snap_factor(c: vec3<i32>) -> f32 {
+    var t = 0.0;
+    if (any(c <= vec3<i32>(-1)) || any(c >= vec3<i32>(32))) {
+        t = 1.0;
+    } else if (any(c <= vec3<i32>(0)) || any(c >= vec3<i32>(31))) {
+        t = 0.5;
+    }
+    return t;
+}
+
+// Surface-nets vertex of the coarse-parity (2x) cell containing fine cell
+// `c`, in fine-voxel units. Returns w = 0 if the coarse cell has no surface
+// crossing (thin feature that vanishes at the parent LOD).
+fn coarse_vertex(c: vec3<i32>) -> vec4<f32> {
+    let big = vec3<i32>(
+        i32(floor(f32(c.x) / 2.0)),
+        i32(floor(f32(c.y) / 2.0)),
+        i32(floor(f32(c.z) / 2.0)),
+    );
+    let base = big * 2;
+    var s: array<f32, 8>;
+    var mask = 0u;
+    for (var i = 0u; i < 8u; i++) {
+        s[i] = sample_sdf(base + corner_offset(i) * 2);
+        if (s[i] < 0.0) {
+            mask |= 1u << i;
+        }
+    }
+    if (mask == 0u || mask == 255u) {
+        return vec4<f32>(0.0);
+    }
+    var sum = vec3<f32>(0.0);
+    var n = 0.0;
+    for (var e = 0u; e < 12u; e++) {
+        let a = EDGES[e].x;
+        let b = EDGES[e].y;
+        if ((s[a] < 0.0) != (s[b] < 0.0)) {
+            let t = s[a] / (s[a] - s[b]);
+            sum += mix(vec3<f32>(corner_offset(a)), vec3<f32>(corner_offset(b)), t);
+            n += 1.0;
+        }
+    }
+    return vec4<f32>(vec3<f32>(base) + (sum / n) * 2.0, 1.0);
 }
 
 const EDGES = array<vec2<u32>, 12>(
@@ -191,7 +241,17 @@ fn sn_vertices(@builtin(global_invocation_id) id: vec3<u32>) {
 
     // Position in voxel units (chunk-local); scaling to meters happens at
     // decode using the per-chunk voxel size.
-    let pv = vec3<f32>(c) + sum / n;
+    var pv = vec3<f32>(c) + sum / n;
+
+    // Stitch chunk boundaries: morph boundary-band vertices onto the
+    // coarse-parity surface so neighboring chunks (same or ±1 LOD) meet.
+    let snap = snap_factor(c);
+    if (snap > 0.0) {
+        let cv = coarse_vertex(c);
+        if (cv.w > 0.5) {
+            pv = mix(pv, cv.xyz, snap);
+        }
+    }
 
     let boundary = is_boundary_cell(c);
     var count = 1u;

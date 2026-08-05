@@ -113,10 +113,16 @@ fn setup(
         })
         // Default: a scouted scenic forest valley (mountains and sea nearby).
         .unwrap_or(Vec3::new(-27570.0, 80.0, -36770.0));
+    let look = std::env::var("VOXEL_LOOK")
+        .ok()
+        .and_then(|s| {
+            let v: Vec<f32> = s.split(',').filter_map(|p| p.trim().parse().ok()).collect();
+            (v.len() == 3).then(|| Vec3::new(v[0], v[1], v[2]))
+        })
+        .unwrap_or(Vec3::new(0.4, -0.35, 0.4));
     commands.spawn((
         Camera3d::default(),
-        Transform::from_translation(start)
-            .looking_at(start + Vec3::new(0.4, -0.35, 0.4) * 1000.0, Vec3::Y),
+        Transform::from_translation(start).looking_at(start + look * 1000.0, Vec3::Y),
         FreeCamera {
             walk_speed: 60.0,
             run_speed: 600.0,

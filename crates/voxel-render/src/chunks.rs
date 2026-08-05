@@ -62,7 +62,9 @@ use voxel_core::ChunkKey;
 
 use crate::slab::{SlabAlloc, SlabAllocator};
 
-const SAMPLES: u32 = 36;
+/// Density samples per axis: 33 corners + apron covering corners -2..=35
+/// (one extra low corner for coarse-parity stitching).
+const SAMPLES: u32 = 38;
 const CELLS: u32 = 32;
 /// Compressed vertex: 12 bytes (unorm16 pos ×4 incl. pad, snorm16 oct normal).
 const VERTEX_BYTES: u64 = 12;
@@ -938,7 +940,7 @@ fn dispatch_chunk_work(
             ..default()
         });
 
-        let gen_groups = SAMPLES / 6;
+        let gen_groups = SAMPLES.div_ceil(6);
         let cell_groups = CELLS / 4;
         // Count and vertex passes cover the extended cell range -1..=32.
         let ext_groups = (CELLS + 2).div_ceil(4);

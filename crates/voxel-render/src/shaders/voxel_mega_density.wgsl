@@ -3,8 +3,8 @@
 // grids with corridor cuts, and giant vertical shafts — with hash-driven
 // variation per structural cell. Same bindings/output as the terrain pass.
 
-const SAMPLES: u32 = 36u;
-const SLOT_STRIDE: u32 = 46656u;
+const SAMPLES: u32 = 38u;
+const SLOT_STRIDE: u32 = 54872u; // 38^3
 
 struct ChunkParams {
     origin: vec4<f32>, // xyz = chunk min corner (m), w = voxel size (m)
@@ -130,7 +130,8 @@ fn density_main(@builtin(global_invocation_id) id: vec3<u32>) {
         return;
     }
     let vs = params.origin.w;
-    let p = params.origin.xyz + vec3<f32>(vec3<i32>(id) - vec3<i32>(1)) * vs;
+    // Sample i holds cell corner i - 2 (apron covers coarse-parity cells).
+    let p = params.origin.xyz + vec3<f32>(vec3<i32>(id) - vec3<i32>(2)) * vs;
     let sdf = clamp(mega_sdf(p, vs) / vs, -4.0, 4.0);
     let material = select(0u, 2u, sdf < 0.0);
     let packed = (pack2x16float(vec2<f32>(sdf, 0.0)) & 0xFFFFu) | (material << 16u);

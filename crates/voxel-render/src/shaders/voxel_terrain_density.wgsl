@@ -6,8 +6,8 @@
 // whose wavelength approaches the voxel size are faded out (band-limiting) so
 // coarse LODs don't alias and LOD swaps don't pop.
 
-const SAMPLES: u32 = 36u;
-const SLOT_STRIDE: u32 = 46656u; // 36^3
+const SAMPLES: u32 = 38u;
+const SLOT_STRIDE: u32 = 54872u; // 38^3
 
 struct ChunkParams {
     // xyz = chunk minimum corner in world meters, w = voxel size in meters.
@@ -77,8 +77,8 @@ fn density_main(@builtin(global_invocation_id) id: vec3<u32>) {
         return;
     }
     let vs = params.origin.w;
-    // Sample i holds cell corner i - 1.
-    let p = params.origin.xyz + vec3<f32>(vec3<i32>(id) - vec3<i32>(1)) * vs;
+    // Sample i holds cell corner i - 2 (apron covers coarse-parity cells).
+    let p = params.origin.xyz + vec3<f32>(vec3<i32>(id) - vec3<i32>(2)) * vs;
     // SDF stored in voxel-size units, narrow band ±4.
     let sdf = clamp((p.y - terrain_height(p.xz, vs)) / vs, -4.0, 4.0);
     let material = select(0u, 1u, sdf < 0.0);
