@@ -431,17 +431,38 @@ fn sn_quads(@builtin(global_invocation_id) id: vec3<u32>) {
             quad[i] = cell_indices[cell_slot_index(cells[i])] & 0xFFFFu;
         }
 
+        // Split across the shorter diagonal (better triangles on saddles).
+        let p0 = read_pos(quad[0]);
+        let p1 = read_pos(quad[1]);
+        let p2 = read_pos(quad[2]);
+        let p3 = read_pos(quad[3]);
+        let d02 = p2 - p0;
+        let d13 = p3 - p1;
+        let alt = dot(d13, d13) < dot(d02, d02);
+
         let q = atomicAdd(&counts[params.counts_slot].quads, 1u);
-        write_quad(q, quad, s0 < 0.0);
+        write_quad(q, quad, s0 < 0.0, alt);
     }
+}
+
+fn read_pos(local: u32) -> vec3<f32> {
+    let base = (params.base_vertex + local) * VERTEX_WORDS;
+    let xy = unpack2x16unorm(vertices[base]);
+    let zw = unpack2x16unorm(vertices[base + 1u]);
+    return vec3<f32>(xy.x, xy.y, zw.x) * POS_RANGE - POS_BIAS;
 }
 
 // Six u16 indices per quad, packed two per u32 word. `first_index` is
 // always even (quad-aligned), so the three words never straddle quads.
-fn write_quad(quad_index: u32, corners: array<u32, 4>, flip: bool) {
+// `alt` splits across the 1-3 diagonal instead of 0-2.
+fn write_quad(quad_index: u32, corners: array<u32, 4>, flip: bool, alt: bool) {
     var i: array<u32, 6>;
-    if (flip) {
+    if (flip && alt) {
+        i = array<u32, 6>(corners[1], corners[2], corners[3], corners[1], corners[3], corners[0]);
+    } else if (flip) {
         i = array<u32, 6>(corners[0], corners[1], corners[2], corners[0], corners[2], corners[3]);
+    } else if (alt) {
+        i = array<u32, 6>(corners[1], corners[3], corners[2], corners[1], corners[0], corners[3]);
     } else {
         i = array<u32, 6>(corners[0], corners[2], corners[1], corners[0], corners[3], corners[2]);
     }
