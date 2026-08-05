@@ -229,6 +229,17 @@
         "amount": 0.5
       },
       "detail_fade": 0.002
+    },
+    {
+      "type": "surface",
+      "id": 4,
+      "base": [
+        0.16,
+        0.34,
+        0.44
+      ],
+      "grain": 0.06,
+      "detail_fade": 0.004
     }
   ],
   "ops": [
@@ -244,6 +255,10 @@
     {
       "type": "caves",
       "chance": 0.45
+    },
+    {
+      "type": "rivers",
+      "chance": 0.5
     }
   ],
   "spawners": [

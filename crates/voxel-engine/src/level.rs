@@ -1058,6 +1058,12 @@ pub enum OpsDef {
         #[serde(default = "default_road_reach")]
         reach: f32,
     },
+    /// Rivers: springs on high ground descending to the sea (per-512 m
+    /// cell probability), carving beds filled with the water material.
+    Rivers {
+        #[serde(default = "default_ruin_chance")]
+        chance: f32,
+    },
     /// Perlin-worm cave tunnels (per-256 m-cell probability).
     Caves {
         #[serde(default = "default_ruin_chance")]
@@ -1289,8 +1295,9 @@ pub struct SurfaceCutsQuery(
 #[derive(Resource, Default, Clone)]
 pub struct PlanningLayers(pub Vec<Arc<voxel_layers::LayerManager>>);
 
-/// Road segments overlapping a box (world xz meters): spawner clearance
-/// so props never grow on the roadbed.
+/// Linear-feature segments (roads, rivers) overlapping a box (world xz
+/// meters): spawner clearance so props never grow on roadbeds or in
+/// riverbeds.
 #[derive(Resource, Default, Clone)]
 pub struct RoadsQuery(
     pub Option<Arc<dyn Fn(bevy::math::Vec2, bevy::math::Vec2) -> Vec<[bevy::math::Vec2; 2]> + Send + Sync>>,
@@ -1302,7 +1309,9 @@ fn build_ops_provider(
     let seed = level.seed;
     let mut sources: Vec<OpsSource> = Vec::new();
     let mut managers: Vec<Arc<voxel_layers::LayerManager>> = Vec::new();
-    let mut roads_query = RoadsQuery(None);
+    type ClearanceSource =
+        Arc<dyn Fn(bevy::math::Vec2, bevy::math::Vec2) -> Vec<[bevy::math::Vec2; 2]> + Send + Sync>;
+    let mut clearance_sources: Vec<ClearanceSource> = Vec::new();
     for def in &level.ops {
         match *def {
             OpsDef::Ruins { chance } => sources.push(Arc::new(move |min, max| {
@@ -1316,9 +1325,9 @@ fn build_ops_provider(
                 ));
                 managers.push(layers.clone());
                 let roads_layers = layers.clone();
-                roads_query = RoadsQuery(Some(Arc::new(move |min, max| {
+                clearance_sources.push(Arc::new(move |min, max| {
                     voxel_worldgen::roads::roads_near(&roads_layers, min, max)
-                })));
+                }));
                 sources.push(Arc::new(move |min, max| {
                     voxel_worldgen::roads::road_ops(&layers, min, max)
                 }));
@@ -1326,6 +1335,22 @@ fn build_ops_provider(
             OpsDef::Pockets { chance } => sources.push(Arc::new(move |min, max| {
                 voxel_worldgen::mega::pockets_ops(seed, chance, min, max)
             })),
+            OpsDef::Rivers { chance } => {
+                let layers = Arc::new(voxel_worldgen::rivers::planning_layers(seed, chance));
+                managers.push(layers.clone());
+                let clear_layers = layers.clone();
+                clearance_sources.push(Arc::new(move |min, max| {
+                    voxel_worldgen::rivers::rivers_near(&clear_layers, min, max)
+                }));
+                sources.push(Arc::new(move |min, max| {
+                    // Same carve-horizon rule as caves: bed cuts are
+                    // meter-scale and alias at coarse sampling.
+                    if max.x - min.x > 140.0 {
+                        return Vec::new();
+                    }
+                    voxel_worldgen::rivers::river_ops(&layers, min, max)
+                }));
+            }
             OpsDef::Caves { chance, radius } => sources.push(Arc::new(move |min, max| {
                 // Meter-scale carved voids: served only to chunks that can
                 // resolve them. A per-chunk gate keeps every chunk's op
@@ -1390,6 +1415,18 @@ fn build_ops_provider(
         }));
     }
 
+    let roads_query = if clearance_sources.is_empty() {
+        RoadsQuery(None)
+    } else {
+        let cs = clearance_sources;
+        RoadsQuery(Some(Arc::new(move |min, max| {
+            let mut out = Vec::new();
+            for source in &cs {
+                out.extend(source(min, max));
+            }
+            out
+        })))
+    };
     if sources.is_empty() {
         return (
             ChunkOpsProvider(None),
