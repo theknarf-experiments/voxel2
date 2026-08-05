@@ -943,7 +943,11 @@ fn plan_frame(
                     .into(),
                 half_extents: Vec3A::splat(half as f32),
             };
-            if !f.intersects_obb_identity(&aabb) {
+            // intersect_far must be false: with the infinite reversed-Z
+            // projection the far half-space is degenerate, and testing it
+            // culls everything beyond a few km (bevy's own visibility
+            // culling skips it too).
+            if !f.intersects_obb(&aabb, &bevy::math::Affine3A::IDENTITY, true, false) {
                 culled += 1;
                 continue;
             }

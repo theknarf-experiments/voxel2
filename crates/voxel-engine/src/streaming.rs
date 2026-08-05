@@ -299,8 +299,8 @@ fn hud_stats(
         return;
     };
     hud.0.push(format!(
-        "chunks: {} tracked | {} meshed | {} drawn | {} pending",
-        s.tracked, s.meshed, s.drawn, s.awaiting
+        "chunks: {} tracked | {} meshed | {} drawn | {} culled | {} pending",
+        s.tracked, s.meshed, s.drawn, s.culled, s.awaiting
     ));
     let occ: Vec<String> = s
         .slab_occupancy
