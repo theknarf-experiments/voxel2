@@ -23,7 +23,7 @@
     "illuminance": 25000.0
   },
   "lod": {
-    "max_level": 8,
+    "max_level": 9,
     "top_radius": 3,
     "top_y": [
       -1,

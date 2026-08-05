@@ -7,7 +7,7 @@
     "brightness": 120.0
   },
   "lod": {
-    "max_level": 4,
+    "max_level": 5,
     "top_radius": 2,
     "top_y": [-3, 3],
     "split_k": 1.6,

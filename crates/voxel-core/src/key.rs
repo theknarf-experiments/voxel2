@@ -111,9 +111,10 @@ mod tests {
 
     #[test]
     fn edge_scales_with_level() {
+        let edge0 = crate::BASE_VOXEL_M * crate::CHUNK_CELLS as f64;
         let k0 = ChunkKey::new(0, IVec3::ZERO);
         let k17 = ChunkKey::new(17, IVec3::ZERO);
-        assert_eq!(k0.edge_m(), 32.0);
-        assert_eq!(k17.edge_m(), 32.0 * 131072.0); // ~4194 km
+        assert_eq!(k0.edge_m(), edge0);
+        assert_eq!(k17.edge_m(), edge0 * 131072.0);
     }
 }

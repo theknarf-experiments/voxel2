@@ -72,10 +72,12 @@ mod tests {
 
     #[test]
     fn normalize_wraps_local() {
+        let edge = (crate::BASE_VOXEL_M * crate::CHUNK_CELLS as f64) as f32;
         let p = GlobalPos::new(IVec3::ZERO, Vec3::new(33.0, -1.0, 64.5));
-        assert_eq!(p.chunk, IVec3::new(1, -1, 2));
-        assert!(p.local.x >= 0.0 && p.local.x < 32.0);
-        assert!(p.local.y >= 0.0 && p.local.y < 32.0);
+        let expect = |v: f32| (v / edge).floor() as i32;
+        assert_eq!(p.chunk, IVec3::new(expect(33.0), expect(-1.0), expect(64.5)));
+        assert!(p.local.x >= 0.0 && p.local.x < edge);
+        assert!(p.local.y >= 0.0 && p.local.y < edge);
         assert!((p.to_dvec3() - DVec3::new(33.0, -1.0, 64.5)).length() < 1e-4);
     }
 
@@ -85,7 +87,10 @@ mod tests {
         let p = DVec3::new(1.0e6, -2.5e5, 7.77e5) + DVec3::new(0.123, 0.456, 0.789);
         let g = GlobalPos::from_dvec3(p);
         assert!((g.to_dvec3() - p).length() < 1e-3);
-        assert!(g.local.min_element() >= 0.0 && g.local.max_element() < 32.0);
+        assert!(
+            g.local.min_element() >= 0.0
+                && (g.local.max_element() as f64) < crate::BASE_VOXEL_M * crate::CHUNK_CELLS as f64
+        );
     }
 
     #[test]
@@ -103,7 +108,8 @@ mod tests {
 
     #[test]
     fn offset_carries_across_chunks() {
-        let p = GlobalPos::new(IVec3::new(5, 0, 0), Vec3::new(31.5, 0.0, 0.0));
+        let edge = (crate::BASE_VOXEL_M * crate::CHUNK_CELLS as f64) as f32;
+        let p = GlobalPos::new(IVec3::new(5, 0, 0), Vec3::new(edge - 0.5, 0.0, 0.0));
         let q = p.offset(Vec3::new(1.0, 0.0, 0.0));
         assert_eq!(q.chunk, IVec3::new(6, 0, 0));
         assert!((q.local.x - 0.5).abs() < 1e-5);

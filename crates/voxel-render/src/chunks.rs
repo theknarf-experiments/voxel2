@@ -1287,11 +1287,14 @@ fn plan_frame(
                 break;
             };
             let chunk = table.chunks.get_mut(&key).unwrap();
-            // Consume this chunk's planning ops into the frame buffer.
-            let csg = match chunk.ops.take() {
+            // Copy this chunk's planning ops into the frame buffer. Kept
+            // on the chunk (not consumed): any later regen of the same
+            // generation request must re-apply them, or CSG content
+            // silently vanishes from the reissued mesh.
+            let csg = match &chunk.ops {
                 Some(ops) => {
                     let offset = frame_ops.len() as u32;
-                    frame_ops.extend_from_slice(&ops);
+                    frame_ops.extend_from_slice(ops);
                     (offset, ops.len() as u32)
                 }
                 None => (0, 0),

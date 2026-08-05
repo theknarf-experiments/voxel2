@@ -15,7 +15,7 @@ pub const CLASS_VERTS: [u32; 4] = [2_048, 6_144, 16_384, 53_248];
 /// Slots per class, sized for ground-level LOD (~2000 live surface chunks
 /// across all levels): terrain chunks are mostly ≤2k, architectural chunks
 /// (a floor slab + pillars + skirt twins) typically 4–6k.
-pub const CLASS_SLOTS: [u32; 4] = [512, 1_024, 384, 96];
+pub const CLASS_SLOTS: [u32; 4] = [1_024, 1_024, 384, 96];
 pub const INDEX_FACTOR: u32 = 6;
 
 /// A granted allocation: ranges into the shared vertex/index buffers.

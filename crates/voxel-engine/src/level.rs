@@ -1035,7 +1035,7 @@ fn build_ops_provider(level: &LevelDef) -> ChunkOpsProvider {
         return ChunkOpsProvider(None);
     }
     ChunkOpsProvider(Some(Arc::new(move |key: ChunkKey| {
-        if key.level > 2 {
+        if key.edge_m() > 130.0 {
             return Vec::new(); // meter-scale features: fine LODs only
         }
         let min = key.min_corner_m().as_vec3();

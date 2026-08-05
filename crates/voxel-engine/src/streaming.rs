@@ -126,8 +126,8 @@ const EPOCH_REQUEST_BUDGET: usize = 64;
 
 /// Structural changes attempted per epoch. Caps bound the planning burst
 /// and the epoch's generation load; refinement just takes more epochs.
-const EPOCH_MAX_SPLITS: usize = 48;
-const EPOCH_MAX_MERGES: usize = 48;
+const EPOCH_MAX_SPLITS: usize = 24;
+const EPOCH_MAX_MERGES: usize = 24;
 
 #[derive(Resource, Default)]
 struct LodTree {
@@ -266,6 +266,47 @@ impl PostState<'_> {
         true
     }
 
+    /// Add to `out` every leaf covering or inside `key`'s region that
+    /// touches `target`'s box. Descends only into touching subtrees.
+    fn collect_touching_leaves(
+        &self,
+        max_level: u8,
+        key: ChunkKey,
+        target: ChunkKey,
+        out: &mut HashSet<ChunkKey>,
+    ) {
+        let mut k = key;
+        loop {
+            if self.is_leaf(k) {
+                if boxes_touch(k, target) {
+                    out.insert(k);
+                }
+                return;
+            }
+            if k.level >= max_level {
+                break;
+            }
+            k = k.parent();
+        }
+        self.descend_touching(key, target, out);
+    }
+
+    fn descend_touching(&self, region: ChunkKey, target: ChunkKey, out: &mut HashSet<ChunkKey>) {
+        if !boxes_touch(region, target) {
+            return;
+        }
+        if self.is_leaf(region) {
+            out.insert(region);
+            return;
+        }
+        if region.level == 0 {
+            return;
+        }
+        for c in region.children() {
+            self.descend_touching(c, target, out);
+        }
+    }
+
     /// Seam mask: one coarser-neighbor bit per direction of the
     /// 26-neighborhood, in scan order (dz, dy, dx in -1..=1, center
     /// skipped) — twin of `snap_to_parity` in the mesh shader. Diagonal
@@ -356,17 +397,56 @@ fn plan_epoch(tree: &LodTree, config: &LodConfig, anchor: DVec3) -> Option<Epoch
     });
     merges.truncate(EPOCH_MAX_MERGES);
 
-    // ±1 fixpoint: drop transitions that would put a 2-level jump on
-    // screen; a rejection can cascade, so iterate until stable.
+    // Force-split closure: a split whose children would sit two levels
+    // finer than a touching shown leaf must not be vetoed — the field has
+    // legitimate diagonal 2-jumps, so a veto clamps refinement there
+    // forever and the clamp cascades inward (each frozen region vetoes its
+    // finer neighbor's split, all the way to the camera; ops-gated content
+    // then never generates). Restricted-octree rule instead: split the
+    // too-coarse covering leaf in the same epoch, whether or not the field
+    // wants it. The merge veto below keeps forced splits stable.
     loop {
-        let n0 = splits.len() + merges.len();
         let post = PostState::plan(&tree.leaves, &splits, &merges);
-        let keep_splits: Vec<ChunkKey> = splits
-            .iter()
-            .filter(|p| post.adjacency_ok(config.max_level, **p, p.level - 1))
-            .copied()
-            .collect();
-        splits = keep_splits;
+        let mut forced: Vec<ChunkKey> = Vec::new();
+        for p in &splits {
+            let child_level = p.level - 1;
+            for dz in -1..=1 {
+                for dy in -1..=1 {
+                    for dx in -1..=1 {
+                        if dx == 0 && dy == 0 && dz == 0 {
+                            continue;
+                        }
+                        let n = ChunkKey::new(p.level, p.pos + IVec3::new(dx, dy, dz));
+                        let Some(l) = post.covering_level(config.max_level, n) else {
+                            continue;
+                        };
+                        if l <= child_level + 1 {
+                            continue;
+                        }
+                        let mut k = n;
+                        while k.level < l {
+                            k = k.parent();
+                        }
+                        if !splits.contains(&k) && !forced.contains(&k) {
+                            forced.push(k);
+                        }
+                    }
+                }
+            }
+        }
+        if forced.is_empty() {
+            break;
+        }
+        // A forced split overrides any merge that involves the same
+        // region (as the merge parent or one of its children).
+        merges.retain(|m| !forced.iter().any(|f| *m == *f || *m == f.parent()));
+        splits.extend(forced);
+    }
+
+    // ±1 veto for merges: coarsening waits until the neighborhood can
+    // absorb it (this is what keeps forced splits from flapping back).
+    loop {
+        let n0 = merges.len();
         let post = PostState::plan(&tree.leaves, &splits, &merges);
         let keep_merges: Vec<ChunkKey> = merges
             .iter()
@@ -374,7 +454,7 @@ fn plan_epoch(tree: &LodTree, config: &LodConfig, anchor: DVec3) -> Option<Epoch
             .copied()
             .collect();
         merges = keep_merges;
-        if splits.len() + merges.len() == n0 {
+        if merges.len() == n0 {
             break;
         }
     }
@@ -405,27 +485,33 @@ fn plan_epoch(tree: &LodTree, config: &LodConfig, anchor: DVec3) -> Option<Epoch
         epoch.merges.push((p, p.children()));
     }
     // Seam remeshes: every kept leaf whose mask changes under the
-    // post-epoch configuration regenerates (held) and commits with it.
-    // A mask can only change if the leaf touches a region whose level
-    // changes, so filter by box-touch before the (much costlier) mask
-    // recomputation — the scan is per-epoch over every leaf otherwise.
-    let changed: Vec<ChunkKey> = post
-        .removed
-        .iter()
-        .chain(post.added.iter())
-        .copied()
-        .collect();
-    for leaf in &tree.leaves {
-        if post.removed.contains(leaf) {
+    // post-epoch configuration regenerates (held) and commits with it. A
+    // mask can only change for leaves touching a region whose level
+    // changes, so enumerate those from the changed regions (26 neighbor
+    // keys each, descending only into touching subtrees) — an all-leaves
+    // scan is an O(leaves × changes) planning burst.
+    let mut candidates: HashSet<ChunkKey> = HashSet::new();
+    for (r, _) in epoch.splits.iter().chain(epoch.merges.iter()) {
+        for dz in -1..=1 {
+            for dy in -1..=1 {
+                for dx in -1..=1 {
+                    if dx == 0 && dy == 0 && dz == 0 {
+                        continue;
+                    }
+                    let n = ChunkKey::new(r.level, r.pos + IVec3::new(dx, dy, dz));
+                    post.collect_touching_leaves(config.max_level, n, *r, &mut candidates);
+                }
+            }
+        }
+    }
+    for leaf in candidates {
+        if !tree.leaves.contains(&leaf) || post.removed.contains(&leaf) {
             continue;
         }
-        if !changed.iter().any(|c| boxes_touch(*c, *leaf)) {
-            continue;
-        }
-        let m = post.seam_mask(config.max_level, *leaf);
-        if tree.sent_masks.get(leaf) != Some(&m) {
-            epoch.waits.insert(*leaf, m);
-            epoch.to_request.push((*leaf, m, true));
+        let m = post.seam_mask(config.max_level, leaf);
+        if tree.sent_masks.get(&leaf) != Some(&m) {
+            epoch.waits.insert(leaf, m);
+            epoch.to_request.push((leaf, m, true));
         }
     }
     Some(epoch)

@@ -28,7 +28,7 @@ pub const CHUNK_SAMPLES: u32 = 36;
 pub const SAMPLE_OFFSET: i32 = -1;
 
 /// Voxel edge length in meters at LOD 0.
-pub const BASE_VOXEL_M: f64 = 1.0;
+pub const BASE_VOXEL_M: f64 = 0.5;
 
 /// SDF narrow band half-width, in units of the voxel size at the chunk's LOD.
 /// Stored SDF values are clamped to `±SDF_BAND`.
