@@ -1035,8 +1035,12 @@ fn build_ops_provider(level: &LevelDef) -> ChunkOpsProvider {
         return ChunkOpsProvider(None);
     }
     ChunkOpsProvider(Some(Arc::new(move |key: ChunkKey| {
-        if key.edge_m() > 130.0 {
-            return Vec::new(); // meter-scale features: fine LODs only
+        // Meter-scale features apply on every level whose chunks can show
+        // them at visible size: the ops horizon (where the SDF genuinely
+        // loses the ops — a hard-cut seam by doctrine) must sit far enough
+        // out that structures are subpixel and haze covers the ring.
+        if key.edge_m() > 1000.0 {
+            return Vec::new();
         }
         // Pad by the density apron: samples extend 2 voxels below and 3
         // above the 32-cell core, so an op grazing only the apron still

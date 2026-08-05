@@ -72,7 +72,7 @@ fn split_wanted(config: &LodConfig, anchor: DVec3, key: ChunkKey) -> bool {
 }
 
 /// LOD configuration.
-#[derive(Resource)]
+#[derive(Resource, Clone)]
 pub struct LodConfig {
     /// Coarsest chunk level. Edge = 32 · 2^max_level meters.
     pub max_level: u8,
@@ -117,8 +117,10 @@ struct Epoch {
     waits: HashMap<ChunkKey, u32>,
     /// Requests not yet issued, trickled a budget per frame (safe: nothing
     /// swaps until commit, so deferral can't show stale seams).
-    /// (key, mask, hold) — hold marks in-place remeshes of shown chunks.
-    to_request: Vec<(ChunkKey, u32, bool)>,
+    /// (key, mask, hold, ops) — hold marks in-place remeshes of shown
+    /// chunks; ops are precomputed by the planning task so provider cost
+    /// never lands on the main thread.
+    to_request: Vec<(ChunkKey, u32, bool, Option<Arc<Vec<CsgOp>>>)>,
 }
 
 /// Generation requests issued per frame while an epoch is in flight.
@@ -147,6 +149,12 @@ struct LodTree {
     /// Quantized camera anchor the LOD field is evaluated at. Sticky —
     /// this is the hysteresis; it is only read when planning an epoch.
     anchor: Option<DVec3>,
+    /// In-flight async planning task (pure function of a tree snapshot;
+    /// runs on the compute pool so the main thread never blocks on it).
+    planning: Option<bevy::tasks::Task<Option<Epoch>>>,
+    /// Something changed since the last plan (commit, anchor move, ring
+    /// churn) — gates snapshotting so idle frames don't clone the tree.
+    replan_needed: bool,
 }
 
 /// The shown configuration a plan would produce: current leaves minus
@@ -363,9 +371,20 @@ fn top_ancestor(key: ChunkKey, max_level: u8) -> IVec3 {
 /// Plan the next epoch: field-wanted splits/merges filtered to transitions
 /// the shown tree can absorb (±1 fixpoint), plus every seam remesh the
 /// resulting configuration requires. Returns None when nothing changes.
+/// Pure over the snapshot — safe to run off-thread.
+#[cfg(test)]
 fn plan_epoch(tree: &LodTree, config: &LodConfig, anchor: DVec3) -> Option<Epoch> {
-    let mut splits: Vec<ChunkKey> = tree
-        .leaves
+    plan_epoch_snapshot(&tree.leaves, &tree.sent_masks, config, anchor, None)
+}
+
+fn plan_epoch_snapshot(
+    leaves: &HashSet<ChunkKey>,
+    sent_masks: &HashMap<ChunkKey, u32>,
+    config: &LodConfig,
+    anchor: DVec3,
+    provider: Option<&(dyn Fn(ChunkKey) -> Vec<CsgOp> + Send + Sync)>,
+) -> Option<Epoch> {
+    let mut splits: Vec<ChunkKey> = leaves
         .iter()
         .filter(|l| split_wanted(config, anchor, **l))
         .copied()
@@ -380,7 +399,7 @@ fn plan_epoch(tree: &LodTree, config: &LodConfig, anchor: DVec3) -> Option<Epoch
     splits.truncate(EPOCH_MAX_SPLITS);
 
     let mut sibling_count: HashMap<ChunkKey, u8> = HashMap::new();
-    for leaf in &tree.leaves {
+    for leaf in leaves {
         if leaf.level >= config.max_level {
             continue;
         }
@@ -406,7 +425,7 @@ fn plan_epoch(tree: &LodTree, config: &LodConfig, anchor: DVec3) -> Option<Epoch
     // too-coarse covering leaf in the same epoch, whether or not the field
     // wants it. The merge veto below keeps forced splits stable.
     loop {
-        let post = PostState::plan(&tree.leaves, &splits, &merges);
+        let post = PostState::plan(leaves, &splits, &merges);
         let mut forced: Vec<ChunkKey> = Vec::new();
         for p in &splits {
             let child_level = p.level - 1;
@@ -447,7 +466,7 @@ fn plan_epoch(tree: &LodTree, config: &LodConfig, anchor: DVec3) -> Option<Epoch
     // absorb it (this is what keeps forced splits from flapping back).
     loop {
         let n0 = merges.len();
-        let post = PostState::plan(&tree.leaves, &splits, &merges);
+        let post = PostState::plan(leaves, &splits, &merges);
         let keep_merges: Vec<ChunkKey> = merges
             .iter()
             .filter(|p| post.adjacency_ok(config.max_level, **p, p.level))
@@ -462,7 +481,17 @@ fn plan_epoch(tree: &LodTree, config: &LodConfig, anchor: DVec3) -> Option<Epoch
         return None;
     }
 
-    let post = PostState::plan(&tree.leaves, &splits, &merges);
+    let post = PostState::plan(leaves, &splits, &merges);
+    let ops_for = |key: ChunkKey| -> Option<Arc<Vec<CsgOp>>> {
+        provider.and_then(|f| {
+            let v = f(key);
+            if v.is_empty() {
+                None
+            } else {
+                Some(Arc::new(v))
+            }
+        })
+    };
     let mut epoch = Epoch {
         splits: Vec::new(),
         merges: Vec::new(),
@@ -474,14 +503,14 @@ fn plan_epoch(tree: &LodTree, config: &LodConfig, anchor: DVec3) -> Option<Epoch
         for c in children {
             let m = post.seam_mask(config.max_level, c);
             epoch.waits.insert(c, m);
-            epoch.to_request.push((c, m, false));
+            epoch.to_request.push((c, m, false, ops_for(c)));
         }
         epoch.splits.push((p, children));
     }
     for p in merges {
         let m = post.seam_mask(config.max_level, p);
         epoch.waits.insert(p, m);
-        epoch.to_request.push((p, m, false));
+        epoch.to_request.push((p, m, false, ops_for(p)));
         epoch.merges.push((p, p.children()));
     }
     // Seam remeshes: every kept leaf whose mask changes under the
@@ -505,13 +534,13 @@ fn plan_epoch(tree: &LodTree, config: &LodConfig, anchor: DVec3) -> Option<Epoch
         }
     }
     for leaf in candidates {
-        if !tree.leaves.contains(&leaf) || post.removed.contains(&leaf) {
+        if !leaves.contains(&leaf) || post.removed.contains(&leaf) {
             continue;
         }
         let m = post.seam_mask(config.max_level, leaf);
-        if tree.sent_masks.get(&leaf) != Some(&m) {
+        if sent_masks.get(&leaf) != Some(&m) {
             epoch.waits.insert(leaf, m);
-            epoch.to_request.push((leaf, m, true));
+            epoch.to_request.push((leaf, m, true, ops_for(leaf)));
         }
     }
     Some(epoch)
@@ -572,6 +601,7 @@ fn lod_tick(
     };
     let anchor = tree.anchor.unwrap();
     if anchor_moved {
+        tree.replan_needed = true;
         field.anchor = anchor.as_vec3();
         field.dist_scale = (config.split_k * 32.0) as f32;
         field.max_vs = (1u32 << config.max_level) as f32;
@@ -589,6 +619,7 @@ fn lod_tick(
             queue.push(ChunkCommand::Free(key));
         }
         *tree = LodTree::default();
+        tree.replan_needed = true;
     }
 
     // 1. Absorb readiness notifications.
@@ -612,13 +643,15 @@ fn lod_tick(
                     tree.sent_masks.insert(key, mask);
                     request(&queue, &ops_provider, key, true, false, mask);
                     tree.leaves.insert(key);
+                    tree.replan_needed = true;
                 }
             }
         }
     }
-    // Evictions wait for the epoch: freeing a member would wedge its
-    // commit, and the stale ring is far behind the camera anyway.
-    if tree.epoch.is_none() {
+    // Evictions wait for the epoch AND any in-flight planning: freeing a
+    // member (or a plan-snapshot leaf) would wedge the commit. The stale
+    // ring is far behind the camera anyway.
+    if tree.epoch.is_none() && tree.planning.is_none() {
         let keep = r + 1;
         let stale: Vec<IVec3> = tree
             .top_cells
@@ -632,16 +665,33 @@ fn lod_tick(
         }
     }
 
-    // 3. Plan the next epoch when none is in flight.
+    // 3. Plan the next epoch off-thread when none is in flight. Planning
+    //    is pure over a snapshot; the shown tree can only change under it
+    //    additively (ring arrivals, which don't affect masks of existing
+    //    leaves) — commits and evictions are gated while it runs.
     if tree.epoch.is_none() {
-        let t = std::time::Instant::now();
-        tree.epoch = plan_epoch(tree, &config, anchor);
-        let ms = t.elapsed().as_secs_f32() * 1000.0;
-        if ms > 8.0 && std::env::var("VOXEL_LOG_FPS").is_ok() {
-            info!(
-                "plan_epoch {ms:.1} ms ({} waits)",
-                tree.epoch.as_ref().map_or(0, |e| e.waits.len())
-            );
+        if let Some(task) = &mut tree.planning {
+            if let Some(result) =
+                bevy::tasks::block_on(bevy::tasks::futures_lite::future::poll_once(task))
+            {
+                tree.planning = None;
+                tree.epoch = result;
+            }
+        } else if tree.replan_needed {
+            tree.replan_needed = false;
+            let leaves = tree.leaves.clone();
+            let sent_masks = tree.sent_masks.clone();
+            let config = config.clone();
+            let provider = ops_provider.0.clone();
+            tree.planning = Some(bevy::tasks::AsyncComputeTaskPool::get().spawn(async move {
+                plan_epoch_snapshot(
+                    &leaves,
+                    &sent_masks,
+                    &config,
+                    anchor,
+                    provider.as_deref(),
+                )
+            }));
         }
     }
 
@@ -649,9 +699,15 @@ fn lod_tick(
     //    then commit atomically once every member is drawable.
     if let Some(mut epoch) = tree.epoch.take() {
         let n = epoch.to_request.len().min(EPOCH_REQUEST_BUDGET);
-        for (key, mask, hold) in epoch.to_request.drain(..n) {
+        for (key, mask, hold, ops) in epoch.to_request.drain(..n) {
             tree.sent_masks.insert(key, mask);
-            request(&queue, &ops_provider, key, false, hold, mask);
+            queue.push(ChunkCommand::Request {
+                key,
+                show_on_ready: false,
+                hold,
+                ops,
+                face_mask: mask,
+            });
         }
         let done = epoch.to_request.is_empty()
             && epoch
@@ -660,6 +716,8 @@ fn lod_tick(
                 .all(|(k, m)| matches!(tree.ready.get(k), Some(&r) if r == *m || r == u32::MAX));
         if done {
             commit_epoch(tree, &queue, epoch);
+            // Refinement cascades: the new configuration may want more.
+            tree.replan_needed = true;
         } else {
             tree.epoch = Some(epoch);
         }
@@ -893,7 +951,7 @@ mod epoch_invariants {
             };
             let _ = round;
             assert!(!epoch.waits.is_empty());
-            for (key, mask, _) in &epoch.to_request {
+            for (key, mask, _, _) in &epoch.to_request {
                 tree.sent_masks.insert(*key, *mask);
             }
             for (parent, children) in &epoch.splits {
