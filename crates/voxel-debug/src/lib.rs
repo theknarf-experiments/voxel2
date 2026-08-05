@@ -22,7 +22,7 @@ impl Plugin for VoxelDebugPlugin {
     fn build(&self, app: &mut App) {
         app.add_plugins((FreeCameraPlugin, FrameTimeDiagnosticsPlugin::default()))
             .add_systems(Startup, spawn_hud)
-            .add_systems(Update, (update_hud, auto_screenshot));
+            .add_systems(Update, (update_hud, auto_screenshot, dump_camera));
     }
 }
 
@@ -104,6 +104,25 @@ fn auto_screenshot(
     commands
         .spawn(Screenshot::image(target.image.clone()))
         .observe(save_to_disk(path));
+}
+
+/// `P`: print the camera position and look direction to the log, as a
+/// ready-to-paste `VOXEL_START`/`VOXEL_LOOK` pair.
+fn dump_camera(
+    keys: Res<ButtonInput<KeyCode>>,
+    cameras: Query<&Transform, (With<Camera3d>, With<FreeCamera>)>,
+) {
+    if !keys.just_pressed(KeyCode::KeyP) {
+        return;
+    }
+    for t in &cameras {
+        let p = t.translation;
+        let f = t.forward();
+        info!(
+            "camera: VOXEL_START=\"{:.1},{:.1},{:.1}\" VOXEL_LOOK=\"{:.3},{:.3},{:.3}\"",
+            p.x, p.y, p.z, f.x, f.y, f.z
+        );
+    }
 }
 
 /// Marker for the HUD text node. External systems can append their own lines

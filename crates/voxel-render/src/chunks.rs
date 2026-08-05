@@ -432,6 +432,11 @@ struct GenEntry {
 
 struct MeshEntry {
     uniform_offset: u32,
+    /// Allocated index range (index units), cleared before emission so any
+    /// count-vs-emit divergence yields degenerate triangles, not stale
+    /// indices from the slot's previous occupant.
+    first_index: u32,
+    index_count: u32,
 }
 
 #[derive(Resource, Default)]
@@ -582,7 +587,7 @@ fn init_chunk_resources(
             "voxel_index_slab",
             // u16 indices.
             SlabAllocator::total_indices() * 2,
-            BufferUsages::STORAGE | BufferUsages::INDEX,
+            BufferUsages::STORAGE | BufferUsages::INDEX | BufferUsages::COPY_DST,
         ),
         counts: buffer(
             "voxel_counts",
@@ -1026,6 +1031,8 @@ fn plan_frame(
         ));
         batches.mesh.push(MeshEntry {
             uniform_offset: offset,
+            first_index: alloc.first_index,
+            index_count: indices,
         });
         // The mesh compute is recorded later this frame, before the main
         // pass, so the chunk is immediately drawable.
@@ -1245,6 +1252,16 @@ fn dispatch_chunk_work(
 
     let encoder = render_context.command_encoder();
     encoder.clear_buffer(&gpu.counts, 0, None);
+    // Zero the index ranges this frame's mesh batch will fill: emitted
+    // quads overwrite; any shortfall draws degenerate (0,0,0) triangles
+    // instead of the previous occupant's stale indices.
+    for entry in &batches.mesh {
+        encoder.clear_buffer(
+            &gpu.index_slab,
+            entry.first_index as u64 * 2,
+            Some(entry.index_count as u64 * 2),
+        );
+    }
     {
         let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
             label: Some("voxel_chunk_work"),

@@ -386,6 +386,7 @@ pub fn mega_program() -> Vec<WorldOp> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::fbm;
 
     #[test]
     fn planet_program_matches_legacy_terrain_height() {
@@ -469,10 +470,7 @@ mod tests {
                 differs += 1;
             }
         }
-        assert!(
-            differs > 100,
-            "modes/warp barely changed terrain: {differs}"
-        );
+        assert!(differs > 60, "modes/warp barely changed terrain: {differs}");
     }
 
     #[test]

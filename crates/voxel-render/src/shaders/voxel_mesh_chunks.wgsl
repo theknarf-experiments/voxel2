@@ -298,8 +298,19 @@ fn sn_vertices(@builtin(global_invocation_id) id: vec3<u32>) {
     write_vertex(params.base_vertex + local, pv, normal, mat);
     var twin = NONE16;
     if (boundary) {
-        twin = local + 1u;
-        write_vertex(params.base_vertex + twin, pv - normal * SKIRT_VOXELS, normal, mat);
+        // Skirt twins displace along -normal; that hides them inside the
+        // ground on terrain, but on thin features (CSG walls, pillars) the
+        // displaced point lands in open air and the skirt reads as a giant
+        // blade. Only create the twin when it ends up inside solid — the
+        // counted capacity covers it either way, and skipped skirt quads
+        // collapse to degenerate triangles (their index range is
+        // pre-cleared).
+        let tp = pv - normal * SKIRT_VOXELS;
+        let tc = vec3<i32>(round(tp));
+        if (sample_sdf(tc) < -1.0) {
+            twin = local + 1u;
+            write_vertex(params.base_vertex + twin, tp, normal, mat);
+        }
     }
     cell_indices[cell_slot_index(c)] = (local & 0xFFFFu) | (twin << 16u);
 }
