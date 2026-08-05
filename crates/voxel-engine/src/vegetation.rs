@@ -272,6 +272,8 @@ struct TreeAssets {
     canopy_mat: Handle<StandardMaterial>,
     rock_mat: Handle<StandardMaterial>,
     impostor_mat: Handle<StandardMaterial>,
+    blob_shadow_mesh: Handle<Mesh>,
+    blob_shadow_mat: Handle<StandardMaterial>,
 }
 
 /// Procedural low-poly conifer: an 8-sided trunk cylinder and three stacked
@@ -329,6 +331,13 @@ fn build_tree_assets(
             base_color: Color::WHITE,
             unlit: true,
             cull_mode: None,
+            ..default()
+        }),
+        blob_shadow_mesh: meshes.add(bevy::math::primitives::Circle::new(1.0)),
+        blob_shadow_mat: materials.add(StandardMaterial {
+            base_color: Color::srgba(0.05, 0.07, 0.04, 0.42),
+            unlit: true,
+            alpha_mode: AlphaMode::Blend,
             ..default()
         }),
     });
@@ -601,6 +610,28 @@ fn spawn_tile(commands: &mut Commands, assets: &TreeAssets, tile: IVec2) -> Vec<
                     Mesh3d(top_mesh.clone()),
                     MeshMaterial3d(top_mat.clone()),
                     transform,
+                ))
+                .id(),
+        );
+        // Grounding blob shadow, stretched along the sun direction and
+        // offset opposite it. Terrain-conforming shadows are future work;
+        // on gentle tree-bearing slopes a flat disc reads fine.
+        let sun_xz = Vec2::new(0.55, 0.32).normalize();
+        entities.push(
+            commands
+                .spawn((
+                    Mesh3d(assets.blob_shadow_mesh.clone()),
+                    MeshMaterial3d(assets.blob_shadow_mat.clone()),
+                    Transform::from_translation(
+                        tree.pos
+                            + Vec3::new(-sun_xz.x, 0.0, -sun_xz.y) * 0.9 * tree.scale
+                            + Vec3::Y * 0.22,
+                    )
+                    .with_rotation(
+                        Quat::from_rotation_y(sun_xz.x.atan2(sun_xz.y))
+                            * Quat::from_rotation_x(-std::f32::consts::FRAC_PI_2),
+                    )
+                    .with_scale(Vec3::new(1.5, 2.3, 1.0) * tree.scale),
                 ))
                 .id(),
         );
