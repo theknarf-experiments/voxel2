@@ -71,10 +71,10 @@ const CELLS: u32 = 32;
 /// Compressed vertex: 12 bytes (unorm16 pos ×4 incl. pad, snorm16 oct normal).
 const VERTEX_BYTES: u64 = 12;
 
-const ARENA_SLOTS: u32 = 64;
-const COUNTS_SLOTS: u32 = 64;
-const GEN_BUDGET: usize = 24;
-const MESH_BUDGET: usize = 32;
+const ARENA_SLOTS: u32 = 128;
+const COUNTS_SLOTS: u32 = 128;
+const GEN_BUDGET: usize = 48;
+const MESH_BUDGET: usize = 64;
 const STAGING_BUFFERS: usize = 3;
 
 // --- main-world <-> render-world plumbing ------------------------------------

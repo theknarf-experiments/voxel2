@@ -52,6 +52,33 @@ impl CsgOp {
         }
     }
 
+    /// Signed distance to this op's primitive (mirrors the WGSL `op_sdf`).
+    pub fn sdf(&self, p: Vec3) -> f32 {
+        let mut q = p - Vec3::from(self.center);
+        let (s, c) = (-self.yaw).sin_cos();
+        q = Vec3::new(q.x * c - q.z * s, q.y, q.x * s + q.z * c);
+        let h = Vec3::from(self.half);
+        if self.kind < 2 {
+            let a = q.abs() - h;
+            a.max(Vec3::ZERO).length() + a.x.max(a.y.max(a.z)).min(0.0)
+        } else {
+            let dr = (q.x * q.x + q.z * q.z).sqrt() - h.x;
+            let dy = q.y.abs() - h.y;
+            glam::Vec2::new(dr.max(0.0), dy.max(0.0)).length() + dr.max(dy).min(0.0)
+        }
+    }
+
+    /// Fold this op into a scene distance (ignores smooth blend — CPU
+    /// collision does not need it).
+    pub fn apply(&self, d: f32, p: Vec3) -> f32 {
+        let od = self.sdf(p);
+        if self.kind & 1 == 0 {
+            d.min(od)
+        } else {
+            d.max(-od)
+        }
+    }
+
     /// Conservative world-space AABB (yaw-safe: uses the diagonal).
     pub fn aabb(&self) -> (Vec3, Vec3) {
         let c = Vec3::from(self.center);
@@ -95,6 +122,19 @@ mod tests {
                 assert!(world.z >= lo.z && world.z <= hi.z);
             }
         }
+    }
+
+    #[test]
+    fn sdf_matches_primitives() {
+        let b = CsgOp::boxy(Vec3::ZERO, Vec3::new(2.0, 1.0, 3.0), 0.0, 0, false);
+        assert!(b.sdf(Vec3::ZERO) < 0.0);
+        assert!((b.sdf(Vec3::new(4.0, 0.0, 0.0)) - 2.0).abs() < 1e-5);
+        let cyl = CsgOp::cylinder(Vec3::ZERO, 1.5, 2.0, 0, false);
+        assert!((cyl.sdf(Vec3::new(3.0, 0.0, 0.0)) - 1.5).abs() < 1e-5);
+        assert!((cyl.sdf(Vec3::new(0.0, 5.0, 0.0)) - 3.0).abs() < 1e-5);
+        // Cut ops carve: applying a cut around a point makes it air.
+        let cut = CsgOp::boxy(Vec3::ZERO, Vec3::ONE, 0.0, 0, true);
+        assert!(cut.apply(-10.0, Vec3::ZERO) > 0.0);
     }
 
     #[test]

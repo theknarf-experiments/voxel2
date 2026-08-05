@@ -4,6 +4,7 @@
 
 use bevy::prelude::*;
 use voxel_debug::prelude::*;
+use voxel_engine::streaming::ChunkOpsProvider;
 use voxel_engine::{LodConfig, VoxelEnginePlugin, WorldKind};
 
 fn main() {
@@ -27,6 +28,17 @@ fn main() {
             split_k: 1.6,
             merge_k: 2.1,
         })
+        // Planned variation: habitation pockets and light wells.
+        .insert_resource(ChunkOpsProvider(Some(std::sync::Arc::new(
+            |key: voxel_engine::ChunkKey| {
+                if key.level > 2 {
+                    return Vec::new();
+                }
+                let min = key.min_corner_m().as_vec3();
+                let max = min + Vec3::splat(key.edge_m() as f32);
+                voxel_worldgen::mega::pockets_ops(min, max)
+            },
+        ))))
         .add_plugins((
             VoxelDebugPlugin,
             VoxelEnginePlugin {
@@ -49,11 +61,26 @@ fn walk_mode(
     if std::env::var("VOXEL_WALK").is_err() {
         return;
     }
-    use voxel_worldgen::mega::{mega_gradient, mega_sdf};
+    use voxel_worldgen::mega::{mega_sdf, mega_sdf_with_ops, pockets_ops};
     const RADIUS: f32 = 0.5;
     const EYE: f32 = 1.6;
 
     for mut t in &mut cameras {
+        // Planned features near the player participate in collision.
+        let local_ops = pockets_ops(
+            t.translation - Vec3::splat(30.0),
+            t.translation + Vec3::splat(30.0),
+        );
+        let sdf = |p: Vec3| mega_sdf_with_ops(p, &local_ops);
+        let grad = |p: Vec3| {
+            let e = 0.1;
+            Vec3::new(
+                sdf(p + Vec3::X * e) - sdf(p - Vec3::X * e),
+                sdf(p + Vec3::Y * e) - sdf(p - Vec3::Y * e),
+                sdf(p + Vec3::Z * e) - sdf(p - Vec3::Z * e),
+            )
+            .normalize_or_zero()
+        };
         // First tick: relocate onto solid floor (spawn cells can be holes).
         if !*spawned {
             *spawned = true;
@@ -82,9 +109,9 @@ fn walk_mode(
             body.y += step;
             remaining -= step;
             for _ in 0..4 {
-                let d = mega_sdf(body);
+                let d = sdf(body);
                 if d < RADIUS {
-                    let n = mega_gradient(body);
+                    let n = grad(body);
                     body += n * (RADIUS - d);
                     if n.y > 0.5 {
                         *fall_speed = 0.0;
@@ -95,9 +122,9 @@ fn walk_mode(
         }
         // Resolve horizontal penetration from the flycam's own motion.
         for _ in 0..4 {
-            let d = mega_sdf(body);
+            let d = sdf(body);
             if d < RADIUS {
-                body += mega_gradient(body) * (RADIUS - d);
+                body += grad(body) * (RADIUS - d);
             }
         }
         t.translation = body + Vec3::Y * EYE;

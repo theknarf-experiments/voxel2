@@ -20,6 +20,32 @@ struct ChunkParams {
 @group(0) @binding(0) var<storage, read_write> density: array<u32>;
 @group(0) @binding(1) var<uniform> params: ChunkParams;
 
+// Planning-layer CSG ops (48 B, layout mirrors voxel-core CsgOp).
+struct CsgOp {
+    center: vec3<f32>,
+    kind: u32, // 0 box add, 1 box cut, 2 cylinder add, 3 cylinder cut
+    half: vec3<f32>,
+    material: u32,
+    yaw: f32,
+    blend: f32,
+    _pad: vec2<u32>,
+}
+@group(0) @binding(2) var<storage, read_write> csg_ops: array<CsgOp>;
+
+fn op_sdf(op: CsgOp, p: vec3<f32>) -> f32 {
+    var q = p - op.center;
+    let c = cos(-op.yaw);
+    let s = sin(-op.yaw);
+    q = vec3<f32>(q.x * c - q.z * s, q.y, q.x * s + q.z * c);
+    if (op.kind < 2u) {
+        let a = abs(q) - op.half;
+        return length(max(a, vec3<f32>(0.0))) + min(max(a.x, max(a.y, a.z)), 0.0);
+    }
+    let dr = length(q.xz) - op.half.x;
+    let dy = abs(q.y) - op.half.y;
+    return length(vec2<f32>(max(dr, 0.0), max(dy, 0.0))) + min(max(dr, dy), 0.0);
+}
+
 fn hash2(p: vec2<i32>) -> f32 {
     var h: u32 = u32(p.x) * 374761393u + u32(p.y) * 668265263u;
     h = (h ^ (h >> 13u)) * 1274126177u;
@@ -135,7 +161,22 @@ fn density_main(@builtin(global_invocation_id) id: vec3<u32>) {
     let vs = params.origin.w;
     // Sample i holds cell corner i - 2 (apron covers coarse-parity cells).
     let p = params.origin.xyz + vec3<f32>(vec3<i32>(id) - vec3<i32>(2)) * vs;
-    let sdf = clamp(mega_sdf(p, vs) / vs, -4.0, 4.0);
+
+    var d_m = mega_sdf(p, vs);
+    // Planned variation ops (rooms, wells) at fine LODs.
+    if (params.csg_count > 0u && vs < 4.0) {
+        for (var i = 0u; i < params.csg_count; i++) {
+            let op = csg_ops[params.csg_offset + i];
+            let od = op_sdf(op, p);
+            if ((op.kind & 1u) == 0u) {
+                d_m = min(d_m, od);
+            } else {
+                d_m = max(d_m, -od);
+            }
+        }
+    }
+
+    let sdf = clamp(d_m / vs, -4.0, 4.0);
     let material = select(0u, 2u, sdf < 0.0);
     let packed = (pack2x16float(vec2<f32>(sdf, 0.0)) & 0xFFFFu) | (material << 16u);
     let base = params.slot * SLOT_STRIDE;
