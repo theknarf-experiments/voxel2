@@ -38,7 +38,7 @@ fn value_noise(p: Vec2) -> f32 {
     ab + (cd - ab) * u.y
 }
 
-fn band_fade(wavelength: f32, voxel_size: f32) -> f32 {
+pub(crate) fn band_fade(wavelength: f32, voxel_size: f32) -> f32 {
     let lo = 2.0 * voxel_size;
     let hi = 4.0 * voxel_size;
     let t = ((wavelength - lo) / (hi - lo)).clamp(0.0, 1.0);
@@ -46,12 +46,24 @@ fn band_fade(wavelength: f32, voxel_size: f32) -> f32 {
 }
 
 pub(crate) fn fbm(p: Vec2, base_scale: f32, octaves: i32, voxel_size: f32) -> f32 {
+    fbm_mode(p, base_scale, octaves, voxel_size, 0)
+}
+
+/// FBM with a per-octave shaping mode: 0 plain, 1 ridged (sharp crests),
+/// 2 billow (rounded mounds). Mirrors the WGSL exactly.
+pub(crate) fn fbm_mode(p: Vec2, base_scale: f32, octaves: i32, voxel_size: f32, mode: u32) -> f32 {
     let mut sum = 0.0;
     let mut amp = 0.5;
     let mut freq = base_scale;
     for _ in 0..octaves {
         let fade = band_fade(1.0 / freq, voxel_size);
-        sum += amp * fade * (value_noise(p * freq) - 0.5);
+        let n = value_noise(p * freq);
+        let v = match mode {
+            1 => 0.5 - (2.0 * n - 1.0).abs(),
+            2 => (2.0 * n - 1.0).abs() - 0.5,
+            _ => n - 0.5,
+        };
+        sum += amp * fade * v;
         amp *= 0.5;
         freq *= 2.0;
     }

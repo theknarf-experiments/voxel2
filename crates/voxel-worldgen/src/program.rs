@@ -10,7 +10,7 @@ use std::sync::{Arc, RwLock};
 use glam::{IVec2, IVec3, Vec2, Vec3};
 use voxel_core::worldop::*;
 
-use crate::{fbm, hash2};
+use crate::{fbm_mode, hash2};
 
 fn hash3(p: IVec3) -> f32 {
     let mut h: u32 = (p.x as u32)
@@ -28,6 +28,43 @@ fn sd_box(p: Vec3, b: Vec3) -> f32 {
     q.max(Vec3::ZERO).length() + q.x.max(q.y.max(q.z)).min(0.0)
 }
 
+/// Mirrors the WGSL `value_noise3` (quintic smoothstep).
+fn value_noise3(p: Vec3) -> f32 {
+    let i = p.floor();
+    let f = p - i;
+    let i = IVec3::new(i.x as i32, i.y as i32, i.z as i32);
+    let u = f * f * f * (f * (f * 6.0 - 15.0) + 10.0);
+    let corner = |dx: i32, dy: i32, dz: i32| hash3(i + IVec3::new(dx, dy, dz));
+    let x00 = corner(0, 0, 0) + (corner(1, 0, 0) - corner(0, 0, 0)) * u.x;
+    let x10 = corner(0, 1, 0) + (corner(1, 1, 0) - corner(0, 1, 0)) * u.x;
+    let x01 = corner(0, 0, 1) + (corner(1, 0, 1) - corner(0, 0, 1)) * u.x;
+    let x11 = corner(0, 1, 1) + (corner(1, 1, 1) - corner(0, 1, 1)) * u.x;
+    let y0 = x00 + (x10 - x00) * u.y;
+    let y1 = x01 + (x11 - x01) * u.y;
+    y0 + (y1 - y0) * u.z
+}
+
+/// Anisotropic band-limited 3D FBM (~[-0.5, 0.5]); wavelength for the
+/// band fade uses the horizontal frequency. Mirrors the WGSL exactly.
+fn fbm3(p: Vec3, freq_xz: f32, freq_y: f32, octaves: i32, voxel_size: f32) -> f32 {
+    let mut sum = 0.0;
+    let mut amp = 0.5;
+    let mut mul = 1.0;
+    for _ in 0..octaves {
+        let fade = crate::band_fade(1.0 / (freq_xz * mul), voxel_size);
+        sum += amp
+            * fade
+            * (value_noise3(Vec3::new(
+                p.x * freq_xz * mul,
+                p.y * freq_y * mul,
+                p.z * freq_xz * mul,
+            )) - 0.5);
+        amp *= 0.5;
+        mul *= 2.0;
+    }
+    sum
+}
+
 const BIG: f32 = 1.0e6;
 const SOLID: f32 = -1.0e5;
 
@@ -43,6 +80,7 @@ pub fn eval(ops: &[WorldOp], p: Vec3, vs: f32) -> (f32, u32) {
     let mut sxz = Vec2::ZERO;
     let mut sr = 0.0f32;
     let mut shaft = BIG;
+    let mut warp = Vec2::ZERO;
     let pxz = Vec2::new(p.x, p.z);
 
     for op in ops {
@@ -54,14 +92,34 @@ pub fn eval(ops: &[WorldOp], p: Vec3, vs: f32) -> (f32, u32) {
         }
         match op.kind {
             WOP_HEIGHT_FBM => {
-                h += fbm(
-                    pxz + Vec2::new(op.p0[0], op.p0[1]),
+                h += fbm_mode(
+                    pxz + warp + Vec2::new(op.p0[0], op.p0[1]),
                     op.p0[2],
                     op.p1[0] as i32,
                     vs,
+                    op.p1[1] as u32,
                 ) * op.p0[3];
             }
             WOP_HEIGHT_OFFSET => h += op.p0[0],
+            WOP_WARP_XZ => {
+                let q = pxz + Vec2::new(op.p0[2], op.p0[3]);
+                let oct = op.p1[0] as i32;
+                warp.x += fbm_mode(q, op.p0[0], oct, vs, 0) * op.p0[1];
+                warp.y += fbm_mode(q + Vec2::new(713.0, -337.0), op.p0[0], oct, vs, 0) * op.p0[1];
+            }
+            WOP_FBM3 => {
+                let q = p + Vec3::new(op.p1[0], op.p1[1], op.p1[2]);
+                let n = fbm3(q, op.p0[0], op.p0[1], op.p2[0] as i32, vs);
+                let sd = (op.p0[2] - n) * op.p0[3];
+                if op.p1[3] < 0.5 {
+                    if sd < d {
+                        d = sd;
+                        mat = op.material;
+                    }
+                } else {
+                    d = d.max(-sd);
+                }
+            }
             WOP_HEIGHT_SURFACE => {
                 let nd = p.y - h;
                 if nd < d {
@@ -174,17 +232,25 @@ pub fn eval(ops: &[WorldOp], p: Vec3, vs: f32) -> (f32, u32) {
 /// (shadow bake) and water (seabed) shaders.
 pub fn eval_height(ops: &[WorldOp], xz: Vec2, vs: f32) -> f32 {
     let mut h = 0.0;
+    let mut warp = Vec2::ZERO;
     for op in ops {
         match op.kind {
             WOP_HEIGHT_FBM => {
-                h += fbm(
-                    xz + Vec2::new(op.p0[0], op.p0[1]),
+                h += fbm_mode(
+                    xz + warp + Vec2::new(op.p0[0], op.p0[1]),
                     op.p0[2],
                     op.p1[0] as i32,
                     vs,
+                    op.p1[1] as u32,
                 ) * op.p0[3];
             }
             WOP_HEIGHT_OFFSET => h += op.p0[0],
+            WOP_WARP_XZ => {
+                let q = xz + Vec2::new(op.p0[2], op.p0[3]);
+                let oct = op.p1[0] as i32;
+                warp.x += fbm_mode(q, op.p0[0], oct, vs, 0) * op.p0[1];
+                warp.y += fbm_mode(q + Vec2::new(713.0, -337.0), op.p0[0], oct, vs, 0) * op.p0[1];
+            }
             _ => {}
         }
     }
@@ -385,5 +451,84 @@ mod tests {
     fn lattice_spacing_found() {
         assert_eq!(lattice_y_spacing(&mega_program()), Some(44.0));
         assert_eq!(lattice_y_spacing(&planet_program()), None);
+    }
+
+    #[test]
+    fn noise_modes_and_warp_change_heights_within_bounds() {
+        let base = WorldOp::new(WOP_HEIGHT_FBM)
+            .p0([0.0, 0.0, 0.001, 100.0])
+            .p1([4.0, 0.0, 0.0, 0.0]);
+        let ridged = base.p1([4.0, 1.0, 0.0, 0.0]);
+        let billow = base.p1([4.0, 2.0, 0.0, 0.0]);
+        let warp = WorldOp::new(WOP_WARP_XZ)
+            .p0([0.0005, 400.0, 0.0, 0.0])
+            .p1([3.0, 0.0, 0.0, 0.0]);
+        let mut differs = 0;
+        for i in 0..200 {
+            let p = Vec2::new(i as f32 * 137.0, i as f32 * -91.0);
+            let h0 = eval_height(&[base], p, 1.0);
+            let h1 = eval_height(&[ridged], p, 1.0);
+            let h2 = eval_height(&[billow], p, 1.0);
+            let hw = eval_height(&[warp, base], p, 1.0);
+            for h in [h0, h1, h2, hw] {
+                assert!(h.is_finite() && h.abs() <= 100.0, "h={h}");
+            }
+            if (h0 - h1).abs() > 1.0 && (h0 - h2).abs() > 1.0 && (h0 - hw).abs() > 1.0 {
+                differs += 1;
+            }
+        }
+        assert!(
+            differs > 100,
+            "modes/warp barely changed terrain: {differs}"
+        );
+    }
+
+    #[test]
+    fn fbm3_carve_makes_underground_air() {
+        // Planet base + aggressive cave carve: some points well below the
+        // surface must now be air, and the op must be deterministic.
+        let mut ops = planet_program();
+        ops.push(
+            WorldOp::new(WOP_FBM3)
+                .p0([0.02, 0.04, 0.05, 30.0])
+                .p1([0.0, 0.0, 0.0, 1.0])
+                .p2([3.0, 0.0, 0.0, 0.0]),
+        );
+        let mut caves = 0;
+        for i in 0..400 {
+            let xz = Vec2::new(i as f32 * 61.0, i as f32 * -43.0);
+            let h = eval_height(&ops, xz, 1.0);
+            let p = Vec3::new(xz.x, h - 12.0, xz.y);
+            let (d, _) = eval(&ops, p, 1.0);
+            assert_eq!(eval(&ops, p, 1.0), (d, eval(&ops, p, 1.0).1));
+            if d > 0.5 {
+                caves += 1;
+            }
+        }
+        assert!(caves > 20, "carve produced almost no caves: {caves}");
+    }
+
+    #[test]
+    fn fbm3_union_makes_floating_solids() {
+        // Pure 3D-noise world: solid regions exist above any surface.
+        let ops = vec![WorldOp::new(WOP_FBM3)
+            .material(2)
+            .p0([0.005, 0.01, 0.12, 60.0])
+            .p1([0.0, 0.0, 0.0, 0.0])
+            .p2([3.0, 0.0, 0.0, 0.0])];
+        let mut solid = 0;
+        for i in 0..400 {
+            let p = Vec3::new(
+                i as f32 * 53.0,
+                100.0 + (i % 13) as f32 * 30.0,
+                i as f32 * -37.0,
+            );
+            let (d, mat) = eval(&ops, p, 1.0);
+            if d < 0.0 {
+                solid += 1;
+                assert_eq!(mat, 2);
+            }
+        }
+        assert!(solid > 20, "no floating solids: {solid}");
     }
 }

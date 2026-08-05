@@ -344,6 +344,39 @@ pub enum GenOpDef {
         /// Amplitude in meters.
         amp: f32,
         octaves: u32,
+        /// Octave shaping: plain fbm, ridged crests, or rounded billows.
+        #[serde(default)]
+        mode: NoiseModeDef,
+    },
+    /// Domain-warp the XZ coordinate later height ops sample (swirled
+    /// coastlines, eroded-looking ridges).
+    WarpXz {
+        #[serde(default)]
+        offset: [f32; 2],
+        scale: f32,
+        /// Warp amplitude in meters.
+        amp: f32,
+        octaves: u32,
+    },
+    /// Anisotropic 3D noise solid: union it in (floating islands, mesas)
+    /// or carve it out (caves, overhangs).
+    Fbm3 {
+        /// Cycles per meter horizontally.
+        scale: f32,
+        /// Vertical-to-horizontal frequency ratio (>1 squashes flat).
+        #[serde(default = "default_one")]
+        y_ratio: f32,
+        octaves: u32,
+        /// Noise iso level the surface sits at (~[-0.5, 0.5]).
+        threshold: f32,
+        /// Meters per unit of noise beyond the threshold.
+        width: f32,
+        #[serde(default)]
+        offset: [f32; 3],
+        #[serde(default)]
+        carve: bool,
+        #[serde(default = "mat_grass")]
+        material: u32,
     },
     /// Constant meters added to the height register.
     HeightOffset { value: f32 },
@@ -440,6 +473,16 @@ pub enum GenOpDef {
     },
 }
 
+/// Octave shaping for `height_fbm`.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum NoiseModeDef {
+    #[default]
+    Fbm,
+    Ridged,
+    Billow,
+}
+
 fn mat_grass() -> u32 {
     1
 }
@@ -465,9 +508,37 @@ impl GenOpDef {
                 scale,
                 amp,
                 octaves,
+                mode,
             } => WorldOp::new(WOP_HEIGHT_FBM)
                 .p0([offset[0], offset[1], scale, amp])
+                .p1([octaves as f32, mode as u32 as f32, 0.0, 0.0]),
+            GenOpDef::WarpXz {
+                offset,
+                scale,
+                amp,
+                octaves,
+            } => WorldOp::new(WOP_WARP_XZ)
+                .p0([scale, amp, offset[0], offset[1]])
                 .p1([octaves as f32, 0.0, 0.0, 0.0]),
+            GenOpDef::Fbm3 {
+                scale,
+                y_ratio,
+                octaves,
+                threshold,
+                width,
+                offset,
+                carve,
+                material,
+            } => WorldOp::new(WOP_FBM3)
+                .material(material)
+                .p0([scale, scale * y_ratio, threshold, width])
+                .p1([
+                    offset[0],
+                    offset[1],
+                    offset[2],
+                    if carve { 1.0 } else { 0.0 },
+                ])
+                .p2([octaves as f32, 0.0, 0.0, 0.0]),
             GenOpDef::HeightOffset { value } => {
                 WorldOp::new(WOP_HEIGHT_OFFSET).p0([value, 0.0, 0.0, 0.0])
             }

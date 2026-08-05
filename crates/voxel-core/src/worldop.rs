@@ -48,6 +48,21 @@ pub const WOP_WATER: u32 = 12;
 /// Meta op (no SDF effect): vegetation grows on the heightfield surface.
 /// `p0.x = density multiplier`. Drives tree/grass streaming.
 pub const WOP_VEGETATION: u32 = 13;
+/// Domain-warp the XZ coordinate that later height ops sample.
+/// `p0 = (cycles_per_m, amplitude_m, offset_x, offset_z)`, `p1.x = octaves`.
+pub const WOP_WARP_XZ: u32 = 14;
+/// Anisotropic 3D FBM solid: union or carve by a noise iso-surface —
+/// caves, overhangs, floating islands. `p0 = (cycles_per_m_xz,
+/// cycles_per_m_y, threshold, width_m)`, `p1 = (offset x, y, z, mode)`
+/// (mode 0 = union, 1 = carve), `p2.x = octaves`.
+pub const WOP_FBM3: u32 = 15;
+
+/// Noise modes for `WOP_HEIGHT_FBM` (`p1.y`).
+pub const NOISE_MODE_FBM: u32 = 0;
+/// Sharp ridges (mountain crests, dune fields).
+pub const NOISE_MODE_RIDGED: u32 = 1;
+/// Rounded billows (rolling hills, cloudy blobs).
+pub const NOISE_MODE_BILLOW: u32 = 2;
 
 /// Skip this op at coarse LODs (voxel size >= the structural cutoff).
 pub const WOP_FLAG_FINE_ONLY: u32 = 1;

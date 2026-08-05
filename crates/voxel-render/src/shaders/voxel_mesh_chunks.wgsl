@@ -342,24 +342,41 @@ fn sfbm2(p: vec2<f32>, base_scale: f32, octaves: i32) -> f32 {
 
 // Sum of the generator program's height ops at coarse detail (finer bands
 // fade out below ~16 m wavelengths, matching CPU impostor seating).
+// Band-limited (~16 m cutoff) FBM with shaping mode, for height-op replay.
+fn coarse_fbm(p: vec2<f32>, base_scale: f32, octaves: i32, mode: u32) -> f32 {
+    var sum = 0.0;
+    var amp = 0.5;
+    var freq = base_scale;
+    for (var o = 0; o < octaves; o++) {
+        let fade = smoothstep(16.0, 32.0, 1.0 / freq);
+        let n = svalue_noise2(p * freq);
+        var v = n - 0.5;
+        if (mode == 1u) {
+            v = 0.5 - abs(2.0 * n - 1.0);
+        } else if (mode == 2u) {
+            v = abs(2.0 * n - 1.0) - 0.5;
+        }
+        sum += amp * fade * v;
+        amp *= 0.5;
+        freq *= 2.0;
+    }
+    return sum;
+}
+
 fn height_coarse(xz: vec2<f32>) -> f32 {
     var h = 0.0;
+    var warp = vec2<f32>(0.0);
     for (var i = 0u; i < prog.count.x; i++) {
         let op = prog.ops[i];
         if (op.head.x == 0u) {
-            var sum = 0.0;
-            var amp = 0.5;
-            var freq = op.p0.z;
-            let octaves = i32(op.p1.x);
-            for (var o = 0; o < octaves; o++) {
-                let fade = smoothstep(16.0, 32.0, 1.0 / freq);
-                sum += amp * fade * (svalue_noise2((xz + op.p0.xy) * freq) - 0.5);
-                amp *= 0.5;
-                freq *= 2.0;
-            }
-            h += sum * op.p0.w;
+            h += coarse_fbm(xz + warp + op.p0.xy, op.p0.z, i32(op.p1.x), u32(op.p1.y)) * op.p0.w;
         } else if (op.head.x == 1u) {
             h += op.p0.x;
+        } else if (op.head.x == 14u) {
+            let q = xz + op.p0.zw;
+            let oct = i32(op.p1.x);
+            warp.x += coarse_fbm(q, op.p0.x, oct, 0u) * op.p0.y;
+            warp.y += coarse_fbm(q + vec2<f32>(713.0, -337.0), op.p0.x, oct, 0u) * op.p0.y;
         }
     }
     return h;

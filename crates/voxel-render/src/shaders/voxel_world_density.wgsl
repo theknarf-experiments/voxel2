@@ -110,17 +110,54 @@ fn band_fade(wavelength: f32, voxel_size: f32) -> f32 {
     return smoothstep(2.0 * voxel_size, 4.0 * voxel_size, wavelength);
 }
 
-fn fbm(p: vec2<f32>, base_scale: f32, octaves: i32, voxel_size: f32) -> f32 {
+// FBM with a per-octave shaping mode: 0 plain, 1 ridged (sharp crests),
+// 2 billow (rounded mounds).
+fn fbm(p: vec2<f32>, base_scale: f32, octaves: i32, voxel_size: f32, mode: u32) -> f32 {
     var sum = 0.0;
     var amp = 0.5;
     var freq = base_scale;
     for (var i = 0; i < octaves; i++) {
         let fade = band_fade(1.0 / freq, voxel_size);
-        sum += amp * fade * (value_noise(p * freq) - 0.5);
+        let n = value_noise(p * freq);
+        var v = n - 0.5;
+        if (mode == 1u) {
+            v = 0.5 - abs(2.0 * n - 1.0);
+        } else if (mode == 2u) {
+            v = abs(2.0 * n - 1.0) - 0.5;
+        }
+        sum += amp * fade * v;
         amp *= 0.5;
         freq *= 2.0;
     }
     return sum; // ~[-0.5, 0.5]
+}
+
+fn value_noise3(p: vec3<f32>) -> f32 {
+    let i = vec3<i32>(floor(p));
+    let f = fract(p);
+    let u = f * f * f * (f * (f * 6.0 - 15.0) + 10.0);
+    let x00 = mix(hash3(i), hash3(i + vec3<i32>(1, 0, 0)), u.x);
+    let x10 = mix(hash3(i + vec3<i32>(0, 1, 0)), hash3(i + vec3<i32>(1, 1, 0)), u.x);
+    let x01 = mix(hash3(i + vec3<i32>(0, 0, 1)), hash3(i + vec3<i32>(1, 0, 1)), u.x);
+    let x11 = mix(hash3(i + vec3<i32>(0, 1, 1)), hash3(i + vec3<i32>(1, 1, 1)), u.x);
+    return mix(mix(x00, x10, u.y), mix(x01, x11, u.y), u.z);
+}
+
+// Anisotropic band-limited 3D FBM (~[-0.5, 0.5]); band fade keys on the
+// horizontal frequency.
+fn fbm3(p: vec3<f32>, freq_xz: f32, freq_y: f32, octaves: i32, voxel_size: f32) -> f32 {
+    var sum = 0.0;
+    var amp = 0.5;
+    var mul = 1.0;
+    for (var i = 0; i < octaves; i++) {
+        let fade = band_fade(1.0 / (freq_xz * mul), voxel_size);
+        sum += amp * fade
+            * (value_noise3(vec3<f32>(p.x * freq_xz * mul, p.y * freq_y * mul, p.z * freq_xz * mul))
+                - 0.5);
+        amp *= 0.5;
+        mul *= 2.0;
+    }
+    return sum;
 }
 
 fn sd_box(p: vec3<f32>, b: vec3<f32>) -> f32 {
@@ -145,6 +182,7 @@ fn eval_program(p: vec3<f32>, vs: f32) -> WorldSample {
     var sxz = vec2<f32>(0.0);
     var sr = 0.0;
     var shaft = BIG;
+    var warp = vec2<f32>(0.0);
     let pxz = p.xz;
 
     for (var i = 0u; i < prog.count.x; i++) {
@@ -153,10 +191,26 @@ fn eval_program(p: vec3<f32>, vs: f32) -> WorldSample {
         if (!coarse && (op.head.y & 2u) != 0u) { continue; }
         switch op.head.x {
             case 0u: { // height fbm band
-                h += fbm(pxz + op.p0.xy, op.p0.z, i32(op.p1.x), vs) * op.p0.w;
+                h += fbm(pxz + warp + op.p0.xy, op.p0.z, i32(op.p1.x), vs, u32(op.p1.y)) * op.p0.w;
             }
             case 1u: { // height offset
                 h += op.p0.x;
+            }
+            case 14u: { // domain warp for later height ops
+                let q = pxz + op.p0.zw;
+                let oct = i32(op.p1.x);
+                warp.x += fbm(q, op.p0.x, oct, vs, 0u) * op.p0.y;
+                warp.y += fbm(q + vec2<f32>(713.0, -337.0), op.p0.x, oct, vs, 0u) * op.p0.y;
+            }
+            case 15u: { // 3D fbm solid: union or carve
+                let q = p + op.p1.xyz;
+                let n = fbm3(q, op.p0.x, op.p0.y, i32(op.p2.x), vs);
+                let sd = (op.p0.z - n) * op.p0.w;
+                if (op.p1.w < 0.5) {
+                    if (sd < d) { d = sd; mat = op.head.z; }
+                } else {
+                    d = max(d, -sd);
+                }
             }
             case 2u: { // height surface
                 let nd = p.y - h;
