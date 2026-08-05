@@ -125,10 +125,13 @@ impl Plugin for LevelPlugin {
     }
 }
 
+/// A boxed source of planning ops for a world-space box.
+type OpsSource = Arc<dyn Fn(Vec3, Vec3) -> Vec<CsgOp> + Send + Sync>;
+
 /// Compose the named planning providers into one op source.
 fn build_ops_provider(level: &LevelDef) -> ChunkOpsProvider {
     let seed = level.seed;
-    let mut sources: Vec<Arc<dyn Fn(Vec3, Vec3) -> Vec<CsgOp> + Send + Sync>> = Vec::new();
+    let mut sources: Vec<OpsSource> = Vec::new();
     for name in &level.ops {
         match name.as_str() {
             "ruins" => sources.push(Arc::new(move |min, max| {
