@@ -24,9 +24,14 @@ cargo run -p scout --release                      # offline: scan for scenic loc
 ```
 
 A level file describes the world kind, seed, LOD configuration, lighting,
-camera, feature toggles (water/vegetation), and which named planning-op
-providers author structures ("ruins", "roads", "pockets"). See
-`levels/*.json` and `voxel_engine::level::LevelDef`.
+camera, feature toggles (water/vegetation), and parameterized planning-op
+providers that author structures (ruins site chance, road reach, pocket
+density, …). See `levels/*.json` and `voxel_engine::level::LevelDef`.
+
+**Live editing**: the level file is watched while running. Lighting,
+colors, and camera tuning apply instantly; changes to the seed, providers,
+or LOD topology rebuild the streamed world in place. World kind and
+feature toggles still need a restart.
 
 Flycam: mouse look (hold right button), WASD + QE, shift to run, scroll for
 speed. Env vars:

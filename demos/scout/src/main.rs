@@ -1,6 +1,6 @@
 // Scout: find a road midpoint to screenshot.
 fn main() {
-    let mgr = voxel_worldgen::roads::planning_layers(0);
+    let mgr = voxel_worldgen::roads::planning_layers(0, 0.32, 700.0);
     let bounds = voxel_layers::IAabb::new(
         glam::IVec3::new(-30000, 0, -42000),
         glam::IVec3::new(-22000, 1, -34000),

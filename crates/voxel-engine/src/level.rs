@@ -11,7 +11,7 @@ use voxel_core::csg::CsgOp;
 use voxel_core::ChunkKey;
 use voxel_render::WorldKind;
 
-use crate::streaming::ChunkOpsProvider;
+use crate::streaming::{ChunkOpsProvider, StreamingRebuild};
 use crate::{LodConfig, VoxelEnginePlugin};
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
@@ -73,10 +73,53 @@ pub struct LevelDef {
     pub camera: CameraDef,
     #[serde(default)]
     pub features: FeaturesDef,
-    /// Named planning-op providers, composed in order. Built-ins:
-    /// "ruins", "roads" (planet); "pockets" (megastructure).
+    /// Planning-op providers, composed in order.
     #[serde(default)]
-    pub ops: Vec<String>,
+    pub ops: Vec<OpsDef>,
+}
+
+/// A parameterized planning-op provider.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum OpsDef {
+    /// Scattered ruin sites (per-256 m-cell probability).
+    Ruins {
+        #[serde(default = "default_ruin_chance")]
+        chance: f32,
+    },
+    /// Roads connecting ruin sites (max connection distance, meters).
+    Roads {
+        #[serde(default = "default_ruin_chance")]
+        site_chance: f32,
+        #[serde(default = "default_road_reach")]
+        reach: f32,
+    },
+    /// Megastructure habitation pockets (per-cell probability).
+    Pockets {
+        #[serde(default = "default_pocket_chance")]
+        chance: f32,
+    },
+}
+
+fn default_ruin_chance() -> f32 {
+    0.32
+}
+fn default_road_reach() -> f32 {
+    700.0
+}
+fn default_pocket_chance() -> f32 {
+    0.45
+}
+
+impl LevelDef {
+    /// The pockets chance, if a pockets provider is configured (used by
+    /// walk-mode collision to mirror the GPU world).
+    pub fn pocket_chance(&self) -> Option<f32> {
+        self.ops.iter().find_map(|o| match o {
+            OpsDef::Pockets { chance } => Some(*chance),
+            _ => None,
+        })
+    }
 }
 
 impl LevelDef {
@@ -94,13 +137,40 @@ impl LevelDef {
 
 /// Presents a [`LevelDef`]: engine plugins, lighting, camera, planning
 /// providers, autopilot/walk controls — everything the old hardcoded demos
-/// did, from data.
-pub struct LevelPlugin(pub LevelDef);
+/// did, from data. With a `source` path, the file is watched and edits
+/// hot-reload: lighting and camera apply instantly; generation parameter
+/// changes rebuild the streamed world in place.
+pub struct LevelPlugin {
+    pub def: LevelDef,
+    pub source: Option<std::path::PathBuf>,
+}
+
+/// Watch state for level hot-reload.
+#[derive(Resource)]
+struct LevelSource {
+    path: std::path::PathBuf,
+    mtime: Option<std::time::SystemTime>,
+    poll: Timer,
+}
+
+/// Marker for the level's sun light (replaced on reload).
+#[derive(Component)]
+struct LevelSun;
 
 impl Plugin for LevelPlugin {
     fn build(&self, app: &mut App) {
-        let level = self.0.clone();
+        let level = self.def.clone();
         let c = level.clear_color;
+
+        if let Some(path) = &self.source {
+            let mtime = std::fs::metadata(path).and_then(|m| m.modified()).ok();
+            app.insert_resource(LevelSource {
+                path: path.clone(),
+                mtime,
+                poll: Timer::from_seconds(0.5, TimerMode::Repeating),
+            })
+            .add_systems(Update, reload_level);
+        }
 
         app.insert_resource(ClearColor(Color::srgb(c[0], c[1], c[2])))
             .insert_resource(LodConfig {
@@ -132,21 +202,24 @@ type OpsSource = Arc<dyn Fn(Vec3, Vec3) -> Vec<CsgOp> + Send + Sync>;
 fn build_ops_provider(level: &LevelDef) -> ChunkOpsProvider {
     let seed = level.seed;
     let mut sources: Vec<OpsSource> = Vec::new();
-    for name in &level.ops {
-        match name.as_str() {
-            "ruins" => sources.push(Arc::new(move |min, max| {
-                voxel_worldgen::ruins::ruins_ops(seed, min, max)
+    for def in &level.ops {
+        match *def {
+            OpsDef::Ruins { chance } => sources.push(Arc::new(move |min, max| {
+                voxel_worldgen::ruins::ruins_ops(seed, chance, min, max)
             })),
-            "roads" => {
-                let layers = Arc::new(voxel_worldgen::roads::planning_layers(seed));
+            OpsDef::Roads { site_chance, reach } => {
+                let layers = Arc::new(voxel_worldgen::roads::planning_layers(
+                    seed,
+                    site_chance,
+                    reach,
+                ));
                 sources.push(Arc::new(move |min, max| {
                     voxel_worldgen::roads::road_ops(&layers, min, max)
                 }));
             }
-            "pockets" => sources.push(Arc::new(move |min, max| {
-                voxel_worldgen::mega::pockets_ops(seed, min, max)
+            OpsDef::Pockets { chance } => sources.push(Arc::new(move |min, max| {
+                voxel_worldgen::mega::pockets_ops(seed, chance, min, max)
             })),
-            other => warn!("level '{}': unknown ops provider \"{other}\"", level.name),
         }
     }
     if sources.is_empty() {
@@ -170,6 +243,7 @@ fn setup_level(mut commands: Commands, level: Res<LevelDef>) {
     if let Some(sun) = &level.sun {
         let dir = Vec3::from(sun.direction).normalize();
         commands.spawn((
+            LevelSun,
             DirectionalLight {
                 illuminance: sun.illuminance,
                 ..default()
@@ -214,6 +288,98 @@ fn setup_level(mut commands: Commands, level: Res<LevelDef>) {
     ));
 }
 
+/// Poll the level file; apply edits live. Presentation fields (colors,
+/// lights, camera speeds, split/merge tuning) apply directly; changes to
+/// seed/ops/LOD topology rebuild the streamed world; world kind and
+/// feature toggles need a restart.
+#[allow(clippy::too_many_arguments)]
+fn reload_level(
+    mut commands: Commands,
+    time: Res<Time>,
+    mut source: ResMut<LevelSource>,
+    mut level: ResMut<LevelDef>,
+    mut clear: ResMut<ClearColor>,
+    mut lod: ResMut<LodConfig>,
+    mut rebuild: ResMut<StreamingRebuild>,
+    mut cameras: Query<&mut voxel_debug::FreeCamera>,
+    suns: Query<Entity, With<LevelSun>>,
+) {
+    if !source.poll.tick(time.delta()).just_finished() {
+        return;
+    }
+    let Ok(mtime) = std::fs::metadata(&source.path).and_then(|m| m.modified()) else {
+        return;
+    };
+    if source.mtime == Some(mtime) {
+        return;
+    }
+    source.mtime = Some(mtime);
+
+    let new = match std::fs::read_to_string(&source.path)
+        .map_err(|e| e.to_string())
+        .and_then(|json| LevelDef::from_json(&json).map_err(|e| e.to_string()))
+    {
+        Ok(new) => new,
+        Err(e) => {
+            warn!("level reload: {e}");
+            return;
+        }
+    };
+
+    // Presentation: apply directly.
+    let c = new.clear_color;
+    clear.0 = Color::srgb(c[0], c[1], c[2]);
+    let a = &new.ambient;
+    commands.insert_resource(GlobalAmbientLight {
+        color: Color::srgb(a.color[0], a.color[1], a.color[2]),
+        brightness: a.brightness,
+        ..default()
+    });
+    for sun in &suns {
+        commands.entity(sun).despawn();
+    }
+    if let Some(sun) = &new.sun {
+        let dir = Vec3::from(sun.direction).normalize();
+        commands.spawn((
+            LevelSun,
+            DirectionalLight {
+                illuminance: sun.illuminance,
+                ..default()
+            },
+            Transform::from_translation(Vec3::ZERO).looking_to(-dir, Vec3::Y),
+        ));
+    }
+    for mut cam in &mut cameras {
+        cam.walk_speed = new.camera.walk_speed;
+        cam.run_speed = new.camera.run_speed;
+    }
+    lod.split_k = new.lod.split_k;
+    lod.merge_k = new.lod.merge_k;
+    info!("level reload: presentation applied");
+
+    // Generation-affecting changes: rebuild the streamed world.
+    let regen = new.seed != level.seed
+        || new.ops != level.ops
+        || new.lod.max_level != level.lod.max_level
+        || new.lod.top_radius != level.lod.top_radius
+        || new.lod.top_y != level.lod.top_y;
+    if regen {
+        lod.max_level = new.lod.max_level;
+        lod.top_radius = new.lod.top_radius;
+        lod.top_y = new.lod.top_y;
+        commands.insert_resource(build_ops_provider(&new));
+        rebuild.0 = true;
+        info!("level reload: generation changed — rebuilding world");
+    }
+    if new.world != level.world
+        || new.features.water != level.features.water
+        || new.features.vegetation != level.features.vegetation
+    {
+        warn!("level reload: world/features changed — restart required");
+    }
+    *level = new;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -228,13 +394,14 @@ mod tests {
         let planet = LevelDef::from_json(&shipped("planet.json")).unwrap();
         assert_eq!(planet.world, WorldDef::Planet);
         assert!(planet.features.water && planet.features.vegetation);
-        assert_eq!(planet.ops, vec!["ruins", "roads"]);
+        assert!(matches!(planet.ops[0], OpsDef::Ruins { .. }));
+        assert!(matches!(planet.ops[1], OpsDef::Roads { .. }));
         assert!(planet.sun.is_some());
 
         let mega = LevelDef::from_json(&shipped("megastructure.json")).unwrap();
         assert_eq!(mega.world, WorldDef::Megastructure);
         assert!(!mega.features.water);
-        assert_eq!(mega.ops, vec!["pockets"]);
+        assert!(matches!(mega.ops[0], OpsDef::Pockets { .. }));
         assert!(mega.sun.is_none());
     }
 
@@ -290,9 +457,11 @@ fn walk_mode(
             const EYE: f32 = 1.6;
             let seed = level.seed;
 
+            let pocket_chance = level.pocket_chance().unwrap_or(0.0);
             for mut t in &mut cameras {
                 let local_ops = pockets_ops(
                     seed,
+                    pocket_chance,
                     t.translation - Vec3::splat(30.0),
                     t.translation + Vec3::splat(30.0),
                 );

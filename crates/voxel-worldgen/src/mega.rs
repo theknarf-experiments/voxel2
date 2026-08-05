@@ -143,14 +143,14 @@ const POCKET_SEED: u64 = 0xB10C;
 /// Planned features overlapping `[min, max]`: hollow room shells with
 /// doorways on floor tops, and vertical light wells cut through several
 /// levels. Shared by the GPU density pass and CPU collision.
-pub fn pockets_ops(seed: u64, min: Vec3, max: Vec3) -> Vec<CsgOp> {
+pub fn pockets_ops(seed: u64, chance: f32, min: Vec3, max: Vec3) -> Vec<CsgOp> {
     let lo = |v: f32, c: f32| ((v - 20.0) / c).floor() as i32;
     let hi = |v: f32, c: f32| ((v + 20.0) / c).floor() as i32;
     let mut out = Vec::new();
     for cy in lo(min.y, POCKET_CELL_Y)..=hi(max.y, POCKET_CELL_Y) {
         for cz in lo(min.z, POCKET_CELL_XZ)..=hi(max.z, POCKET_CELL_XZ) {
             for cx in lo(min.x, POCKET_CELL_XZ)..=hi(max.x, POCKET_CELL_XZ) {
-                pocket_cell_ops(seed, cx, cy, cz, &mut out);
+                pocket_cell_ops(seed, chance, cx, cy, cz, &mut out);
             }
         }
     }
@@ -158,12 +158,15 @@ pub fn pockets_ops(seed: u64, min: Vec3, max: Vec3) -> Vec<CsgOp> {
     out
 }
 
-fn pocket_cell_ops(seed: u64, cx: i32, cy: i32, cz: i32, out: &mut Vec<CsgOp>) {
+fn pocket_cell_ops(seed: u64, chance: f32, cx: i32, cy: i32, cz: i32, out: &mut Vec<CsgOp>) {
     let mut rng = Rng::new(chunk_seed(POCKET_SEED ^ seed, 0x1, IVec3::new(cx, cy, cz)));
     let roll = rng.next_f32();
-    if roll > 0.45 {
+    if roll > chance {
         return;
     }
+    // Sub-features keyed to the original scale so chance only adds/removes
+    // pockets rather than reshaping survivors.
+    let roll = roll * 0.45 / chance.max(1.0e-6);
 
     let x = cx as f32 * POCKET_CELL_XZ + 24.0 + rng.next_f32() * (POCKET_CELL_XZ - 48.0);
     let z = cz as f32 * POCKET_CELL_XZ + 24.0 + rng.next_f32() * (POCKET_CELL_XZ - 48.0);
@@ -284,8 +287,8 @@ mod tests {
     fn pockets_are_deterministic_and_culled() {
         let min = Vec3::new(-500.0, -100.0, -500.0);
         let max = Vec3::new(500.0, 150.0, 500.0);
-        let a = pockets_ops(0, min, max);
-        let b = pockets_ops(0, min, max);
+        let a = pockets_ops(0, 0.45, min, max);
+        let b = pockets_ops(0, 0.45, min, max);
         assert_eq!(a, b);
         assert!(!a.is_empty(), "no pockets in 1 km cube");
         for op in &a {

@@ -34,6 +34,12 @@ fn main() {
             }),
             ..default()
         }))
-        .add_plugins((VoxelDebugPlugin, LevelPlugin(level)))
+        .add_plugins((
+            VoxelDebugPlugin,
+            LevelPlugin {
+                def: level,
+                source: Some(path.into()),
+            },
+        ))
         .run();
 }

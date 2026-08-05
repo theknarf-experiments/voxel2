@@ -21,6 +21,7 @@ const ROAD_REACH_M: f32 = 700.0;
 
 pub struct SitesLayer {
     pub seed: u64,
+    pub site_chance: f32,
 }
 
 pub struct SitesChunk {
@@ -37,12 +38,14 @@ impl Layer for SitesLayer {
 
     fn generate(&self, _ctx: &LayerCtx<'_, Self>, coord: IVec3) -> SitesChunk {
         SitesChunk {
-            site: site_center(self.seed, coord.x, coord.z),
+            site: site_center(self.seed, self.site_chance, coord.x, coord.z),
         }
     }
 }
 
-pub struct RoadsLayer;
+pub struct RoadsLayer {
+    pub reach: f32,
+}
 
 pub struct RoadsChunk {
     /// Site-to-site connections owned by this chunk (midpoint rule).
@@ -80,7 +83,7 @@ impl Layer for RoadsLayer {
         for &a in &sites {
             let Some(&b) = sites
                 .iter()
-                .filter(|&&b| b != a && a.distance(b) < ROAD_REACH_M)
+                .filter(|&&b| b != a && a.distance(b) < self.reach)
                 .min_by(|x, y| a.distance_squared(**x).total_cmp(&a.distance_squared(**y)))
             else {
                 continue;
@@ -101,10 +104,13 @@ impl Layer for RoadsLayer {
 }
 
 /// Build the standard planning stack.
-pub fn planning_layers(world_seed: u64) -> LayerManager {
+pub fn planning_layers(world_seed: u64, site_chance: f32, road_reach: f32) -> LayerManager {
     let mut mgr = LayerManager::new(world_seed);
-    mgr.register(SitesLayer { seed: world_seed });
-    mgr.register(RoadsLayer);
+    mgr.register(SitesLayer {
+        seed: world_seed,
+        site_chance,
+    });
+    mgr.register(RoadsLayer { reach: road_reach });
     mgr
 }
 
@@ -154,7 +160,7 @@ mod tests {
 
     #[test]
     fn roads_connect_real_sites_deterministically() {
-        let mgr = planning_layers(0);
+        let mgr = planning_layers(0, 0.32, 700.0);
         let bounds = IAabb::new(IVec3::new(-6000, 0, -6000), IVec3::new(6000, 1, 6000));
         let mut total = 0;
         let mut pairs_a = Vec::new();
@@ -165,15 +171,15 @@ mod tests {
                 // Both endpoints are genuine sites.
                 let ca = (a / CELL_M as f32).floor();
                 let cb = (b / CELL_M as f32).floor();
-                assert_eq!(site_center(0, ca.x as i32, ca.y as i32), Some(a));
-                assert_eq!(site_center(0, cb.x as i32, cb.y as i32), Some(b));
+                assert_eq!(site_center(0, 0.32, ca.x as i32, ca.y as i32), Some(a));
+                assert_eq!(site_center(0, 0.32, cb.x as i32, cb.y as i32), Some(b));
                 assert!(a.distance(b) < ROAD_REACH_M);
             }
         }
         assert!(total > 0, "no roads in 12 km x 12 km");
 
         // Regenerating from scratch matches.
-        let mgr2 = planning_layers(0);
+        let mgr2 = planning_layers(0, 0.32, 700.0);
         let mut pairs_b = Vec::new();
         for (coord, chunk) in mgr2.get::<RoadsLayer>(bounds).iter() {
             for &(a, b) in &chunk.roads {
@@ -185,7 +191,7 @@ mod tests {
 
     #[test]
     fn road_ops_follow_terrain() {
-        let mgr = planning_layers(0);
+        let mgr = planning_layers(0, 0.32, 700.0);
         let ops = road_ops(
             &mgr,
             Vec3::new(-6000.0, -100.0, -6000.0),

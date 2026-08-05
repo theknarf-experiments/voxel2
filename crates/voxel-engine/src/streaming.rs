@@ -72,6 +72,12 @@ impl Default for LodConfig {
     }
 }
 
+/// Set to request a full streaming rebuild (e.g. after a hot-reloaded
+/// level changes generation parameters): every chunk is freed and the tree
+/// restarts from the top-level ring with the current providers.
+#[derive(Resource, Default)]
+pub struct StreamingRebuild(pub bool);
+
 #[derive(Resource, Default)]
 struct LodTree {
     /// Currently-shown chunks (some may still be generating right after
@@ -93,6 +99,7 @@ impl Plugin for VoxelStreamingPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<LodConfig>()
             .init_resource::<ChunkOpsProvider>()
+            .init_resource::<StreamingRebuild>()
             .init_resource::<LodTree>()
             .add_systems(Update, (lod_tick, hud_stats));
     }
@@ -119,6 +126,7 @@ fn lod_tick(
     mut tree: ResMut<LodTree>,
     queue: Res<ChunkCommandQueue>,
     ops_provider: Res<ChunkOpsProvider>,
+    mut rebuild: ResMut<StreamingRebuild>,
     ready_rx: Res<ChunkReadyChannel>,
     cameras: Query<&Transform, With<Camera3d>>,
 ) {
@@ -127,6 +135,21 @@ fn lod_tick(
     };
     let camera = camera.translation.as_dvec3();
     let tree = &mut *tree;
+
+    // 0. Full rebuild: free every requested chunk and restart from the top
+    //    ring (used when generation parameters hot-reload).
+    if rebuild.0 {
+        rebuild.0 = false;
+        let mut requested: HashSet<ChunkKey> = tree.leaves.iter().copied().collect();
+        for children in tree.splitting.values() {
+            requested.extend(children.iter().copied());
+        }
+        requested.extend(tree.merging.keys().copied());
+        for key in requested {
+            queue.push(ChunkCommand::Free(key));
+        }
+        *tree = LodTree::default();
+    }
 
     // 1. Absorb readiness notifications.
     for key in ready_rx.rx.try_iter() {

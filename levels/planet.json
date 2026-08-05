@@ -2,11 +2,64 @@
   "name": "Planet",
   "world": "planet",
   "seed": 0,
-  "clear_color": [0.65, 0.77, 0.94],
-  "ambient": { "color": [0.7, 0.8, 1.0], "brightness": 400.0 },
-  "sun": { "direction": [0.55, 0.5, 0.32], "illuminance": 25000.0 },
-  "lod": { "max_level": 8, "top_radius": 3, "top_y": [-1, 0], "split_k": 2.5, "merge_k": 3.0 },
-  "camera": { "start": [-27570.0, 80.0, -36770.0], "look": [0.4, -0.35, 0.4], "walk_speed": 60.0, "run_speed": 600.0 },
-  "features": { "water": true, "vegetation": true },
-  "ops": ["ruins", "roads"]
+  "clear_color": [
+    0.65,
+    0.77,
+    0.94
+  ],
+  "ambient": {
+    "color": [
+      0.7,
+      0.8,
+      1.0
+    ],
+    "brightness": 400.0
+  },
+  "sun": {
+    "direction": [
+      0.55,
+      0.5,
+      0.32
+    ],
+    "illuminance": 25000.0
+  },
+  "lod": {
+    "max_level": 8,
+    "top_radius": 3,
+    "top_y": [
+      -1,
+      0
+    ],
+    "split_k": 2.5,
+    "merge_k": 3.0
+  },
+  "camera": {
+    "start": [
+      -27570.0,
+      80.0,
+      -36770.0
+    ],
+    "look": [
+      0.4,
+      -0.35,
+      0.4
+    ],
+    "walk_speed": 60.0,
+    "run_speed": 600.0
+  },
+  "features": {
+    "water": true,
+    "vegetation": true
+  },
+  "ops": [
+    {
+      "type": "ruins",
+      "chance": 0.32
+    },
+    {
+      "type": "roads",
+      "site_chance": 0.32,
+      "reach": 700.0
+    }
+  ]
 }
