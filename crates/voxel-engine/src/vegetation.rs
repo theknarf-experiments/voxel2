@@ -679,9 +679,11 @@ fn tile_trees(tile: IVec2, trees: &crate::level::TreesDef) -> Vec<TreeInstance> 
         let x = origin.x + rng.next_f32() * TILE_M;
         let z = origin.y + rng.next_f32() * TILE_M;
         let xz = Vec2::new(x, z);
-        let y = terrain_height(xz, 1.0);
+        // Seat on the band-limited surface mid-LOD terrain shows across the
+        // detail radius (tiles spawn at the rim, where the ground is ~L2).
+        let y = terrain_height(xz, 4.0);
         if !(trees.altitude[0]..trees.altitude[1]).contains(&y)
-            || terrain_up(xz, 1.0) < trees.min_up
+            || terrain_up(xz, 4.0) < trees.min_up
         {
             continue;
         }
@@ -715,7 +717,7 @@ fn tile_trees(tile: IVec2, trees: &crate::level::TreesDef) -> Vec<TreeInstance> 
         let sr = trees.species[species].scale;
         let scale = sr[0] + rng.next_f32() * (sr[1] - sr[0]);
         out.push(TreeInstance {
-            pos: Vec3::new(x, y - 0.15, z),
+            pos: Vec3::new(x, y - 0.45, z),
             yaw,
             scale,
             species,
@@ -785,8 +787,8 @@ fn spawn_tile(
         let x = origin.x + rng.next_f32() * TILE_M;
         let z = origin.y + rng.next_f32() * TILE_M;
         let xz = Vec2::new(x, z);
-        let y = terrain_height(xz, 1.0);
-        let up = terrain_up(xz, 1.0);
+        let y = terrain_height(xz, 4.0);
+        let up = terrain_up(xz, 4.0);
         if !(b.altitude[0]..b.altitude[1]).contains(&y)
             || up < b.min_up
             || rng.next_f32() >= b.chance

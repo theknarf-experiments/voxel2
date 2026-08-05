@@ -118,8 +118,10 @@ fn snap_to_parity(c: vec3<i32>) -> bool {
 
 // Seam-aware quad ownership. Default: edge-origin in [0, 32)³. Toward a
 // coarser +face the chunk additionally owns the seam-plane quads (origin
-// 32 on that axis); toward a finer -face it cedes its plane quads (origin
-// 0) to the finer neighbors, which mesh that plane at their resolution.
+// 32 on that axis). Nothing is ever ceded: coverage is a union of
+// unilateral contributions (holes are impossible by construction); where
+// a finer neighbor also meshes a seam plane, the parity snap makes the
+// two copies exactly coplanar, so overlap is invisible.
 fn owns_quad(c: vec3<i32>, axis: u32) -> bool {
     for (var a = 0u; a < 3u; a++) {
         let ca = c[a];
@@ -127,9 +129,6 @@ fn owns_quad(c: vec3<i32>, axis: u32) -> bool {
             return false;
         }
         if (ca == 32 && !(axis != a && face_code(2u * a) == 1u)) {
-            return false;
-        }
-        if (ca == 0 && axis != a && face_code(2u * a + 1u) == 2u) {
             return false;
         }
     }
