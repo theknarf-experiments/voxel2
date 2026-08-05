@@ -18,6 +18,9 @@ pub struct WaterSeg {
     pub b: Vec2,
     pub half_w: f32,
     pub levels: [f32; 2],
+    /// Level material id: the renderer takes the surface color from the
+    /// level's material table (water look is level data).
+    pub material: u32,
 }
 
 /// A point of interest emitted by the stack (dungeon entrance, bridge,
@@ -498,14 +501,13 @@ impl Layer for EmitPatches {
                             let t = i as f32 / n as f32;
                             let half_w = width[0] + (width[1] - width[0]) * t;
                             let seg_levels = [levels[i], levels[i + 1]];
-                            water_segment_ops(
-                                seg[0], seg[1], half_w, seg_levels, *material, &mut out.ops,
-                            );
+                            water_segment_ops(seg[0], seg[1], half_w, seg_levels, &mut out.ops);
                             out.water.push(WaterSeg {
                                 a: seg[0],
                                 b: seg[1],
                                 half_w,
                                 levels: seg_levels,
+                                material: *material,
                             });
                             out.clearance.push([seg[0], seg[1]]);
                         }
@@ -589,16 +591,10 @@ fn slab_segment_ops(
     }
 }
 
-/// Bed notch + water ribbon along one course segment, flow-aligned with
-/// interpolated (monotone) water levels — the rivers emission.
-fn water_segment_ops(
-    a: Vec2,
-    b: Vec2,
-    half_w: f32,
-    levels: [f32; 2],
-    material: u32,
-    out: &mut Vec<CsgOp>,
-) {
+/// Bed notch along one course segment, flow-aligned with interpolated
+/// (monotone) water levels. The water surface itself is NOT baked into
+/// the SDF — the renderer draws it from the emitted [`WaterSeg`]s.
+fn water_segment_ops(a: Vec2, b: Vec2, half_w: f32, levels: [f32; 2], out: &mut Vec<CsgOp>) {
     let len = a.distance(b);
     if len < 0.01 {
         return;
@@ -617,13 +613,6 @@ fn water_segment_ops(
             -yaw,
             0,
             true,
-        ));
-        out.push(CsgOp::boxy(
-            Vec3::new(p.x, level - 0.8, p.y),
-            Vec3::new(sub * 0.7 + 0.6, 1.0, half_w),
-            -yaw,
-            material,
-            false,
         ));
     }
 }
@@ -1069,9 +1058,15 @@ mod tests {
         assert!(!rivers.water.is_empty(), "no water segments");
         assert!(!rivers.ops.is_empty(), "no river bed ops");
         assert!(!rivers.clearance.is_empty(), "no river clearance");
+        // The surface is drawn from segments, never baked into the SDF:
+        // every bed op is a cut.
+        for op in &rivers.ops {
+            assert_eq!(op.kind & 1, 1, "river emitted an additive op");
+        }
         for w in &rivers.water {
             assert!(w.half_w >= 2.0 && w.half_w <= 7.0);
             assert!(w.levels[1] <= w.levels[0] + 1e-4, "water flows uphill");
+            assert_eq!(w.material, 4);
         }
         let caves = patches_in(&mgr, "caves", min, max);
         assert!(!caves.ops.is_empty(), "no cave cuts");

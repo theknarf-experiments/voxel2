@@ -22,6 +22,7 @@ impl Plugin for VoxelDebugPlugin {
     fn build(&self, app: &mut App) {
         app.add_plugins((FreeCameraPlugin, FrameTimeDiagnosticsPlugin::default()))
             .add_systems(Startup, spawn_hud)
+            .init_resource::<ScreenshotRequest>()
             .add_systems(Update, (update_hud, auto_screenshot, dump_camera));
     }
 }
@@ -32,6 +33,11 @@ struct ScreenshotTarget {
     image: Handle<Image>,
     camera: Entity,
 }
+
+/// One-shot screenshot requests (paths), served by the same offscreen
+/// mirror as `VOXEL_SCREENSHOT` — remote tooling pushes here.
+#[derive(Resource, Default)]
+pub struct ScreenshotRequest(pub Vec<String>);
 
 /// `VOXEL_SCREENSHOT=path[,interval_secs]`: periodically dump the rendered
 /// frame to `path` (default every 10 s, overwriting). Renders through a
@@ -45,17 +51,15 @@ fn auto_screenshot(
     target: Option<Res<ScreenshotTarget>>,
     main_cam: Query<&Transform, (With<FreeCamera>, With<Camera3d>)>,
     mut mirror_cam: Query<&mut Transform, (Without<FreeCamera>, With<Camera3d>)>,
+    mut requests: ResMut<ScreenshotRequest>,
     mut next_at: Local<Option<f32>>,
 ) {
     use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat, TextureUsages};
     use bevy::render::view::window::screenshot::{save_to_disk, Screenshot};
-    let Ok(spec) = std::env::var("VOXEL_SCREENSHOT") else {
+    let spec = std::env::var("VOXEL_SCREENSHOT").ok();
+    if spec.is_none() && requests.0.is_empty() && target.is_none() {
         return;
-    };
-    let (path, interval): (String, f32) = match spec.split_once(',') {
-        Some((p, secs)) => (p.to_string(), secs.trim().parse().unwrap_or(10.0)),
-        None => (spec, 10.0),
-    };
+    }
 
     // Lazily create the offscreen target + mirror camera.
     let Some(target) = target else {
@@ -95,6 +99,21 @@ fn auto_screenshot(
         *mirror = *main;
     }
 
+    // One-shot requests from remote tooling.
+    for path in requests.0.drain(..) {
+        commands
+            .spawn(Screenshot::image(target.image.clone()))
+            .observe(save_to_disk(path));
+    }
+
+    // Periodic env-driven dump.
+    let Some(spec) = spec else {
+        return;
+    };
+    let (path, interval): (String, f32) = match spec.split_once(',') {
+        Some((p, secs)) => (p.to_string(), secs.trim().parse().unwrap_or(10.0)),
+        None => (spec, 10.0),
+    };
     let now = time.elapsed_secs();
     let due = next_at.get_or_insert(interval.min(5.0));
     if now < *due {

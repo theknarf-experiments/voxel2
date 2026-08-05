@@ -2,8 +2,10 @@
 //! budgets, edit application, and persistence.
 
 pub mod level;
+pub mod remote;
 pub mod streaming;
 pub mod vegetation;
+pub mod water_mesh;
 
 use bevy::prelude::*;
 

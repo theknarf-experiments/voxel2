@@ -1521,7 +1521,19 @@ impl Plugin for LevelPlugin {
             .add_plugins(voxel_render::WaterPlugin)
             .add_systems(Startup, setup_level)
             .add_systems(Update, (autopilot, walk_mode).chain())
-            .add_systems(Update, roll_planning_caches);
+            .add_systems(Update, roll_planning_caches)
+            .init_resource::<crate::water_mesh::WaterMeshTiles>()
+            .add_systems(Update, crate::water_mesh::stream_water_meshes);
+        // Live tooling: VOXEL_REMOTE=1 (or a port) starts the BRP server
+        // the voxctl CLI talks to.
+        if let Ok(v) = std::env::var("VOXEL_REMOTE") {
+            // "1"/"true" enable the default port; a number >1024 sets it.
+            let port = match v.parse::<u16>() {
+                Ok(p) if p > 1024 => p,
+                _ => 15702,
+            };
+            app.add_plugins(crate::remote::VoxelRemotePlugin { port });
+        }
     }
 }
 
