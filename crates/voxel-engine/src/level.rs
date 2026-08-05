@@ -857,6 +857,13 @@ fn sun_dir(level: &LevelDef) -> Vec3 {
         .normalize()
 }
 
+/// `VOXEL_EVAL_HOLES=1`: coverage-eval rendering — magenta background,
+/// monotone-white geometry, water off. A single background-colored pixel
+/// below the horizon means missing world coverage.
+pub fn eval_holes_mode() -> bool {
+    std::env::var("VOXEL_EVAL_HOLES").is_ok()
+}
+
 fn apply_generator(level: &LevelDef) -> voxel_render::WorldProgram {
     let ops: Vec<WorldOp> = level.generator.iter().map(GenOpDef::pack).collect();
     let sun = sun_dir(level);
@@ -872,6 +879,12 @@ fn apply_generator(level: &LevelDef) -> voxel_render::WorldProgram {
 
 /// The generator's water surface (its `water` op, if present).
 fn water_surface(program: &voxel_render::WorldProgram) -> voxel_render::WaterSurface {
+    if eval_holes_mode() {
+        return voxel_render::WaterSurface {
+            enabled: false,
+            level: 0.0,
+        };
+    }
     match voxel_worldgen::program::water_level(&program.ops) {
         Some(level) => voxel_render::WaterSurface {
             enabled: true,
@@ -907,7 +920,7 @@ fn env_params(level: &LevelDef) -> voxel_render::EnvParams {
         sun: v(e.sun_color, e.sun_strength),
         sky: v(e.ambient_sky, e.ambient_strength),
         ground: v(e.ambient_ground, e.ambient_exponent),
-        sun_dir: sun_dir(level).extend(0.0),
+        sun_dir: sun_dir(level).extend(if eval_holes_mode() { 1.0 } else { 0.0 }),
     }
 }
 
@@ -968,7 +981,11 @@ impl Plugin for LevelPlugin {
         app.insert_resource(program)
             .insert_resource(material_table(&level))
             .insert_resource(env_params(&level))
-            .insert_resource(ClearColor(Color::srgb(c[0], c[1], c[2])))
+            .insert_resource(if eval_holes_mode() {
+                ClearColor(Color::srgb(1.0, 0.0, 1.0))
+            } else {
+                ClearColor(Color::srgb(c[0], c[1], c[2]))
+            })
             .insert_resource(LodConfig {
                 max_level: level.lod.max_level,
                 top_radius: level.lod.top_radius,
@@ -1124,7 +1141,11 @@ fn reload_level(
 
     // Presentation: apply directly.
     let c = new.clear_color;
-    clear.0 = Color::srgb(c[0], c[1], c[2]);
+    clear.0 = if eval_holes_mode() {
+        Color::srgb(1.0, 0.0, 1.0)
+    } else {
+        Color::srgb(c[0], c[1], c[2])
+    };
     let a = &new.ambient;
     commands.insert_resource(GlobalAmbientLight {
         color: Color::srgb(a.color[0], a.color[1], a.color[2]),

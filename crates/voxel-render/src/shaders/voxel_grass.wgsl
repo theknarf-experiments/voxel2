@@ -87,6 +87,9 @@ fn vertex(in: VsIn) -> VsOut {
 
 @fragment
 fn fragment(in: VsOut) -> @location(0) vec4<f32> {
+    if (env.sun_dir.w > 0.5) {
+        return vec4<f32>(1.0, 1.0, 1.0, 1.0);
+    }
     // Match the terrain's sun + haze so grass sits in the scene.
     let sun_dir = normalize(env.sun_dir.xyz);
     let lit = in.color * (0.55 + 0.45 * max(sun_dir.y, 0.0));

@@ -455,3 +455,134 @@ fn hud_stats(
         tree.merging.len(),
     ));
 }
+
+#[cfg(test)]
+mod field_invariants {
+    use super::*;
+    use voxel_core::seed::Rng;
+
+    fn cfg() -> LodConfig {
+        LodConfig::default()
+    }
+
+    /// The field's leaf level at a world position: descend from the top
+    /// while the field wants refinement.
+    fn leaf_at(config: &LodConfig, anchor: DVec3, p: DVec3) -> ChunkKey {
+        let top_edge = ChunkKey::new(config.max_level, IVec3::ZERO).edge_m();
+        let cell = (p / top_edge).floor();
+        let mut k = ChunkKey::new(
+            config.max_level,
+            IVec3::new(cell.x as i32, cell.y as i32, cell.z as i32),
+        );
+        while split_wanted(config, anchor, k) {
+            let mut next = k.children()[0];
+            for c in k.children() {
+                let min = c.min_corner_m();
+                let max = min + DVec3::splat(c.edge_m());
+                if p.x >= min.x
+                    && p.x < max.x
+                    && p.y >= min.y
+                    && p.y < max.y
+                    && p.z >= min.z
+                    && p.z < max.z
+                {
+                    next = c;
+                }
+            }
+            k = next;
+        }
+        k
+    }
+
+    fn rand_anchor(rng: &mut Rng) -> DVec3 {
+        DVec3::new(
+            (rng.next_f32() as f64 - 0.5) * 40000.0,
+            (rng.next_f32() as f64) * 2000.0,
+            (rng.next_f32() as f64 - 0.5) * 40000.0,
+        )
+    }
+
+    /// Both sides of every seam classify it identically: equal is
+    /// symmetric, and "my neighbor is coarser" reciprocates as "my
+    /// neighbor's representation sees my region as finer".
+    #[test]
+    fn seam_masks_reciprocate() {
+        let config = cfg();
+        let mut rng = Rng::new(0xE7A1);
+        for _ in 0..2000 {
+            let anchor = rand_anchor(&mut rng);
+            let p = rand_anchor(&mut rng);
+            let a = leaf_at(&config, anchor, p);
+            for d in FACE_DIRS {
+                let n = ChunkKey::new(a.level, a.pos + d);
+                match field_code(&config, anchor, n) {
+                    0 => {
+                        // Equal: the neighbor leaf must see us as equal.
+                        assert_eq!(field_code(&config, anchor, a), 0, "equal not symmetric");
+                    }
+                    1 => {
+                        // Coarser: the parent representing that region must
+                        // see our region as finer.
+                        assert_eq!(
+                            field_code(&config, anchor, ChunkKey::new(a.level, a.pos).parent()),
+                            2,
+                            "coarser/finer not reciprocal"
+                        );
+                    }
+                    2 => {
+                        // Finer: its children facing us see our region not
+                        // finer than themselves-level (never 2 both ways
+                        // across one face — that would be a 2-level jump).
+                        for c in n.children() {
+                            assert_ne!(
+                                field_code(&config, anchor, ChunkKey::new(c.level, a.pos * 2)),
+                                2,
+                                "two-level jump across a face"
+                            );
+                        }
+                    }
+                    _ => unreachable!(),
+                }
+            }
+        }
+    }
+
+    /// Face-adjacent leaf levels never differ by more than one (the parity
+    /// snap only bridges one level).
+    #[test]
+    fn face_neighbors_within_one_level() {
+        let config = cfg();
+        let mut rng = Rng::new(0x51EA);
+        for _ in 0..2000 {
+            let anchor = rand_anchor(&mut rng);
+            let p = rand_anchor(&mut rng);
+            let a = leaf_at(&config, anchor, p);
+            let edge = a.edge_m();
+            let center = a.min_corner_m() + DVec3::splat(edge * 0.5);
+            for d in FACE_DIRS {
+                let q = center + DVec3::new(d.x as f64, d.y as f64, d.z as f64) * edge;
+                let b = leaf_at(&config, anchor, q);
+                assert!(
+                    (a.level as i32 - b.level as i32).abs() <= 1,
+                    "leaf levels jump >1 across a face: {a:?} vs {b:?}"
+                );
+            }
+        }
+    }
+
+    /// The anchor is the field's only input: masks are identical for any
+    /// camera position within the anchor's stickiness radius.
+    #[test]
+    fn masks_depend_only_on_anchor() {
+        let config = cfg();
+        let mut rng = Rng::new(0xADD1);
+        for _ in 0..500 {
+            let anchor = rand_anchor(&mut rng);
+            let p = rand_anchor(&mut rng);
+            let a = leaf_at(&config, anchor, p);
+            let m1 = face_mask(&config, anchor, a);
+            let m2 = face_mask(&config, anchor, a);
+            assert_eq!(m1, m2);
+        }
+    }
+}

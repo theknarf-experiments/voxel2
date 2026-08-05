@@ -195,6 +195,10 @@ fn zoned_albedo(m: WorldMaterial, world: vec3<f32>, n: vec3<f32>, dist: f32) -> 
 
 @fragment
 fn fragment(in: VsOut) -> @location(0) vec4<f32> {
+    // Coverage-eval mode: monotone geometry against a magenta background.
+    if (env.sun_dir.w > 0.5) {
+        return vec4<f32>(1.0, 1.0, 1.0, 1.0);
+    }
     let n = normalize(in.normal);
     let world = vec3<f32>(
         view.world_position.x + in.cam_rel.x,
