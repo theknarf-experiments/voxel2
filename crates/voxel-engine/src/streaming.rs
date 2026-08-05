@@ -108,6 +108,8 @@ pub struct StreamingRebuild(pub bool);
 
 /// One planned batch of LOD transitions, committed atomically.
 struct Epoch {
+    /// When planning finished — a stall timer, not a profiler.
+    born: std::time::Instant,
     /// Shown leaf → the 8 children replacing it.
     splits: Vec<(ChunkKey, [ChunkKey; 8])>,
     /// Hidden parent → the 8 shown leaves it replaces.
@@ -126,10 +128,28 @@ struct Epoch {
 /// Generation requests issued per frame while an epoch is in flight.
 const EPOCH_REQUEST_BUDGET: usize = 64;
 
-/// Structural changes attempted per epoch. Caps bound the planning burst
-/// and the epoch's generation load; refinement just takes more epochs.
+/// Structural changes attempted per epoch. The split cap bounds the
+/// planning burst and generation load; the merge cap is much higher —
+/// splits get amplified by the force-split closure, and if merges can't
+/// keep pace the leaf population ratchets upward until the slabs
+/// exhaust (each merge is only one generation, and they free memory).
 const EPOCH_MAX_SPLITS: usize = 24;
-const EPOCH_MAX_MERGES: usize = 24;
+const EPOCH_MAX_MERGES: usize = 128;
+
+/// Leaf-count governor: above this, epochs stop proposing new splits
+/// (forced splits only follow proposed ones, so none happen either) and
+/// merge-only epochs drain the tree back under the cap.
+const LEAF_SOFT_CAP: usize = 16_000;
+
+/// After an aborted (stalled) epoch, plan merge-only epochs for this
+/// long — the stall is almost always slab exhaustion, and merges free
+/// slots while splits would consume them.
+const ABORT_COOLDOWN: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// An epoch stuck longer than this has a member that cannot generate
+/// (typically slab exhaustion): abort it and coarsen instead of wedging
+/// the pipeline forever.
+const EPOCH_STALL_LIMIT: std::time::Duration = std::time::Duration::from_secs(20);
 
 #[derive(Resource, Default)]
 struct LodTree {
@@ -155,6 +175,8 @@ struct LodTree {
     /// Something changed since the last plan (commit, anchor move, ring
     /// churn) — gates snapshotting so idle frames don't clone the tree.
     replan_needed: bool,
+    /// Merge-only planning until this instant (set on epoch abort).
+    split_cooldown_until: Option<std::time::Instant>,
 }
 
 /// The shown configuration a plan would produce: current leaves minus
@@ -374,15 +396,17 @@ fn top_ancestor(key: ChunkKey, max_level: u8) -> IVec3 {
 /// Pure over the snapshot — safe to run off-thread.
 #[cfg(test)]
 fn plan_epoch(tree: &LodTree, config: &LodConfig, anchor: DVec3) -> Option<Epoch> {
-    plan_epoch_snapshot(&tree.leaves, &tree.sent_masks, config, anchor, None)
+    plan_epoch_snapshot(&tree.leaves, &tree.sent_masks, config, anchor, None, true)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn plan_epoch_snapshot(
     leaves: &HashSet<ChunkKey>,
     sent_masks: &HashMap<ChunkKey, u32>,
     config: &LodConfig,
     anchor: DVec3,
     provider: Option<&(dyn Fn(ChunkKey) -> Vec<CsgOp> + Send + Sync)>,
+    allow_splits: bool,
 ) -> Option<Epoch> {
     let mut splits: Vec<ChunkKey> = leaves
         .iter()
@@ -397,6 +421,12 @@ fn plan_epoch_snapshot(
             .total_cmp(&aabb_distance(anchor, *b))
     });
     splits.truncate(EPOCH_MAX_SPLITS);
+    // Governor: a bloated tree (fast flight ratchets leaves upward) or a
+    // caller-imposed merge-only phase stops splitting entirely; merges
+    // drain the population and free slab memory.
+    if !allow_splits || leaves.len() > LEAF_SOFT_CAP {
+        splits.clear();
+    }
 
     let mut sibling_count: HashMap<ChunkKey, u8> = HashMap::new();
     for leaf in leaves {
@@ -493,6 +523,7 @@ fn plan_epoch_snapshot(
         })
     };
     let mut epoch = Epoch {
+        born: std::time::Instant::now(),
         splits: Vec::new(),
         merges: Vec::new(),
         waits: HashMap::new(),
@@ -683,6 +714,9 @@ fn lod_tick(
             let sent_masks = tree.sent_masks.clone();
             let config = config.clone();
             let provider = ops_provider.0.clone();
+            let allow_splits = tree
+                .split_cooldown_until
+                .is_none_or(|until| std::time::Instant::now() >= until);
             tree.planning = Some(bevy::tasks::AsyncComputeTaskPool::get().spawn(async move {
                 plan_epoch_snapshot(
                     &leaves,
@@ -690,6 +724,7 @@ fn lod_tick(
                     &config,
                     anchor,
                     provider.as_deref(),
+                    allow_splits,
                 )
             }));
         }
@@ -717,6 +752,31 @@ fn lod_tick(
         if done {
             commit_epoch(tree, &queue, epoch);
             // Refinement cascades: the new configuration may want more.
+            tree.replan_needed = true;
+        } else if epoch.born.elapsed() > EPOCH_STALL_LIMIT {
+            // A member cannot generate — almost always slab exhaustion.
+            // Wedging forever would also block the merges that free slabs:
+            // abort, then coarsen for a cooldown before splitting again.
+            warn!(
+                "epoch stalled {}s with {} waits — aborting; merge-only for {}s",
+                EPOCH_STALL_LIMIT.as_secs(),
+                epoch.waits.len(),
+                ABORT_COOLDOWN.as_secs(),
+            );
+            for key in epoch.waits.keys() {
+                if tree.leaves.contains(key) {
+                    // In-place remesh: drop the held result (if any) and
+                    // forget the sent mask so a later epoch re-requests it.
+                    queue.push(ChunkCommand::CancelHold(*key));
+                    tree.sent_masks.remove(key);
+                } else {
+                    // Hidden replacement chunk: free it outright.
+                    queue.push(ChunkCommand::Free(*key));
+                    tree.ready.remove(key);
+                    tree.sent_masks.remove(key);
+                }
+            }
+            tree.split_cooldown_until = Some(std::time::Instant::now() + ABORT_COOLDOWN);
             tree.replan_needed = true;
         } else {
             tree.epoch = Some(epoch);
@@ -812,10 +872,17 @@ fn hud_stats(
         slow_accum.1 += 1;
         slow_accum.2 = slow_accum.2.max(dt);
         if slow_accum.0 >= 2.0 {
+            let slab = stats
+                .0
+                .lock()
+                .map(|s| s.slab_occupancy)
+                .unwrap_or_default();
             info!(
-                "fps avg {:.0} | worst frame {:.0} ms",
+                "fps avg {:.0} | worst frame {:.0} ms | leaves {} | slab free {:?}",
                 slow_accum.1 as f32 / slow_accum.0,
-                slow_accum.2 * 1000.0
+                slow_accum.2 * 1000.0,
+                tree.leaves.len(),
+                slab.map(|(free, _)| free),
             );
             *slow_accum = (0.0, 0, 0.0);
         }

@@ -106,6 +106,10 @@ pub enum ChunkCommand {
     Show(ChunkKey),
     /// Make visible and swap in any held regen result.
     Commit(ChunkKey),
+    /// Drop a held regen result without swapping (epoch aborted): frees
+    /// the held slab allocation, keeps drawing the old mesh. In-flight
+    /// pending states are left to complete (they hold arena slots).
+    CancelHold(ChunkKey),
     Free(ChunkKey),
 }
 
@@ -1060,6 +1064,15 @@ fn plan_frame(
                             }
                             chunk.state = ChunkState::Empty;
                         }
+                        other => chunk.pending = other,
+                    }
+                }
+            }
+            ChunkCommand::CancelHold(key) => {
+                if let Some(chunk) = table.chunks.get_mut(&key) {
+                    match chunk.pending.take() {
+                        Some(Pending::Held { alloc, .. }) => gpu.slab.free(alloc),
+                        Some(Pending::HeldEmpty) | None => {}
                         other => chunk.pending = other,
                     }
                 }
