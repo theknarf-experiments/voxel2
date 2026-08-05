@@ -43,16 +43,17 @@ use bevy::{
             ViewBinnedRenderPhases,
         },
         render_resource::{
-            binding_types::{storage_buffer_sized, uniform_buffer},
+            binding_types::{storage_buffer_read_only_sized, storage_buffer_sized, uniform_buffer},
             BindGroup, BindGroupEntries, BindGroupLayoutDescriptor, BindGroupLayoutEntries, Buffer,
             BufferDescriptor, BufferInitDescriptor, BufferUsages, CachedComputePipelineId,
             Canonical, ColorTargetState, ColorWrites, CompareFunction, ComputePassDescriptor,
             ComputePipelineDescriptor, DepthStencilState, DynamicUniformBuffer, FragmentState,
             IndexFormat, MapMode, PipelineCache, RenderPipeline, RenderPipelineDescriptor,
-            ShaderStages, ShaderType, Specializer, SpecializerKey, TextureFormat, UniformBuffer,
+            ShaderStages, ShaderType, Specializer, SpecializerKey, StorageBuffer, TextureFormat,
             Variants, VertexAttribute, VertexFormat, VertexState, VertexStepMode,
         },
         renderer::{RenderContext, RenderDevice, RenderGraph, RenderQueue},
+        sync_world::MainEntity,
         view::{
             ExtractedView, RenderVisibleEntities, ViewUniform, ViewUniformOffset, ViewUniforms,
         },
@@ -138,28 +139,61 @@ pub struct RenderStats {
     pub culled: usize,
 }
 
-/// World tuning parameters shared with the GPU (terrain bands, mega
-/// lattice). Set by the level presenter; extracted every frame so
-/// hot-reloads apply. Packed as vec4s for uniform layout.
-#[derive(Resource, ShaderType, Clone, Copy)]
-pub struct WorldTuning {
-    /// continents scale/amp, mountains scale/amp
-    pub t0: Vec4,
-    /// rolling scale/amp, detail scale/amp
-    pub t1: Vec4,
-    /// height offset, floor/pillar/wall spacing
-    pub t2: Vec4,
-    /// shaft spacing, wall chance, opening chance, (unused)
-    pub t3: Vec4,
+/// The level's generator program — the data that *is* the world. Set by
+/// the level presenter; extracted every frame so hot-reloads apply. The
+/// density shader interprets it; the mesh (shadow bake) and water
+/// (shoreline) shaders read its height ops.
+#[derive(Resource, Clone, Default)]
+pub struct WorldProgram(pub std::sync::Arc<Vec<voxel_core::worldop::WorldOp>>);
+
+/// Fragment shading family for the chunk draw (a level-selected preset
+/// until materials become palette data).
+#[derive(Resource, Clone, Copy, PartialEq, Eq, Hash, Debug, Default)]
+pub enum ShadingMode {
+    /// Procedural nature zones: grass tops, rock faces, snow, worked stone.
+    #[default]
+    Zones,
+    /// Poured concrete: pale banded gray with grime and streaks.
+    Concrete,
 }
 
-impl Default for WorldTuning {
-    fn default() -> Self {
+/// GPU layout twin of `voxel_core::worldop::WorldOp` (64 B).
+#[derive(ShaderType, Clone, Copy, Default)]
+pub(crate) struct GpuWorldOp {
+    /// kind, flags, material, unused
+    meta: UVec4,
+    p0: Vec4,
+    p1: Vec4,
+    p2: Vec4,
+}
+
+/// The program as bound in shaders. `count = (total, height ops, -, -)`.
+#[derive(ShaderType, Clone, Default)]
+pub(crate) struct GpuWorldProgram {
+    count: UVec4,
+    #[shader(size(runtime))]
+    ops: Vec<GpuWorldOp>,
+}
+
+impl GpuWorldProgram {
+    fn from_ops(ops: &[voxel_core::worldop::WorldOp]) -> Self {
+        let height_ops = ops.iter().filter(|op| op.is_height_op()).count() as u32;
+        let mut gpu_ops: Vec<GpuWorldOp> = ops
+            .iter()
+            .map(|op| GpuWorldOp {
+                meta: UVec4::new(op.kind, op.flags, op.material, 0),
+                p0: Vec4::from_array(op.p0),
+                p1: Vec4::from_array(op.p1),
+                p2: Vec4::from_array(op.p2),
+            })
+            .collect();
+        // Runtime-sized arrays must not be empty.
+        if gpu_ops.is_empty() {
+            gpu_ops.push(GpuWorldOp::default());
+        }
         Self {
-            t0: Vec4::new(0.00005, 800.0, 0.0008, 420.0),
-            t1: Vec4::new(0.01, 36.0, 0.06, 5.0),
-            t2: Vec4::new(-8.0, 44.0, 34.0, 104.0),
-            t3: Vec4::new(288.0, 0.45, 0.16, 0.0),
+            count: UVec4::new(ops.len() as u32, height_ops, 0, 0),
+            ops: gpu_ops,
         }
     }
 }
@@ -170,28 +204,18 @@ impl Default for WorldTuning {
 #[component(on_add = visibility::add_visibility_class::<VoxelTerrainMarker>)]
 pub struct VoxelTerrainMarker;
 
-/// Which world the density/draw shaders generate.
-#[derive(Resource, Clone, Copy, PartialEq, Eq, Debug, Default)]
-pub enum WorldKind {
-    #[default]
-    Planet,
-    Megastructure,
-}
-
 #[derive(Default)]
-pub struct VoxelChunksPlugin {
-    pub world: WorldKind,
-}
+pub struct VoxelChunksPlugin;
 
 impl Plugin for VoxelChunksPlugin {
     fn build(&self, app: &mut App) {
-        embedded_asset!(app, "shaders/voxel_terrain_density.wgsl");
-        embedded_asset!(app, "shaders/voxel_mega_density.wgsl");
+        embedded_asset!(app, "shaders/voxel_world_density.wgsl");
         embedded_asset!(app, "shaders/voxel_mesh_chunks.wgsl");
         embedded_asset!(app, "shaders/voxel_chunk_draw.wgsl");
 
         let (ready_tx, ready_rx) = crossbeam_channel::unbounded();
-        app.init_resource::<WorldTuning>();
+        app.init_resource::<WorldProgram>();
+        app.init_resource::<ShadingMode>();
         app.init_resource::<ChunkCommandQueue>()
             .init_resource::<SharedRenderStats>()
             .insert_resource(ChunkReadyChannel { rx: ready_rx })
@@ -204,9 +228,9 @@ impl Plugin for VoxelChunksPlugin {
             return;
         };
         render_app
-            .init_resource::<WorldTuning>()
+            .init_resource::<WorldProgram>()
+            .init_resource::<ShadingMode>()
             .insert_resource(stats)
-            .insert_resource(self.world)
             .insert_resource(ChunkReadySender(ready_tx))
             .init_resource::<ExtractedChunkCommands>()
             .init_resource::<ChunkTable>()
@@ -218,7 +242,7 @@ impl Plugin for VoxelChunksPlugin {
             .add_systems(RenderStartup, init_chunk_resources)
             .add_systems(
                 ExtractSchedule,
-                (extract_chunk_commands, extract_camera_pos, extract_tuning),
+                (extract_chunk_commands, extract_camera_pos, extract_program),
             )
             .add_systems(Render, plan_frame.in_set(RenderSystems::Prepare))
             .add_systems(
@@ -346,7 +370,7 @@ struct StagingSlot {
 }
 
 #[derive(Resource)]
-struct ChunkGpuResources {
+pub(crate) struct ChunkGpuResources {
     density_arena: Buffer,
     cell_scratch: Buffer,
     vertex_slab: Buffer,
@@ -359,7 +383,7 @@ struct ChunkGpuResources {
     arena_free: Vec<u32>,
     slab: SlabAllocator,
     gen_uniforms: DynamicUniformBuffer<ChunkParams>,
-    tuning_uniform: UniformBuffer<WorldTuning>,
+    pub(crate) program_buffer: StorageBuffer<GpuWorldProgram>,
     draw_uniforms: DynamicUniformBuffer<ChunkDrawUniform>,
     map_tx: crossbeam_channel::Sender<usize>,
     map_rx: crossbeam_channel::Receiver<usize>,
@@ -393,7 +417,6 @@ fn init_chunk_resources(
     render_device: Res<RenderDevice>,
     asset_server: Res<AssetServer>,
     pipeline_cache: Res<PipelineCache>,
-    world_kind: Res<WorldKind>,
 ) {
     let buffer = |label: &str, size: u64, usage: BufferUsages| {
         render_device.create_buffer(&BufferDescriptor {
@@ -461,7 +484,7 @@ fn init_chunk_resources(
         arena_free: (0..ARENA_SLOTS).rev().collect(),
         slab: SlabAllocator::new(),
         gen_uniforms: DynamicUniformBuffer::default(),
-        tuning_uniform: UniformBuffer::default(),
+        program_buffer: StorageBuffer::default(),
         draw_uniforms: DynamicUniformBuffer::default(),
         map_tx,
         map_rx,
@@ -472,10 +495,10 @@ fn init_chunk_resources(
         &BindGroupLayoutEntries::sequential(
             ShaderStages::COMPUTE,
             (
-                storage_buffer_sized(false, None),    // density arena
-                uniform_buffer::<ChunkParams>(true),  // per-chunk params
-                storage_buffer_sized(false, None),    // planning CSG ops
-                uniform_buffer::<WorldTuning>(false), // world tuning
+                storage_buffer_sized(false, None),           // density arena
+                uniform_buffer::<ChunkParams>(true),         // per-chunk params
+                storage_buffer_sized(false, None),           // planning CSG ops
+                storage_buffer_read_only_sized(false, None), // generator program
             ),
         ),
     );
@@ -484,32 +507,22 @@ fn init_chunk_resources(
         &BindGroupLayoutEntries::sequential(
             ShaderStages::COMPUTE,
             (
-                storage_buffer_sized(false, None),    // density arena
-                uniform_buffer::<ChunkParams>(true),  // per-chunk params
-                storage_buffer_sized(false, None),    // cell_indices scratch
-                storage_buffer_sized(false, None),    // vertex slab
-                storage_buffer_sized(false, None),    // index slab
-                storage_buffer_sized(false, None),    // counts
-                uniform_buffer::<WorldTuning>(false), // world tuning
+                storage_buffer_sized(false, None),           // density arena
+                uniform_buffer::<ChunkParams>(true),         // per-chunk params
+                storage_buffer_sized(false, None),           // cell_indices scratch
+                storage_buffer_sized(false, None),           // vertex slab
+                storage_buffer_sized(false, None),           // index slab
+                storage_buffer_sized(false, None),           // counts
+                storage_buffer_read_only_sized(false, None), // generator program
             ),
         ),
     );
 
-    let density_shader: Handle<Shader> = match *world_kind {
-        WorldKind::Planet => {
-            load_embedded_asset!(asset_server.as_ref(), "shaders/voxel_terrain_density.wgsl")
-        }
-        WorldKind::Megastructure => {
-            load_embedded_asset!(asset_server.as_ref(), "shaders/voxel_mega_density.wgsl")
-        }
-    };
+    let density_shader: Handle<Shader> =
+        load_embedded_asset!(asset_server.as_ref(), "shaders/voxel_world_density.wgsl");
     let mesh_shader: Handle<Shader> =
         load_embedded_asset!(asset_server.as_ref(), "shaders/voxel_mesh_chunks.wgsl");
 
-    let compute_defs: Vec<bevy::shader::ShaderDefVal> = match *world_kind {
-        WorldKind::Planet => vec![],
-        WorldKind::Megastructure => vec!["MEGASTRUCTURE".into()],
-    };
     let compute = |label: &'static str,
                    shader: &Handle<Shader>,
                    entry: &'static str,
@@ -518,7 +531,6 @@ fn init_chunk_resources(
             label: Some(label.into()),
             layout: vec![layout.clone()],
             shader: shader.clone(),
-            shader_defs: compute_defs.clone(),
             entry_point: Some(entry.into()),
             ..default()
         })
@@ -559,16 +571,12 @@ fn init_chunk_resources(
     );
     let draw_shader: Handle<Shader> =
         load_embedded_asset!(asset_server.as_ref(), "shaders/voxel_chunk_draw.wgsl");
-    let shader_defs = match *world_kind {
-        WorldKind::Planet => vec![],
-        WorldKind::Megastructure => vec!["MEGASTRUCTURE".into()],
-    };
     let base_descriptor = RenderPipelineDescriptor {
         label: Some("voxel_chunks_draw".into()),
         layout: vec![view_layout.clone(), chunk_layout.clone()],
         vertex: VertexState {
             shader: draw_shader.clone(),
-            shader_defs: shader_defs.clone(),
+            shader_defs: vec![],
             entry_point: Some("vertex".into()),
             buffers: vec![VertexBufferLayout {
                 array_stride: VERTEX_BYTES,
@@ -589,7 +597,7 @@ fn init_chunk_resources(
         },
         fragment: Some(FragmentState {
             shader: draw_shader,
-            shader_defs,
+            shader_defs: vec![],
             entry_point: Some("fragment".into()),
             targets: vec![Some(ColorTargetState {
                 format: TextureFormat::Rgba8UnormSrgb,
@@ -622,8 +630,13 @@ fn extract_chunk_commands(
     extracted.0.append(&mut queue.inner.lock().unwrap());
 }
 
-fn extract_tuning(tuning: Extract<Res<WorldTuning>>, mut commands: Commands) {
-    commands.insert_resource(**tuning);
+fn extract_program(
+    program: Extract<Res<WorldProgram>>,
+    shading: Extract<Res<ShadingMode>>,
+    mut commands: Commands,
+) {
+    commands.insert_resource(program.clone());
+    commands.insert_resource(**shading);
 }
 
 fn extract_camera_pos(
@@ -683,7 +696,7 @@ fn plan_frame(
     mut batches: ResMut<FrameBatches>,
     mut draw_list: ResMut<VoxelDrawList>,
     camera: Res<ExtractedCameraPos>,
-    tuning: Res<WorldTuning>,
+    program: Res<WorldProgram>,
     frustum: Res<ExtractedFrustum>,
     stats: Res<SharedRenderStats>,
     ready_tx: Res<ChunkReadySender>,
@@ -1009,8 +1022,9 @@ fn plan_frame(
     gpu.gen_uniforms.write_buffer(&render_device, &render_queue);
     gpu.draw_uniforms
         .write_buffer(&render_device, &render_queue);
-    gpu.tuning_uniform.set(*tuning);
-    gpu.tuning_uniform
+    gpu.program_buffer
+        .set(GpuWorldProgram::from_ops(&program.0));
+    gpu.program_buffer
         .write_buffer(&render_device, &render_queue);
 
     // 7. HUD stats.
@@ -1064,7 +1078,7 @@ fn dispatch_chunk_work(
         return;
     };
 
-    let Some(tuning_binding) = gpu.tuning_uniform.binding() else {
+    let Some(program_binding) = gpu.program_buffer.binding() else {
         return;
     };
     let csg = gpu.csg_buffer.as_ref().unwrap_or(&gpu.csg_dummy);
@@ -1075,7 +1089,7 @@ fn dispatch_chunk_work(
             gpu.density_arena.as_entire_buffer_binding(),
             gen_uniform_binding.clone(),
             csg.as_entire_buffer_binding(),
-            tuning_binding.clone(),
+            program_binding.clone(),
         )),
     );
     let mesh_bg = render_context.render_device().create_bind_group(
@@ -1088,7 +1102,7 @@ fn dispatch_chunk_work(
             gpu.vertex_slab.as_entire_buffer_binding(),
             gpu.index_slab.as_entire_buffer_binding(),
             gpu.counts.as_entire_buffer_binding(),
-            tuning_binding,
+            program_binding,
         )),
     );
 
@@ -1142,7 +1156,7 @@ fn dispatch_chunk_work(
 struct VoxelChunksSpecializer;
 
 #[derive(Copy, Clone, PartialEq, Eq, Hash, SpecializerKey)]
-struct VoxelChunksKey(Msaa);
+struct VoxelChunksKey(Msaa, ShadingMode);
 
 impl Specializer<RenderPipeline> for VoxelChunksSpecializer {
     type Key = VoxelChunksKey;
@@ -1153,6 +1167,15 @@ impl Specializer<RenderPipeline> for VoxelChunksSpecializer {
         descriptor: &mut RenderPipelineDescriptor,
     ) -> Result<Canonical<Self::Key>, BevyError> {
         descriptor.multisample.count = key.0.samples();
+        if key.1 == ShadingMode::Concrete {
+            descriptor
+                .vertex
+                .shader_defs
+                .push("CONCRETE_SHADING".into());
+            if let Some(fragment) = &mut descriptor.fragment {
+                fragment.shader_defs.push("CONCRETE_SHADING".into());
+            }
+        }
         Ok(key)
     }
 }
@@ -1188,6 +1211,7 @@ fn prepare_view_bind_group(
     });
 }
 
+#[allow(clippy::too_many_arguments)]
 fn queue_voxel_chunks(
     pipeline_cache: Res<PipelineCache>,
     pipeline: Option<ResMut<ChunkDrawPipeline>>,
@@ -1196,11 +1220,16 @@ fn queue_voxel_chunks(
     views: Query<(&ExtractedView, &RenderVisibleEntities, &Msaa)>,
     dirty_specializations: Res<DirtySpecializations>,
     mut pending_queues: ResMut<PendingVoxelQueues>,
+    shading: Res<ShadingMode>,
+    mut last_shading: Local<Option<ShadingMode>>,
 ) {
     let Some(mut pipeline) = pipeline else {
         return;
     };
     let draw_function = opaque_draw_functions.read().id::<DrawVoxelChunksCommands>();
+    // A live shading switch invalidates the retained phase items.
+    let force_requeue = *last_shading != Some(*shading);
+    *last_shading = Some(*shading);
 
     for (view, view_visible_entities, msaa) in views.iter() {
         let Some(opaque_phase) = opaque_render_phases.get_mut(&view.retained_view_entity) else {
@@ -1216,14 +1245,22 @@ fn queue_voxel_chunks(
         {
             opaque_phase.remove(main_entity);
         }
-        for (render_entity, main_entity) in dirty_specializations.iter_to_queue(
-            view.retained_view_entity,
-            visible,
-            &view_pending.prev_frame,
-        ) {
+        let mut to_queue: Vec<(Entity, MainEntity)> = dirty_specializations
+            .iter_to_queue(view.retained_view_entity, visible, &view_pending.prev_frame)
+            .map(|(re, me)| (*re, *me))
+            .collect();
+        if force_requeue {
+            for pair in &visible.entities_cpu_culling {
+                if !to_queue.contains(pair) {
+                    opaque_phase.remove(pair.1);
+                    to_queue.push(*pair);
+                }
+            }
+        }
+        for (render_entity, main_entity) in to_queue {
             let Ok(pipeline_id) = pipeline
                 .variants
-                .specialize(&pipeline_cache, VoxelChunksKey(*msaa))
+                .specialize(&pipeline_cache, VoxelChunksKey(*msaa, *shading))
             else {
                 continue;
             };
@@ -1238,7 +1275,7 @@ fn queue_voxel_chunks(
                 Opaque3dBinKey {
                     asset_id: AssetId::<Mesh>::invalid().untyped(),
                 },
-                (*render_entity, *main_entity),
+                (render_entity, main_entity),
                 InputUniformIndex::default(),
                 BinnedRenderPhaseType::NonMesh,
             );

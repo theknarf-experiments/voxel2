@@ -1,49 +1,25 @@
 {
   "name": "Planet",
-  "world": "planet",
   "seed": 0,
-  "clear_color": [
-    0.65,
-    0.77,
-    0.94
-  ],
+  "clear_color": [0.65, 0.77, 0.94],
   "ambient": {
-    "color": [
-      0.7,
-      0.8,
-      1.0
-    ],
+    "color": [0.7, 0.8, 1.0],
     "brightness": 400.0
   },
   "sun": {
-    "direction": [
-      0.55,
-      0.5,
-      0.32
-    ],
+    "direction": [0.55, 0.5, 0.32],
     "illuminance": 25000.0
   },
   "lod": {
     "max_level": 8,
     "top_radius": 3,
-    "top_y": [
-      -1,
-      0
-    ],
+    "top_y": [-1, 0],
     "split_k": 2.5,
     "merge_k": 3.0
   },
   "camera": {
-    "start": [
-      -27570.0,
-      80.0,
-      -36770.0
-    ],
-    "look": [
-      0.4,
-      -0.35,
-      0.4
-    ],
+    "start": [-27570.0, 80.0, -36770.0],
+    "look": [0.4, -0.35, 0.4],
     "walk_speed": 60.0,
     "run_speed": 600.0
   },
@@ -51,34 +27,18 @@
     "water": true,
     "vegetation": true
   },
-  "ops": [
-    {
-      "type": "ruins",
-      "chance": 0.32
-    },
-    {
-      "type": "roads",
-      "site_chance": 0.32,
-      "reach": 700.0
-    }
+  "walk": "terrain",
+  "shading": "zones",
+  "generator": [
+    { "type": "height_fbm", "scale": 5e-05, "amp": 800.0, "octaves": 3 },
+    { "type": "height_fbm", "offset": [510.0, -770.0], "scale": 0.0008, "amp": 420.0, "octaves": 5 },
+    { "type": "height_fbm", "offset": [1337.0, 55.0], "scale": 0.01, "amp": 36.0, "octaves": 5 },
+    { "type": "height_fbm", "offset": [37.0, 91.0], "scale": 0.06, "amp": 5.0, "octaves": 4 },
+    { "type": "height_offset", "value": -8.0 },
+    { "type": "height_surface", "material": 1 }
   ],
-  "terrain": {
-    "continents": [
-      5e-05,
-      800.0
-    ],
-    "mountains": [
-      0.0008,
-      420.0
-    ],
-    "rolling": [
-      0.01,
-      36.0
-    ],
-    "detail": [
-      0.06,
-      5.0
-    ],
-    "offset": -8.0
-  }
+  "ops": [
+    { "type": "ruins", "chance": 0.32 },
+    { "type": "roads", "site_chance": 0.32, "reach": 700.0 }
+  ]
 }

@@ -9,6 +9,7 @@ pub mod morton;
 pub mod pos;
 pub mod seed;
 pub mod voxel;
+pub mod worldop;
 
 pub use key::ChunkKey;
 pub use pos::GlobalPos;

@@ -51,14 +51,24 @@ impl Plugin for VegetationPlugin {
                 Update,
                 (
                     rebuild_vegetation,
-                    stream_vegetation,
-                    stream_grass,
-                    stream_far_forest,
-                    far_forest_visibility,
+                    (
+                        stream_vegetation,
+                        stream_grass,
+                        stream_far_forest,
+                        far_forest_visibility,
+                    )
+                        .run_if(vegetation_enabled),
                 )
                     .chain(),
             );
     }
+}
+
+/// Vegetation grows only when the level asks for it — a runtime gate so a
+/// hot-reload can switch worlds (rebuild still runs, so a toggle-off clears
+/// what grew).
+fn vegetation_enabled(level: Option<Res<crate::LevelDef>>) -> bool {
+    level.is_none_or(|l| l.features.vegetation)
 }
 
 /// Despawn everything grown; the streaming systems regrow it on the (new)

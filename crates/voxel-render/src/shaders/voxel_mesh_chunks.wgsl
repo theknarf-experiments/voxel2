@@ -62,13 +62,19 @@ struct SlotCounts {
 @group(0) @binding(4) var<storage, read_write> indices: array<u32>;
 @group(0) @binding(5) var<storage, read_write> counts: array<SlotCounts>;
 
-struct WorldTuning {
-    t0: vec4<f32>, // continents scale/amp, mountains scale/amp
-    t1: vec4<f32>, // rolling scale/amp, detail scale/amp
-    t2: vec4<f32>, // height offset, floor/pillar/wall spacing
-    t3: vec4<f32>, // shaft spacing, wall chance, opening chance, unused
+// Generator program (64 B ops, layout mirrors voxel-core WorldOp); the
+// shadow bake reads the height ops. count = (total, height ops, -, -).
+struct WorldOp {
+    head: vec4<u32>,
+    p0: vec4<f32>,
+    p1: vec4<f32>,
+    p2: vec4<f32>,
 }
-@group(0) @binding(6) var<uniform> tuning: WorldTuning;
+struct WorldProgram {
+    count: vec4<u32>,
+    ops: array<WorldOp>,
+}
+@group(0) @binding(6) var<storage, read> prog: WorldProgram;
 
 fn corner_offset(i: u32) -> vec3<i32> {
     return vec3<i32>(i32(i & 1u), i32((i >> 1u) & 1u), i32((i >> 2u) & 1u));
@@ -332,17 +338,36 @@ fn sfbm2(p: vec2<f32>, base_scale: f32, octaves: i32) -> f32 {
     return sum;
 }
 
+// Sum of the generator program's height ops at coarse detail (finer bands
+// fade out below ~16 m wavelengths, matching CPU impostor seating).
 fn height_coarse(xz: vec2<f32>) -> f32 {
-    let continents = sfbm2(xz, tuning.t0.x, 3) * tuning.t0.y;
-    let mountains = sfbm2(xz + vec2<f32>(510.0, -770.0), tuning.t0.z, 4) * tuning.t0.w;
-    let rolling = sfbm2(xz + vec2<f32>(1337.0, 55.0), tuning.t1.x, 3) * tuning.t1.y;
-    return continents + mountains + rolling + tuning.t2.x;
+    var h = 0.0;
+    for (var i = 0u; i < prog.count.x; i++) {
+        let op = prog.ops[i];
+        if (op.head.x == 0u) {
+            var sum = 0.0;
+            var amp = 0.5;
+            var freq = op.p0.z;
+            let octaves = i32(op.p1.x);
+            for (var o = 0; o < octaves; o++) {
+                let fade = smoothstep(16.0, 32.0, 1.0 / freq);
+                sum += amp * fade * (svalue_noise2((xz + op.p0.xy) * freq) - 0.5);
+                amp *= 0.5;
+                freq *= 2.0;
+            }
+            h += sum * op.p0.w;
+        } else if (op.head.x == 1u) {
+            h += op.p0.x;
+        }
+    }
+    return h;
 }
 
 fn baked_sun_shadow(world: vec3<f32>) -> f32 {
-#ifdef MEGASTRUCTURE
-    return 1.0;
-#else
+    // Heightfield-free programs (pure structures) have no horizon to march.
+    if (prog.count.y == 0u) {
+        return 1.0;
+    }
     let sun_dir = normalize(vec3<f32>(0.55, 0.5, 0.32));
     var occ = 0.0;
     var t = 8.0;
@@ -353,7 +378,6 @@ fn baked_sun_shadow(world: vec3<f32>) -> f32 {
         t *= 1.8;
     }
     return 1.0 - smoothstep(0.0, 0.2, occ);
-#endif
 }
 
 // Octahedral normal encoding.

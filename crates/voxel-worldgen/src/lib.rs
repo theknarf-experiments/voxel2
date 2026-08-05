@@ -1,19 +1,19 @@
-//! Concrete world-generation: CPU mirrors of the GPU terrain functions plus
-//! (eventually) the LayerProcGen planning layers.
+//! Concrete world-generation: the CPU twin of the GPU generator-program
+//! interpreter ([`program`]) plus the LayerProcGen planning layers.
 //!
-//! `terrain_height` MUST stay bit-compatible with
-//! `voxel-render/src/shaders/voxel_terrain_density.wgsl` — vegetation and
+//! [`program::eval`] MUST stay bit-compatible with
+//! `voxel-render/src/shaders/voxel_world_density.wgsl` — vegetation and
 //! gameplay place things on the surface the GPU generates.
 
 pub mod mega;
-pub mod params;
+pub mod program;
 pub mod roads;
 pub mod ruins;
 
 use glam::Vec2;
 
 /// Mirrors the WGSL `hash2`.
-fn hash2(p: glam::IVec2) -> f32 {
+pub(crate) fn hash2(p: glam::IVec2) -> f32 {
     let mut h: u32 = (p.x as u32)
         .wrapping_mul(374_761_393)
         .wrapping_add((p.y as u32).wrapping_mul(668_265_263));
@@ -44,7 +44,7 @@ fn band_fade(wavelength: f32, voxel_size: f32) -> f32 {
     t * t * (3.0 - 2.0 * t)
 }
 
-fn fbm(p: Vec2, base_scale: f32, octaves: i32, voxel_size: f32) -> f32 {
+pub(crate) fn fbm(p: Vec2, base_scale: f32, octaves: i32, voxel_size: f32) -> f32 {
     let mut sum = 0.0;
     let mut amp = 0.5;
     let mut freq = base_scale;
@@ -57,20 +57,11 @@ fn fbm(p: Vec2, base_scale: f32, octaves: i32, voxel_size: f32) -> f32 {
     sum
 }
 
-/// Terrain height in meters at a world XZ position, evaluated at the given
-/// voxel size (pass 1.0 for full detail). Mirrors the WGSL exactly.
+/// Heightfield of the current level's generator program (meters) at a world
+/// XZ position, evaluated at the given voxel size (pass 1.0 for full
+/// detail). Mirrors the GPU exactly.
 pub fn terrain_height(xz: Vec2, voxel_size: f32) -> f32 {
-    let t = params::terrain_params();
-    let continents = fbm(xz, t.continents_scale, 3, voxel_size) * t.continents_amp;
-    let mountains = fbm(
-        xz + Vec2::new(510.0, -770.0),
-        t.mountains_scale,
-        5,
-        voxel_size,
-    ) * t.mountains_amp;
-    let rolling = fbm(xz + Vec2::new(1337.0, 55.0), t.rolling_scale, 5, voxel_size) * t.rolling_amp;
-    let detail = fbm(xz + Vec2::new(37.0, 91.0), t.detail_scale, 4, voxel_size) * t.detail_amp;
-    continents + mountains + rolling + detail + t.offset
+    program::eval_height(&program::program(), xz, voxel_size)
 }
 
 /// Forest density in [0, 1]: slow spatial noise so woods come in coherent

@@ -8,8 +8,8 @@ pub mod slab;
 pub mod water;
 
 pub use chunks::{
-    ChunkCommand, ChunkCommandQueue, ChunkReadyChannel, SharedRenderStats, VoxelChunksPlugin,
-    WorldKind, WorldTuning,
+    ChunkCommand, ChunkCommandQueue, ChunkReadyChannel, ShadingMode, SharedRenderStats,
+    VoxelChunksPlugin, WorldProgram,
 };
 pub use grass::{GrassInstance, GrassInstances, GrassPlugin};
-pub use water::WaterPlugin;
+pub use water::{WaterEnabled, WaterPlugin};

@@ -17,11 +17,18 @@ architecture. Design plan: `~/.claude/plans/binary-twirling-brooks.md`.
 
 ## Invariants that bite
 
-- **WGSL/Rust twins must stay in sync**: `ChunkParams` struct (3 shaders +
-  chunks.rs), `CsgOp` layout (csg.rs + terrain shader), terrain
-  height/mega SDF mirrors (voxel-worldgen vs density shaders — bit-exact
-  integer hashing), vertex packing (mesh shader ↔ draw shader ↔ slab
-  layouts), baked-shadow march (mesh shader ↔ voxel_worldgen::sun_shadow).
+- **WGSL/Rust twins must stay in sync**: the generator-program interpreter
+  (`voxel_world_density.wgsl` ↔ `voxel_worldgen::program::eval` — same op
+  semantics, register file, and bit-exact integer hashing; the height-only
+  loops in the mesh/water shaders ↔ `eval_height`), `ChunkParams` struct
+  (2 shaders + chunks.rs), `CsgOp` and `WorldOp` layouts (voxel-core ↔
+  WGSL structs — note `meta` is a reserved WGSL word, the GPU field is
+  `head`), vertex packing (mesh shader ↔ draw shader ↔ slab layouts),
+  baked-shadow march (mesh shader ↔ voxel_worldgen::sun_shadow).
+- **Worlds are data, not code**: never add a world-kind enum or
+  world-specific shader; extend the op set (voxel-core::worldop + both
+  interpreters + GenOpDef) and express the world in the level JSON.
+  `voxel_engine` tests pin the shipped JSONs to the reference programs.
 - Count pass and emit passes in `voxel_mesh_chunks.wgsl` must agree
   *exactly* on skip rules — allocation uses counted values.
 - `map_async` on the counts staging ring only the frame *after* the copy

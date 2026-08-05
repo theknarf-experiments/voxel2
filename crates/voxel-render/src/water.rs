@@ -26,11 +26,12 @@ use bevy::{
             ViewBinnedRenderPhases,
         },
         render_resource::{
-            binding_types::uniform_buffer, BindGroup, BindGroupEntries, BindGroupLayoutDescriptor,
-            BindGroupLayoutEntries, Canonical, ColorTargetState, ColorWrites, CompareFunction,
-            DepthStencilState, FragmentState, PipelineCache, RenderPipeline,
-            RenderPipelineDescriptor, ShaderStages, ShaderType, Specializer, SpecializerKey,
-            TextureFormat, UniformBuffer, Variants, VertexState,
+            binding_types::{storage_buffer_read_only_sized, uniform_buffer},
+            BindGroup, BindGroupEntries, BindGroupLayoutDescriptor, BindGroupLayoutEntries,
+            Canonical, ColorTargetState, ColorWrites, CompareFunction, DepthStencilState,
+            FragmentState, PipelineCache, RenderPipeline, RenderPipelineDescriptor, ShaderStages,
+            ShaderType, Specializer, SpecializerKey, TextureFormat, UniformBuffer, Variants,
+            VertexState,
         },
         renderer::{RenderDevice, RenderQueue},
         view::{
@@ -54,13 +55,42 @@ struct WaterParams {
 #[component(on_add = visibility::add_visibility_class::<WaterMarker>)]
 pub struct WaterMarker;
 
+/// Level-controlled toggle: hides the ocean in waterless worlds. Runtime
+/// (not build-time) so a hot-reload can switch worlds.
+#[derive(Resource, Clone, Copy)]
+pub struct WaterEnabled(pub bool);
+
+impl Default for WaterEnabled {
+    fn default() -> Self {
+        Self(true)
+    }
+}
+
+fn apply_water_toggle(
+    enabled: Res<WaterEnabled>,
+    mut markers: Query<&mut Visibility, With<WaterMarker>>,
+) {
+    if !enabled.is_changed() {
+        return;
+    }
+    for mut visibility in &mut markers {
+        *visibility = if enabled.0 {
+            Visibility::Visible
+        } else {
+            Visibility::Hidden
+        };
+    }
+}
+
 pub struct WaterPlugin;
 
 impl Plugin for WaterPlugin {
     fn build(&self, app: &mut App) {
         embedded_asset!(app, "shaders/voxel_water.wgsl");
-        app.add_plugins(ExtractComponentPlugin::<WaterMarker>::default())
-            .add_systems(Startup, spawn_water_marker);
+        app.init_resource::<WaterEnabled>()
+            .add_plugins(ExtractComponentPlugin::<WaterMarker>::default())
+            .add_systems(Startup, spawn_water_marker)
+            .add_systems(Update, apply_water_toggle);
 
         let Some(render_app) = app.get_sub_app_mut(RenderApp) else {
             return;
@@ -102,7 +132,6 @@ struct WaterPipeline {
 struct WaterBindGroupRes {
     bind_group: Option<BindGroup>,
     params: UniformBuffer<WaterParams>,
-    tuning: UniformBuffer<crate::chunks::WorldTuning>,
 }
 
 #[derive(Resource, Default)]
@@ -126,7 +155,9 @@ fn init_water_pipeline(mut commands: Commands, asset_server: Res<AssetServer>) {
                 uniform_buffer::<ViewUniform>(true),
                 uniform_buffer::<GlobalsUniform>(false),
                 uniform_buffer::<WaterParams>(false),
-                uniform_buffer::<crate::chunks::WorldTuning>(false),
+                // The level's generator program (shoreline height ops);
+                // shared with the chunk pipeline.
+                storage_buffer_read_only_sized(false, None),
             ),
         ),
     );
@@ -192,7 +223,7 @@ fn prepare_water_bind_group(
     globals: Res<GlobalsBuffer>,
     pipeline: Option<Res<WaterPipeline>>,
     camera: Res<ExtractedWaterCamera>,
-    tuning: Res<crate::chunks::WorldTuning>,
+    gpu: Option<Res<crate::chunks::ChunkGpuResources>>,
     pipeline_cache: Res<PipelineCache>,
     render_device: Res<RenderDevice>,
     render_queue: Res<RenderQueue>,
@@ -213,9 +244,9 @@ fn prepare_water_bind_group(
         origin: Vec4::new(ox as f32, 0.0, oz as f32, 0.0),
     });
     res.params.write_buffer(&render_device, &render_queue);
-    res.tuning.set(*tuning);
-    res.tuning.write_buffer(&render_device, &render_queue);
-    let (Some(params_binding), Some(tuning_binding)) = (res.params.binding(), res.tuning.binding())
+    // The chunk pipeline owns and writes the program buffer each frame.
+    let program_binding = gpu.as_ref().and_then(|g| g.program_buffer.binding());
+    let (Some(params_binding), Some(program_binding)) = (res.params.binding(), program_binding)
     else {
         return;
     };
@@ -226,7 +257,7 @@ fn prepare_water_bind_group(
             view_binding,
             globals_binding,
             params_binding,
-            tuning_binding,
+            program_binding,
         )),
     ));
 }

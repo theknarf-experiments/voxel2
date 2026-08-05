@@ -1,0 +1,346 @@
+//! CPU twin of the GPU world-generator interpreter
+//! (`voxel-render/src/shaders/voxel_world_density.wgsl`). A world's base
+//! generator is a program of [`WorldOp`]s; both interpreters evaluate it
+//! op-for-op over the same register file, so collision, vegetation,
+//! planning, and the rendered world always agree. MUST stay bit-compatible
+//! with the WGSL.
+
+use std::sync::{Arc, RwLock};
+
+use glam::{IVec2, IVec3, Vec2, Vec3};
+use voxel_core::worldop::*;
+
+use crate::{fbm, hash2};
+
+fn hash3(p: IVec3) -> f32 {
+    let mut h: u32 = (p.x as u32)
+        .wrapping_mul(374_761_393)
+        .wrapping_add((p.y as u32).wrapping_mul(668_265_263))
+        .wrapping_add((p.z as u32).wrapping_mul(2_246_822_519));
+    h = (h ^ (h >> 13)).wrapping_mul(1_274_126_177);
+    h ^= h >> 16;
+    (h & 0xFF_FFFF) as f32 / 16_777_216.0
+}
+
+fn sd_box(p: Vec3, b: Vec3) -> f32 {
+    let q = p.abs() - b;
+    q.max(Vec3::ZERO).length() + q.x.max(q.y.max(q.z)).min(0.0)
+}
+
+const BIG: f32 = 1.0e6;
+const SOLID: f32 = -1.0e5;
+
+/// Signed distance (meters) and material of the program at `p`, evaluated
+/// at voxel size `vs` (1.0 = full detail).
+pub fn eval(ops: &[WorldOp], p: Vec3, vs: f32) -> (f32, u32) {
+    let coarse = vs >= WOP_COARSE_VOXEL_M;
+    let mut h = 0.0f32;
+    let mut d = BIG;
+    let mut mat = 1u32;
+    let mut level = 0.0f32;
+    let mut fy = p.y;
+    let mut sxz = Vec2::ZERO;
+    let mut sr = 0.0f32;
+    let mut shaft = BIG;
+    let pxz = Vec2::new(p.x, p.z);
+
+    for op in ops {
+        if coarse && op.flags & WOP_FLAG_FINE_ONLY != 0 {
+            continue;
+        }
+        if !coarse && op.flags & WOP_FLAG_COARSE_ONLY != 0 {
+            continue;
+        }
+        match op.kind {
+            WOP_HEIGHT_FBM => {
+                h += fbm(
+                    pxz + Vec2::new(op.p0[0], op.p0[1]),
+                    op.p0[2],
+                    op.p1[0] as i32,
+                    vs,
+                ) * op.p0[3];
+            }
+            WOP_HEIGHT_OFFSET => h += op.p0[0],
+            WOP_HEIGHT_SURFACE => {
+                let nd = p.y - h;
+                if nd < d {
+                    d = nd;
+                    mat = op.material;
+                }
+            }
+            WOP_COARSE_SOLID if SOLID < d => {
+                d = SOLID;
+                mat = op.material;
+            }
+            WOP_LATTICE_Y => {
+                level = (p.y / op.p0[0]).round();
+                fy = p.y - level * op.p0[0];
+            }
+            WOP_SLABS_Y => {
+                let nd = fy.abs() - op.p0[0];
+                if nd < d {
+                    d = nd;
+                    mat = op.material;
+                }
+            }
+            WOP_GRID_HOLES => {
+                let cell = op.p0[0];
+                let c = IVec2::new((p.x / cell).floor() as i32, (p.z / cell).floor() as i32);
+                if hash3(IVec3::new(c.x, level as i32, c.y)) < op.p0[1] {
+                    let oc = (Vec2::new(c.x as f32, c.y as f32) + 0.5) * cell;
+                    let cut = sd_box(
+                        Vec3::new(p.x - oc.x, fy, p.z - oc.y),
+                        Vec3::new(op.p1[0], op.p1[1], op.p1[2]),
+                    );
+                    d = d.max(-cut);
+                }
+            }
+            WOP_PILLARS_XZ => {
+                let sp = op.p0[0];
+                let c = IVec2::new((p.x / sp).round() as i32, (p.z / sp).round() as i32);
+                let jit =
+                    Vec2::new(hash2(c) - 0.5, hash2(c + IVec2::new(311, 77)) - 0.5) * op.p0[1];
+                let q = pxz - Vec2::new(c.x as f32, c.y as f32) * sp - jit;
+                let girth = op.p0[2] + hash2(c + IVec2::new(9, -4)) * op.p0[3];
+                let nd = q.x.abs().max(q.y.abs()) - girth;
+                if nd < d {
+                    d = nd;
+                    mat = op.material;
+                }
+            }
+            WOP_WALLS => {
+                let sp = op.p0[0];
+                let along_z = op.p0[3] > 0.5;
+                let (a, b) = if along_z { (p.z, p.x) } else { (p.x, p.z) };
+                let wi = (a / sp).round();
+                let w = a - wi * sp;
+                let gate = hash2(IVec2::new(wi as i32 + op.p1[0] as i32, level as i32));
+                if gate < op.p0[2] {
+                    let mut wall = w.abs() - op.p0[1];
+                    let dc = op.p1[1];
+                    let ci = (b / dc).round();
+                    let cl = b - ci * dc;
+                    if hash3(IVec3::new(
+                        wi as i32,
+                        ci as i32,
+                        level as i32 + op.p1[3] as i32,
+                    )) < op.p1[2]
+                    {
+                        let doorway = sd_box(
+                            Vec3::new(w, fy + op.p2[3], cl),
+                            Vec3::new(op.p2[0], op.p2[1], op.p2[2]),
+                        );
+                        wall = wall.max(-doorway);
+                    }
+                    if wall < d {
+                        d = wall;
+                        mat = op.material;
+                    }
+                }
+            }
+            WOP_SHAFTS_XZ => {
+                let sp = op.p0[0];
+                let c = IVec2::new((p.x / sp).round() as i32, (p.z / sp).round() as i32);
+                let jit = Vec2::new(
+                    hash2(c + IVec2::new(41, 13)) - 0.5,
+                    hash2(c + IVec2::new(-7, 99)) - 0.5,
+                ) * op.p0[1];
+                sxz = pxz - Vec2::new(c.x as f32, c.y as f32) * sp - jit;
+                sr = op.p0[2] + hash2(c) * op.p0[3];
+                shaft = sxz.length() - sr;
+            }
+            WOP_SHAFTS_CUT => d = d.max(-shaft),
+            WOP_BEAMS => {
+                let n = op.p0[0];
+                if (level - (level / n).round() * n).abs() < 0.5 {
+                    let beam = (sxz.y.abs() - op.p0[1])
+                        .max((fy + op.p0[2]).abs() - op.p0[3])
+                        .max(sxz.length() - (sr + op.p1[0]));
+                    if beam < d {
+                        d = beam;
+                        mat = op.material;
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    (d, mat)
+}
+
+/// Height (meters) of the program's heightfield component at `xz` — the sum
+/// of its height ops only. Twin of the height-only loops in the mesh
+/// (shadow bake) and water (seabed) shaders.
+pub fn eval_height(ops: &[WorldOp], xz: Vec2, vs: f32) -> f32 {
+    let mut h = 0.0;
+    for op in ops {
+        match op.kind {
+            WOP_HEIGHT_FBM => {
+                h += fbm(
+                    xz + Vec2::new(op.p0[0], op.p0[1]),
+                    op.p0[2],
+                    op.p1[0] as i32,
+                    vs,
+                ) * op.p0[3];
+            }
+            WOP_HEIGHT_OFFSET => h += op.p0[0],
+            _ => {}
+        }
+    }
+    h
+}
+
+/// The Y-lattice spacing of the program, if it has one (used by planning
+/// providers that seat features on structural floors).
+pub fn lattice_y_spacing(ops: &[WorldOp]) -> Option<f32> {
+    ops.iter()
+        .find(|op| op.kind == WOP_LATTICE_Y)
+        .map(|op| op.p0[0])
+}
+
+// --- the process-wide current program ----------------------------------------
+
+static PROGRAM: RwLock<Option<Arc<Vec<WorldOp>>>> = RwLock::new(None);
+
+/// Install the level's generator program for the CPU mirrors
+/// ([`crate::terrain_height`], [`crate::mega::mega_sdf`], …).
+pub fn set_program(ops: Vec<WorldOp>) {
+    *PROGRAM.write().unwrap() = Some(Arc::new(ops));
+}
+
+/// The current program (defaults to [`planet_program`] until a level
+/// installs one — keeps tools like scout working without a level).
+pub fn program() -> Arc<Vec<WorldOp>> {
+    if let Some(p) = PROGRAM.read().unwrap().as_ref() {
+        return p.clone();
+    }
+    let mut w = PROGRAM.write().unwrap();
+    w.get_or_insert_with(|| Arc::new(planet_program())).clone()
+}
+
+// --- reference programs (also the test oracles' subjects) --------------------
+
+/// The shipped planet: four height bands, sea-relative offset, grass surface.
+pub fn planet_program() -> Vec<WorldOp> {
+    fn band(offset: [f32; 2], scale: f32, amp: f32, octaves: f32) -> WorldOp {
+        WorldOp::new(WOP_HEIGHT_FBM)
+            .p0([offset[0], offset[1], scale, amp])
+            .p1([octaves, 0.0, 0.0, 0.0])
+    }
+    vec![
+        band([0.0, 0.0], 0.00005, 800.0, 3.0),
+        band([510.0, -770.0], 0.0008, 420.0, 5.0),
+        band([1337.0, 55.0], 0.01, 36.0, 5.0),
+        band([37.0, 91.0], 0.06, 5.0, 4.0),
+        WorldOp::new(WOP_HEIGHT_OFFSET).p0([-8.0, 0.0, 0.0, 0.0]),
+        WorldOp::new(WOP_HEIGHT_SURFACE).material(1),
+    ]
+}
+
+/// The shipped megastructure: shaft registers, coarse solid mass, floor
+/// lattice with openings, pillars, gated walls with doorways, shaft cut,
+/// catwalk beams.
+pub fn mega_program() -> Vec<WorldOp> {
+    vec![
+        WorldOp::new(WOP_SHAFTS_XZ).p0([288.0, 90.0, 24.0, 30.0]),
+        WorldOp::new(WOP_COARSE_SOLID)
+            .flags(WOP_FLAG_COARSE_ONLY)
+            .material(2),
+        WorldOp::new(WOP_LATTICE_Y)
+            .flags(WOP_FLAG_FINE_ONLY)
+            .p0([44.0, 0.0, 0.0, 0.0]),
+        WorldOp::new(WOP_SLABS_Y)
+            .flags(WOP_FLAG_FINE_ONLY)
+            .material(2)
+            .p0([1.5, 0.0, 0.0, 0.0]),
+        WorldOp::new(WOP_GRID_HOLES)
+            .flags(WOP_FLAG_FINE_ONLY)
+            .p0([16.0, 0.16, 0.0, 0.0])
+            .p1([7.0, 4.0, 7.0, 0.0]),
+        WorldOp::new(WOP_PILLARS_XZ)
+            .flags(WOP_FLAG_FINE_ONLY)
+            .material(2)
+            .p0([34.0, 8.0, 1.6, 2.2]),
+        WorldOp::new(WOP_WALLS)
+            .flags(WOP_FLAG_FINE_ONLY)
+            .material(2)
+            .p0([104.0, 1.2, 0.45, 0.0])
+            .p1([0.0, 22.0, 0.5, 0.0])
+            .p2([4.0, 14.0, 5.0, 12.0]),
+        WorldOp::new(WOP_WALLS)
+            .flags(WOP_FLAG_FINE_ONLY)
+            .material(2)
+            .p0([104.0, 1.2, 0.45, 1.0])
+            .p1([501.0, 22.0, 0.5, 77.0])
+            .p2([4.0, 14.0, 5.0, 12.0]),
+        WorldOp::new(WOP_SHAFTS_CUT),
+        WorldOp::new(WOP_BEAMS)
+            .flags(WOP_FLAG_FINE_ONLY)
+            .material(2)
+            .p0([3.0, 2.2, 1.0, 0.7])
+            .p1([6.0, 0.0, 0.0, 0.0]),
+    ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn planet_program_matches_legacy_terrain_height() {
+        // Oracle: the pre-program formula, verbatim.
+        let ops = planet_program();
+        for i in 0..500 {
+            let p = Vec2::new((i * 37) as f32 * 13.7, (i * 91) as f32 * -7.3);
+            for vs in [1.0, 8.0, 64.0] {
+                let legacy = fbm(p, 0.00005, 3, vs) * 800.0
+                    + fbm(p + Vec2::new(510.0, -770.0), 0.0008, 5, vs) * 420.0
+                    + fbm(p + Vec2::new(1337.0, 55.0), 0.01, 5, vs) * 36.0
+                    + fbm(p + Vec2::new(37.0, 91.0), 0.06, 4, vs) * 5.0
+                    - 8.0;
+                assert_eq!(eval_height(&ops, p, vs), legacy);
+                // (h - 3) - h is not exactly -3 in f32; the height itself is
+                // bit-exact (asserted above), the SDF just subtracts it.
+                let (d, mat) = eval(&ops, glam::Vec3::new(p.x, legacy - 3.0, p.y), vs);
+                assert!((d + 3.0).abs() < 1.0e-3, "d={d}");
+                assert_eq!(mat, 1);
+            }
+        }
+    }
+
+    #[test]
+    fn coarse_mega_is_solid_minus_shafts() {
+        let ops = mega_program();
+        for i in 0..300 {
+            let p = Vec3::new(i as f32 * 17.3, (i % 11) as f32 * 9.0, i as f32 * -23.1);
+            let (coarse, _) = eval(&ops, p, 8.0);
+            // Away from shafts the coarse world is deeply solid; the fine
+            // world is never *more* solid than a slab is thick.
+            let (fine, _) = eval(&ops, p, 1.0);
+            assert!(coarse.is_finite() && fine.is_finite());
+            if coarse > 1.0 {
+                // Inside a shaft: fine structure must be air there too
+                // (beams excepted).
+                assert!(
+                    fine > -0.01 || fine <= coarse,
+                    "fine {fine} coarse {coarse}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn programs_are_deterministic() {
+        let ops = mega_program();
+        for i in 0..200 {
+            let p = Vec3::new(i as f32 * 13.7, (i % 7) as f32 * 11.0, i as f32 * -7.9);
+            assert_eq!(eval(&ops, p, 1.0), eval(&ops, p, 1.0));
+        }
+    }
+
+    #[test]
+    fn lattice_spacing_found() {
+        assert_eq!(lattice_y_spacing(&mega_program()), Some(44.0));
+        assert_eq!(lattice_y_spacing(&planet_program()), None);
+    }
+}

@@ -103,7 +103,7 @@ fn fbm3(p: vec3<f32>) -> f32 {
 }
 
 
-#ifdef MEGASTRUCTURE
+#ifdef CONCRETE_SHADING
 @fragment
 fn fragment(in: VsOut) -> @location(0) vec4<f32> {
     let n = normalize(in.normal);

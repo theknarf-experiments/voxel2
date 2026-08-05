@@ -23,15 +23,22 @@ cargo run -p voxel2 -- levels/megastructure.json  # endless concrete interior
 cargo run -p scout --release                      # offline: scan for scenic locations
 ```
 
-A level file describes the world kind, seed, LOD configuration, lighting,
-camera, feature toggles (water/vegetation), and parameterized planning-op
-providers that author structures (ruins site chance, road reach, pocket
-density, …). See `levels/*.json` and `voxel_engine::level::LevelDef`.
+There are no hardcoded worlds. A level file describes everything, most
+importantly the **generator program**: an ordered list of composable ops
+(FBM height bands, floor lattices, pillar/wall grids, shafts, catwalk
+beams, …) that one GPU interpreter evaluates as the world's SDF — a lush
+planet and a concrete megacity are the same engine fed different data. The
+rest of the file covers seed, LOD configuration, lighting, camera, feature
+toggles (water/vegetation), walk and shading modes, and parameterized
+planning-op providers that author structures (ruins site chance, road
+reach, pocket density, …). See `levels/*.json` and
+`voxel_engine::level::LevelDef`.
 
 **Live editing**: the level file is watched while running. Lighting,
-colors, and camera tuning apply instantly; changes to the seed, providers,
-or LOD topology rebuild the streamed world in place. World kind and
-feature toggles still need a restart.
+colors, shading, and camera tuning apply instantly; changes to the
+generator, seed, providers, or LOD topology rebuild the streamed world in
+place — copying a different level over the watched file swaps the whole
+world without a restart.
 
 Flycam: mouse look (hold right button), WASD + QE, shift to run, scroll for
 speed. Env vars:
@@ -41,12 +48,13 @@ speed. Env vars:
 | `VOXEL_START=x,y,z` | Spawn position |
 | `VOXEL_LOOK=dx,dy,dz` | Initial look direction |
 | `VOXEL_AUTOPILOT=<m/s>` | Fly forward continuously (smoke tests) |
-| `VOXEL_WALK=1` | On-foot: terrain glue (planet) / SDF collision (mega) |
+| `VOXEL_WALK=1` | On-foot: heightfield glue or SDF collision (level's `walk` mode) |
 
 ## How it works
 
-- **Voxels are transient GPU artifacts.** Density compute passes evaluate a
-  world SDF (FBM terrain or architectural CSG lattice) into a 38³-sample
+- **Voxels are transient GPU artifacts.** One density compute pass
+  interprets the level's generator program (a storage buffer of 64-byte
+  ops over a small register file) into a 38³-sample
   arena slot per chunk; an exact-count pass feeds a staging-ring readback
   that drives bucketed slab allocation; surface-nets compute passes then
   mesh straight into shared vertex/index slabs. Nothing but 8-byte counts
@@ -68,10 +76,10 @@ speed. Env vars:
   containing its midpoint). Ops upload with the generation batch and the
   density shader applies them after the base SDF. Determinism is enforced
   by construction and by tests that race generation across thread counts.
-- **CPU mirrors for gameplay.** The terrain height and megastructure SDF
-  are mirrored bit-compatibly in Rust: vegetation placement, ruins/roads
-  planning, walk-mode collision, and scenic-location scouting all consume
-  the same world the GPU renders.
+- **CPU mirrors for gameplay.** The generator program has a bit-compatible
+  Rust twin interpreter: vegetation placement, ruins/roads planning,
+  walk-mode collision, and scenic-location scouting all consume the same
+  world the GPU renders — one op table, two interpreters.
 - **Fully procedural shading.** No texture assets: noise-grained material
   zones, worked-stone with mortar bands and moss, concrete with pour bands
   and grime, emissive light strips, hemispheric ambient, sun-tinted haze,
@@ -85,7 +93,7 @@ speed. Env vars:
 |---|---|
 | `voxel-core` | Chunk keys, packed voxel format, CSG op IR, morton, seeding (no Bevy) |
 | `voxel-layers` | LayerProcGen framework: padded deps, recursive on-demand generation |
-| `voxel-worldgen` | CPU world mirrors + planning layers (sites, roads, ruins, mega SDF) |
+| `voxel-worldgen` | CPU twin of the generator interpreter + planning layers (sites, roads, ruins) |
 | `voxel-render` | Density/meshing compute, slab allocator, LOD draw, grass, materials |
 | `voxel-engine` | LOD controller, level definitions (JSON), vegetation streaming, walk modes |
 | `voxel-debug` | Flycam + HUD (fps, chunk/arena/slab occupancy, LOD histogram) |

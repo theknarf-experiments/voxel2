@@ -16,13 +16,19 @@ struct WaterParams {
 }
 @group(0) @binding(2) var<uniform> params: WaterParams;
 
-struct WorldTuning {
-    t0: vec4<f32>, // continents scale/amp, mountains scale/amp
-    t1: vec4<f32>, // rolling scale/amp, detail scale/amp
-    t2: vec4<f32>, // height offset, floor/pillar/wall spacing
-    t3: vec4<f32>, // shaft spacing, wall chance, opening chance, unused
+// Generator program (64 B ops, layout mirrors voxel-core WorldOp); the
+// shoreline reads the height ops. count = (total, height ops, -, -).
+struct WorldOp {
+    head: vec4<u32>,
+    p0: vec4<f32>,
+    p1: vec4<f32>,
+    p2: vec4<f32>,
 }
-@group(0) @binding(3) var<uniform> tuning: WorldTuning;
+struct WorldProgram {
+    count: vec4<u32>,
+    ops: array<WorldOp>,
+}
+@group(0) @binding(3) var<storage, read> prog: WorldProgram;
 
 const GRID_N: u32 = 192u;       // vertices per side
 const RANGE_M: f32 = 30000.0;   // farthest grid reach from center
@@ -129,11 +135,29 @@ fn fbm2(p: vec2<f32>, base_scale: f32, octaves: i32) -> f32 {
     return sum;
 }
 
+// Sum of the generator program's height ops at coarse detail (bands under
+// ~16 m wavelength fade out — the shoreline doesn't need them).
 fn seabed_height(xz: vec2<f32>) -> f32 {
-    let continents = fbm2(xz, tuning.t0.x, 3) * tuning.t0.y;
-    let mountains = fbm2(xz + vec2<f32>(510.0, -770.0), tuning.t0.z, 4) * tuning.t0.w;
-    let rolling = fbm2(xz + vec2<f32>(1337.0, 55.0), tuning.t1.x, 3) * tuning.t1.y;
-    return continents + mountains + rolling + tuning.t2.x;
+    var h = 0.0;
+    for (var i = 0u; i < prog.count.x; i++) {
+        let op = prog.ops[i];
+        if (op.head.x == 0u) {
+            var sum = 0.0;
+            var amp = 0.5;
+            var freq = op.p0.z;
+            let octaves = i32(op.p1.x);
+            for (var o = 0; o < octaves; o++) {
+                let fade = smoothstep(16.0, 32.0, 1.0 / freq);
+                sum += amp * fade * (value_noise2((xz + op.p0.xy) * freq) - 0.5);
+                amp *= 0.5;
+                freq *= 2.0;
+            }
+            h += sum * op.p0.w;
+        } else if (op.head.x == 1u) {
+            h += op.p0.x;
+        }
+    }
+    return h;
 }
 
 @fragment

@@ -11,31 +11,26 @@ pub use level::{LevelDef, LevelPlugin};
 pub use streaming::{LodConfig, VoxelStreamingPlugin};
 pub use vegetation::VegetationPlugin;
 pub use voxel_core::ChunkKey;
-pub use voxel_render::WorldKind;
 
-/// Everything needed for a streamed voxel world.
+/// Everything needed for a streamed voxel world. The world itself is data:
+/// a generator program in [`voxel_render::WorldProgram`], normally installed
+/// by a [`LevelPlugin`].
 pub struct VoxelEnginePlugin {
-    pub world: WorldKind,
     pub vegetation: bool,
 }
 
 impl Default for VoxelEnginePlugin {
     fn default() -> Self {
-        Self {
-            world: WorldKind::default(),
-            vegetation: true,
-        }
+        Self { vegetation: true }
     }
 }
 
 impl Plugin for VoxelEnginePlugin {
     fn build(&self, app: &mut App) {
-        app.add_plugins((
-            voxel_render::VoxelChunksPlugin { world: self.world },
-            VoxelStreamingPlugin,
-        ));
-        // Organic vegetation only grows on planets.
-        if self.vegetation && self.world == WorldKind::Planet {
+        app.add_plugins((voxel_render::VoxelChunksPlugin, VoxelStreamingPlugin));
+        // Vegetation systems gate themselves on the level's feature toggle
+        // at runtime (so a hot-reload can switch worlds).
+        if self.vegetation {
             app.add_plugins(VegetationPlugin);
         }
     }
