@@ -34,10 +34,12 @@ pub fn ruins_ops(min: Vec3, max: Vec3) -> Vec<CsgOp> {
     out
 }
 
-fn cell_ops(cx: i32, cz: i32, out: &mut Vec<CsgOp>) {
+/// The ruin site of a 256 m planning cell, if any. Shared by the ruin
+/// geometry below and the sites/roads layers.
+pub fn site_center(cx: i32, cz: i32) -> Option<Vec2> {
     let mut rng = Rng::new(chunk_seed(RUIN_SEED, 0x101, IVec3::new(cx, 0, cz)));
     if rng.next_f32() > 0.32 {
-        return; // most cells have no ruin
+        return None; // most cells have no ruin
     }
     let center_xz = Vec2::new(
         cx as f32 * CELL_M + 32.0 + rng.next_f32() * (CELL_M - 64.0),
@@ -46,8 +48,17 @@ fn cell_ops(cx: i32, cz: i32, out: &mut Vec<CsgOp>) {
     let ground = terrain_height(center_xz, 1.0);
     // Ruins stand on gentle inland ground.
     if !(8.0..280.0).contains(&ground) || terrain_up(center_xz, 1.0) < 0.88 {
-        return;
+        return None;
     }
+    Some(center_xz)
+}
+
+fn cell_ops(cx: i32, cz: i32, out: &mut Vec<CsgOp>) {
+    let Some(center_xz) = site_center(cx, cz) else {
+        return;
+    };
+    // Fresh sub-seeded stream for the layout, independent of site selection.
+    let mut rng = Rng::new(chunk_seed(RUIN_SEED, 0x202, IVec3::new(cx, 0, cz)));
 
     let radius = 8.0 + rng.next_f32() * 9.0;
     let segments = 6 + rng.next_range(4);

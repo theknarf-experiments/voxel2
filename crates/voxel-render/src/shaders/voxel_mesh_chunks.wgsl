@@ -74,6 +74,13 @@ fn sample_sdf(c: vec3<i32>) -> f32 {
     return unpack2x16float(packed & 0xFFFFu).x;
 }
 
+fn sample_material(c: vec3<i32>) -> u32 {
+    let cc = clamp(c, vec3<i32>(-2), vec3<i32>(35));
+    let i = vec3<u32>(cc + vec3<i32>(2));
+    let packed = density[params.slot * SLOT_STRIDE + i.x + SAMPLES * (i.y + SAMPLES * i.z)];
+    return (packed >> 16u) & 0xFFu;
+}
+
 // Cell coordinates run -1..=32; scratch indexing is offset by one.
 fn cell_slot_index(c: vec3<i32>) -> u32 {
     let i = vec3<u32>(c + vec3<i32>(1));
@@ -263,11 +270,21 @@ fn sn_vertices(@builtin(global_invocation_id) id: vec3<u32>) {
     }
     let local = atomicAdd(&counts[params.counts_slot].verts, count);
 
-    write_vertex(params.base_vertex + local, pv, normal);
+    // Vertex material: the material of the most-solid corner.
+    var mat = 0u;
+    var best = 1.0e9;
+    for (var i = 0u; i < 8u; i++) {
+        if (s[i] < best) {
+            best = s[i];
+            mat = sample_material(c + corner_offset(i));
+        }
+    }
+
+    write_vertex(params.base_vertex + local, pv, normal, mat);
     var twin = NONE16;
     if (boundary) {
         twin = local + 1u;
-        write_vertex(params.base_vertex + twin, pv - normal * SKIRT_VOXELS, normal);
+        write_vertex(params.base_vertex + twin, pv - normal * SKIRT_VOXELS, normal, mat);
     }
     cell_indices[cell_slot_index(c)] = (local & 0xFFFFu) | (twin << 16u);
 }
@@ -343,13 +360,15 @@ fn oct_encode(n: vec3<f32>) -> vec2<f32> {
     return v;
 }
 
-fn write_vertex(index: u32, pos_voxels: vec3<f32>, normal: vec3<f32>) {
+// The spare u16 packs material (high byte) and baked shadow (low byte).
+fn write_vertex(index: u32, pos_voxels: vec3<f32>, normal: vec3<f32>, material: u32) {
     let pn = clamp((pos_voxels + POS_BIAS) / POS_RANGE, vec3<f32>(0.0), vec3<f32>(1.0));
     let world = params.origin.xyz + pos_voxels * params.origin.w;
-    let shadow = baked_sun_shadow(world);
+    let shadow_u = u32(round(baked_sun_shadow(world) * 255.0));
+    let extra = f32((material << 8u) | shadow_u) / 65535.0;
     let out = index * VERTEX_WORDS;
     vertices[out + 0u] = pack2x16unorm(pn.xy);
-    vertices[out + 1u] = pack2x16unorm(vec2<f32>(pn.z, shadow));
+    vertices[out + 1u] = pack2x16unorm(vec2<f32>(pn.z, extra));
     vertices[out + 2u] = pack2x16snorm(oct_encode(normal));
 }
 

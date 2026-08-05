@@ -29,6 +29,8 @@ struct VsOut {
     @location(0) normal: vec3<f32>,
     @location(1) cam_rel: vec3<f32>,
     @location(2) shadow: f32,
+    // Flat-interpolated material id from the most-solid corner.
+    @location(3) @interpolate(flat) material: u32,
 }
 
 const POS_BIAS: f32 = 8.0;
@@ -53,7 +55,10 @@ fn vertex(in: VsIn) -> VsOut {
     out.clip = view.clip_from_view * vec4<f32>(view_space, 1.0);
     out.normal = oct_decode(in.oct);
     out.cam_rel = cam_rel;
-    out.shadow = in.pos.w;
+    // Spare u16: material in the high byte, baked shadow in the low byte.
+    let extra = u32(round(in.pos.w * 65535.0));
+    out.shadow = f32(extra & 0xFFu) / 255.0;
+    out.material = (extra >> 8u) & 0xFFu;
     return out;
 }
 
@@ -197,6 +202,17 @@ fn fragment(in: VsOut) -> @location(0) vec4<f32> {
     base = mix(base, snow, smoothstep(820.0 + border, 1050.0 + border, world.y));
     let steep = smoothstep(0.72, 0.45, n.y); // 1 on cliffs
     base = mix(base, rock, steep);
+
+    // Material 3: worked stone (ruins, roads) — cut-block gray with grime,
+    // faint moss only in upward crevices.
+    if (in.material == 3u) {
+        var stone = vec3<f32>(0.52, 0.50, 0.46);
+        let block = fract(world.y * 0.55 + macro_var * 0.7);
+        stone *= 0.82 + 0.18 * smoothstep(0.08, 0.25, block); // mortar lines
+        stone *= 0.75 + 0.4 * detail;
+        let moss = smoothstep(0.6, 0.9, macro_var) * smoothstep(0.5, 0.9, n.y) * 0.5;
+        base = mix(stone, grass, moss);
+    }
 
     // --- lighting ------------------------------------------------------------
     let sun_dir = normalize(vec3<f32>(0.55, 0.5, 0.32));

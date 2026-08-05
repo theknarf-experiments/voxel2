@@ -7,3 +7,4 @@ license.workspace = true
 [dependencies]
 voxel-worldgen.workspace = true
 glam.workspace = true
+voxel-layers.workspace = true

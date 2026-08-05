@@ -4496,6 +4496,7 @@ name = "scout"
 version = "0.1.0"
 dependencies = [
  "glam",
+ "voxel-layers",
  "voxel-worldgen",
 ]
 

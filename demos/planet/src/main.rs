@@ -18,15 +18,21 @@ fn main() {
             ..default()
         }))
         .insert_resource(ClearColor(Color::srgb(0.65, 0.77, 0.94)))
-        // Planning-layer CSG: ruin sites carved/merged into fine-LOD chunks.
-        .insert_resource(ChunkOpsProvider(Some(std::sync::Arc::new(|key| {
-            if key.level > 2 {
-                return Vec::new(); // meter-scale features: fine LODs only
-            }
-            let min = key.min_corner_m().as_vec3();
-            let max = min + Vec3::splat(key.edge_m() as f32);
-            voxel_worldgen::ruins::ruins_ops(min, max)
-        }))))
+        // Planning-layer CSG: ruin sites + connecting roads, resolved
+        // through the LayerProcGen stack and merged into fine-LOD chunks.
+        .insert_resource(ChunkOpsProvider(Some({
+            let layers = std::sync::Arc::new(voxel_worldgen::roads::planning_layers(0));
+            std::sync::Arc::new(move |key: voxel_engine::ChunkKey| {
+                if key.level > 2 {
+                    return Vec::new(); // meter-scale features: fine LODs only
+                }
+                let min = key.min_corner_m().as_vec3();
+                let max = min + Vec3::splat(key.edge_m() as f32);
+                let mut ops = voxel_worldgen::ruins::ruins_ops(min, max);
+                ops.extend(voxel_worldgen::roads::road_ops(&layers, min, max));
+                ops
+            })
+        })))
         .add_plugins((VoxelDebugPlugin, VoxelEnginePlugin::default()))
         .add_systems(Startup, setup)
         .add_systems(Update, (autopilot, walk_mode, follow_ocean).chain())
