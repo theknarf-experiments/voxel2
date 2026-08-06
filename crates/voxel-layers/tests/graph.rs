@@ -12,7 +12,7 @@ use std::sync::{
 };
 
 use glam::IVec3;
-use voxel_layers::v2::{ChunkCtx, Dep, IAabb, Layer, LayerChunk, LayerGraph, TopDep};
+use voxel_layers::{ChunkCtx, Dep, IAabb, Layer, LayerChunk, LayerGraph, TopDep};
 
 const CELL: i32 = 256;
 
@@ -371,7 +371,7 @@ fn shared_chunks_survive_one_holder_leaving() {
 /// brings residency in line with it — the app never blocks on generation.
 #[test]
 fn runtime_follows_a_published_focus() {
-    use voxel_layers::v2::LayerRuntime;
+    use voxel_layers::LayerRuntime;
 
     let ledger = Arc::new(Ledger::default());
     let graph = Arc::new(graph(ledger.clone(), 0, 0, 2));
@@ -401,7 +401,7 @@ fn runtime_follows_a_published_focus() {
 /// owned entities or GPU slots would leak them on teardown.
 #[test]
 fn dropping_the_runtime_releases_everything() {
-    use voxel_layers::v2::LayerRuntime;
+    use voxel_layers::LayerRuntime;
 
     let ledger = Arc::new(Ledger::default());
     let graph = Arc::new(graph(ledger.clone(), 1, CELL, 2));

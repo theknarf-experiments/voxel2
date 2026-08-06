@@ -9,7 +9,7 @@
 
 use glam::IVec3;
 
-use crate::layer::{layer_key, IAabb, LayerKey};
+use crate::layer::{layer_key, LayerKey};
 
 /// A dependency on a level of another layer.
 ///
@@ -114,14 +114,5 @@ pub trait LayerChunk: Default + Send + Sync + 'static {
     fn destroy(&mut self, _ctx: &ChunkCtx<'_, Self::Layer>, _level: u32) {}
 }
 
-pub use crate::v2::graph::ChunkCtx;
+pub use crate::graph::ChunkCtx;
 
-/// World-space bounds of a chunk, honoring collapsed axes.
-pub(crate) fn bounds_of(extent: IVec3, coord: IVec3) -> IAabb {
-    crate::layer::chunk_bounds(extent, coord)
-}
-
-/// Inclusive range of chunk coordinates covering `bounds`.
-pub(crate) fn range_of(extent: IVec3, bounds: IAabb) -> (IVec3, IVec3) {
-    crate::layer::chunk_range(extent, bounds)
-}

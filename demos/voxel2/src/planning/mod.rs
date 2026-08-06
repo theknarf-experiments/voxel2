@@ -19,7 +19,7 @@ use voxel_engine::{
     level::LevelDef,
     planning::{HostPlanning, Marker, PlanningStats, RibbonSeg, WorldPlanner, OPS_HORIZON_EDGE_M},
 };
-use voxel_layers::v2::{LayerGraph, LayerRuntime, TopDep, TopHandle};
+use voxel_layers::{LayerGraph, LayerRuntime, TopDep, TopHandle};
 
 pub use schema::{PlanningDef, StackLayerDef};
 use schema::{validate_level, EmitDef};

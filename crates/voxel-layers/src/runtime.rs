@@ -12,7 +12,7 @@ use std::time::Duration;
 
 use glam::IVec3;
 
-use crate::v2::graph::{LayerGraph, TopDep};
+use crate::graph::{LayerGraph, TopDep};
 
 /// How long the thread idles when no top dependency has moved. Short
 /// enough that a camera crossing a chunk boundary is picked up within a

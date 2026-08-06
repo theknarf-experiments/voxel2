@@ -6,7 +6,7 @@
 
 use glam::{IVec3, Vec2, Vec3};
 use voxel_core::csg::CsgOp;
-use voxel_layers::v2::{ChunkCtx, Dep, IAabb, Layer, LayerChunk, LayerGraph};
+use voxel_layers::{ChunkCtx, Dep, IAabb, Layer, LayerChunk, LayerGraph};
 
 use voxel_worldgen::Generator;
 
@@ -1315,7 +1315,7 @@ mod tests {
         )
     }
     use crate::planning::structure::{Anchor, Arrange, Extent, Part, Seat, Shape, Structure, Variant, Yaw};
-    use voxel_layers::v2::{LayerRuntime, TopDep};
+    use voxel_layers::{LayerRuntime, TopDep};
 
     /// A minimal structure for emit tests: one seated block per site.
     fn test_structure(material: u32, cut: bool, seat: Seat) -> std::sync::Arc<Structure> {

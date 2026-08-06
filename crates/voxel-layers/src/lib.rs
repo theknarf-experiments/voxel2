@@ -1,22 +1,34 @@
-//! Data layers chunked at per-layer scales, with declared padded
-//! dependencies on lower layers.
+//! LayerProcGen: dependency management between data layers, threaded chunk
+//! generation, and spatial organisation — and no procedural generation
+//! algorithms whatsoever. Concrete layers are the game's code.
 //!
-//! [`v2`] is the framework, after runevision/LayerProcGen: lifetime
-//! reference-counted through the dependency graph, top dependencies as the
-//! only thing that generates, symmetric create/destroy, dependencies that
-//! name a level. [`manager`] is the on-demand cache it replaces, kept only
-//! until its callers are ported.
+//! - **Lifetime is reference-counted through the dependency graph.** Every
+//!   chunk level records what it was generated from and how many things
+//!   need it. The resident set is exactly the transitive closure of the
+//!   active [`TopDep`]s, not an approximation kept by an eviction pass.
+//! - **Top dependencies are the only thing that generates**, and they
+//!   process ensure-new-then-release-old, so a moving focus never drops
+//!   what a consumer still holds. Reads return what is resident; a miss
+//!   reports the padding that would have covered it.
+//! - **`create` and `destroy` are symmetric**, so a chunk can own entities,
+//!   GPU slots or pooled buffers and give them back at a defined moment.
+//! - **Dependencies name a level**, so a layer publishes partial states and
+//!   a graph that would otherwise be circular stays a DAG.
 //!
-//! The contract both share, and that determinism rests on:
-//! - A layer writes only its own chunk and reads only *lower* layers, within
-//!   its own bounds inflated by the padding it declared for that dependency.
-//! - All randomness derives from `(world_seed, layer_name, chunk_coord)`.
-//! - Therefore any chunk can be generated at any time, on any thread, in any
-//!   order, and the result is byte-identical.
+//! Determinism rests on one rule: a layer writes only its own chunk and
+//! reads only what it declared, within its own bounds inflated by that
+//! dependency's padding, deriving all randomness from
+//! `(world_seed, instance, chunk_coord)`. Any chunk can then be generated
+//! at any time, on any thread, in any order, byte-identically.
 
+pub mod graph;
 pub mod layer;
-pub mod manager;
-pub mod v2;
+pub mod runtime;
+pub mod store;
+pub mod traits;
 
-pub use layer::{Dep, IAabb, Layer};
-pub use manager::{LayerCtx, LayerManager, LayerView};
+pub use graph::{ChunkCtx, ChunkRef, LayerGraph, TopDep, View};
+pub use layer::{layer_key, IAabb, LayerKey};
+pub use runtime::{LayerRuntime, TopHandle};
+pub use store::Usage;
+pub use traits::{Dep, Layer, LayerChunk, FINAL_LEVEL};

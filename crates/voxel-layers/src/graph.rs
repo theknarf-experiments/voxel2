@@ -22,8 +22,9 @@ use glam::IVec3;
 use voxel_core::seed::{chunk_seed, Rng};
 
 use crate::layer::{layer_key, IAabb, LayerKey};
-use crate::v2::layer::{bounds_of, range_of, Dep, Layer, LayerChunk, FINAL_LEVEL};
-use crate::v2::store::{ChunkSlot, ErasedChunk, Provider, Usage};
+use crate::layer::{chunk_bounds as bounds_of, chunk_range as range_of};
+use crate::traits::{Dep, Layer, LayerChunk, FINAL_LEVEL};
+use crate::store::{ChunkSlot, ErasedChunk, Provider, Usage};
 
 type CreateFn = Box<dyn Fn(&LayerGraph, &Arc<ChunkSlot>, u32) + Send + Sync>;
 type NewChunkFn = Box<dyn Fn() -> ErasedChunk + Send + Sync>;

@@ -1,8 +1,7 @@
-//! The `Layer` trait and supporting geometry types.
+//! Chunk geometry and layer identity: the coordinate system every
+//! layer shares.
 
 use glam::IVec3;
-
-use crate::manager::LayerCtx;
 
 /// Integer axis-aligned box in world meters, `max` exclusive.
 /// `i32::MIN`/`i32::MAX` bounds mean "unbounded along that axis".
@@ -44,31 +43,6 @@ impl IAabb {
     }
 }
 
-/// A declared dependency on a lower layer.
-pub struct Dep {
-    /// Instance key (hashed instance name) of the depended-on layer.
-    pub key: LayerKey,
-    /// How far outside its own chunk bounds (in meters, per axis) the
-    /// dependent layer may read from `layer`.
-    pub padding: IVec3,
-}
-
-impl Dep {
-    /// Depend on the default instance of `L` (instance name = `L::NAME`).
-    pub fn of<L: Layer>(padding: IVec3) -> Self {
-        Self::named(L::NAME, padding)
-    }
-
-    /// Depend on a named instance (data-driven stacks register several
-    /// differently-parameterized instances of one layer type).
-    pub fn named(name: &str, padding: IVec3) -> Self {
-        Self {
-            key: layer_key(name),
-            padding,
-        }
-    }
-}
-
 /// Stable instance key: hash of the instance name. Also seeds the
 /// instance's RNG streams, so renaming an instance reshuffles its
 /// randomness — treat like a save-format change.
@@ -82,55 +56,8 @@ pub fn layer_key(name: &str) -> LayerKey {
     h
 }
 
-/// One data layer of the procedural world.
-///
-/// Chunks of different layers can differ in scale by orders of magnitude; an
-/// axis with `chunk_extent` 0 is *collapsed* — the layer has a single chunk
-/// along it (coordinate 0, unbounded extent), which is how planar 2D layers
-/// are expressed in a 3D world.
-pub trait Layer: Sized + Send + Sync + 'static {
-    type Chunk: Send + Sync + 'static;
-
-    /// Stable identifier; hashed into every chunk seed of this layer.
-    /// Renaming a layer reshuffles its randomness — treat like a save-format
-    /// change.
-    const NAME: &'static str;
-
-    /// Chunk extent in meters per axis (0 = collapsed axis).
-    fn chunk_extent(&self) -> IVec3;
-
-    /// Lower layers this layer reads, with padded reach. Must already be
-    /// registered when this layer is registered.
-    fn dependencies(&self) -> Vec<Dep> {
-        Vec::new()
-    }
-
-    /// Internal levels (LayerProcGen pattern): multiple generation passes
-    /// within one layer, sharing the chunk grid. Level `l` chunks may read
-    /// level `l-1` chunks of the same layer through
-    /// [`LayerCtx::get_self`] within [`Layer::level_padding`]. Outside
-    /// consumers (and inter-layer dependencies) always see the final
-    /// level. Default: a single level.
-    fn levels(&self) -> u32 {
-        1
-    }
-
-    /// Padded reach (meters) of level `level`'s reads into level
-    /// `level - 1` of the same layer.
-    fn level_padding(&self, _level: u32) -> IVec3 {
-        IVec3::ZERO
-    }
-
-    /// Produce the chunk at `coord` for `ctx.level()`. May read dependency
-    /// layers through `ctx` (within declared padding), the previous level
-    /// of this layer through `ctx.get_self`, and derive randomness from
-    /// `ctx.seed()`/`ctx.rng()` — nothing else. That discipline is what
-    /// makes generation deterministic under any thread count or order.
-    fn generate(&self, ctx: &LayerCtx<'_, Self>, coord: IVec3) -> Self::Chunk;
-}
-
 /// World-space bounds of a layer chunk, honoring collapsed axes.
-pub(crate) fn chunk_bounds(extent: IVec3, coord: IVec3) -> IAabb {
+pub fn chunk_bounds(extent: IVec3, coord: IVec3) -> IAabb {
     let axis = |e: i32, c: i32| -> (i32, i32) {
         if e == 0 {
             (i32::MIN, i32::MAX)
@@ -150,7 +77,7 @@ pub(crate) fn chunk_bounds(extent: IVec3, coord: IVec3) -> IAabb {
 }
 
 /// Range of chunk coordinates (inclusive) covering `bounds`.
-pub(crate) fn chunk_range(extent: IVec3, bounds: IAabb) -> (IVec3, IVec3) {
+pub fn chunk_range(extent: IVec3, bounds: IAabb) -> (IVec3, IVec3) {
     let axis = |e: i32, min: i32, max: i32| -> (i32, i32) {
         if e == 0 {
             (0, 0)
