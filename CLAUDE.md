@@ -11,13 +11,13 @@ architecture. Design plan: `~/.claude/plans/binary-twirling-brooks.md`.
   screenshot, and look. Use `caffeinate -dis` so the display can't sleep,
   and capture only the app window region: `screencapture -x -R390,160,1245,730 out.png`.
 - Env vars for repeatable scenes: `VOXEL_START=x,y,z`, `VOXEL_LOOK=dx,dy,dz`,
-  `VOXEL_AUTOPILOT=<m/s>`, `VOXEL_WALK=1`. `cargo run -p scout --release`
-  scans for scenic spots (edit its main.rs per need).
+  `VOXEL_AUTOPILOT=<m/s>`, `VOXEL_WALK=1`.
 - PREFER live verification over relaunch cycles: run with `VOXEL_REMOTE=1`
   and drive via `cargo run -p voxctl -q -- status | goto X Y Z [DIR] |
-  water/markers/ops X Z [R] | shot PATH` (offscreen screenshots; wait
-  ~1 s for the file, ~10-15 s after a goto for streaming). F8/F9 (or
-  `raw voxel/viz`) toggle chunk/layer debug overlays.
+  water/markers/ops X Z [R] | scan X Z [R] [STEP] | shot PATH`
+  (offscreen screenshots; wait ~1 s for the file, ~10-15 s after a goto
+  for streaming). `scan` ranks scenic spots; F8/F9 (or `raw voxel/viz`)
+  toggle chunk/layer debug overlays.
 - Zero `Validation Error` lines in the log is part of "verified".
 
 ## Invariants that bite

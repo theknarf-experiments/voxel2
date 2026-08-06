@@ -20,7 +20,6 @@ Worlds are data: one binary presents a JSON level definition.
 ```sh
 cargo run -p voxel2 -- levels/planet.json         # forests, biomes, rivers, ruins, roads, caves, dungeons
 cargo run -p voxel2 -- levels/megastructure.json  # endless interior: pocket districts linked by tubes
-cargo run -p scout --release                      # offline: scan for scenic locations
 ```
 
 There are no hardcoded worlds. A level file describes everything, most
@@ -64,7 +63,8 @@ speed. Env vars:
 
 **Live tooling**: run with `VOXEL_REMOTE=1`, then drive the running game:
 `cargo run -p voxctl -- status | goto X Y Z [DX DY DZ] | water X Z [R] |
-markers X Z [R] [KIND] | ops ... | shot PATH`. In-game overlays: F8 chunk
+markers X Z [R] [KIND] | scan X Z [R] [STEP] | shot PATH` — `scan` ranks
+scenic spots (steep, high terrain) from the CPU world mirror. In-game overlays: F8 chunk
 boundaries by LOD, F9 planning layers (markers, clearance, water, biome
 field).
 

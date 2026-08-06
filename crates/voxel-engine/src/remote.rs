@@ -23,6 +23,7 @@ impl Plugin for VoxelRemotePlugin {
                 .with_method_main("voxel/water", water)
                 .with_method_main("voxel/markers", markers)
                 .with_method_main("voxel/ops", ops)
+                .with_method_main("voxel/scan", scan)
                 .with_method_main("voxel/viz", viz)
                 .with_method_main("voxel/screenshot", screenshot),
         )
@@ -212,6 +213,62 @@ fn viz(In(params): In<Option<Value>>, mut viz: ResMut<crate::debug_viz::DebugViz
     Ok(json!({"chunks": viz.chunks, "layers": viz.layers}))
 }
 
+/// Scenic-spot scoring: local relief (how dramatically the terrain
+/// drops around the point) plus an altitude bonus — the "steep high
+/// terrain" heuristic the old offline scout binary used.
+fn scan_terrain(center: Vec2, radius: f32, step: f32, top: usize) -> Vec<(Vec3, f32, f32)> {
+    // Bound the grid so a wide scan cannot stall the main thread.
+    let step = step.max(radius * 2.0 / 128.0).max(8.0);
+    let n = (radius * 2.0 / step) as i32;
+    let height = |p: Vec2| voxel_worldgen::terrain_height(p, 8.0);
+    let mut spots: Vec<(Vec3, f32, f32)> = Vec::new();
+    for gz in 0..=n {
+        for gx in 0..=n {
+            let p = center - Vec2::splat(radius)
+                + Vec2::new(gx as f32, gz as f32) * step;
+            let h = height(p);
+            if h <= 1.0 {
+                continue; // sea floor is never scenic
+            }
+            let mut relief = 0.0f32;
+            for (dx, dz) in [(step, 0.0), (-step, 0.0), (0.0, step), (0.0, -step)] {
+                relief = relief.max((h - height(p + Vec2::new(dx, dz))).abs());
+            }
+            let score = relief + h * 0.15;
+            spots.push((Vec3::new(p.x, h, p.y), relief, score));
+        }
+    }
+    spots.sort_by(|a, b| b.2.total_cmp(&a.2));
+    spots.truncate(top);
+    spots
+}
+
+/// `{"center": [x, z], "radius": r?, "step": s?, "top": n?}` — scan the
+/// terrain mirror for scenic spots (steep, high ground), ranked. The
+/// offline scout binary's job, minus the hand-copied level config.
+fn scan(In(params): In<Option<Value>>) -> BrpResult {
+    let params = params.ok_or_else(|| err("params required"))?;
+    let c = f32s(&params, "center", 2)?;
+    let r = radius(&params, 4_096.0);
+    let step = params.get("step").and_then(Value::as_f64).unwrap_or(32.0) as f32;
+    let top = params
+        .get("top")
+        .and_then(Value::as_u64)
+        .unwrap_or(10)
+        .min(64) as usize;
+    let spots: Vec<Value> = scan_terrain(Vec2::new(c[0], c[1]), r, step, top)
+        .iter()
+        .map(|(pos, relief, score)| {
+            json!({
+                "pos": [pos.x, pos.y, pos.z],
+                "relief": relief,
+                "score": score,
+            })
+        })
+        .collect();
+    Ok(json!({"count": spots.len(), "spots": spots}))
+}
+
 /// `{"path": "shot.png"}` — dump the next rendered frame through the
 /// offscreen mirror (works with an occluded window).
 fn screenshot(
@@ -225,4 +282,27 @@ fn screenshot(
         .ok_or_else(|| err("missing param \"path\""))?;
     requests.0.push(path.to_string());
     Ok(json!({"queued": path}))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn scan_ranks_bounded_spots_within_radius() {
+        // Land region of the reference planet (default program).
+        let center = Vec2::new(-27000.0, -38000.0);
+        let spots = scan_terrain(center, 4096.0, 64.0, 10);
+        assert!(!spots.is_empty() && spots.len() <= 10);
+        for w in spots.windows(2) {
+            assert!(w[0].2 >= w[1].2, "not sorted by score");
+        }
+        for (pos, relief, score) in &spots {
+            assert!(Vec2::new(pos.x, pos.z).distance(center) <= 4096.0 * 1.5);
+            assert!(pos.y > 1.0, "sea-floor spot");
+            assert!(*score >= *relief);
+        }
+        // Deterministic.
+        assert_eq!(spots, scan_terrain(center, 4096.0, 64.0, 10));
+    }
 }

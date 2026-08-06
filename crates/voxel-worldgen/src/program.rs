@@ -358,7 +358,7 @@ pub fn sun_direction() -> glam::Vec3 {
 }
 
 /// The current program (defaults to [`planet_program`] until a level
-/// installs one — keeps tools like scout working without a level).
+/// installs one — keeps standalone tools and tests working without a level).
 pub fn program() -> Arc<Vec<WorldOp>> {
     if let Some(p) = PROGRAM.read().unwrap().as_ref() {
         return p.clone();

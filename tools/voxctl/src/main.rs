@@ -7,6 +7,7 @@
 //!   voxctl status
 //!   voxctl goto X Y Z [DX DY DZ]
 //!   voxctl water X Z [RADIUS]
+//!   voxctl scan X Z [RADIUS] [STEP]   # scenic-spot ranking (ex-scout)
 //!   voxctl markers X Z [RADIUS] [KIND]
 //!   voxctl shot PATH
 //!   voxctl raw METHOD [PARAMS_JSON]
@@ -96,6 +97,14 @@ fn main() {
             }
             call("voxel/markers", params)
         }
+        ["scan", x, z, rest @ ..] => {
+            let radius = rest.first().map(|r| parse_f64(r)).unwrap_or(4096.0);
+            let step = rest.get(1).map(|s| parse_f64(s)).unwrap_or(32.0);
+            call(
+                "voxel/scan",
+                json!({"center": [parse_f64(x), parse_f64(z)], "radius": radius, "step": step}),
+            )
+        }
         ["shot", path] => call("voxel/screenshot", json!({"path": path})),
         ["raw", method] => call(method, Value::Null),
         ["raw", method, params] => match serde_json::from_str(params) {
@@ -105,7 +114,8 @@ fn main() {
         _ => {
             eprintln!(
                 "usage: voxctl status | goto X Y Z [DX DY DZ] | water X Z [R] | \
-                 markers X Z [R] [KIND] | shot PATH | raw METHOD [JSON]"
+                 markers X Z [R] [KIND] | scan X Z [R] [STEP] | shot PATH | \
+                 raw METHOD [JSON]"
             );
             std::process::exit(2);
         }
