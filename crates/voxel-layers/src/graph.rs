@@ -15,7 +15,7 @@ use std::any::{Any, TypeId};
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::marker::PhantomData;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 
 use glam::IVec3;
@@ -39,6 +39,14 @@ struct LayerEntry {
     /// Dependencies per level, with `FINAL_LEVEL` already resolved.
     deps: Vec<Vec<Dep>>,
     grid: RwLock<HashMap<IVec3, Arc<ChunkSlot>>>,
+    /// Chunk objects returned by `destroy`, ready to be filled again.
+    /// Chunks are long-lived at scale and their buffers dominate; letting
+    /// a layer keep its capacity is why `destroy` should clear rather than
+    /// replace.
+    pool: Mutex<Vec<ErasedChunk>>,
+    created: AtomicUsize,
+    destroyed: AtomicUsize,
+    create_nanos: AtomicU64,
     /// Serializes creates of a level that reads its own layer across
     /// chunks (`level_padding != 0`). Without it two neighbours can
     /// deadlock: each holds its own chunk for writing while asking to read
@@ -71,6 +79,21 @@ pub struct LayerGraph {
     /// the graph.
     free_workers: AtomicUsize,
     reads_missed: AtomicUsize,
+    /// Set when the world is going away. Checked inside the generation
+    /// loops so a teardown or a level reload does not have to wait for a
+    /// whole pass over a resident set it is about to discard.
+    aborting: AtomicBool,
+}
+
+/// What one layer instance has cost and is holding.
+#[derive(Debug, Clone)]
+pub struct LayerStats {
+    pub name: String,
+    pub resident: usize,
+    pub created: usize,
+    pub destroyed: usize,
+    /// Total time inside this layer's `create`.
+    pub create_time: std::time::Duration,
 }
 
 impl LayerGraph {
@@ -93,6 +116,7 @@ impl LayerGraph {
             layers: HashMap::new(),
             free_workers: AtomicUsize::new(threads.saturating_sub(1)),
             reads_missed: AtomicUsize::new(0),
+            aborting: AtomicBool::new(false),
         }
     }
 
@@ -198,6 +222,10 @@ impl LayerGraph {
                 level_pads,
                 deps,
                 grid: RwLock::new(HashMap::new()),
+                pool: Mutex::new(Vec::new()),
+                created: AtomicUsize::new(0),
+                destroyed: AtomicUsize::new(0),
+                create_nanos: AtomicU64::new(0),
                 self_reading,
                 level_locks: (0..levels).map(|_| Mutex::new(())).collect(),
                 new_chunk: Box::new(|| Box::new(L::Chunk::default())),
@@ -260,12 +288,13 @@ impl LayerGraph {
                         for x in lo.x..=hi.x {
                             let coord = IVec3::new(x, y, z);
                             let slot = grid.entry(coord).or_insert_with(|| {
-                                Arc::new(ChunkSlot::new(
-                                    key,
-                                    coord,
-                                    entry.levels as usize,
-                                    (entry.new_chunk)(),
-                                ))
+                                let data = entry
+                                    .pool
+                                    .lock()
+                                    .unwrap()
+                                    .pop()
+                                    .unwrap_or_else(|| (entry.new_chunk)());
+                                Arc::new(ChunkSlot::new(key, coord, entry.levels as usize, data))
                             });
                             slots.push(slot.clone());
                         }
@@ -328,6 +357,9 @@ impl LayerGraph {
         };
         if helpers == 0 {
             for slot in missing {
+                if self.aborting.load(Ordering::Relaxed) {
+                    return;
+                }
                 self.create_level(key, slot, level);
             }
             return;
@@ -337,11 +369,17 @@ impl LayerGraph {
             for _ in 0..helpers {
                 scope.spawn(|| {
                     while let Some(slot) = missing.get(next.fetch_add(1, Ordering::Relaxed)) {
+                        if self.aborting.load(Ordering::Relaxed) {
+                            return;
+                        }
                         self.create_level(key, slot, level);
                     }
                 });
             }
             while let Some(slot) = missing.get(next.fetch_add(1, Ordering::Relaxed)) {
+                if self.aborting.load(Ordering::Relaxed) {
+                    break;
+                }
                 self.create_level(key, slot, level);
             }
         });
@@ -399,7 +437,12 @@ impl LayerGraph {
             self.ensure(dep.key, dep_bounds(own, dep.padding), dep.level, &mut providers);
         }
 
+        let started = std::time::Instant::now();
         (entry.create)(self, slot, level);
+        entry
+            .create_nanos
+            .fetch_add(started.elapsed().as_nanos() as u64, Ordering::Relaxed);
+        entry.created.fetch_add(1, Ordering::Relaxed);
 
         slot.levels.lock().unwrap()[level as usize].providers = providers.providers;
         slot.level.store(level as i32, Ordering::Release);
@@ -466,8 +509,17 @@ impl LayerGraph {
             (entry.destroy)(self, slot, level);
             slot.level.store(level as i32 - 1, Ordering::Release);
         }
+        entry.destroyed.fetch_add(1, Ordering::Relaxed);
         if level == 0 {
-            entry.grid.write().unwrap().remove(&slot.coord);
+            let removed = entry.grid.write().unwrap().remove(&slot.coord);
+            // Only the last holder of the slot may recycle its chunk; a
+            // reader that still has the Arc would otherwise see it refilled
+            // underneath it.
+            if let Some(slot) = removed {
+                if let Ok(slot) = Arc::try_unwrap(slot) {
+                    entry.pool.lock().unwrap().push(slot.data.into_inner().unwrap());
+                }
+            }
         }
     }
 
@@ -567,6 +619,32 @@ impl LayerGraph {
             .values()
             .map(|entry| entry.grid.read().unwrap().len())
             .sum()
+    }
+
+    /// Ask in-flight generation to stop as soon as it can. Irreversible:
+    /// the world is being torn down.
+    pub fn abort(&self) {
+        self.aborting.store(true, Ordering::Relaxed);
+    }
+
+    /// Per-layer residency and cost, for the HUD and for deciding whether
+    /// a layer is worth what it costs.
+    pub fn layer_stats(&self) -> Vec<LayerStats> {
+        let mut out: Vec<LayerStats> = self
+            .layers
+            .values()
+            .map(|entry| LayerStats {
+                name: entry.name.clone(),
+                resident: entry.grid.read().unwrap().len(),
+                created: entry.created.load(Ordering::Relaxed),
+                destroyed: entry.destroyed.load(Ordering::Relaxed),
+                create_time: std::time::Duration::from_nanos(
+                    entry.create_nanos.load(Ordering::Relaxed),
+                ),
+            })
+            .collect();
+        out.sort_by_key(|s| std::cmp::Reverse(s.create_time));
+        out
     }
 
     /// Resident chunks of one instance.

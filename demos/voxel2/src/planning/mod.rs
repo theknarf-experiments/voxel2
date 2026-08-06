@@ -202,6 +202,7 @@ impl WorldPlanner for StackPlanner {
             resident_chunks: rt.graph().resident_chunks(),
             reads_missed: rt.graph().reads_missed(),
             generating: rt.is_generating(),
+            layers: rt.graph().layer_stats(),
         })
     }
 }

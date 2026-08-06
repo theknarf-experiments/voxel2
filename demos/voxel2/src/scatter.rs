@@ -127,7 +127,7 @@ impl LayerChunk for ScatterChunk {
     }
 
     fn destroy(&mut self, _ctx: &ChunkCtx<'_, ScatterPopulation>, _level: u32) {
-        self.placements = Vec::new();
+        self.placements.clear();
     }
 }
 

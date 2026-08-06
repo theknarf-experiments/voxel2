@@ -91,7 +91,7 @@ pub trait WorldPlanner: Send + Sync + 'static {
 }
 
 /// What a planner reports about itself.
-#[derive(Debug, Default, Clone, Copy)]
+#[derive(Debug, Default, Clone)]
 pub struct PlanningStats {
     /// Chunks currently held resident. With a dependency graph this is
     /// the exact transitive closure of the top dependencies, so it should
@@ -104,6 +104,8 @@ pub struct PlanningStats {
     pub reads_missed: usize,
     /// A generation pass is running.
     pub generating: bool,
+    /// Per-layer residency and cost, dearest first.
+    pub layers: Vec<voxel_layers::LayerStats>,
 }
 
 /// A source of ops for a world-space box, independent of any layer stack

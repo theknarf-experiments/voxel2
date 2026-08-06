@@ -79,6 +79,7 @@ fn status(
     cams: PlayerCamera<&Transform>,
     stats: Option<Res<voxel_render::SharedRenderStats>>,
     probe: Option<Res<voxel_engine::streaming::StreamProbe>>,
+    world: Option<Res<voxel_engine::WorldQuery>>,
     diagnostics: Res<bevy::diagnostic::DiagnosticsStore>,
 ) -> BrpResult {
     let t = cams.single().map_err(|_| err("no player camera"))?;
@@ -102,6 +103,25 @@ fn status(
             "epoch_to_request": p.epoch_to_request,
             "epoch_age_s": p.epoch_age_s,
             "reads_missed": p.reads_missed,
+        });
+    }
+    if let Some(world) = world {
+        let planning = world.stats();
+        out["planning"] = json!({
+            "resident_chunks": planning.resident_chunks,
+            "reads_missed": planning.reads_missed,
+            "generating": planning.generating,
+            "layers": planning
+                .layers
+                .iter()
+                .map(|l| json!({
+                    "name": l.name,
+                    "resident": l.resident,
+                    "created": l.created,
+                    "destroyed": l.destroyed,
+                    "create_ms": l.create_time.as_secs_f64() * 1000.0,
+                }))
+                .collect::<Vec<_>>(),
         });
     }
     if let Some(s) = stats {

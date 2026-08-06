@@ -460,3 +460,29 @@ fn invalidate_ignores_absent_chunks() {
     assert_eq!(graph.resident_chunks(), 0);
     assert_eq!(ledger.created.load(Ordering::Relaxed), 0);
 }
+
+/// Chunk objects are reused rather than reallocated, which is why
+/// `destroy` should clear its buffers instead of replacing them.
+#[test]
+fn chunk_objects_are_pooled_across_residency() {
+    let ledger = Arc::new(Ledger::default());
+    let graph = graph(ledger.clone(), 0, 0, 1);
+
+    let mut top = TopDep::new(&graph, "play", IVec3::new(CELL * 2, 0, CELL * 2));
+    top.set_focus(&graph, IVec3::new(CELL / 2, 0, CELL / 2));
+    graph.process_top(&mut top);
+    let held = graph.resident_in("play");
+    assert!(held > 0);
+
+    // Somewhere with no overlap: every chunk is replaced, so every object
+    // freed by the release is available to the creates that follow.
+    top.set_focus(&graph, IVec3::new(CELL * 400 + CELL / 2, 0, CELL / 2));
+    graph.process_top(&mut top);
+    assert_eq!(graph.resident_in("play"), held);
+
+    let stats = graph.layer_stats();
+    let play = stats.iter().find(|s| s.name == "play").expect("play stats");
+    assert_eq!(play.resident, held);
+    assert_eq!(play.created, held * 2, "both windows generated");
+    assert_eq!(play.destroyed, held, "the first window was released");
+}

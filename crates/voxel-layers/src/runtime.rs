@@ -37,7 +37,11 @@ impl TopSlot {
                 AtomicI32::new(size.y),
                 AtomicI32::new(size.z),
             ],
-            active: AtomicBool::new(true),
+            // Inactive until the app says where to look. Otherwise the
+            // first pass generates a whole world at the origin and the
+            // first published focus throws all of it away — which for the
+            // shipped planet was half of everything ever generated.
+            active: AtomicBool::new(false),
         }
     }
 
@@ -160,6 +164,9 @@ impl LayerRuntime {
 
 impl Drop for LayerRuntime {
     fn drop(&mut self) {
+        // Abort first: a pass mid-way through a large resident set would
+        // otherwise have to finish before the join.
+        self.graph.abort();
         self.shared.stop.store(true, Ordering::Relaxed);
         if let Some(thread) = self.thread.take() {
             let _ = thread.join();
@@ -210,9 +217,14 @@ pub struct TopHandle {
 }
 
 impl TopHandle {
+    /// Publish where to look. The first call is also what starts this
+    /// dependency generating.
     pub fn set_focus(&self, focus: IVec3) {
         self.request();
         TopSlot::store(&self.shared.tops[self.index].focus, focus);
+        self.shared.tops[self.index]
+            .active
+            .store(true, Ordering::Relaxed);
     }
 
     pub fn set_size(&self, size: IVec3) {

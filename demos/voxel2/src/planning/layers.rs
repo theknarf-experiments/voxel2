@@ -1134,7 +1134,7 @@ impl LayerChunk for SitesChunk {
     }
 
     fn destroy(&mut self, _ctx: &ChunkCtx<'_, ScatterSites>, _level: u32) {
-        *self = Self::default();
+        self.sites.clear();
     }
 }
 
@@ -1158,7 +1158,7 @@ impl LayerChunk for Sites3Chunk {
     }
 
     fn destroy(&mut self, _ctx: &ChunkCtx<'_, Scatter3Sites>, _level: u32) {
-        *self = Self::default();
+        self.sites.clear();
     }
 }
 
@@ -1170,7 +1170,7 @@ impl LayerChunk for Paths3Chunk {
     }
 
     fn destroy(&mut self, _ctx: &ChunkCtx<'_, Connect3Paths>, _level: u32) {
-        *self = Self::default();
+        self.paths.clear();
     }
 }
 
@@ -1182,7 +1182,7 @@ impl LayerChunk for PathsChunk {
     }
 
     fn destroy(&mut self, _ctx: &ChunkCtx<'_, ConnectPaths>, _level: u32) {
-        *self = Self::default();
+        self.paths.clear();
     }
 }
 
@@ -1194,7 +1194,7 @@ impl LayerChunk for CoursesChunk {
     }
 
     fn destroy(&mut self, _ctx: &ChunkCtx<'_, FlowCourses>, _level: u32) {
-        *self = Self::default();
+        self.courses.clear();
     }
 }
 
@@ -1206,7 +1206,7 @@ impl LayerChunk for WormsChunk {
     }
 
     fn destroy(&mut self, _ctx: &ChunkCtx<'_, WormBurrows>, _level: u32) {
-        *self = Self::default();
+        self.worms.clear();
     }
 }
 
@@ -1218,7 +1218,10 @@ impl LayerChunk for PatchChunk {
     }
 
     fn destroy(&mut self, _ctx: &ChunkCtx<'_, EmitPatches>, _level: u32) {
-        *self = Self::default();
+        self.patches.ops.clear();
+        self.patches.ribbons.clear();
+        self.patches.clearance.clear();
+        self.patches.markers.clear();
     }
 }
 
