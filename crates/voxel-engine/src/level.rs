@@ -1820,9 +1820,9 @@ impl Plugin for LevelPlugin {
             panic!("level {:?} has invalid planning data: {e}", level.name);
         }
         let (ops_provider, world_query, planning_layers) = build_ops_provider(&level);
-        let warmup = planning_warmup(&level, &world_query);
+        let prepare = ops_prepare(&world_query);
         app.insert_resource(program)
-            .insert_resource(warmup)
+            .insert_resource(prepare)
             .insert_resource(material_table(&level))
             .insert_resource(env_params(&level))
             .insert_resource(if eval_holes_mode() {
@@ -1886,18 +1886,63 @@ pub struct PlanningLayers(pub Vec<Arc<voxel_layers::LayerManager>>);
 pub struct WorldQuery {
     /// The level's planning stack (one manager for all layers).
     stack: Option<Arc<voxel_layers::LayerManager>>,
-    /// Emit instances: (name, carve-horizon gate in chunk-edge meters).
-    emitters: Vec<(String, Option<f32>)>,
+    /// Emit instances and what each one can produce.
+    emitters: Vec<Emitter>,
     /// Legacy op sources not yet in the stack (pockets, placements).
     sources: Vec<OpsSource>,
     /// Biome layers: (instance name, ordered biome names).
     biome_tables: Vec<(String, Vec<String>)>,
+    /// Radius (m) the prop/water streamers query around the camera,
+    /// `None` when the level has neither. They ignore the LOD gates, so
+    /// they need their own ensure pass — a second top dependency with a
+    /// different size, in LayerProcGen terms.
+    streamer_radius: Option<f32>,
 }
+
+/// The ops horizon: chunks coarser than this never receive planning ops
+/// at all (structures are subpixel there and haze covers the hard-cut
+/// ring). Shared by the chunk provider and the ensure-load pass so they
+/// agree on what the resident planning set must be.
+const OPS_HORIZON_EDGE_M: f32 = 1000.0;
 
 /// Vertical band xz-facade queries cover: enough for any current world
 /// (the deepest LOD tree spans ~±2.5 km), small enough that volumetric
 /// emit layers don't enumerate thousands of 132 m y-rows per query.
 const FACADE_Y_M: f32 = 2_560.0;
+
+/// One emit layer as the facade sees it. `produces` keeps a query from
+/// touching — and therefore GENERATING — layers that cannot answer it: a
+/// level with no water emitter must not pull its structure planning into
+/// existence through `water_in`.
+#[derive(Clone)]
+struct Emitter {
+    name: String,
+    /// Carve-horizon gate in chunk-edge meters.
+    gate: Option<f32>,
+    water: bool,
+    clearance: bool,
+    markers: bool,
+}
+
+impl Emitter {
+    fn new(name: String, gate: Option<f32>, emit: &EmitDef) -> Self {
+        let (water, clearance, markers) = match emit {
+            EmitDef::CourseWater { .. } => (true, true, false),
+            EmitDef::PathSlabs { clearance, .. } => (false, *clearance, false),
+            EmitDef::SiteRecipe { marker, .. } | EmitDef::SiteRecipe3 { marker, .. } => {
+                (false, false, marker.is_some())
+            }
+            EmitDef::WormCuts | EmitDef::Tubes { .. } => (false, false, false),
+        };
+        Self {
+            name,
+            gate,
+            water,
+            clearance,
+            markers,
+        }
+    }
+}
 
 impl WorldQuery {
     /// All ops overlapping the box, as served to a chunk of the given
@@ -1910,13 +1955,94 @@ impl WorldQuery {
             out.extend(source(min, max));
         }
         if let Some(mgr) = &self.stack {
-            for (name, gate) in &self.emitters {
-                if gate.is_none_or(|g| chunk_edge_m <= g) {
-                    out.extend(voxel_worldgen::stack::patches_in(mgr, name, min, max).ops);
+            for e in &self.emitters {
+                if e.gate.is_none_or(|g| chunk_edge_m <= g) {
+                    out.extend(voxel_worldgen::stack::patches_in(mgr, &e.name, min, max).ops);
                 }
             }
         }
         out
+    }
+
+    /// Ensure the planning data every emitter needs for `keys` exists,
+    /// before anything reads it. Each emitter is ensured over the union
+    /// of the chunks that will actually query it: chunks past the global
+    /// ops horizon or past the emitter's carve-horizon gate are excluded,
+    /// so the resident planning set matches what can render.
+    pub fn prepare(&self, keys: &[ChunkKey]) {
+        let Some(mgr) = &self.stack else {
+            return;
+        };
+        if std::env::var_os("VOXEL_NO_PREPARE").is_some() {
+            return; // A/B kill switch: fall back to read-driven generation
+        }
+        // Per chunk, the exact box its ops query will cover: the chunk,
+        // the density apron the provider adds, and the element padding
+        // patches_in applies. A hull around all of them would generate
+        // planning for the hollow middle of the LOD shell.
+        let elem_pad = voxel_worldgen::stack::ELEM_PAD_M;
+        let region_of = |key: &ChunkKey| -> voxel_layers::IAabb {
+            let edge = key.edge_m() as f32;
+            let apron = 4.0 * key.voxel_size_m() as f32;
+            let lo = key.min_corner_m().as_vec3() - Vec3::splat(apron + elem_pad);
+            let hi = key.min_corner_m().as_vec3() + Vec3::splat(edge + apron + elem_pad);
+            voxel_layers::IAabb::new(lo.as_ivec3(), hi.as_ivec3())
+        };
+        let focus = keys
+            .iter()
+            .min_by_key(|k| k.edge_m() as i64)
+            .map(|k| k.min_corner_m().as_vec3().as_ivec3())
+            .unwrap_or(bevy::math::IVec3::ZERO);
+        let mut regions: Vec<voxel_layers::IAabb> = Vec::with_capacity(keys.len());
+        for e in &self.emitters {
+            regions.clear();
+            regions.extend(
+                keys.iter()
+                    .filter(|k| {
+                        let edge = k.edge_m() as f32;
+                        edge <= OPS_HORIZON_EDGE_M && !e.gate.is_some_and(|g| edge > g)
+                    })
+                    .map(region_of),
+            );
+            if regions.is_empty() {
+                continue; // nothing in this batch queries this emitter
+            }
+            let stats = mgr.ensure_loaded_regions(&e.name, &regions, focus);
+            if std::env::var_os("VOXEL_LOG_LAYERS").is_some() {
+                info!(
+                    "prepare {}: {} generated, {} present, {} regions",
+                    e.name,
+                    stats.generated,
+                    stats.present,
+                    regions.len()
+                );
+            }
+        }
+
+        // Second top dependency: the streamers query a fixed radius around
+        // the camera, ungated — without this their first tiles generate
+        // planning (400-step river descents, scatter filters) on the MAIN
+        // thread.
+        let Some(radius) = self.streamer_radius else {
+            return;
+        };
+        let band = bevy::math::IVec3::new(radius as i32, FACADE_Y_M as i32, radius as i32);
+        let near = voxel_layers::IAabb::new(focus - band, focus + band);
+        // Every emitter: the prop streamers' carved-ground check
+        // (`cuts_in`) queries all of them, not just the ones producing
+        // water or clearance.
+        for e in &self.emitters {
+            mgr.ensure_loaded_regions(&e.name, std::slice::from_ref(&near), focus);
+        }
+        // Spawner biome gates sample a wide influence window.
+        let biome_pad = bevy::math::IVec3::new(
+            voxel_worldgen::stack::BIOME_INFLUENCE_CELLS,
+            0,
+            voxel_worldgen::stack::BIOME_INFLUENCE_CELLS,
+        );
+        for (name, _) in &self.biome_tables {
+            mgr.ensure_loaded_regions(name, &[near.inflate(biome_pad)], focus);
+        }
     }
 
     /// Cut ops (carved voids) overlapping the box: spawners consult this
@@ -1936,8 +2062,8 @@ impl WorldQuery {
         );
         let mut out = Vec::new();
         if let Some(mgr) = &self.stack {
-            for (name, _) in &self.emitters {
-                out.extend(voxel_worldgen::stack::patches_in(mgr, name, min3, max3).clearance);
+            for e in self.emitters.iter().filter(|e| e.clearance) {
+                out.extend(voxel_worldgen::stack::patches_in(mgr, &e.name, min3, max3).clearance);
             }
         }
         out
@@ -1955,8 +2081,8 @@ impl WorldQuery {
         );
         let mut out = Vec::new();
         if let Some(mgr) = &self.stack {
-            for (name, _) in &self.emitters {
-                out.extend(voxel_worldgen::stack::patches_in(mgr, name, min3, max3).water);
+            for e in self.emitters.iter().filter(|e| e.water) {
+                out.extend(voxel_worldgen::stack::patches_in(mgr, &e.name, min3, max3).water);
             }
         }
         out
@@ -1992,9 +2118,9 @@ impl WorldQuery {
         );
         let mut out = Vec::new();
         if let Some(mgr) = &self.stack {
-            for (name, _) in &self.emitters {
+            for e in self.emitters.iter().filter(|e| e.markers) {
                 out.extend(
-                    voxel_worldgen::stack::patches_in(mgr, name, min3, max3)
+                    voxel_worldgen::stack::patches_in(mgr, &e.name, min3, max3)
                         .markers
                         .into_iter()
                         .filter(|m| kind.is_none_or(|k| m.kind == k)),
@@ -2005,33 +2131,17 @@ impl WorldQuery {
     }
 }
 
-/// Pre-warm the planning caches the vegetation streamers will hit,
-/// inside the async genesis task (cold layer generation must never land
-/// on the main thread). Rebuilt on hot reload — a stale closure would
-/// warm the retired manager and pin its cache forever.
-fn planning_warmup(level: &LevelDef, world: &WorldQuery) -> crate::streaming::PlanningWarmup {
-    // The warmup exists for the vegetation/water streamers' first
-    // main-thread ticks. A level without spawners never runs those
-    // queries — and warming a volumetric stack's full y-range (the
-    // megastructure) enumerates six figures of emit cells, stalling
-    // genesis for minutes. Skip it entirely.
-    if level.spawners.is_empty() {
-        return crate::streaming::PlanningWarmup(None);
-    }
+/// The engine's top dependency: pre-generate each emitter's planning
+/// closure over exactly the region the chunks in `keys` will query —
+/// gate-aware, so coarse chunks never drag fine-scale planning into
+/// existence. Runs in the async planning task; the per-chunk ops queries
+/// that follow are cache reads (`LayerManager::read_generated` reports
+/// any that are not).
+fn ops_prepare(world: &WorldQuery) -> crate::streaming::ChunkOpsPrepare {
     let world = world.clone();
-    crate::streaming::PlanningWarmup(Some(std::sync::Arc::new(
-        move |anchor: bevy::math::DVec3| {
-            let c = bevy::math::Vec2::new(anchor.x as f32, anchor.z as f32);
-            const WARM_M: f32 = 1_700.0;
-            let (min, max) = (c - Vec2::splat(WARM_M), c + Vec2::splat(WARM_M));
-            let _ = world.clearance_in(min, max);
-            let _ = world.cuts_in(
-                Vec3::new(min.x, -10_000.0, min.y),
-                Vec3::new(max.x, 10_000.0, max.y),
-            );
-            let _ = world.water_in(min, max);
-        },
-    )))
+    crate::streaming::ChunkOpsPrepare(Some(std::sync::Arc::new(move |keys: &[ChunkKey]| {
+        world.prepare(keys);
+    })))
 }
 
 fn build_ops_provider(level: &LevelDef) -> (ChunkOpsProvider, WorldQuery, PlanningLayers) {
@@ -2049,10 +2159,11 @@ fn build_ops_provider(level: &LevelDef) -> (ChunkOpsProvider, WorldQuery, Planni
             if let StackLayerDef::Emit {
                 name,
                 max_chunk_edge_m,
+                emit,
                 ..
             } = def
             {
-                emitters.push((name.clone(), *max_chunk_edge_m));
+                emitters.push(Emitter::new(name.clone(), *max_chunk_edge_m, emit));
             }
         }
         let mgr = Arc::new(mgr);
@@ -2122,11 +2233,33 @@ fn build_ops_provider(level: &LevelDef) -> (ChunkOpsProvider, WorldQuery, Planni
             _ => None,
         })
         .collect();
+    // Streamer working set, derived from the streamers themselves: props
+    // (far-forest ring dominates) and river water. Levels with neither
+    // skip the pass entirely.
+    let mut streamer_radius: Option<f32> = None;
+    let mut want = |reach: f32| {
+        streamer_radius = Some(streamer_radius.map_or(reach, |r: f32| r.max(reach)));
+    };
+    if !level.spawners.is_empty() {
+        want(crate::vegetation::QUERY_REACH_M);
+    }
+    if level.stack.iter().any(|l| {
+        matches!(
+            l,
+            StackLayerDef::Emit {
+                emit: EmitDef::CourseWater { .. },
+                ..
+            }
+        )
+    }) {
+        want(crate::river_water::QUERY_REACH_M);
+    }
     let world = WorldQuery {
         stack,
         emitters,
         sources,
         biome_tables,
+        streamer_radius,
     };
     if world.stack.is_none() && world.sources.is_empty() {
         return (ChunkOpsProvider(None), world, PlanningLayers(managers));
@@ -2137,7 +2270,7 @@ fn build_ops_provider(level: &LevelDef) -> (ChunkOpsProvider, WorldQuery, Planni
         // them at visible size: the ops horizon (where the SDF genuinely
         // loses the ops — a hard-cut seam by doctrine) must sit far enough
         // out that structures are subpixel and haze covers the ring.
-        if key.edge_m() > 1000.0 {
+        if key.edge_m() as f32 > OPS_HORIZON_EDGE_M {
             return Vec::new();
         }
         // Pad by the density apron: samples extend 2 voxels below and 3
@@ -2352,7 +2485,7 @@ fn reload_level(
         let (ops_provider, world_query, planning_layers) = build_ops_provider(&new);
         // The warmup must target the NEW manager; the old closure would
         // warm the retired one and pin its cache in memory forever.
-        commands.insert_resource(planning_warmup(&new, &world_query));
+        commands.insert_resource(ops_prepare(&world_query));
         commands.insert_resource(ops_provider);
         commands.insert_resource(world_query);
         commands.insert_resource(planning_layers);

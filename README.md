@@ -59,6 +59,9 @@ speed. Env vars:
 | `VOXEL_SCREENSHOT=path[,secs]` | Periodic offscreen frame dumps (works occluded) |
 | `VOXEL_EVAL_HOLES=1` | Coverage-eval rendering (used by `mise run eval`) |
 | `VOXEL_LOG_FPS=1` | fps/leaves/slab telemetry to the log |
+| `VOXEL_LOG_LAYERS=<n>` | Log the ensure-load passes and the first `n` read-driven generations (with a backtrace) |
+| `VOXEL_ENSURE_THREADS=<n>` | Override the planning ensure-load worker count |
+| `VOXEL_NO_PREPARE=1` | Fall back to read-driven planning generation (A/B) |
 
 **Live tooling**: run with `VOXEL_REMOTE=1`, then drive the running game:
 `cargo run -p voxctl -- status | goto X Y Z [DX DY DZ] | water X Z [R] |
@@ -87,9 +90,14 @@ field).
   indices; drawn camera-relative through a custom phase item (the view
   matrix is applied with w = 0, so world-space f32 error never grows with
   distance).
-- **Planning layers drive the GPU** (the LayerProcGen part): the level's
-  stack builds one `LayerManager` of CPU layers with declared padded
-  dependencies; `emit` layers bucket their output by owning cell (a road
+- **Planning layers drive the GPU** (the LayerProcGen part): generation is
+  *dependency-driven* — before the LOD planner queries anything, it
+  ensure-loads the planning closure for the chunks it is about to request
+  (and a second pass for the prop/water streamers' radius), resolving
+  declared dependencies first, nearest-first, in parallel and off the main
+  thread. `read_generated` in the debug status reports any consumer whose
+  working set that misses. The level's stack builds one `LayerManager` of
+  CPU layers with declared padded dependencies; `emit` layers bucket their output by owning cell (a road
   is owned by the chunk containing its midpoint) and a single `WorldQuery`
   facade serves CSG ops to chunks (with per-emitter carve-horizon gates),
   clearance to spawners, water segments to the renderer, and markers to

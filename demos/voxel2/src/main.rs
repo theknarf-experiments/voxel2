@@ -4,6 +4,7 @@
 //!     cargo run -p voxel2 -- levels/megastructure.json
 
 use bevy::prelude::*;
+use bevy::winit::{UpdateMode, WinitSettings};
 use voxel_debug::prelude::*;
 use voxel_engine::{LevelDef, LevelPlugin};
 
@@ -27,6 +28,15 @@ fn main() {
     };
 
     App::new()
+        // Keep running at full speed when the window loses focus. Bevy's
+        // default (`WinitSettings::game()`) drops to reactive_low_power
+        // at 60 Hz unfocused, which silently caps every measurement taken
+        // while the window is backgrounded — the exact shape of a "why is
+        // it 59 fps" mystery.
+        .insert_resource(WinitSettings {
+            focused_mode: UpdateMode::Continuous,
+            unfocused_mode: UpdateMode::Continuous,
+        })
         .add_plugins(DefaultPlugins.set(WindowPlugin {
             primary_window: Some(Window {
                 title: format!("voxel2 — {}", level.name),

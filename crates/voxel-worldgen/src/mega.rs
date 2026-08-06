@@ -11,7 +11,7 @@ use voxel_core::seed::Rng;
 pub fn pocket_recipe_ops(site: Vec3, rng: &mut Rng, out: &mut Vec<CsgOp>) {
     let floor_top = site.y + 1.5;
     let (x, z) = (site.x, site.z);
-    let fs = crate::program::lattice_y_spacing(&crate::program::program()).unwrap_or(44.0);
+    let fs = crate::program::with_program(crate::program::lattice_y_spacing).unwrap_or(44.0);
     let roll = rng.next_f32();
 
     if roll < 0.12 {

@@ -5,6 +5,7 @@
 //! planning, and the rendered world always agree. MUST stay bit-compatible
 //! with the WGSL.
 
+use std::cell::RefCell;
 use std::sync::{Arc, RwLock};
 
 use glam::{IVec2, IVec3, Vec2, Vec3};
@@ -240,10 +241,40 @@ static SUN: RwLock<glam::Vec3> = RwLock::new(DEFAULT_SUN_DIR);
 /// The engine-wide fallback sun direction (not normalized; twins normalize).
 pub const DEFAULT_SUN_DIR: glam::Vec3 = glam::Vec3::new(0.55, 0.5, 0.32);
 
+/// Bumped on every install so per-thread snapshots refresh.
+static PROGRAM_GEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+thread_local! {
+    /// Per-thread snapshot of the program. The CPU mirrors sample the
+    /// heightfield millions of times per planning pass; going through the
+    /// global `RwLock` + `Arc::clone` on every sample WRITES a shared
+    /// cache line, which made parallel generation slower than serial
+    /// (measured: 2.3 s at one thread, 5.5 s at seven). Reads here touch
+    /// only thread-local state plus one relaxed load of a read-mostly
+    /// counter.
+    static LOCAL_PROGRAM: RefCell<(u64, Option<Arc<Vec<WorldOp>>>)> =
+        const { RefCell::new((u64::MAX, None)) };
+}
+
 /// Install the level's generator program for the CPU mirrors
 /// ([`crate::terrain_height`], the planning layers, …).
 pub fn set_program(ops: Vec<WorldOp>) {
     *PROGRAM.write().unwrap() = Some(Arc::new(ops));
+    PROGRAM_GEN.fetch_add(1, std::sync::atomic::Ordering::Release);
+}
+
+/// Run `f` against the current program without per-call synchronization.
+/// Prefer this over [`program`] on hot paths.
+pub fn with_program<R>(f: impl FnOnce(&[WorldOp]) -> R) -> R {
+    let generation = PROGRAM_GEN.load(std::sync::atomic::Ordering::Acquire);
+    LOCAL_PROGRAM.with(|cell| {
+        if cell.borrow().0 != generation {
+            let fresh = program();
+            *cell.borrow_mut() = (generation, Some(fresh));
+        }
+        let snapshot = cell.borrow();
+        f(snapshot.1.as_ref().expect("program snapshot"))
+    })
 }
 
 /// Install the level seed. Mixed into the generator hashes on both twins;

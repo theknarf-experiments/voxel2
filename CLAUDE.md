@@ -49,7 +49,16 @@ architecture. Design plan: `~/.claude/plans/binary-twirling-brooks.md`.
 - Slab exhaustion wedges generation (AwaitingAlloc holds arena slots): the
   HUD shows `arena free: 0` + full classes. Fix class sizing, not budgets.
 - Layer determinism: all randomness from `chunk_seed`; reads only within
-  declared padded bounds (debug-assert enforced).
+  declared padded bounds (asserted, with the needed padding in the message).
+- Planning generation is **dependency-driven**: consumers `ensure_loaded`
+  the region they are about to query (the LOD planner does this per epoch,
+  plus a streamer-radius pass), then read. `voxctl status` →
+  `stream.read_generated` must stay ~0; anything else means a consumer's
+  working set is uncovered and is generating on whatever thread reads.
+- CPU mirrors sample the program via `program::with_program` (thread-local
+  snapshot). Never call `program::program()` per sample — the `Arc` clone
+  writes a shared cache line and makes parallel generation slower than
+  serial.
 
 ## Style
 

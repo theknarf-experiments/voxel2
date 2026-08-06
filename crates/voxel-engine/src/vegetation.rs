@@ -32,6 +32,12 @@ const GRASS_TILE_RADIUS: i32 = 7; // ~112 m of dense grass
 /// Far-forest impostors: merged silhouette meshes per 128 m super-tile.
 const SUPER_M: f32 = 128.0;
 const SUPER_RADIUS: i32 = 24; // ~3 km of visible forest
+
+/// How far vegetation streaming queries planning data from the camera —
+/// the far-forest ring dominates. The ensure pass derives its radius from
+/// this, so moving the ring can't silently reintroduce main-thread
+/// generation.
+pub const QUERY_REACH_M: f32 = (SUPER_RADIUS + 2) as f32 * SUPER_M;
 /// Super-tiles closer than this hide (detailed tree meshes take over).
 const SUPER_HIDE_M: f32 = 320.0;
 /// Super-tile builds per frame (amortize the height/shadow evaluation).

@@ -78,13 +78,13 @@ pub(crate) fn fbm_mode(p: Vec2, base_scale: f32, octaves: i32, voxel_size: f32, 
 /// XZ position, evaluated at the given voxel size (pass 1.0 for full
 /// detail). Mirrors the GPU exactly.
 pub fn terrain_height(xz: Vec2, voxel_size: f32) -> f32 {
-    program::eval_height(&program::program(), xz, voxel_size)
+    program::with_program(|ops| program::eval_height(ops, xz, voxel_size))
 }
 
 /// The current program's field registers at a column (spawner densities,
 /// gameplay queries). See `WOP_FIELD`.
 pub fn world_fields(xz: Vec2) -> [f32; voxel_core::worldop::FIELD_SLOTS] {
-    program::eval_fields(&program::program(), xz, 4.0)
+    program::with_program(|ops| program::eval_fields(ops, xz, 4.0))
 }
 
 /// Patch density in [0, 1]: slow spatial noise so scattered props come in
@@ -102,7 +102,7 @@ pub fn sun_shadow(pos: glam::Vec3) -> f32 {
     // Twin of the GPU gate: a heightless program (interiors) casts no
     // terrain shadow — without this, terrain_height == 0 darkens
     // everything below y = 0 on the CPU side only.
-    if !program::program().iter().any(|op| op.is_height_op()) {
+    if !program::with_program(|ops| ops.iter().any(|op| op.is_height_op())) {
         return 1.0;
     }
     let sun = program::sun_direction().normalize();

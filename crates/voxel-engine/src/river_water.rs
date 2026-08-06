@@ -15,6 +15,9 @@ const WATER_TILE_M: f32 = 256.0;
 /// ~1.5 km of visible river surface around the camera.
 const WATER_RADIUS: i32 = 6;
 
+/// How far river-water streaming queries planning data from the camera.
+pub const QUERY_REACH_M: f32 = (WATER_RADIUS + 1) as f32 * WATER_TILE_M;
+
 #[derive(Resource, Default)]
 pub struct RiverWaterTiles {
     tiles: HashMap<IVec2, Vec<RiverSegGpu>>,
