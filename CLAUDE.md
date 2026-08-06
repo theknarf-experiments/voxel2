@@ -13,6 +13,11 @@ architecture. Design plan: `~/.claude/plans/binary-twirling-brooks.md`.
 - Env vars for repeatable scenes: `VOXEL_START=x,y,z`, `VOXEL_LOOK=dx,dy,dz`,
   `VOXEL_AUTOPILOT=<m/s>`, `VOXEL_WALK=1`. `cargo run -p scout --release`
   scans for scenic spots (edit its main.rs per need).
+- PREFER live verification over relaunch cycles: run with `VOXEL_REMOTE=1`
+  and drive via `cargo run -p voxctl -q -- status | goto X Y Z [DIR] |
+  water/markers/ops X Z [R] | shot PATH` (offscreen screenshots; wait
+  ~1 s for the file, ~10-15 s after a goto for streaming). F8/F9 (or
+  `raw voxel/viz`) toggle chunk/layer debug overlays.
 - Zero `Validation Error` lines in the log is part of "verified".
 
 ## Invariants that bite
@@ -27,8 +32,10 @@ architecture. Design plan: `~/.claude/plans/binary-twirling-brooks.md`.
   baked-shadow march (mesh shader ↔ voxel_worldgen::sun_shadow).
 - **Worlds are data, not code**: never add a world-kind enum,
   world-specific shader, feature flag, or shading branch; extend the op
-  set (voxel-core::worldop + both interpreters + GenOpDef — water and
-  vegetation are meta ops) or the material recipe kinds
+  set (voxel-core::worldop + both interpreters + GenOpDef — water is a
+  meta op; vegetation is spawner data), the planning-stack vocabulary
+  (voxel_worldgen::stack + StackLayerDef + validate_stack), or the
+  material recipe kinds
   (voxel-render WorldMaterial ↔ MaterialDef::pack ↔ the WGSL
   MaterialTable — field-position layout twins) and express the world in
   the level JSON. Lighting/haze are the level's `environment` block.

@@ -25,7 +25,9 @@ done
 kill $PID 2>/dev/null || true
 sleep 1
 ERRS=$(grep -cE "Validation Error|panicked" "$OUT/run.log" || true)
-python3 scripts/count_holes.py "$OUT"/frame_*.png
-HOLES=$?
+# `set -e` must not kill the script before the diagnostics print: a
+# hole failure still reports validation errors and the kept-frames path.
+HOLES=0
+python3 scripts/count_holes.py "$OUT"/frame_*.png || HOLES=$?
 echo "validation-errors: $ERRS"
 [ "$ERRS" = "0" ] && [ "$HOLES" = "0" ] && echo "EVAL PASS" || { echo "EVAL FAIL (frames kept in $OUT)"; exit 1; }

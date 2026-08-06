@@ -1345,6 +1345,46 @@ enum StackKind {
 /// misordered declaration) fails HERE with a message, never as a panic
 /// at registration or mid-generation. Boot fails loudly on an invalid
 /// shipped level; hot reload warns and keeps the running world.
+/// Validate the whole level's data-driven references: the stack itself,
+/// plus spawner biome refs (which would otherwise degrade silently to
+/// full density on a typo).
+pub fn validate_level(level: &LevelDef) -> Result<(), String> {
+    validate_stack(&level.stack)?;
+    let biome_ref = |owner: &str, reference: &str| -> Result<(), String> {
+        let Some((instance, biome)) = reference.rsplit_once(':') else {
+            return Err(format!(
+                "spawner {owner}: biome ref {reference:?} is not \"instance:biome\""
+            ));
+        };
+        for def in &level.stack {
+            if let StackLayerDef::Biomes { name, table, .. } = def {
+                if name == instance {
+                    if table.iter().any(|(n, _)| n == biome) {
+                        return Ok(());
+                    }
+                    return Err(format!(
+                        "spawner {owner}: biome {biome:?} not in layer {instance:?}"
+                    ));
+                }
+            }
+        }
+        Err(format!(
+            "spawner {owner}: biome layer {instance:?} not found in stack"
+        ))
+    };
+    for spawner in &level.spawners {
+        let (owner, biome) = match spawner {
+            SpawnerDef::Trees(t) => ("trees", &t.biome),
+            SpawnerDef::Grass(g) => ("grass", &g.biome),
+            SpawnerDef::Boulders(b) => ("boulders", &b.biome),
+        };
+        if let Some(reference) = biome {
+            biome_ref(owner, reference)?;
+        }
+    }
+    Ok(())
+}
+
 pub fn validate_stack(stack: &[StackLayerDef]) -> Result<(), String> {
     use voxel_worldgen::stack::{RECIPES, RECIPES3};
     let mut declared: Vec<(&str, StackKind)> = Vec::new();
@@ -1788,27 +1828,11 @@ impl Plugin for LevelPlugin {
 
         let program = apply_generator(&level);
         let water = water_surface(&program);
-        if let Err(e) = validate_stack(&level.stack) {
-            panic!("level {:?} has an invalid planning stack: {e}", level.name);
+        if let Err(e) = validate_level(&level) {
+            panic!("level {:?} has invalid planning data: {e}", level.name);
         }
         let (ops_provider, world_query, planning_layers) = build_ops_provider(&level);
-        // Pre-warm the planning caches the vegetation streamers will hit,
-        // inside the async genesis task (cold layer generation must never
-        // land on the main thread).
-        let warm_world = world_query.clone();
-        let warmup = crate::streaming::PlanningWarmup(Some(std::sync::Arc::new(
-            move |anchor: bevy::math::DVec3| {
-                let c = bevy::math::Vec2::new(anchor.x as f32, anchor.z as f32);
-                const WARM_M: f32 = 1_700.0;
-                let (min, max) = (c - Vec2::splat(WARM_M), c + Vec2::splat(WARM_M));
-                let _ = warm_world.clearance_in(min, max);
-                let _ = warm_world.cuts_in(
-                    Vec3::new(min.x, -10_000.0, min.y),
-                    Vec3::new(max.x, 10_000.0, max.y),
-                );
-                let _ = warm_world.water_in(min, max);
-            },
-        )));
+        let warmup = planning_warmup(&world_query);
         app.insert_resource(program)
             .insert_resource(warmup)
             .insert_resource(material_table(&level))
@@ -1991,6 +2015,27 @@ impl WorldQuery {
         }
         out
     }
+}
+
+/// Pre-warm the planning caches the vegetation streamers will hit,
+/// inside the async genesis task (cold layer generation must never land
+/// on the main thread). Rebuilt on hot reload — a stale closure would
+/// warm the retired manager and pin its cache forever.
+fn planning_warmup(world: &WorldQuery) -> crate::streaming::PlanningWarmup {
+    let world = world.clone();
+    crate::streaming::PlanningWarmup(Some(std::sync::Arc::new(
+        move |anchor: bevy::math::DVec3| {
+            let c = bevy::math::Vec2::new(anchor.x as f32, anchor.z as f32);
+            const WARM_M: f32 = 1_700.0;
+            let (min, max) = (c - Vec2::splat(WARM_M), c + Vec2::splat(WARM_M));
+            let _ = world.clearance_in(min, max);
+            let _ = world.cuts_in(
+                Vec3::new(min.x, -10_000.0, min.y),
+                Vec3::new(max.x, 10_000.0, max.y),
+            );
+            let _ = world.water_in(min, max);
+        },
+    )))
 }
 
 fn build_ops_provider(level: &LevelDef) -> (ChunkOpsProvider, WorldQuery, PlanningLayers) {
@@ -2205,7 +2250,10 @@ fn reload_level(
     mut water: ResMut<voxel_render::WaterSurface>,
     mut veg_rebuild: Option<ResMut<crate::vegetation::VegetationRebuild>>,
     mut cameras: Query<&mut voxel_debug::FreeCamera>,
-    mut camera_transforms: Query<&mut Transform, With<Camera3d>>,
+    mut camera_transforms: Query<
+        &mut Transform,
+        (With<Camera3d>, Without<voxel_render::HelperCamera>),
+    >,
     mut windows: Query<&mut Window>,
     suns: Query<Entity, With<LevelSun>>,
 ) {
@@ -2232,8 +2280,8 @@ fn reload_level(
     };
     // Authoring errors in the stack must never take down a live session:
     // keep the running world and report, exactly like a parse error.
-    if let Err(e) = validate_stack(&new.stack) {
-        warn!("level reload: invalid planning stack — {e}");
+    if let Err(e) = validate_level(&new) {
+        warn!("level reload: invalid planning data — {e}");
         return;
     }
 
@@ -2296,6 +2344,8 @@ fn reload_level(
     }
     let regen = generator_changed
         || new.stack != level.stack
+        || new.placements != level.placements
+        || new.prefabs != level.prefabs
         || new.lod.max_level != level.lod.max_level
         || new.lod.top_radius != level.lod.top_radius
         || new.lod.top_y != level.lod.top_y;
@@ -2304,13 +2354,20 @@ fn reload_level(
         lod.top_radius = new.lod.top_radius;
         lod.top_y = new.lod.top_y;
         let (ops_provider, world_query, planning_layers) = build_ops_provider(&new);
+        // The warmup must target the NEW manager; the old closure would
+        // warm the retired one and pin its cache in memory forever.
+        commands.insert_resource(planning_warmup(&world_query));
         commands.insert_resource(ops_provider);
         commands.insert_resource(world_query);
         commands.insert_resource(planning_layers);
+        // Streamed derivatives of the planning data are stale too: river
+        // tiles rebuild from scratch, vegetation re-streams.
+        commands.insert_resource(crate::river_water::RiverWaterTiles::default());
+        commands.insert_resource(voxel_render::RiverWater::default());
         rebuild.0 = true;
         info!("level reload: generation changed — rebuilding world");
     }
-    if generator_changed || new.spawners != level.spawners {
+    if regen || new.spawners != level.spawners {
         commands.insert_resource(grass_style(&new));
         if let Some(veg) = veg_rebuild.as_mut() {
             veg.0 = true;
@@ -2318,7 +2375,7 @@ fn reload_level(
     }
     // A different camera start means a different place (typically a whole
     // different level file): jump there.
-    if new.camera.start != level.camera.start {
+    if new.camera.start != level.camera.start || new.camera.look != level.camera.look {
         let start = Vec3::from(new.camera.start);
         let look = Vec3::from(new.camera.look);
         let up = if look.normalize_or_zero().dot(Vec3::Y).abs() > 0.9 {
@@ -2335,7 +2392,13 @@ fn reload_level(
 
 
 /// Flies the camera forward when `VOXEL_AUTOPILOT` is set (m/s).
-fn autopilot(mut cameras: Query<&mut Transform, With<Camera3d>>, time: Res<Time>) {
+fn autopilot(
+    mut cameras: Query<
+        &mut Transform,
+        (With<Camera3d>, Without<voxel_render::HelperCamera>),
+    >,
+    time: Res<Time>,
+) {
     let Ok(speed) = std::env::var("VOXEL_AUTOPILOT") else {
         return;
     };
@@ -2357,7 +2420,10 @@ fn autopilot(mut cameras: Query<&mut Transform, With<Camera3d>>, time: Res<Time>
 fn walk_mode(
     level: Res<LevelDef>,
     world: Res<WorldQuery>,
-    mut cameras: Query<&mut Transform, With<Camera3d>>,
+    mut cameras: Query<
+        &mut Transform,
+        (With<Camera3d>, Without<voxel_render::HelperCamera>),
+    >,
     time: Res<Time>,
     mut fall_speed: Local<f32>,
     mut spawned: Local<bool>,
@@ -2646,6 +2712,17 @@ mod tests {
                 "error {err:?} missing {expect:?} for {json}"
             );
         }
+    }
+
+    #[test]
+    fn spawner_biome_refs_are_validated() {
+        let mut planet = LevelDef::from_json(&shipped("planet.json")).unwrap();
+        validate_level(&planet).unwrap();
+        if let Some(SpawnerDef::Trees(t)) = planet.spawners.first_mut() {
+            t.biome = Some("biomes:forrest".into());
+        }
+        let err = validate_level(&planet).unwrap_err();
+        assert!(err.contains("forrest"), "typo not caught: {err}");
     }
 
     #[test]

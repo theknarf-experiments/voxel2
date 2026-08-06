@@ -38,6 +38,13 @@ fn err(msg: impl Into<String>) -> BrpError {
     }
 }
 
+/// World-coordinate clamp for remote inputs: far beyond any world, small
+/// enough that downstream tile math cannot overflow i32.
+const REMOTE_POS_M: f32 = 1.0e7;
+/// Query radius clamp: a stray `radius: 1e9` must not enumerate the
+/// whole plane through on-demand layer generation on the main thread.
+const REMOTE_RADIUS_M: f64 = 8_192.0;
+
 fn f32s(v: &Value, key: &str, n: usize) -> Result<Vec<f32>, BrpError> {
     let arr = v
         .get(key)
@@ -46,10 +53,21 @@ fn f32s(v: &Value, key: &str, n: usize) -> Result<Vec<f32>, BrpError> {
     if arr.len() != n {
         return Err(err(format!("{key:?} must have {n} elements")));
     }
-    Ok(arr
-        .iter()
-        .map(|x| x.as_f64().unwrap_or(0.0) as f32)
-        .collect())
+    arr.iter()
+        .map(|x| {
+            x.as_f64()
+                .map(|v| (v as f32).clamp(-REMOTE_POS_M, REMOTE_POS_M))
+                .ok_or_else(|| err(format!("{key:?} has a non-numeric element")))
+        })
+        .collect()
+}
+
+fn radius(params: &Value, default: f64) -> f32 {
+    params
+        .get("radius")
+        .and_then(Value::as_f64)
+        .unwrap_or(default)
+        .clamp(1.0, REMOTE_RADIUS_M) as f32
 }
 
 type PlayerCamera<'w, 's, T> =
@@ -119,7 +137,7 @@ fn teleport(In(params): In<Option<Value>>, mut cams: PlayerCamera<&mut Transform
 fn water(In(params): In<Option<Value>>, world: Res<WorldQuery>) -> BrpResult {
     let params = params.ok_or_else(|| err("params required"))?;
     let c = f32s(&params, "center", 2)?;
-    let r = params.get("radius").and_then(Value::as_f64).unwrap_or(512.0) as f32;
+    let r = radius(&params, 512.0);
     let (min, max) = (Vec2::new(c[0] - r, c[1] - r), Vec2::new(c[0] + r, c[1] + r));
     let segs: Vec<Value> = world
         .water_in(min, max)
@@ -141,7 +159,7 @@ fn water(In(params): In<Option<Value>>, world: Res<WorldQuery>) -> BrpResult {
 fn markers(In(params): In<Option<Value>>, world: Res<WorldQuery>) -> BrpResult {
     let params = params.ok_or_else(|| err("params required"))?;
     let c = f32s(&params, "center", 2)?;
-    let r = params.get("radius").and_then(Value::as_f64).unwrap_or(2048.0) as f32;
+    let r = radius(&params, 2048.0);
     let kind = params.get("kind").and_then(Value::as_str);
     let (min, max) = (Vec2::new(c[0] - r, c[1] - r), Vec2::new(c[0] + r, c[1] + r));
     let found: Vec<Value> = world
@@ -157,7 +175,7 @@ fn markers(In(params): In<Option<Value>>, world: Res<WorldQuery>) -> BrpResult {
 fn ops(In(params): In<Option<Value>>, world: Res<WorldQuery>) -> BrpResult {
     let params = params.ok_or_else(|| err("params required"))?;
     let c = f32s(&params, "center", 3)?;
-    let r = params.get("radius").and_then(Value::as_f64).unwrap_or(40.0) as f32;
+    let r = radius(&params, 40.0);
     let edge = params.get("edge").and_then(Value::as_f64).unwrap_or(12.8) as f32;
     let center = Vec3::new(c[0], c[1], c[2]);
     let found = world.ops_in(center - Vec3::splat(r), center + Vec3::splat(r), edge);

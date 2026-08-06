@@ -18,23 +18,29 @@ Inspirations: [LayerProcGen] (layered deterministic contextual generation),
 Worlds are data: one binary presents a JSON level definition.
 
 ```sh
-cargo run -p voxel2 -- levels/planet.json         # grasslands, forests, ocean, ruins, roads
-cargo run -p voxel2 -- levels/megastructure.json  # endless concrete interior
+cargo run -p voxel2 -- levels/planet.json         # forests, biomes, rivers, ruins, roads, caves, dungeons
+cargo run -p voxel2 -- levels/megastructure.json  # endless interior: pocket districts linked by tubes
 cargo run -p scout --release                      # offline: scan for scenic locations
 ```
 
 There are no hardcoded worlds. A level file describes everything, most
 importantly the **generator program**: an ordered list of composable ops
 (FBM height bands, floor lattices, pillar/wall grids, shafts, catwalk
-beams, plus `water` and `vegetation` meta ops) that one GPU interpreter
-evaluates as the world's SDF — a lush planet and a concrete megacity are
-the same engine fed different data. Shading is data too: a **material
-table** (parameterized `surface` and `zoned` recipes) indexed by the
-material ids the generator ops emit, and an **environment** block for
-lighting and haze. The rest covers seed, LOD configuration, camera, walk
-mode, and parameterized planning-op providers that author structures
-(ruins site chance, road reach, pocket density, …). See `levels/*.json`
-and `voxel_engine::level::LevelDef`.
+beams, plus the `water` meta op) that one GPU interpreter evaluates as
+the world's SDF — a lush planet and a concrete megacity are the same
+engine fed different data. Planned structure is data too, declared as a
+**planning stack**: a small generic layer vocabulary — `biomes` (blended
+regions), `scatter`/`scatter3` (sites), `connect`/`connect3` (pathfound
+or orthogonal links), `flow` (descent hydrology), `worm` (burrows), and
+`emit` (CSG patches, water segments, clearance, markers) — that levels
+compose by instance name: ruins, roads, rivers, caves, dungeons, and the
+megastructure's habitation districts are all stack configurations, not
+engine features. Shading follows the same rule: a **material table**
+(parameterized `surface`, `zoned`, and `canopy` recipes) indexed by the
+material ids the ops emit, an **environment** block for lighting and
+haze, and data-driven spawners (trees/grass/boulders with placement
+rules, density fields, and biome gates). See `levels/*.json` and
+`voxel_engine::level::LevelDef`.
 
 **Live editing**: the level file is watched while running. Lighting,
 colors, shading, and camera tuning apply instantly; changes to the
@@ -49,8 +55,18 @@ speed. Env vars:
 |---|---|
 | `VOXEL_START=x,y,z` | Spawn position |
 | `VOXEL_LOOK=dx,dy,dz` | Initial look direction |
-| `VOXEL_AUTOPILOT=<m/s>` | Fly forward continuously (smoke tests) |
+| `VOXEL_AUTOPILOT=<m/s>` | Fly forward continuously (smoke tests); `VOXEL_AUTOPILOT_LEVEL=1` keeps it level |
 | `VOXEL_WALK=1` | On-foot: heightfield glue or SDF collision (level's `walk` mode) |
+| `VOXEL_REMOTE=1` | BRP server for the `voxctl` CLI (teleport, planning queries, offscreen screenshots) |
+| `VOXEL_SCREENSHOT=path[,secs]` | Periodic offscreen frame dumps (works occluded) |
+| `VOXEL_EVAL_HOLES=1` | Coverage-eval rendering (used by `scripts/eval_holes.sh`) |
+| `VOXEL_LOG_FPS=1` | fps/leaves/slab telemetry to the log |
+
+**Live tooling**: run with `VOXEL_REMOTE=1`, then drive the running game:
+`cargo run -p voxctl -- status | goto X Y Z [DX DY DZ] | water X Z [R] |
+markers X Z [R] [KIND] | ops ... | shot PATH`. In-game overlays: F8 chunk
+boundaries by LOD, F9 planning layers (markers, clearance, water, biome
+field).
 
 ## How it works
 
@@ -72,12 +88,15 @@ speed. Env vars:
   indices; drawn camera-relative through a custom phase item (the view
   matrix is applied with w = 0, so world-space f32 error never grows with
   distance).
-- **Planning layers drive the GPU** (the LayerProcGen part): CPU layers with
-  declared padded dependencies emit compact `CsgOp` lists per chunk —
-  ruin sites, then roads connecting them (a road is owned by the chunk
-  containing its midpoint). Ops upload with the generation batch and the
-  density shader applies them after the base SDF. Determinism is enforced
-  by construction and by tests that race generation across thread counts.
+- **Planning layers drive the GPU** (the LayerProcGen part): the level's
+  stack builds one `LayerManager` of CPU layers with declared padded
+  dependencies; `emit` layers bucket their output by owning cell (a road
+  is owned by the chunk containing its midpoint) and a single `WorldQuery`
+  facade serves CSG ops to chunks (with per-emitter carve-horizon gates),
+  clearance to spawners, water segments to the renderer, and markers to
+  gameplay. Ops upload with the generation batch and the density shader
+  applies them after the base SDF. Determinism is enforced by construction
+  and by tests that race generation across thread counts.
 - **CPU mirrors for gameplay.** The generator program has a bit-compatible
   Rust twin interpreter: vegetation placement, ruins/roads planning,
   walk-mode collision, and scenic-location scouting all consume the same
@@ -97,10 +116,14 @@ speed. Env vars:
 |---|---|
 | `voxel-core` | Chunk keys, packed voxel format, CSG op IR, morton, seeding (no Bevy) |
 | `voxel-layers` | LayerProcGen framework: padded deps, recursive on-demand generation |
-| `voxel-worldgen` | CPU twin of the generator interpreter + planning layers (sites, roads, ruins) |
+| `voxel-worldgen` | CPU twin of the generator interpreter + the stack vocabulary (scatter/connect/flow/worm/biomes/emit), recipes, hydrology, pathfinding |
 | `voxel-render` | Density/meshing compute, slab allocator, LOD draw, grass, materials |
 | `voxel-engine` | LOD controller, level definitions (JSON), vegetation streaming, walk modes |
 | `voxel-debug` | Flycam + HUD (fps, chunk/arena/slab occupancy, LOD histogram) |
+
+`tools/voxctl` drives a running instance over the Bevy Remote Protocol;
+`mise run setup` installs the pre-commit gate (workspace check + clippy
+`-D warnings`).
 
 `cargo test --workspace` runs the property tests (determinism under racing
 threads, format round-trips, slab allocation, planning invariants).
