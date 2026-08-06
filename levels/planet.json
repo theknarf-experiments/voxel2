@@ -78,7 +78,6 @@
     "ambient_strength": 0.3,
     "ambient_exponent": 1.0
   },
-  "walk": "terrain",
   "generator": [
     {
       "type": "height_fbm",

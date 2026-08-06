@@ -241,7 +241,7 @@ static SUN: RwLock<glam::Vec3> = RwLock::new(DEFAULT_SUN_DIR);
 pub const DEFAULT_SUN_DIR: glam::Vec3 = glam::Vec3::new(0.55, 0.5, 0.32);
 
 /// Install the level's generator program for the CPU mirrors
-/// ([`crate::terrain_height`], [`crate::mega::mega_sdf`], …).
+/// ([`crate::terrain_height`], the planning layers, …).
 pub fn set_program(ops: Vec<WorldOp>) {
     *PROGRAM.write().unwrap() = Some(Arc::new(ops));
 }

@@ -11,7 +11,7 @@ architecture. Design plan: `~/.claude/plans/binary-twirling-brooks.md`.
   screenshot, and look. Use `caffeinate -dis` so the display can't sleep,
   and capture only the app window region: `screencapture -x -R390,160,1245,730 out.png`.
 - Env vars for repeatable scenes: `VOXEL_START=x,y,z`, `VOXEL_LOOK=dx,dy,dz`,
-  `VOXEL_AUTOPILOT=<m/s>`, `VOXEL_WALK=1`.
+  `VOXEL_AUTOPILOT=<m/s>`.
 - PREFER live verification over relaunch cycles: run with `VOXEL_REMOTE=1`
   and drive via `cargo run -p voxctl -q -- status | goto X Y Z [DIR] |
   water/markers/ops X Z [R] | scan X Z [R] [STEP] | shot PATH`

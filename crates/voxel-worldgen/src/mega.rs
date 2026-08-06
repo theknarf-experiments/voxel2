@@ -1,31 +1,9 @@
-//! Structure-world gameplay queries: signed distance against the current
-//! level's generator program (see [`crate::program`]) plus the planned
-//! habitation-pocket variation ops.
+//! The "pocket" volumetric recipe for the megastructure's `scatter3`
+//! sites, placed by the stack's `site_recipe3` emit.
 
 use glam::Vec3;
-
-/// Signed distance (meters) to the current level's generator program at
-/// full detail — used for collision and gameplay queries.
-pub fn mega_sdf(p: Vec3) -> f32 {
-    crate::program::eval(&crate::program::program(), p, 1.0).0
-}
-
-/// Numerical SDF gradient (central differences, 0.1 m).
-pub fn mega_gradient(p: Vec3) -> Vec3 {
-    let e = 0.1;
-    Vec3::new(
-        mega_sdf(p + Vec3::X * e) - mega_sdf(p - Vec3::X * e),
-        mega_sdf(p + Vec3::Y * e) - mega_sdf(p - Vec3::Y * e),
-        mega_sdf(p + Vec3::Z * e) - mega_sdf(p - Vec3::Z * e),
-    )
-    .normalize_or_zero()
-}
-
-// --- planned variation: habitation pockets & light wells ---------------------
-
 use voxel_core::csg::CsgOp;
 use voxel_core::seed::Rng;
-
 
 /// The "pocket" volumetric recipe (stack `scatter3` sites): a light
 /// well, or 2-4 hollow orthogonal room shells with doorways, seated on
@@ -94,64 +72,28 @@ pub fn pocket_recipe_ops(site: Vec3, rng: &mut Rng, out: &mut Vec<CsgOp>) {
 }
 
 
-/// Full-world SDF for collision: base structure plus planned ops near `p`.
-pub fn mega_sdf_with_ops(p: Vec3, ops: &[CsgOp]) -> f32 {
-    let mut d = mega_sdf(p);
-    for op in ops {
-        d = op.apply(d, p);
-    }
-    d
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    // Evaluate the reference mega program explicitly: the process-global
-    // program is shared test state and defaults to the planet.
-    fn msdf(p: Vec3) -> f32 {
-        crate::program::eval(&crate::program::mega_program(), p, 1.0).0
-    }
-
-    /// A floor point that is solid slab (not inside an opening/shaft).
-    fn solid_floor_point() -> Vec3 {
-        for i in 0..200 {
-            let p = Vec3::new(37.0 + i as f32 * 17.0, 0.0, 91.0 + i as f32 * 5.0);
-            if msdf(p) < -1.0 {
-                return p;
-            }
-        }
-        panic!("no solid floor found on scan line");
-    }
+    use voxel_core::seed::{chunk_seed, Rng};
 
     #[test]
-    fn floors_are_solid_and_rooms_are_air() {
-        let floor = solid_floor_point();
-        assert!(msdf(floor) < -1.0);
-        // Mid-room air exists somewhere above the slab plane.
-        let mut found_air = false;
-        for i in 0..80 {
-            let p = Vec3::new(3.0 + i as f32 * 5.0, 20.0, 9.0);
-            if msdf(p) > 1.0 {
-                found_air = true;
-                break;
-            }
+    fn pocket_recipe_is_deterministic_and_seated_on_its_floor() {
+        let site = Vec3::new(40.0, 88.0, -70.0);
+        let ops = |salt: u64| {
+            let mut rng = Rng::new(chunk_seed(salt, 0x0c, glam::IVec3::new(3, 1, 4)));
+            let mut out = Vec::new();
+            pocket_recipe_ops(site, &mut rng, &mut out);
+            out
+        };
+        let a = ops(5);
+        assert_eq!(a, ops(5));
+        assert_ne!(a, ops(6));
+        assert!(!a.is_empty());
+        // Rooms sit on the site's floor plane; light wells stay within
+        // the element-padding reach.
+        for op in &a {
+            assert!(op.center[1] > site.y - 2.0 && op.center[1] < site.y + 120.0);
         }
-        assert!(found_air, "no open room space found");
-    }
-
-
-    #[test]
-    fn gradient_points_out_of_floor() {
-        let floor = solid_floor_point();
-        let p = floor + Vec3::Y * 1.4;
-        let e = 0.1;
-        let g = Vec3::new(
-            msdf(p + Vec3::X * e) - msdf(p - Vec3::X * e),
-            msdf(p + Vec3::Y * e) - msdf(p - Vec3::Y * e),
-            msdf(p + Vec3::Z * e) - msdf(p - Vec3::Z * e),
-        )
-        .normalize_or_zero();
-        assert!(g.y > 0.6, "gradient near floor top should point up: {g}");
     }
 }

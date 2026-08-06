@@ -60,7 +60,6 @@
     "ambient_strength": 0.67,
     "ambient_exponent": 2.0
   },
-  "walk": "sdf",
   "materials": [
     {
       "type": "surface",

@@ -55,7 +55,6 @@ speed. Env vars:
 | `VOXEL_START=x,y,z` | Spawn position |
 | `VOXEL_LOOK=dx,dy,dz` | Initial look direction |
 | `VOXEL_AUTOPILOT=<m/s>` | Fly forward continuously (smoke tests); `VOXEL_AUTOPILOT_LEVEL=1` keeps it level |
-| `VOXEL_WALK=1` | On-foot: heightfield glue or SDF collision (level's `walk` mode) |
 | `VOXEL_REMOTE=1` | BRP server for the `voxctl` CLI (teleport, planning queries, offscreen screenshots) |
 | `VOXEL_SCREENSHOT=path[,secs]` | Periodic offscreen frame dumps (works occluded) |
 | `VOXEL_EVAL_HOLES=1` | Coverage-eval rendering (used by `mise run eval`) |
@@ -97,10 +96,10 @@ field).
   gameplay. Ops upload with the generation batch and the density shader
   applies them after the base SDF. Determinism is enforced by construction
   and by tests that race generation across thread counts.
-- **CPU mirrors for gameplay.** The generator program has a bit-compatible
-  Rust twin interpreter: vegetation placement, ruins/roads planning,
-  walk-mode collision, and scenic-location scouting all consume the same
-  world the GPU renders — one op table, two interpreters.
+- **CPU mirrors for gameplay.** The generator program's interpreter is
+  generated from ONE op table (`voxel-core::opgen`) into both Rust and
+  WGSL: vegetation placement, planning layers, and terrain queries all
+  consume the same world the GPU renders.
 - **Fully procedural, fully data-driven shading.** No texture assets and
   no world-specific shader branches: one fragment path indexes the level's
   material table (noise-grained bands, grime, streaks, moss, emissive
@@ -118,7 +117,7 @@ field).
 | `voxel-layers` | LayerProcGen framework: padded deps, recursive on-demand generation |
 | `voxel-worldgen` | CPU twin of the generator interpreter + the stack vocabulary (scatter/connect/flow/worm/biomes/emit), recipes, hydrology, pathfinding |
 | `voxel-render` | Density/meshing compute, slab allocator, LOD draw, grass, materials |
-| `voxel-engine` | LOD controller, level definitions (JSON), vegetation streaming, walk modes |
+| `voxel-engine` | LOD controller, level definitions (JSON), vegetation + water streaming, remote tooling |
 | `voxel-debug` | Flycam + HUD (fps, chunk/arena/slab occupancy, LOD histogram) |
 
 `tools/voxctl` drives a running instance over the Bevy Remote Protocol;
