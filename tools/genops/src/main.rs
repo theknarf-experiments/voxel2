@@ -41,7 +41,7 @@ fn main() {
             "            ",
         ),
         (
-            "crates/voxel-render/src/shaders/voxel_water.wgsl",
+            "demos/voxel2/src/voxel_water.wgsl",
             Ctx::Height,
             "            ",
         ),

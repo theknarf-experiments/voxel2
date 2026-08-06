@@ -305,7 +305,7 @@ pub(crate) struct GpuWorldOp {
 /// The program as bound in shaders.
 /// `count = (total, height ops, seed, -)`, `sun = direction | unused`.
 #[derive(ShaderType, Clone, Default)]
-pub(crate) struct GpuWorldProgram {
+pub struct GpuWorldProgram {
     count: UVec4,
     sun: Vec4,
     /// xyz = field anchor, w = dist_scale; field.x = max_vs.
@@ -619,7 +619,7 @@ struct StagingSlot {
 }
 
 #[derive(Resource)]
-pub(crate) struct ChunkGpuResources {
+pub struct ChunkGpuResources {
     density_arena: Buffer,
     cell_scratch: Buffer,
     vertex_slab: Buffer,
@@ -632,7 +632,10 @@ pub(crate) struct ChunkGpuResources {
     arena_free: Vec<u32>,
     slab: SlabAllocator,
     gen_uniforms: DynamicUniformBuffer<ChunkParams>,
-    pub(crate) program_buffer: StorageBuffer<GpuWorldProgram>,
+    /// The world's generator program. Public so a host pipeline can
+    /// replay its height ops (shorelines, water depth) on the GPU without
+    /// hand-copying a CPU/GPU twin.
+    pub program_buffer: StorageBuffer<GpuWorldProgram>,
     env_uniform: UniformBuffer<EnvParams>,
     draw_uniforms: DynamicUniformBuffer<ChunkDrawUniform>,
     map_tx: crossbeam_channel::Sender<usize>,

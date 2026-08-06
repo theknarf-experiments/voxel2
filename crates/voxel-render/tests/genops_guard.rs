@@ -8,7 +8,7 @@ use voxel_core::opgen::{wgsl_arms, wgsl_helpers, Ctx};
 const SHADERS: &[(&str, Ctx)] = &[
     ("src/shaders/voxel_world_density.wgsl", Ctx::Full),
     ("src/shaders/voxel_mesh_chunks.wgsl", Ctx::Height),
-    ("src/shaders/voxel_water.wgsl", Ctx::Height),
+    ("../../demos/voxel2/src/voxel_water.wgsl", Ctx::Height),
 ];
 
 fn region<'a>(text: &'a str, begin: &str, end: &str) -> &'a str {

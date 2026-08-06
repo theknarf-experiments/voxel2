@@ -8,4 +8,6 @@ license.workspace = true
 bevy.workspace = true
 voxel-debug.workspace = true
 voxel-engine.workspace = true
+voxel-render.workspace = true
+bytemuck.workspace = true
 voxel-worldgen.workspace = true

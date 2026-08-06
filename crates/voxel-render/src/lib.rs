@@ -5,18 +5,21 @@
 pub mod chunks;
 pub mod grass;
 pub mod material;
-pub(crate) mod pbr_view;
+/// Shared plumbing so a HOST can build a pipeline that shades like the
+/// terrain does (Bevy's view bind group, matching keys and shader defs).
+pub mod pbr_view;
 pub mod slab;
 pub mod water;
 
 pub use chunks::{
+    ChunkGpuResources, GpuWorldProgram,
     ChunkCommand, ChunkCommandQueue, ChunkReadyChannel, EnvParams, FieldParams, SharedRenderStats,
     VoxelChunksPlugin, WorldMaterial, WorldMaterials, WorldProgram, MATERIAL_SLOTS,
     MAT_KIND_CANOPY, MAT_KIND_SURFACE, MAT_KIND_ZONED,
 };
 pub use grass::{GrassInstance, GrassInstances, GrassPlugin, GrassStyle};
 pub use material::VoxelSurfaceMaterial;
-pub use water::{RiverSegGpu, RiverWater, WaterPlugin, WaterSurface};
+pub use water::{RiverSegGpu, RiverWater, WaterSurface};
 
 /// Marker for helper cameras (offscreen screenshot mirrors, etc.) that
 /// gameplay/streaming systems must ignore when looking for "the player

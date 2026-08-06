@@ -5332,8 +5332,10 @@ name = "voxel2"
 version = "0.1.0"
 dependencies = [
  "bevy",
+ "bytemuck",
  "voxel-debug",
  "voxel-engine",
+ "voxel-render",
  "voxel-worldgen",
 ]
 

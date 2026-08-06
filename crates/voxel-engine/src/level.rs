@@ -2095,7 +2095,6 @@ impl Plugin for LevelPlugin {
             .insert_resource(grass_style(&level))
             .insert_resource(level.clone())
             .add_plugins(VoxelEnginePlugin { vegetation: true })
-            .add_plugins(voxel_render::WaterPlugin)
             .add_systems(Update, roll_planning_caches)
             .init_resource::<crate::river_water::RiverWaterTiles>()
             .add_systems(Update, crate::river_water::stream_river_water);

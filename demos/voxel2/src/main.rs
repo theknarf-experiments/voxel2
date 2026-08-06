@@ -20,7 +20,9 @@ use voxel_engine::level::LevelReloaded;
 use voxel_engine::{LevelDef, LevelPlugin, VoxelStreamSource};
 
 mod props;
+mod water;
 use props::PropsPlugin;
+use water::WaterPlugin;
 
 /// The demo's presentation for one world. A game would inline these
 /// values wherever it spawns its camera and lights.
@@ -144,6 +146,8 @@ fn main() {
             VoxelDebugPlugin,
             VoxelVizPlugin,
             PropsPlugin,
+            // The water look is the demo's, not the engine's.
+            WaterPlugin,
             LevelPlugin {
                 def: level,
                 // A game picks this at new-game time and restores it

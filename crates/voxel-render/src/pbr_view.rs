@@ -32,7 +32,7 @@ use bevy::{
 
 /// Everything a pipeline key depends on, mirroring the inputs of Bevy's
 /// own view key so both stay in step.
-pub(crate) type PbrViewQuery = (
+pub type PbrViewQuery = (
     &'static ExtractedView,
     Option<&'static ExtractedCamera>,
     &'static RenderVisibleEntities,
@@ -44,7 +44,7 @@ pub(crate) type PbrViewQuery = (
 );
 
 /// Build the key for a view exactly as `bevy_pbr` does.
-pub(crate) fn view_key(
+pub fn view_key(
     view: &ExtractedView,
     camera: Option<&ExtractedCamera>,
     msaa: &Msaa,
@@ -84,7 +84,7 @@ pub(crate) fn view_key(
 /// Point a descriptor's groups 0/1 at Bevy's view layouts for this key and
 /// give it the matching shader defs and color target. Descriptors must
 /// already have three layout slots; the first two are overwritten.
-pub(crate) fn specialize_for_view(
+pub fn specialize_for_view(
     layouts: &MeshPipelineViewLayouts,
     key: MeshPipelineKey,
     descriptor: &mut RenderPipelineDescriptor,
