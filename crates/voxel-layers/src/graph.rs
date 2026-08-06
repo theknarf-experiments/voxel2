@@ -425,6 +425,40 @@ impl LayerGraph {
         }
     }
 
+    /// Generate `level` of a chunk again, keeping whoever depends on it.
+    ///
+    /// A chunk's content is normally a pure function of its coordinate and
+    /// its dependencies, and nothing here would exist if that were always
+    /// true. But a voxel chunk is meshed against the LOD of its
+    /// neighbours, which follows the camera: the chunk is the same chunk,
+    /// at the same coordinate, needing to be built again. The alternative
+    /// is pretending it is a different chunk, which would leak its
+    /// identity into a coordinate and defeat the sharing this design is
+    /// for.
+    ///
+    /// Its providers are re-resolved before the old set is released —
+    /// ensure-new-then-release-old, the same rule a moving top dependency
+    /// follows — so a dependency the rebuild still needs is never
+    /// destroyed and immediately regenerated.
+    pub fn invalidate(&self, instance: &str, coord: IVec3, level: u32) {
+        let key = layer_key(instance);
+        let entry = self.entry(key);
+        let Some(slot) = entry.grid.read().unwrap().get(&coord).cloned() else {
+            return; // not resident; nothing to rebuild
+        };
+        let released = {
+            let _guard = slot.level_locks[level as usize].lock().unwrap();
+            if !slot.has_level(level) {
+                return; // never built, or already being rebuilt
+            }
+            (entry.destroy)(self, &slot, level);
+            slot.level.store(level as i32 - 1, Ordering::Release);
+            std::mem::take(&mut slot.levels.lock().unwrap()[level as usize].providers)
+        };
+        self.create_level(key, &slot, level);
+        self.release(Usage::from_providers(released));
+    }
+
     fn destroy_level(&self, slot: &Arc<ChunkSlot>, level: u32) {
         let entry = self.entry(slot.layer);
         {

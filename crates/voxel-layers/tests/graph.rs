@@ -418,3 +418,45 @@ fn dropping_the_runtime_releases_everything() {
         ledger.destroyed.load(Ordering::Relaxed),
     );
 }
+
+/// A chunk whose output depends on something outside its coordinates — a
+/// seam mask that follows the camera — has to be buildable again in
+/// place, without losing whoever depends on it.
+#[test]
+fn invalidate_rebuilds_a_level_in_place() {
+    let ledger = Arc::new(Ledger::default());
+    let graph = graph(ledger.clone(), 0, 0, 1);
+
+    let mut top = TopDep::new(&graph, "play", IVec3::new(1, 0, 1));
+    top.set_focus(&graph, IVec3::new(CELL / 2, 0, CELL / 2));
+    graph.process_top(&mut top);
+    let resident = graph.resident_chunks();
+    let created = ledger.created.load(Ordering::Relaxed);
+    assert!(resident > 0);
+
+    graph.invalidate("play", IVec3::ZERO, 0);
+
+    // Built again, destroyed exactly once for it, and still held.
+    assert_eq!(ledger.created.load(Ordering::Relaxed), created + 1);
+    assert_eq!(ledger.destroyed.load(Ordering::Relaxed), 1);
+    assert_eq!(graph.resident_chunks(), resident, "rebuild lost residency");
+
+    // And the usual teardown still balances.
+    top.set_active(false);
+    graph.process_top(&mut top);
+    assert_eq!(graph.resident_chunks(), 0);
+    assert_eq!(
+        ledger.created.load(Ordering::Relaxed),
+        ledger.destroyed.load(Ordering::Relaxed),
+    );
+}
+
+/// Invalidating something nothing has built is a no-op, not a panic.
+#[test]
+fn invalidate_ignores_absent_chunks() {
+    let ledger = Arc::new(Ledger::default());
+    let graph = graph(ledger.clone(), 0, 0, 1);
+    graph.invalidate("play", IVec3::new(9_999, 0, 9_999), 0);
+    assert_eq!(graph.resident_chunks(), 0);
+    assert_eq!(ledger.created.load(Ordering::Relaxed), 0);
+}

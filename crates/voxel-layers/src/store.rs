@@ -32,6 +32,10 @@ pub struct Usage {
 }
 
 impl Usage {
+    pub(crate) fn from_providers(providers: Vec<Provider>) -> Self {
+        Self { providers }
+    }
+
     pub fn len(&self) -> usize {
         self.providers.len()
     }
