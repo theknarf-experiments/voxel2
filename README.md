@@ -53,11 +53,14 @@ chain with corridors and a surface entrance), and the megastructure's
 habitation pockets are all written that way, with no engine code behind
 them. See `levels/*.json` and `voxel_engine::level::LevelDef`.
 
-**Live editing**: the level file is watched while running. Lighting,
-colors, shading, and camera tuning apply instantly; changes to the
-generator, seed, providers, or LOD topology rebuild the streamed world in
-place — copying a different level over the watched file swaps the whole
-world without a restart.
+**Live editing**: the level file is watched while running. Materials,
+environment and LOD tuning apply instantly; changes to the generator,
+providers, or LOD topology rebuild the streamed world in place — copying
+a different level over the watched file swaps the whole world without a
+restart. The file holds only what the engine owns: the camera, lights,
+clear color and prop models are the host's, written in Rust in
+`demos/voxel2/src/`, and the seed is a runtime input a game picks per
+save.
 
 Flycam: mouse look (hold right button), WASD + QE, shift to run, scroll for
 speed. Env vars:

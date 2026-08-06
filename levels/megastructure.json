@@ -1,19 +1,4 @@
 {
-  "name": "Megastructure",
-  "seed": 0,
-  "clear_color": [
-    0.035,
-    0.045,
-    0.06
-  ],
-  "ambient": {
-    "color": [
-      0.6,
-      0.7,
-      0.9
-    ],
-    "brightness": 120.0
-  },
   "lod": {
     "max_level": 8,
     "top_radius": 2,
@@ -23,20 +8,6 @@
     ],
     "split_k": 1.6,
     "merge_k": 2.1
-  },
-  "camera": {
-    "start": [
-      11.0,
-      12.0,
-      7.0
-    ],
-    "look": [
-      0.7,
-      0.05,
-      0.7
-    ],
-    "walk_speed": 8.0,
-    "run_speed": 60.0
   },
   "environment": {
     "haze_color": [

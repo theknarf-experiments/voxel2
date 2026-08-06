@@ -1,22 +1,4 @@
 {
-  "name": "Planet",
-  "seed": 0,
-  "clear_color": [
-    0.65,
-    0.77,
-    0.94
-  ],
-  "ambient": {
-    "color": [
-      0.7,
-      0.8,
-      1.0
-    ],
-    "brightness": 400.0
-  },
-  "sun": {
-    "illuminance": 25000.0
-  },
   "lod": {
     "max_level": 11,
     "top_radius": 3,
@@ -26,20 +8,6 @@
     ],
     "split_k": 2.5,
     "merge_k": 3.0
-  },
-  "camera": {
-    "start": [
-      -27570.0,
-      80.0,
-      -36770.0
-    ],
-    "look": [
-      0.4,
-      -0.35,
-      0.4
-    ],
-    "walk_speed": 60.0,
-    "run_speed": 600.0
   },
   "environment": {
     "haze_color": [
@@ -741,79 +709,5 @@
       300.0
     ]
   },
-  "prop_query_reach_m": 3328.0,
-  "props": {
-    "tree": {
-      "variants": [
-        {
-          "model": "broadleaf",
-          "trunk": [
-            0.35,
-            0.24,
-            0.15
-          ],
-          "foliage": [
-            0.3,
-            0.44,
-            0.16
-          ],
-          "impostor": {
-            "shape": "diamond",
-            "color": [
-              0.16,
-              0.26,
-              0.08
-            ],
-            "size": [
-              2.3,
-              5.5
-            ]
-          }
-        },
-        {
-          "model": "conifer",
-          "trunk": [
-            0.35,
-            0.24,
-            0.15
-          ],
-          "foliage": [
-            0.18,
-            0.38,
-            0.16
-          ],
-          "impostor": {
-            "shape": "cone",
-            "color": [
-              0.1,
-              0.22,
-              0.09
-            ],
-            "size": [
-              1.7,
-              6.5
-            ]
-          }
-        }
-      ],
-      "blob_shadow": true
-    },
-    "boulder": {
-      "variants": [
-        {
-          "model": "rock",
-          "foliage": [
-            0.44,
-            0.42,
-            0.4
-          ]
-        }
-      ],
-      "squash": [
-        1.0,
-        0.75,
-        1.0
-      ]
-    }
-  }
+  "prop_query_reach_m": 3328.0
 }

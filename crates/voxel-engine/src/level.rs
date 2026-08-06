@@ -1,10 +1,11 @@
-//! Data-driven levels: a JSON `LevelDef` describes everything the engine
-//! needs to present a world — the *generator program* that is the world's
-//! geometry (including water/vegetation meta ops), the material table its
-//! ops reference, the lighting/haze environment, seed, LOD configuration,
-//! camera, and parameterized planning-op providers. Level editors author
-//! these files; the engine has no hardcoded worlds — a lush planet and a
-//! concrete megacity are the same interpreter fed different data.
+//! Data-driven levels: a JSON `LevelDef` describes the world itself and
+//! nothing else — the *generator program* that is its geometry
+//! (including water/scatter meta ops), the material table those ops
+//! reference, the lighting/haze environment, LOD configuration, and the
+//! planning stack. Presentation belongs to the host, and the seed is a
+//! runtime input ([`LevelPlugin::seed`]), so a level editor edits
+//! exactly this file. The engine has no hardcoded worlds — a lush planet
+//! and a concrete megacity are the same interpreter fed different data.
 
 use std::sync::Arc;
 
@@ -601,9 +602,6 @@ impl MaterialDef {
 /// A complete level description.
 #[derive(Resource, Serialize, Deserialize, Clone, Debug)]
 pub struct LevelDef {
-    pub name: String,
-    #[serde(default)]
-    pub seed: u64,
     #[serde(default)]
     pub environment: EnvDef,
     pub lod: LodDef,
@@ -1950,18 +1948,17 @@ pub(crate) static HOLE_EVAL: std::sync::atomic::AtomicBool =
 
 /// Build both twins of the level's generator: the GPU upload and the
 /// CPU-side [`voxel_worldgen::Generator`] every mirror samples.
-fn apply_generator(level: &LevelDef) -> (voxel_render::WorldProgram, Arc<voxel_worldgen::Generator>) {
+fn apply_generator(
+    level: &LevelDef,
+    seed: u64,
+) -> (voxel_render::WorldProgram, Arc<voxel_worldgen::Generator>) {
     let ops: Vec<WorldOp> = level.generator.iter().map(GenOpDef::pack).collect();
     let sun = sun_dir(level);
-    let generator = Arc::new(voxel_worldgen::Generator::new(
-        ops.clone(),
-        level.seed as u32,
-        sun,
-    ));
+    let generator = Arc::new(voxel_worldgen::Generator::new(ops.clone(), seed as u32, sun));
     (
         voxel_render::WorldProgram {
             ops: Arc::new(ops),
-            seed: level.seed as u32,
+            seed: seed as u32,
             sun_dir: sun,
         },
         generator,
@@ -2030,13 +2027,18 @@ fn grass_style(level: &LevelDef) -> voxel_render::GrassStyle {
     }
 }
 
-/// Presents a [`LevelDef`]: engine plugins, lighting, camera, planning
-/// providers, autopilot/walk controls — everything the old hardcoded demos
-/// did, from data. With a `source` path, the file is watched and edits
-/// hot-reload: lighting and camera apply instantly; generation parameter
-/// changes rebuild the streamed world in place.
+/// Presents a [`LevelDef`]: generation, streaming, meshing, materials
+/// and the planning providers. Presentation the *host* owns — camera,
+/// lights, clear color, prop models — is not in here and not in the
+/// level file. With a `source` path the file is watched and edits
+/// hot-reload: material and environment changes apply instantly;
+/// generation parameter changes rebuild the streamed world in place.
 pub struct LevelPlugin {
     pub def: LevelDef,
+    /// World seed. A runtime input, not level data: the same level
+    /// definition generates a different world per seed, so a game picks
+    /// it at new-game time and restores it from its save.
+    pub seed: u64,
     /// Watch this file and hot-reload the level from it.
     pub source: Option<std::path::PathBuf>,
     /// Coverage-eval rendering (monotone geometry, water off) — a test
@@ -2051,6 +2053,7 @@ impl LevelPlugin {
     pub fn new(def: LevelDef) -> Self {
         Self {
             def,
+            seed: 0,
             source: None,
             hole_eval: false,
             remote_port: None,
@@ -2064,6 +2067,10 @@ impl LevelPlugin {
     }
 }
 
+/// The world seed in play, for systems that rebuild generation state.
+#[derive(Resource, Clone, Copy, Debug)]
+pub struct WorldSeed(pub u64);
+
 /// Watch state for level hot-reload.
 #[derive(Resource)]
 struct LevelSource {
@@ -2076,7 +2083,8 @@ impl Plugin for LevelPlugin {
     fn build(&self, app: &mut App) {
         let level = self.def.clone();
 
-        app.add_message::<LevelReloaded>();
+        app.add_message::<LevelReloaded>()
+            .insert_resource(WorldSeed(self.seed));
         if let Some(path) = &self.source {
             let mtime = std::fs::metadata(path).and_then(|m| m.modified()).ok();
             app.insert_resource(LevelSource {
@@ -2087,12 +2095,13 @@ impl Plugin for LevelPlugin {
             .add_systems(Update, reload_level);
         }
 
-        let (program, generator) = apply_generator(&level);
+        let (program, generator) = apply_generator(&level, self.seed);
         let water = water_surface(&program);
         if let Err(e) = validate_level(&level) {
-            panic!("level {:?} has invalid planning data: {e}", level.name);
+            panic!("level has invalid planning data: {e}");
         }
-        let (ops_provider, world_query, planning_layers) = build_ops_provider(&level, &generator);
+        let (ops_provider, world_query, planning_layers) =
+            build_ops_provider(&level, self.seed, &generator);
         let prepare = ops_prepare(&world_query);
         app.insert_resource(program)
             .insert_resource(prepare)
@@ -2410,6 +2419,7 @@ fn ops_prepare(world: &WorldQuery) -> crate::streaming::ChunkOpsPrepare {
 
 fn build_ops_provider(
     level: &LevelDef,
+    seed: u64,
     generator: &Arc<voxel_worldgen::Generator>,
 ) -> (ChunkOpsProvider, WorldQuery, PlanningLayers) {
     let mut sources: Vec<OpsSource> = Vec::new();
@@ -2419,7 +2429,7 @@ fn build_ops_provider(
     let (stack, emitters) = if level.stack.is_empty() {
         (None, Vec::new())
     } else {
-        let mut mgr = voxel_layers::LayerManager::with_context(level.seed, generator.clone());
+        let mut mgr = voxel_layers::LayerManager::with_context(seed, generator.clone());
         let mut emitters = Vec::new();
         for def in &level.stack {
             def.register(&level.stack, &level.structures, &mut mgr);
@@ -2590,7 +2600,7 @@ fn roll_planning_caches(
 
 /// Poll the level file; apply edits live. Presentation fields (colors,
 /// lights, camera speeds, split/merge tuning, shading) apply directly;
-/// changes to the generator/seed/ops/LOD topology rebuild the streamed
+/// changes to the generator/ops/LOD topology rebuild the streamed
 /// world in place — including swapping in a completely different world.
 #[allow(clippy::too_many_arguments)]
 fn reload_level(
@@ -2598,6 +2608,7 @@ fn reload_level(
     time: Res<Time>,
     mut source: ResMut<LevelSource>,
     mut level: ResMut<LevelDef>,
+    seed: Res<WorldSeed>,
     mut lod: ResMut<LodConfig>,
     mut rebuild: ResMut<StreamingRebuild>,
     mut water: ResMut<voxel_render::WaterSurface>,
@@ -2645,11 +2656,10 @@ fn reload_level(
 
     // Generation-affecting changes rebuild the streamed world.
     let sun_changed = sun_dir(&new) != sun_dir(level.as_ref());
-    let generator_changed =
-        new.generator != level.generator || new.seed != level.seed || sun_changed;
+    let generator_changed = new.generator != level.generator || sun_changed;
     // Rebuilt whether or not the program changed: the planning stack and
     // the facade below need one either way.
-    let (program, generator) = apply_generator(&new);
+    let (program, generator) = apply_generator(&new, seed.0);
     if generator_changed {
         *water = water_surface(&program);
         commands.insert_resource(program);
@@ -2666,7 +2676,8 @@ fn reload_level(
         lod.max_level = new.lod.max_level;
         lod.top_radius = new.lod.top_radius;
         lod.top_y = new.lod.top_y;
-        let (ops_provider, world_query, planning_layers) = build_ops_provider(&new, &generator);
+        let (ops_provider, world_query, planning_layers) =
+            build_ops_provider(&new, seed.0, &generator);
         commands.insert_resource(ops_prepare(&world_query));
         commands.insert_resource(ops_provider);
         commands.insert_resource(world_query);
@@ -2794,8 +2805,12 @@ mod tests {
     /// Build a level's world facade the way the plugin does — every
     /// piece of generator state hangs off the returned query.
     fn world_for(def: &LevelDef) -> WorldQuery {
-        let (_, generator) = apply_generator(def);
-        build_ops_provider(def, &generator).1
+        seeded_world_for(def, 0)
+    }
+
+    fn seeded_world_for(def: &LevelDef, seed: u64) -> WorldQuery {
+        let (_, generator) = apply_generator(def, seed);
+        build_ops_provider(def, seed, &generator).1
     }
 
     /// The whole point of per-world generator state: two levels with
@@ -2804,10 +2819,8 @@ mod tests {
     #[test]
     fn two_worlds_coexist_in_one_process() {
         let planet = LevelDef::from_json(&shipped("planet.json")).unwrap();
-        let mut other = planet.clone();
-        other.seed = planet.seed ^ 0x5eed;
-        let a = world_for(&planet);
-        let b = world_for(&other);
+        let a = seeded_world_for(&planet, 0);
+        let b = seeded_world_for(&planet, 0x5eed);
         let mega = LevelDef::from_json(&shipped("megastructure.json")).unwrap();
         let m = world_for(&mega);
 
@@ -2826,8 +2839,8 @@ mod tests {
             let _ = m.generator().height(p, 1.0);
             assert_eq!(hb, b.generator().height(p, 1.0));
         }
-        assert_eq!(a.generator().seed(), planet.seed as u32);
-        assert_eq!(b.generator().seed(), other.seed as u32);
+        assert_eq!(a.generator().seed(), 0);
+        assert_eq!(b.generator().seed(), 0x5eed);
         // Mega has no height op at all; its water/height mirror stays inert
         // while the planets keep working.
         assert!(m.generator().water_level().is_none());

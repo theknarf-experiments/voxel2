@@ -3,69 +3,118 @@
 //! The engine says *where* props go ([`ScatterInstance`] on streamed
 //! entities); this file decides what they look like. Nothing here is in
 //! a reusable crate: the models, the species names, the impostor
-//! silhouettes and their colors are this demo's content, described by a
-//! `props` block in its level file. A game would put its own GLTFs,
-//! materials and gameplay components here instead.
+//! silhouettes and their colors are this demo's content, written in
+//! Rust right here. A game would put its own GLTFs, materials and
+//! gameplay components here instead — none of it belongs in the level
+//! file, which describes only the world the engine generates.
 
 use std::collections::HashMap;
 
 use bevy::mesh::{Indices, PrimitiveTopology};
 use bevy::prelude::*;
-use serde::{Deserialize, Serialize};
 use voxel_engine::level::WorldQuery;
 use voxel_engine::scatter::{tile_placements, ScatterInstance};
 use voxel_engine::{LevelDef, VoxelStreamSource};
 
 /// Host-side appearance for one scatter class, indexed by the engine's
 /// variant number.
-#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
-pub struct PropClassDef {
-    #[serde(default)]
-    pub variants: Vec<PropVariantDef>,
+#[derive(Clone, Debug, Default)]
+pub struct PropClass {
+    pub variants: Vec<PropVariant>,
     /// Draw a grounding blob shadow under each instance.
-    #[serde(default)]
     pub blob_shadow: bool,
     /// Non-uniform squash applied on top of the engine's uniform scale.
-    #[serde(default = "one3")]
-    pub squash: [f32; 3],
+    pub squash: Vec3,
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
-pub struct PropVariantDef {
-    /// Which procedural model this demo builds: "conifer", "broadleaf"
-    /// or "rock". A real game would name an asset path here.
-    pub model: String,
-    #[serde(default = "trunk_default")]
-    pub trunk: [f32; 3],
-    #[serde(default = "foliage_default")]
-    pub foliage: [f32; 3],
+#[derive(Clone, Debug)]
+pub struct PropVariant {
+    pub model: Model,
+    pub trunk: Color,
+    pub foliage: Color,
     /// Far-forest silhouette, when this class has one.
-    #[serde(default)]
-    pub impostor: Option<ImpostorDef>,
+    pub impostor: Option<Impostor>,
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
-pub struct ImpostorDef {
-    /// "cone" or "diamond".
-    pub shape: String,
+/// The procedural models this demo builds. A real game names an asset
+/// path (or a scene handle) instead.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Model {
+    Conifer,
+    Broadleaf,
+    Rock,
+}
+
+#[derive(Clone, Debug)]
+pub struct Impostor {
+    pub shape: ImpostorShape,
     pub color: [f32; 3],
     /// (half width, height) before the instance scale.
     pub size: [f32; 2],
 }
 
-fn one3() -> [f32; 3] {
-    [1.0, 1.0, 1.0]
-}
-fn trunk_default() -> [f32; 3] {
-    [0.35, 0.24, 0.15]
-}
-fn foliage_default() -> [f32; 3] {
-    [0.24, 0.44, 0.16]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ImpostorShape {
+    Cone,
+    Diamond,
 }
 
-/// The demo's prop table, parsed from its level file.
+/// The demo's props, keyed by the scatter class names in the level file.
+/// Classes the level scatters but this table has no entry for simply
+/// stream as bare entities.
 #[derive(Resource, Default, Clone, Debug)]
-pub struct PropTable(pub HashMap<String, PropClassDef>);
+pub struct PropTable(pub HashMap<String, PropClass>);
+
+impl PropTable {
+    /// The planet demo's forest and boulders.
+    fn planet() -> Self {
+        let bark = Color::srgb(0.35, 0.24, 0.15);
+        let mut classes = HashMap::new();
+        classes.insert(
+            "tree".to_string(),
+            PropClass {
+                variants: vec![
+                    PropVariant {
+                        model: Model::Broadleaf,
+                        trunk: bark,
+                        foliage: Color::srgb(0.3, 0.44, 0.16),
+                        impostor: Some(Impostor {
+                            shape: ImpostorShape::Diamond,
+                            color: [0.16, 0.26, 0.08],
+                            size: [2.3, 5.5],
+                        }),
+                    },
+                    PropVariant {
+                        model: Model::Conifer,
+                        trunk: bark,
+                        foliage: Color::srgb(0.18, 0.38, 0.16),
+                        impostor: Some(Impostor {
+                            shape: ImpostorShape::Cone,
+                            color: [0.1, 0.22, 0.09],
+                            size: [1.7, 6.5],
+                        }),
+                    },
+                ],
+                blob_shadow: true,
+                squash: Vec3::ONE,
+            },
+        );
+        classes.insert(
+            "boulder".to_string(),
+            PropClass {
+                variants: vec![PropVariant {
+                    model: Model::Rock,
+                    trunk: bark,
+                    foliage: Color::srgb(0.44, 0.42, 0.4),
+                    impostor: None,
+                }],
+                blob_shadow: false,
+                squash: Vec3::new(1.0, 0.75, 1.0),
+            },
+        );
+        Self(classes)
+    }
+}
 
 /// Far-forest tuning — the host's rendering choice, not the engine's.
 const SUPER_M: f32 = 128.0;
@@ -79,7 +128,7 @@ pub struct PropsPlugin;
 
 impl Plugin for PropsPlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<PropTable>()
+        app.insert_resource(PropTable::planet())
             .init_resource::<PropAssets>()
             .init_resource::<FarForest>()
             .add_systems(Startup, build_prop_assets)
@@ -102,7 +151,7 @@ type VariantParts = Vec<(Handle<Mesh>, Handle<StandardMaterial>)>;
 struct PropAssets {
     /// class -> variant -> parts.
     classes: HashMap<String, Vec<VariantParts>>,
-    impostors: HashMap<String, Vec<Option<ImpostorDef>>>,
+    impostors: HashMap<String, Vec<Option<Impostor>>>,
     impostor_mat: Handle<StandardMaterial>,
     blob_mesh: Handle<Mesh>,
     blob_mat: Handle<StandardMaterial>,
@@ -114,8 +163,8 @@ fn build_prop_assets(
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
-    let srgb = |c: [f32; 3], rough: f32| StandardMaterial {
-        base_color: Color::srgb(c[0], c[1], c[2]),
+    let mat = |base_color: Color, rough: f32| StandardMaterial {
+        base_color,
         perceptual_roughness: rough,
         ..default()
     };
@@ -123,19 +172,22 @@ fn build_prop_assets(
         let mut variants = Vec::new();
         let mut impostors = Vec::new();
         for variant in &def.variants {
-            let trunk_mat = materials.add(srgb(variant.trunk, 0.95));
-            let foliage_mat = materials.add(srgb(variant.foliage, 0.9));
+            let trunk_mat = materials.add(mat(variant.trunk, 0.95));
+            let foliage_mat = materials.add(mat(variant.foliage, 0.9));
             let mut parts = Vec::new();
-            match variant.model.as_str() {
-                "rock" => {
+            match variant.model {
+                Model::Rock => {
                     let mut rock = MeshBuilder::default();
                     rock.blob(Vec3::ZERO, 1.0, 0.35, 7);
-                    parts.push((meshes.add(rock.build()), materials.add(srgb(variant.foliage, 0.85))));
+                    parts.push((
+                        meshes.add(rock.build()),
+                        materials.add(mat(variant.foliage, 0.85)),
+                    ));
                 }
                 model => {
                     parts.push((meshes.add(cylinder_mesh(0.14, 1.6, 8)), trunk_mat));
                     let mut top = MeshBuilder::default();
-                    if model == "broadleaf" {
+                    if model == Model::Broadleaf {
                         top.blob(Vec3::new(0.0, 3.2, 0.0), 1.6, 0.12, 11);
                         top.blob(Vec3::new(0.9, 2.7, 0.4), 1.1, 0.14, 23);
                         top.blob(Vec3::new(-0.8, 2.8, -0.3), 1.0, 0.14, 47);
@@ -187,7 +239,7 @@ fn dress_scatter(
             continue;
         };
         let class_def = table.0.get(&*instance.class).cloned().unwrap_or_default();
-        let squash = Vec3::from(class_def.squash);
+        let squash = class_def.squash.max(Vec3::splat(f32::EPSILON));
         commands.entity(entity).insert(Transform {
             scale: transform.scale * squash,
             ..*transform
@@ -331,7 +383,7 @@ fn build_super_tile(
                     1.0,
                 ];
                 let (hw, h) = (imp.size[0] * placement.scale, imp.size[1] * placement.scale);
-                if imp.shape == "cone" {
+                if imp.shape == ImpostorShape::Cone {
                     b.cross_cone(pos, hw, h, c);
                 } else {
                     b.cross_diamond(pos, hw, h, c);

@@ -5332,8 +5332,6 @@ name = "voxel2"
 version = "0.1.0"
 dependencies = [
  "bevy",
- "serde",
- "serde_json",
  "voxel-debug",
  "voxel-engine",
  "voxel-worldgen",
