@@ -625,13 +625,13 @@ impl Layer for FlowCourses {
                 if !in_own(start) {
                     continue;
                 }
-                let params = crate::rivers::FlowParams {
+                let params = crate::flow::FlowParams {
                     max_steps: self.cfg.max_steps,
                     max_spill_rise: self.cfg.max_spill_rise,
                     ..Default::default()
                 };
                 let waypoints =
-                    crate::rivers::flow_path(&|p| generator.height(p, 8.0), start, &params);
+                    crate::flow::flow_path(&|p| generator.height(p, 8.0), start, &params);
                 if waypoints.len() < 6 {
                     continue;
                 }

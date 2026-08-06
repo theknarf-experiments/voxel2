@@ -7,7 +7,7 @@
 
 pub mod program;
 pub mod path;
-pub mod rivers;
+pub mod flow;
 pub mod stack;
 pub mod structure;
 

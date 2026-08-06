@@ -1,5 +1,10 @@
-//! River hydrology: the deterministic pond-and-spill descent walk the
-//! stack's `flow` layer kind runs from its spring sites.
+//! Descent walk with pond-and-spill: from a start point, follow a
+//! heightfield downhill, escaping basins by spilling over the lowest lip
+//! within reach, and stop at a given level.
+//!
+//! Nothing here is hydrology. It is a generic descent over a scalar
+//! field — what a level uses it for (a river, a lava channel, a drainage
+//! ditch, a retreating path) is data.
 
 use glam::Vec2;
 
@@ -11,7 +16,7 @@ pub const FLOW_STEP_M: f32 = 8.0;
 /// Parameters of the descent walk.
 pub struct FlowParams {
     pub step_m: f32,
-    /// Stop once the height drops to this level (sea).
+    /// Stop once the height drops to this level.
     pub stop_level: f32,
     pub max_steps: usize,
     /// Maximum lip height above the pond floor the walk may spill over.
@@ -33,8 +38,8 @@ impl Default for FlowParams {
 /// downhill neighbors exist the walk takes the steepest one; at a local
 /// minimum a bounded Dijkstra looks for the nearest escape route whose
 /// lip stays within `max_spill_rise` of the pond floor and which ends
-/// LOWER than the pond entry (a shallow pond overflows; a deep basin
-/// ends the river as a lake). Ends at the sea (`stop_level`), in a deep
+/// LOWER than the pond entry (a shallow basin overflows; a deep one
+/// ends the walk). Ends at `stop_level`, in a deep
 /// pit, or at `max_steps`.
 pub fn flow_path(height: &dyn Fn(Vec2) -> f32, start: Vec2, params: &FlowParams) -> Vec<Vec2> {
     let step = params.step_m;
@@ -104,7 +109,7 @@ pub fn flow_path(height: &dyn Fn(Vec2) -> f32, start: Vec2, params: &FlowParams)
             }
         }
         let Some(mut e) = escape else {
-            break; // deep basin: the river ends in a lake
+            break; // deep basin: the walk terminates here
         };
         // Splice the escape route (pond crossing) into the path.
         let mut route = vec![e];
@@ -128,8 +133,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn flow_descends_monotonically_and_reaches_the_sea() {
-        // A uniform slope down toward +x reaching sea level at x = 800.
+    fn flow_descends_monotonically_and_reaches_the_stop_level() {
+        // A uniform slope down toward +x reaching the stop level at x = 800.
         let slope = |p: Vec2| (800.0 - p.x).max(0.0) * 0.1;
         let path = flow_path(&slope, Vec2::new(0.0, 0.0), &FlowParams::default());
         assert!(path.len() > 10);
@@ -137,19 +142,19 @@ mod tests {
         for w in path.windows(2) {
             assert!(
                 slope(w[1]) <= slope(w[0]) + 1e-3,
-                "river flows uphill on a pure slope: {} -> {}",
+                "flow ascends on a pure slope: {} -> {}",
                 slope(w[0]),
                 slope(w[1])
             );
         }
         let end = *path.last().unwrap();
-        assert!(slope(end) <= 0.5, "river never reached the sea: h={}", slope(end));
+        assert!(slope(end) <= 0.5, "flow never reached the stop level: h={}", slope(end));
     }
 
     #[test]
     fn flow_spills_over_a_shallow_lip() {
         // Downhill toward +x, interrupted by a 3 m ridge across x=400:
-        // the walk must pond, spill over, and continue to the sea.
+        // the walk must pond, spill over, and continue to the stop level.
         let terrain = |p: Vec2| {
             let base = (900.0 - p.x).max(0.0) * 0.08;
             let ridge = if (390.0..410.0).contains(&p.x) { 4.0 } else { 0.0 };
@@ -159,18 +164,18 @@ mod tests {
         let end = *path.last().unwrap();
         assert!(
             end.x > 850.0,
-            "river failed to spill past the ridge: ended at {end:?} h={}",
+            "flow failed to spill past the ridge: ended at {end:?} h={}",
             terrain(end)
         );
     }
 
     #[test]
     fn flow_stops_in_a_pit() {
-        // A bowl: minimum at the center, well above sea level.
+        // A bowl: minimum at the center, well above the stop level.
         let bowl = |p: Vec2| 50.0 + p.length() * 0.05;
         let path = flow_path(&bowl, Vec2::new(300.0, 0.0), &FlowParams::default());
         let end = *path.last().unwrap();
-        assert!(end.length() < 40.0, "river did not settle in the pit: {end:?}");
+        assert!(end.length() < 40.0, "flow did not settle in the pit: {end:?}");
         assert!(path.len() < 100, "walk wandered instead of ending: {}", path.len());
     }
 }
