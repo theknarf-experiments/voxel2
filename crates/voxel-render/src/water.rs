@@ -1,29 +1,11 @@
-//! Water DATA: where the water is. How it *looks* is the host's business —
-//! the pipeline and shader that draw it live in the app (see the demo's
-//! `water.rs`), so a game can replace the whole water look without
-//! touching the engine.
+//! What the engine knows about large flat surfaces: nothing but where
+//! they are, and only for the generator's sea-level meta op.
+//!
+//! Ribbon surfaces (rivers, canals, lava) are plain planning-stack data —
+//! see `voxel_worldgen::stack::RibbonSeg` — and the host draws them. This
+//! file holds only the world-level surface the generator itself declares.
 
 use bevy::prelude::*;
-
-/// One river water segment for the GPU (layout twins the WGSL RiverSeg).
-#[derive(Clone, Copy, Default, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
-#[repr(C)]
-pub struct RiverSegGpu {
-    /// a.xz | b.xz (world meters).
-    pub ab: [f32; 4],
-    /// half width | level at a | level at b | unused.
-    pub geo: [f32; 4],
-    /// river tint rgb | unused.
-    pub color: [f32; 4],
-}
-
-/// River segments near the camera, maintained by the engine's streamer.
-/// `generation` bumps on change so a renderer can re-upload.
-#[derive(Resource, Clone, Default)]
-pub struct RiverWater {
-    pub segments: Vec<RiverSegGpu>,
-    pub generation: u64,
-}
 
 /// The generator's water surface (from its `water` op): presence and sea
 /// level. Runtime (not build-time) so a hot-reload can switch worlds.

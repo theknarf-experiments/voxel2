@@ -370,7 +370,7 @@
       "pad_m": 3264.0,
       "max_chunk_edge_m": 140.0,
       "emit": {
-        "type": "course_water",
+        "type": "ribbon",
         "material": 4
       }
     },

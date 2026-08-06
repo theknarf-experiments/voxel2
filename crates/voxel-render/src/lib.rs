@@ -19,7 +19,7 @@ pub use chunks::{
 };
 pub use grass::{GrassInstance, GrassInstances, GrassPlugin, GrassStyle};
 pub use material::VoxelSurfaceMaterial;
-pub use water::{RiverSegGpu, RiverWater, WaterSurface};
+pub use water::WaterSurface;
 
 /// Marker for helper cameras (offscreen screenshot mirrors, etc.) that
 /// gameplay/streaming systems must ignore when looking for "the player

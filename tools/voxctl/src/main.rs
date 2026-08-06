@@ -6,7 +6,7 @@
 //! Usage:
 //!   voxctl status
 //!   voxctl goto X Y Z [DX DY DZ]
-//!   voxctl water X Z [RADIUS]
+//!   voxctl ribbons X Z [RADIUS]
 //!   voxctl scan X Z [RADIUS] [STEP]   # scenic-spot ranking (ex-scout)
 //!   voxctl markers X Z [RADIUS] [KIND]
 //!   voxctl shot PATH
@@ -82,10 +82,10 @@ fn main() {
                 "look": [parse_f64(dx), parse_f64(dy), parse_f64(dz)],
             }),
         ),
-        ["water", x, z, rest @ ..] => {
+        ["ribbons", x, z, rest @ ..] => {
             let radius = rest.first().map(|r| parse_f64(r)).unwrap_or(512.0);
             call(
-                "voxel/water",
+                "voxel/ribbons",
                 json!({"center": [parse_f64(x), parse_f64(z)], "radius": radius}),
             )
         }
@@ -113,7 +113,7 @@ fn main() {
         },
         _ => {
             eprintln!(
-                "usage: voxctl status | goto X Y Z [DX DY DZ] | water X Z [R] | \
+                "usage: voxctl status | goto X Y Z [DX DY DZ] | ribbons X Z [R] | \
                  markers X Z [R] [KIND] | scan X Z [R] [STEP] | shot PATH | \
                  raw METHOD [JSON]"
             );

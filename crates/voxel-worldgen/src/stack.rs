@@ -10,16 +10,18 @@ use voxel_layers::{IAabb, Layer, LayerCtx};
 
 use crate::Generator;
 
-/// A water surface segment (river reach): endpoints, half width, and the
-/// (monotone) water level at each end.
+/// A flat ribbon segment along a path: endpoints, half width, and the
+/// surface height at each end. Nothing aquatic about it — a river, a
+/// canal, a lava flow or a conveyor are the same primitive with a
+/// different material.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub struct WaterSeg {
+pub struct RibbonSeg {
     pub a: Vec2,
     pub b: Vec2,
     pub half_w: f32,
     pub levels: [f32; 2],
-    /// Level material id: the renderer takes the surface color from the
-    /// level's material table (water look is level data).
+    /// Level material id. The host decides what a ribbon of this material
+    /// looks like; the engine only says where it is.
     pub material: u32,
 }
 
@@ -36,7 +38,7 @@ pub struct Marker {
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct PatchSet {
     pub ops: Vec<CsgOp>,
-    pub water: Vec<WaterSeg>,
+    pub ribbons: Vec<RibbonSeg>,
     pub clearance: Vec<[Vec2; 2]>,
     pub markers: Vec<Marker>,
 }
@@ -44,14 +46,14 @@ pub struct PatchSet {
 impl PatchSet {
     pub fn is_empty(&self) -> bool {
         self.ops.is_empty()
-            && self.water.is_empty()
+            && self.ribbons.is_empty()
             && self.clearance.is_empty()
             && self.markers.is_empty()
     }
 
     pub fn extend(&mut self, other: PatchSet) {
         self.ops.extend(other.ops);
-        self.water.extend(other.water);
+        self.ribbons.extend(other.ribbons);
         self.clearance.extend(other.clearance);
         self.markers.extend(other.markers);
     }
@@ -758,9 +760,9 @@ pub enum EmitKind {
         material: u32,
         clearance: bool,
     },
-    /// Bed notch + water ribbon + water-surface segments along a `flow`
+    /// Bed notch + ribbon surface segments along a `flow`
     /// source. Half width grows from `width[0]` to `width[1]` downstream.
-    CourseWater { material: u32, width: [f32; 2] },
+    Ribbon { material: u32, width: [f32; 2] },
     /// Sphere-cut chains from a `worm` source (caves).
     WormCuts,
     /// Build a structure (level data — see [`crate::structure`]) at each
@@ -882,7 +884,7 @@ impl Layer for EmitPatches {
                     }
                 }
             }
-            EmitKind::CourseWater { material, width } => {
+            EmitKind::Ribbon { material, width } => {
                 for (_, c) in ctx.get_named::<FlowCourses>(&self.cfg.source, padded).iter() {
                     for (waypoints, levels) in &c.courses {
                         let n = waypoints.len();
@@ -893,8 +895,8 @@ impl Layer for EmitPatches {
                             let t = i as f32 / n as f32;
                             let half_w = width[0] + (width[1] - width[0]) * t;
                             let seg_levels = [levels[i], levels[i + 1]];
-                            water_segment_ops(seg[0], seg[1], half_w, seg_levels, &mut out.ops);
-                            out.water.push(WaterSeg {
+                            ribbon_bed_ops(seg[0], seg[1], half_w, seg_levels, &mut out.ops);
+                            out.ribbons.push(RibbonSeg {
                                 a: seg[0],
                                 b: seg[1],
                                 half_w,
@@ -1060,9 +1062,9 @@ fn slab_segment_ops(
 }
 
 /// Bed notch along one course segment, flow-aligned with interpolated
-/// (monotone) water levels. The water surface itself is NOT baked into
-/// the SDF — the renderer draws it from the emitted [`WaterSeg`]s.
-fn water_segment_ops(a: Vec2, b: Vec2, half_w: f32, levels: [f32; 2], out: &mut Vec<CsgOp>) {
+/// (monotone) surface heights. The ribbon surface itself is NOT baked into
+/// the SDF — the renderer draws it from the emitted [`RibbonSeg`]s.
+fn ribbon_bed_ops(a: Vec2, b: Vec2, half_w: f32, levels: [f32; 2], out: &mut Vec<CsgOp>) {
     let len = a.distance(b);
     if len < 0.01 {
         return;
@@ -1118,9 +1120,9 @@ pub fn patches_in(
                 out.ops.push(*op);
             }
         }
-        for w in &c.patches.water {
+        for w in &c.patches.ribbons {
             if seg_touches(w.a, w.b, w.half_w) {
-                out.water.push(*w);
+                out.ribbons.push(*w);
             }
         }
         for seg in &c.patches.clearance {
@@ -1361,7 +1363,7 @@ mod tests {
             for (wp, levels) in &c.courses {
                 courses += 1;
                 assert_eq!(wp.len(), levels.len());
-                // Water line is monotone non-increasing.
+                // Surface line is monotone non-increasing (it flows downhill).
                 for w in levels.windows(2) {
                     assert!(w[1] <= w[0] + 1e-4);
                 }
@@ -1517,7 +1519,7 @@ mod tests {
     }
 
     #[test]
-    fn emit_course_water_and_worm_cuts() {
+    fn emit_ribbon_and_worm_cuts() {
         let mut mgr = test_manager(5);
         mgr.register_as(
             "sites:springs",
@@ -1546,7 +1548,7 @@ mod tests {
                 cell_y_m: 0,
                 cfg: EmitCfg {
                     source: "flow:rivers".into(),
-                    kind: EmitKind::CourseWater {
+                    kind: EmitKind::Ribbon {
                         material: 4,
                         width: [2.0, 7.0],
                     },
@@ -1596,7 +1598,7 @@ mod tests {
             Vec3::new(b.max.x as f32, 500.0, b.max.z as f32),
         );
         let rivers = patches_in(&mgr, "rivers", min, max);
-        assert!(!rivers.water.is_empty(), "no water segments");
+        assert!(!rivers.ribbons.is_empty(), "no ribbon segments");
         assert!(!rivers.ops.is_empty(), "no river bed ops");
         assert!(!rivers.clearance.is_empty(), "no river clearance");
         // The surface is drawn from segments, never baked into the SDF:
@@ -1604,9 +1606,9 @@ mod tests {
         for op in &rivers.ops {
             assert_eq!(op.kind & 1, 1, "river emitted an additive op");
         }
-        for w in &rivers.water {
+        for w in &rivers.ribbons {
             assert!(w.half_w >= 2.0 && w.half_w <= 7.0);
-            assert!(w.levels[1] <= w.levels[0] + 1e-4, "water flows uphill");
+            assert!(w.levels[1] <= w.levels[0] + 1e-4, "ribbon surface flows uphill");
             assert_eq!(w.material, 4);
         }
         let caves = patches_in(&mgr, "caves", min, max);

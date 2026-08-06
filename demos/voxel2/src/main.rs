@@ -20,8 +20,10 @@ use voxel_engine::level::LevelReloaded;
 use voxel_engine::{LevelDef, LevelPlugin, VoxelStreamSource};
 
 mod props;
+mod ribbons;
 mod water;
 use props::PropsPlugin;
+use ribbons::RibbonsPlugin;
 use water::WaterPlugin;
 
 /// The demo's presentation for one world. A game would inline these
@@ -146,7 +148,8 @@ fn main() {
             VoxelDebugPlugin,
             VoxelVizPlugin,
             PropsPlugin,
-            // The water look is the demo's, not the engine's.
+            // Water is the demo's: generic ribbon data in, water look out.
+            RibbonsPlugin,
             WaterPlugin,
             LevelPlugin {
                 def: level,

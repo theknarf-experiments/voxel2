@@ -1350,8 +1350,10 @@ pub enum EmitDef {
         #[serde(default = "d_true")]
         clearance: bool,
     },
-    /// Bed notch + water ribbon + surface segments along a `flow` source.
-    CourseWater {
+    /// Bed notch plus a flat ribbon surface along a `flow` source. The
+    /// engine only places it; a river, canal or lava flow is the same
+    /// primitive with a different material.
+    Ribbon {
         material: u32,
         #[serde(default = "d_course_width")]
         width: [f32; 2],
@@ -1486,7 +1488,7 @@ impl EmitDef {
                 material,
                 clearance,
             },
-            EmitDef::CourseWater { material, width } => EmitKind::CourseWater { material, width },
+            EmitDef::Ribbon { material, width } => EmitKind::Ribbon { material, width },
             EmitDef::WormCuts => EmitKind::WormCuts,
             EmitDef::SiteStructure { structure, marker } => EmitKind::SiteStructure {
                 structure: build(&structure),
@@ -1669,7 +1671,7 @@ pub fn validate_stack(
             } => {
                 let expect = match emit {
                     EmitDef::PathSlabs { .. } => StackKind::Connect,
-                    EmitDef::CourseWater { .. } => StackKind::Flow,
+                    EmitDef::Ribbon { .. } => StackKind::Flow,
                     EmitDef::WormCuts => StackKind::Worm,
                     EmitDef::SiteStructure { structure, .. } => {
                         check_structure(structures, name, structure)?;
@@ -1911,6 +1913,11 @@ fn sun_dir(level: &LevelDef) -> Vec3 {
     Vec3::from(level.environment.sun_direction).normalize_or(Vec3::Y)
 }
 
+/// How far out a host is assumed to stream ribbon surfaces, so planning
+/// data is ensured over at least that radius. Hosts that stream further
+/// should raise the level's streamer radius.
+pub const RIBBON_QUERY_REACH_M: f32 = 1792.0;
+
 /// Coverage-eval rendering: monotone-white geometry and no water, so a
 /// single background-colored pixel below the horizon means missing world
 /// coverage. Set from [`LevelPlugin::hole_eval`] — the engine itself
@@ -2096,8 +2103,7 @@ impl Plugin for LevelPlugin {
             .insert_resource(level.clone())
             .add_plugins(VoxelEnginePlugin { vegetation: true })
             .add_systems(Update, roll_planning_caches)
-            .init_resource::<crate::river_water::RiverWaterTiles>()
-            .add_systems(Update, crate::river_water::stream_river_water);
+            ;
 
         if let Some(port) = self.remote_port {
             let _ = port; // BRP tooling lives in voxel-debug; see VoxelRemotePlugin
@@ -2132,7 +2138,7 @@ pub struct WorldQuery {
     /// This world's generator — every CPU-side sample goes through it,
     /// so an app can host several worlds at once.
     generator: Arc<voxel_worldgen::Generator>,
-    /// Radius (m) the prop/water streamers query around the camera,
+    /// Radius (m) the prop/ribbon streamers query around the camera,
     /// `None` when the level has neither. They ignore the LOD gates, so
     /// they need their own ensure pass — a second top dependency with a
     /// different size, in LayerProcGen terms.
@@ -2152,22 +2158,22 @@ const FACADE_Y_M: f32 = 2_560.0;
 
 /// One emit layer as the facade sees it. `produces` keeps a query from
 /// touching — and therefore GENERATING — layers that cannot answer it: a
-/// level with no water emitter must not pull its structure planning into
-/// existence through `water_in`.
+/// level with no ribbon emitter must not pull its structure planning into
+/// existence through `ribbons_in`.
 #[derive(Clone)]
 struct Emitter {
     name: String,
     /// Carve-horizon gate in chunk-edge meters.
     gate: Option<f32>,
-    water: bool,
+    ribbons: bool,
     clearance: bool,
     markers: bool,
 }
 
 impl Emitter {
     fn new(name: String, gate: Option<f32>, emit: &EmitDef) -> Self {
-        let (water, clearance, markers) = match emit {
-            EmitDef::CourseWater { .. } => (true, true, false),
+        let (ribbons, clearance, markers) = match emit {
+            EmitDef::Ribbon { .. } => (true, true, false),
             EmitDef::PathSlabs { clearance, .. } => (false, *clearance, false),
             EmitDef::SiteStructure { marker, .. } | EmitDef::SiteStructure3 { marker, .. } => {
                 (false, false, marker.is_some())
@@ -2177,7 +2183,7 @@ impl Emitter {
         Self {
             name,
             gate,
-            water,
+            ribbons,
             clearance,
             markers,
         }
@@ -2276,7 +2282,7 @@ impl WorldQuery {
         let near = voxel_layers::IAabb::new(focus - band, focus + band);
         // Every emitter: the prop streamers' carved-ground check
         // (`cuts_in`) queries all of them, not just the ones producing
-        // water or clearance.
+        // ribbons or clearance.
         for e in &self.emitters {
             mgr.ensure_loaded_regions(&e.name, std::slice::from_ref(&near), focus);
         }
@@ -2316,19 +2322,19 @@ impl WorldQuery {
     }
 
     /// Water-surface segments overlapping the xz box (river renderer).
-    pub fn water_in(
+    pub fn ribbons_in(
         &self,
         min: bevy::math::Vec2,
         max: bevy::math::Vec2,
-    ) -> Vec<voxel_worldgen::stack::WaterSeg> {
+    ) -> Vec<voxel_worldgen::stack::RibbonSeg> {
         let (min3, max3) = (
             Vec3::new(min.x, -FACADE_Y_M, min.y),
             Vec3::new(max.x, FACADE_Y_M, max.y),
         );
         let mut out = Vec::new();
         if let Some(mgr) = &self.stack {
-            for e in self.emitters.iter().filter(|e| e.water) {
-                out.extend(voxel_worldgen::stack::patches_in(mgr, &e.name, min3, max3).water);
+            for e in self.emitters.iter().filter(|e| e.ribbons) {
+                out.extend(voxel_worldgen::stack::patches_in(mgr, &e.name, min3, max3).ribbons);
             }
         }
         out
@@ -2502,12 +2508,12 @@ fn build_ops_provider(
         matches!(
             l,
             StackLayerDef::Emit {
-                emit: EmitDef::CourseWater { .. },
+                emit: EmitDef::Ribbon { .. },
                 ..
             }
         )
     }) {
-        want(crate::river_water::QUERY_REACH_M);
+        want(RIBBON_QUERY_REACH_M);
     }
     let world = WorldQuery {
         stack,
@@ -2655,8 +2661,6 @@ fn reload_level(
         commands.insert_resource(ops_provider);
         commands.insert_resource(world_query);
         commands.insert_resource(planning_layers);
-        commands.insert_resource(crate::river_water::RiverWaterTiles::default());
-        commands.insert_resource(voxel_render::RiverWater::default());
         rebuild.0 = true;
         info!("level reload: generation changed — rebuilding world");
     }
@@ -2955,7 +2959,7 @@ mod tests {
         let min2 = bevy::math::Vec2::new(min.x, min.z);
         let max2 = bevy::math::Vec2::new(max.x, max.z);
         assert!(!world.clearance_in(min2, max2).is_empty(), "no clearance");
-        assert!(!world.water_in(min2, max2).is_empty(), "no water segments");
+        assert!(!world.ribbons_in(min2, max2).is_empty(), "no ribbon segments");
         assert!(
             !world.markers_in(min2, max2, Some("ruin")).is_empty(),
             "no ruin markers"

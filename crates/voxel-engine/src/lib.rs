@@ -4,7 +4,6 @@
 pub mod level;
 pub mod streaming;
 pub mod scatter;
-pub mod river_water;
 
 use bevy::prelude::*;
 

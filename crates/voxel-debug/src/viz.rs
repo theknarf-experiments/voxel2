@@ -4,7 +4,7 @@
 //! - F8 toggles chunk boundaries (drawn LOD leaves near the camera,
 //!   colored by level).
 //! - F9 toggles planning layers: markers (by kind), clearance segments,
-//!   water segments, and a biome sample grid colored by dominant biome.
+//!   ribbon segments, and a biome sample grid colored by dominant biome.
 
 use bevy::prelude::*;
 
@@ -90,7 +90,7 @@ pub fn draw_debug_viz(
                 Color::srgb(1.0, 0.8, 0.2),
             );
         }
-        for w in world.water_in(min, max) {
+        for w in world.ribbons_in(min, max) {
             gizmos.line(
                 Vec3::new(w.a.x, w.levels[0] + 0.5, w.a.y),
                 Vec3::new(w.b.x, w.levels[1] + 0.5, w.b.y),

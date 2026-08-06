@@ -11,7 +11,30 @@
 //! `voxel_render::pbr_view` for Bevy's view bind group and the world
 //! program buffer for the shoreline.
 
-use voxel_render::{RiverSegGpu, RiverWater, WaterSurface};
+use voxel_render::WaterSurface;
+
+/// One ribbon segment as the water shader wants it (layout twins the
+/// WGSL `RiverSeg`). The engine hands out `RibbonSeg`s; turning them into
+/// GPU data is the host's business, because the layout belongs to the
+/// host's shader.
+#[derive(Clone, Copy, Default, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
+#[repr(C)]
+pub struct RiverSegGpu {
+    /// a.xz | b.xz (world meters).
+    pub ab: [f32; 4],
+    /// half width | level at a | level at b | unused.
+    pub geo: [f32; 4],
+    /// tint rgb | unused.
+    pub color: [f32; 4],
+}
+
+/// Ribbon segments near the camera, maintained by the demo's streamer.
+/// `generation` bumps on change so the render world re-uploads.
+#[derive(Resource, Clone, Default)]
+pub struct RiverWater {
+    pub segments: Vec<RiverSegGpu>,
+    pub generation: u64,
+}
 
 use bevy::{
     asset::{embedded_asset, load_embedded_asset},

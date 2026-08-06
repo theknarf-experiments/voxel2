@@ -1,6 +1,6 @@
 //! Live tooling over the Bevy Remote Protocol: `VOXEL_REMOTE=1` (or a
 //! port number) starts an HTTP JSON-RPC server the `voxctl` CLI drives —
-//! teleport the camera, query planning data (water, markers), and dump
+//! teleport the camera, query planning data (ribbons, markers), and dump
 //! offscreen screenshots from a RUNNING game instead of relaunching it
 //! for every look.
 
@@ -20,7 +20,7 @@ impl Plugin for VoxelRemotePlugin {
             RemotePlugin::default()
                 .with_method_main("voxel/status", status)
                 .with_method_main("voxel/teleport", teleport)
-                .with_method_main("voxel/water", water)
+                .with_method_main("voxel/ribbons", ribbons)
                 .with_method_main("voxel/markers", markers)
                 .with_method_main("voxel/ops", ops)
                 .with_method_main("voxel/scan", scan)
@@ -141,15 +141,15 @@ fn teleport(In(params): In<Option<Value>>, mut cams: PlayerCamera<&mut Transform
     Ok(json!({"ok": true}))
 }
 
-/// `{"center": [x, z], "radius": r}` — planning water segments near a
+/// `{"center": [x, z], "radius": r}` — planning ribbon segments near a
 /// point (find the rivers).
-fn water(In(params): In<Option<Value>>, world: Res<WorldQuery>) -> BrpResult {
+fn ribbons(In(params): In<Option<Value>>, world: Res<WorldQuery>) -> BrpResult {
     let params = params.ok_or_else(|| err("params required"))?;
     let c = f32s(&params, "center", 2)?;
     let r = radius(&params, 512.0);
     let (min, max) = (Vec2::new(c[0] - r, c[1] - r), Vec2::new(c[0] + r, c[1] + r));
     let segs: Vec<Value> = world
-        .water_in(min, max)
+        .ribbons_in(min, max)
         .iter()
         .map(|s| {
             json!({
