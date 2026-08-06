@@ -1,0 +1,582 @@
+//! This demo's planning: JSON-authored LayerProcGen layers.
+//!
+//! `voxel-layers` is the framework — dependency management, threaded
+//! chunk generation, spatial organisation — and the concrete layers are
+//! the game's, so they live here. [`layers`] holds the layer
+//! implementations, [`structure`] the grammar one of them builds with,
+//! and [`schema`] the JSON vocabulary that composes them. The engine sees
+//! only [`StackPlanning`] through [`HostPlanning`].
+
+pub mod layers;
+pub mod schema;
+pub mod structure;
+
+use std::sync::Arc;
+
+use bevy::prelude::*;
+use voxel_core::{csg::CsgOp, ChunkKey};
+use voxel_engine::{
+    level::LevelDef,
+    planning::{HostPlanning, Marker, RibbonSeg, WorldPlanner, OPS_HORIZON_EDGE_M},
+};
+
+pub use schema::{PlanningDef, StackLayerDef};
+use schema::{validate_level, EmitDef};
+
+/// This demo's planning: interpret the level's `planning` block.
+pub struct StackPlanning;
+
+/// How far out a host is assumed to stream ribbon surfaces, so planning
+/// data is ensured over at least that radius. Hosts that stream further
+/// should raise the level's streamer radius.
+pub const RIBBON_QUERY_REACH_M: f32 = 1792.0;
+
+/// Vertical band xz-facade queries cover: enough for any current world
+/// (the deepest LOD tree spans ~±2.5 km), small enough that volumetric
+/// emit layers don't enumerate thousands of 132 m y-rows per query.
+const FACADE_Y_M: f32 = 2_560.0;
+
+/// The level stack as a [`WorldPlanner`]: one `LayerManager` holding every
+/// layer the level declared, plus the bookkeeping needed to answer a query
+/// without generating layers that cannot contribute to it.
+///
+/// This is *a* host's planner, not the engine's: it interprets the
+/// `stack`/`structures` blocks of a level file. A game with hand-written
+/// layers implements [`WorldPlanner`] itself and never touches this.
+#[derive(Clone, Default)]
+pub struct StackPlanner {
+    /// The level's planning stack (one manager for all layers).
+    stack: Option<Arc<voxel_layers::LayerManager>>,
+    /// Emit instances and what each one can produce.
+    emitters: Vec<Emitter>,
+    /// Biome layers: (instance name, ordered biome names).
+    biome_tables: Vec<(String, Vec<String>)>,
+    /// Radius (m) the prop/ribbon streamers query around the camera,
+    /// `None` when the level has neither. They ignore the LOD gates, so
+    /// they need their own ensure pass — a second top dependency with a
+    /// different size, in LayerProcGen terms.
+    streamer_radius: Option<f32>,
+}
+
+/// One emit layer as the facade sees it. `produces` keeps a query from
+/// touching — and therefore GENERATING — layers that cannot answer it: a
+/// level with no ribbon emitter must not pull its structure planning into
+/// existence through `ribbons_in`.
+#[derive(Clone)]
+struct Emitter {
+    name: String,
+    /// Carve-horizon gate in chunk-edge meters.
+    gate: Option<f32>,
+    ribbons: bool,
+    clearance: bool,
+    markers: bool,
+}
+
+impl Emitter {
+    fn new(name: String, gate: Option<f32>, emit: &EmitDef) -> Self {
+        let (ribbons, clearance, markers) = match emit {
+            EmitDef::Ribbon { .. } => (true, true, false),
+            EmitDef::PathSlabs { clearance, .. } => (false, *clearance, false),
+            EmitDef::SiteStructure { marker, .. } | EmitDef::SiteStructure3 { marker, .. } => {
+                (false, false, marker.is_some())
+            }
+            EmitDef::WormCuts | EmitDef::Tubes { .. } => (false, false, false),
+        };
+        Self {
+            name,
+            gate,
+            ribbons,
+            clearance,
+            markers,
+        }
+    }
+}
+
+impl WorldPlanner for StackPlanner {
+    /// Gated emitters drop out wholesale for coarse chunks — the gate is
+    /// per chunk, never per op.
+    fn ops_in(&self, min: Vec3, max: Vec3, chunk_edge_m: f32) -> Vec<CsgOp> {
+        let mut out = Vec::new();
+        if let Some(mgr) = &self.stack {
+            for e in &self.emitters {
+                if e.gate.is_none_or(|g| chunk_edge_m <= g) {
+                    out.extend(layers::patches_in(mgr, &e.name, min, max).ops);
+                }
+            }
+        }
+        out
+    }
+
+    /// Ensure the planning data every emitter needs for `keys` exists,
+    /// before anything reads it. Each emitter is ensured over the union
+    /// of the chunks that will actually query it: chunks past the global
+    /// ops horizon or past the emitter's carve-horizon gate are excluded,
+    /// so the resident planning set matches what can render.
+    fn prepare(&self, keys: &[ChunkKey]) {
+        let Some(mgr) = &self.stack else {
+            return;
+        };
+        // Per chunk, the exact box its ops query will cover: the chunk,
+        // the density apron the provider adds, and the element padding
+        // patches_in applies. A hull around all of them would generate
+        // planning for the hollow middle of the LOD shell.
+        let elem_pad = layers::ELEM_PAD_M;
+        let region_of = |key: &ChunkKey| -> voxel_layers::IAabb {
+            let edge = key.edge_m() as f32;
+            let apron = 4.0 * key.voxel_size_m() as f32;
+            let lo = key.min_corner_m().as_vec3() - Vec3::splat(apron + elem_pad);
+            let hi = key.min_corner_m().as_vec3() + Vec3::splat(edge + apron + elem_pad);
+            voxel_layers::IAabb::new(lo.as_ivec3(), hi.as_ivec3())
+        };
+        let focus = keys
+            .iter()
+            .min_by_key(|k| k.edge_m() as i64)
+            .map(|k| k.min_corner_m().as_vec3().as_ivec3())
+            .unwrap_or(bevy::math::IVec3::ZERO);
+        let mut regions: Vec<voxel_layers::IAabb> = Vec::with_capacity(keys.len());
+        for e in &self.emitters {
+            regions.clear();
+            regions.extend(
+                keys.iter()
+                    .filter(|k| {
+                        let edge = k.edge_m() as f32;
+                        edge <= OPS_HORIZON_EDGE_M && !e.gate.is_some_and(|g| edge > g)
+                    })
+                    .map(region_of),
+            );
+            if regions.is_empty() {
+                continue; // nothing in this batch queries this emitter
+            }
+            let stats = mgr.ensure_loaded_regions(&e.name, &regions, focus);
+            if std::env::var_os("VOXEL_LOG_LAYERS").is_some() {
+                info!(
+                    "prepare {}: {} generated, {} present, {} regions",
+                    e.name,
+                    stats.generated,
+                    stats.present,
+                    regions.len()
+                );
+            }
+        }
+
+        // Second top dependency: the streamers query a fixed radius around
+        // the camera, ungated — without this their first tiles generate
+        // planning (400-step river descents, scatter filters) on the MAIN
+        // thread.
+        let Some(radius) = self.streamer_radius else {
+            return;
+        };
+        let band = bevy::math::IVec3::new(radius as i32, FACADE_Y_M as i32, radius as i32);
+        let near = voxel_layers::IAabb::new(focus - band, focus + band);
+        // Every emitter: the prop streamers' carved-ground check
+        // (`cuts_in`) queries all of them, not just the ones producing
+        // ribbons or clearance.
+        for e in &self.emitters {
+            mgr.ensure_loaded_regions(&e.name, std::slice::from_ref(&near), focus);
+        }
+        // Spawner biome gates sample a wide influence window.
+        let biome_pad = bevy::math::IVec3::new(
+            layers::BIOME_INFLUENCE_CELLS,
+            0,
+            layers::BIOME_INFLUENCE_CELLS,
+        );
+        for (name, _) in &self.biome_tables {
+            mgr.ensure_loaded_regions(name, &[near.inflate(biome_pad)], focus);
+        }
+    }
+
+    fn clearance_in(&self, min: bevy::math::Vec2, max: bevy::math::Vec2) -> Vec<[bevy::math::Vec2; 2]> {
+        let (min3, max3) = (
+            Vec3::new(min.x, -FACADE_Y_M, min.y),
+            Vec3::new(max.x, FACADE_Y_M, max.y),
+        );
+        let mut out = Vec::new();
+        if let Some(mgr) = &self.stack {
+            for e in self.emitters.iter().filter(|e| e.clearance) {
+                out.extend(layers::patches_in(mgr, &e.name, min3, max3).clearance);
+            }
+        }
+        out
+    }
+
+    fn ribbons_in(&self, min: bevy::math::Vec2, max: bevy::math::Vec2) -> Vec<RibbonSeg> {
+        let (min3, max3) = (
+            Vec3::new(min.x, -FACADE_Y_M, min.y),
+            Vec3::new(max.x, FACADE_Y_M, max.y),
+        );
+        let mut out = Vec::new();
+        if let Some(mgr) = &self.stack {
+            for e in self.emitters.iter().filter(|e| e.ribbons) {
+                out.extend(layers::patches_in(mgr, &e.name, min3, max3).ribbons);
+            }
+        }
+        out
+    }
+
+    fn biome_fields(&self) -> Vec<String> {
+        self.biome_tables.iter().map(|(n, _)| n.clone()).collect()
+    }
+
+    fn biomes_at(&self, instance: &str, p: bevy::math::Vec2) -> Vec<(String, f32)> {
+        let Some(mgr) = &self.stack else {
+            return Vec::new();
+        };
+        let Some(table) = self.biome_tables.iter().find_map(|(n, t)| {
+            (n == instance).then_some(t)
+        }) else {
+            return Vec::new();
+        };
+        let w = layers::biome_weights_at(mgr, instance, table.len(), p);
+        table.iter().cloned().zip(w).collect()
+    }
+
+    fn markers_in(
+        &self,
+        min: bevy::math::Vec2,
+        max: bevy::math::Vec2,
+        kind: Option<&str>,
+    ) -> Vec<Marker> {
+        let (min3, max3) = (
+            Vec3::new(min.x, -FACADE_Y_M, min.y),
+            Vec3::new(max.x, FACADE_Y_M, max.y),
+        );
+        let mut out = Vec::new();
+        if let Some(mgr) = &self.stack {
+            for e in self.emitters.iter().filter(|e| e.markers) {
+                out.extend(
+                    layers::patches_in(mgr, &e.name, min3, max3)
+                        .markers
+                        .into_iter()
+                        .filter(|m| kind.is_none_or(|k| m.kind == k)),
+                );
+            }
+        }
+        out
+    }
+
+    fn layer_managers(&self) -> Vec<Arc<voxel_layers::LayerManager>> {
+        self.stack.iter().cloned().collect()
+    }
+}
+
+impl StackPlanner {
+    /// Build the planner a level's `stack` block describes, or `None` if
+    /// it declares no layers.
+    pub fn new(
+        def: &PlanningDef,
+        level: &LevelDef,
+        seed: u64,
+        generator: &Arc<voxel_worldgen::Generator>,
+    ) -> Option<Self> {
+        if def.stack.is_empty() {
+            return None;
+        }
+        // Every layer into ONE manager, in author order.
+        let mut mgr = voxel_layers::LayerManager::with_context(seed, generator.clone());
+        let mut emitters = Vec::new();
+        for layer in &def.stack {
+            layer.register(&def.stack, &def.structures, &mut mgr);
+            if let StackLayerDef::Emit {
+                name,
+                max_chunk_edge_m,
+                emit,
+                ..
+            } = layer
+            {
+                emitters.push(Emitter::new(name.clone(), *max_chunk_edge_m, emit));
+            }
+        }
+        let biome_tables = def
+            .stack
+            .iter()
+            .filter_map(|d| match d {
+                StackLayerDef::Biomes { name, table, .. } => Some((
+                    name.clone(),
+                    table.iter().map(|(n, _)| n.clone()).collect(),
+                )),
+                _ => None,
+            })
+            .collect();
+        // Streamer working set, derived from the streamers themselves:
+        // scattered props (the far ring dominates) and ribbon surfaces.
+        // Levels with neither skip the pass entirely.
+        let mut streamer_radius: Option<f32> = None;
+        let mut want = |reach: f32| {
+            streamer_radius = Some(streamer_radius.map_or(reach, |r: f32| r.max(reach)));
+        };
+        for def in &level.scatter {
+            want((def.radius_tiles + 2) as f32 * def.tile_m);
+        }
+        if let Some(reach) = level.prop_query_reach_m {
+            want(reach);
+        }
+        if emitters.iter().any(|e| e.ribbons) {
+            want(RIBBON_QUERY_REACH_M);
+        }
+        Some(Self {
+            stack: Some(Arc::new(mgr)),
+            emitters,
+            biome_tables,
+            streamer_radius,
+        })
+    }
+}
+
+impl HostPlanning for StackPlanning {
+    fn validate(&self, level: &LevelDef) -> Result<(), String> {
+        validate_level(level)
+    }
+
+    fn build(
+        &self,
+        level: &LevelDef,
+        seed: u64,
+        generator: &Arc<voxel_worldgen::Generator>,
+    ) -> Option<Arc<dyn WorldPlanner>> {
+        let def = match PlanningDef::of(level) {
+            Ok(def) => def,
+            Err(e) => {
+                error!("planning: {e}");
+                return None;
+            }
+        };
+        StackPlanner::new(&def, level, seed, generator).map(|p| Arc::new(p) as Arc<dyn WorldPlanner>)
+    }
+}
+
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use bevy::math::Vec3;
+    use voxel_engine::{
+        level::LevelDef,
+        planning::{HostPlanning, WorldQuery},
+    };
+
+    use voxel_core::csg::CsgOp;
+
+    use super::schema::{validate_level, validate_stack, StackLayerDef};
+    use super::{PlanningDef, StackPlanning};
+
+    fn shipped(name: &str) -> LevelDef {
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../levels/");
+        LevelDef::from_json(&std::fs::read_to_string(format!("{path}{name}")).unwrap()).unwrap()
+    }
+
+    fn validate_stack_of(level: &LevelDef) -> Result<(), String> {
+        let def = PlanningDef::of(level).unwrap();
+        validate_stack(&def.stack, &def.structures)
+    }
+
+    fn world_for(def: &LevelDef) -> WorldQuery {
+        seeded_world_for(def, 0)
+    }
+
+    fn seeded_world_for(def: &LevelDef, seed: u64) -> WorldQuery {
+        let generator = Arc::new(def.generator(seed));
+        let world = WorldQuery::new(generator.clone());
+        match StackPlanning.build(def, seed, &generator) {
+            Some(planner) => world.with_planner(planner),
+            None => world,
+        }
+    }
+
+    /// The whole point of per-world generator state: two levels with
+    /// different programs and seeds, live in one process at the same
+    /// time, each sampling its own world.
+    #[test]
+    fn two_worlds_coexist_in_one_process() {
+        let planet = shipped("planet.json");
+        let a = seeded_world_for(&planet, 0);
+        let b = seeded_world_for(&planet, 0x5eed);
+        let mega = shipped("megastructure.json");
+        let m = world_for(&mega);
+
+        // Same query, three different worlds — interleaved, so a global
+        // "last one installed wins" would show up here.
+        let probes = [
+            bevy::math::Vec2::new(-27000.0, -38000.0),
+            bevy::math::Vec2::new(1200.0, -400.0),
+            bevy::math::Vec2::ZERO,
+        ];
+        for p in probes {
+            let (ha, hb) = (a.generator().height(p, 1.0), b.generator().height(p, 1.0));
+            assert_ne!(ha, hb, "reseeded world returned the same height at {p:?}");
+            // Re-sampling after touching the others must not drift.
+            assert_eq!(ha, a.generator().height(p, 1.0));
+            let _ = m.generator().height(p, 1.0);
+            assert_eq!(hb, b.generator().height(p, 1.0));
+        }
+        assert_eq!(a.generator().seed(), 0);
+        assert_eq!(b.generator().seed(), 0x5eed);
+        // Mega has no height op at all; its height mirror stays inert
+        // while the planets keep working.
+        assert_eq!(m.generator().height(probes[0], 1.0), 0.0);
+        assert_ne!(a.generator().height(probes[0], 1.0), 0.0);
+    }
+
+    #[test]
+    fn mega_stack_serves_pockets_and_tubes_through_world_query() {
+        let mega = shipped("megastructure.json");
+        let world = world_for(&mega);
+        let min = Vec3::new(-1500.0, -260.0, -1500.0);
+        let max = Vec3::new(1500.0, 260.0, 1500.0);
+        let ops = world.ops_in(min, max, 12.8);
+        assert!(!ops.is_empty(), "mega stack served no ops");
+        // Room shells and tube shells: adds and cuts both present.
+        assert!(ops.iter().any(|op| op.kind & 1 == 0), "no shell adds");
+        assert!(ops.iter().any(|op| op.kind & 1 == 1), "no bore/room cuts");
+        // Markers reach the facade.
+        let min2 = bevy::math::Vec2::new(min.x, min.z);
+        let max2 = bevy::math::Vec2::new(max.x, max.z);
+        assert!(
+            !world.markers_in(min2, max2, Some("pocket")).is_empty(),
+            "no pocket markers"
+        );
+        // A specific marker's room shell exists near the site.
+        let m = &world.markers_in(min2, max2, Some("pocket"))[0];
+        let near = world.ops_in(
+            m.pos - Vec3::splat(40.0),
+            m.pos + Vec3::splat(40.0),
+            12.8,
+        );
+        assert!(
+            !near.is_empty(),
+            "no ops within 40 m of pocket marker at {:?}",
+            m.pos
+        );
+    }
+
+    #[test]
+    fn stack_validation_catches_authoring_errors() {
+        let parse = |json: &str| -> Vec<StackLayerDef> { serde_json::from_str(json).unwrap() };
+        // The shipped stacks validate.
+        let planet = shipped("planet.json");
+        validate_stack_of(&planet).unwrap();
+        let mega = shipped("megastructure.json");
+        validate_stack_of(&mega).unwrap();
+
+        let cases: &[(&str, &str)] = &[
+            // Unknown recipe name.
+            (
+                r#"[{"kind":"scatter","name":"s","chance":1.0},
+                    {"kind":"emit","name":"e","source":"s","pad_m":0.0,
+                     "emit":{"type":"site_structure","structure":"castle"}}]"#,
+                "unknown structure",
+            ),
+            // Biome ref to a missing layer.
+            (
+                r#"[{"kind":"scatter","name":"s","chance":1.0,"biome":"nope:forest"}]"#,
+                "not found in stack",
+            ),
+            // Biome name missing from the table.
+            (
+                r#"[{"kind":"biomes","name":"b","table":[["forest",1.0]]},
+                    {"kind":"scatter","name":"s","chance":1.0,"biome":"b:desert"}]"#,
+                "not in layer",
+            ),
+            // Source declared later (registration order).
+            (
+                r#"[{"kind":"connect","name":"c","source":"s"},
+                    {"kind":"scatter","name":"s","chance":1.0}]"#,
+                "not declared earlier",
+            ),
+            // Source of the wrong kind for the emit.
+            (
+                r#"[{"kind":"scatter","name":"s","chance":1.0},
+                    {"kind":"emit","name":"e","source":"s","pad_m":0.0,
+                     "emit":{"type":"worm_cuts"}}]"#,
+                "expected Worm",
+            ),
+            // Duplicate names.
+            (
+                r#"[{"kind":"scatter","name":"s","chance":1.0},
+                    {"kind":"scatter","name":"s","chance":0.5}]"#,
+                "duplicate",
+            ),
+            // Empty biome table.
+            (r#"[{"kind":"biomes","name":"b","table":[]}]"#, "empty table"),
+            // Volumetric source with a collapsed emit y axis.
+            (
+                r#"[{"kind":"scatter3","name":"s","chance":1.0},
+                    {"kind":"emit","name":"e","source":"s","pad_m":0.0,
+                     "emit":{"type":"site_structure3","structure":"ruin"}}]"#,
+                "cell_y_m",
+            ),
+        ];
+        for (json, expect) in cases {
+            let err = validate_stack(&parse(json), &PlanningDef::of(&planet).unwrap().structures).unwrap_err();
+            assert!(
+                err.contains(expect),
+                "error {err:?} missing {expect:?} for {json}"
+            );
+        }
+    }
+
+    #[test]
+    fn spawner_biome_refs_are_validated() {
+        let mut planet = shipped("planet.json");
+        validate_level(&planet).unwrap();
+        if let Some(def) = planet.scatter.first_mut() {
+            def.biome = Some("biomes:forrest".into());
+        }
+        let err = validate_level(&planet).unwrap_err();
+        assert!(err.contains("forrest"), "typo not caught: {err}");
+    }
+
+    #[test]
+    fn planet_stack_serves_gated_ops_through_world_query() {
+        let planet = shipped("planet.json");
+        let world = world_for(&planet);
+        // A land region large enough to hold every feature kind.
+        let min = Vec3::new(-31096.0, -200.0, -42096.0);
+        let max = Vec3::new(-22904.0, 500.0, -33904.0);
+        let fine = world.ops_in(min, max, 12.8);
+        assert!(!fine.is_empty(), "stack served no ops");
+        let has_sphere_cuts = |ops: &[CsgOp]| {
+            ops.iter()
+                .any(|op| op.kind == voxel_core::csg::CSG_KIND_SPHERE_CUT)
+        };
+        assert!(has_sphere_cuts(&fine), "no cave cuts at fine LOD");
+        // Coarse chunks must not see gated emitters (carve horizon).
+        let coarse = world.ops_in(min, max, 500.0);
+        assert!(!has_sphere_cuts(&coarse), "cave cuts leaked past the gate");
+        // Clearance + water flow through the same facade.
+        let min2 = bevy::math::Vec2::new(min.x, min.z);
+        let max2 = bevy::math::Vec2::new(max.x, max.z);
+        assert!(!world.clearance_in(min2, max2).is_empty(), "no clearance");
+        assert!(!world.ribbons_in(min2, max2).is_empty(), "no ribbon segments");
+        assert!(
+            !world.markers_in(min2, max2, Some("ruin")).is_empty(),
+            "no ruin markers"
+        );
+        assert!(
+            !world.markers_in(min2, max2, Some("dungeon")).is_empty(),
+            "no dungeon markers"
+        );
+        // Biomes blend through the facade: partition of unity, both
+        // regions dominant somewhere across a wide sweep.
+        let mut dominant = [false; 2];
+        for gz in 0..12 {
+            for gx in 0..12 {
+                let t = bevy::math::Vec2::new(gx as f32 / 11.0, gz as f32 / 11.0);
+                let p = min2 + (max2 - min2) * t;
+                let w = world.biomes_at("biomes", p);
+                assert_eq!(w.len(), 2);
+                let sum: f32 = w.iter().map(|(_, v)| v).sum();
+                assert!((sum - 1.0).abs() < 1e-4);
+                for (b, (_, v)) in w.iter().enumerate() {
+                    if *v > 0.7 {
+                        dominant[b] = true;
+                    }
+                }
+            }
+        }
+        assert!(dominant[0] && dominant[1], "biomes not regional: {dominant:?}");
+        // Determinism across a fresh build.
+        let world2 = world_for(&planet);
+        assert_eq!(fine, world2.ops_in(min, max, 12.8));
+    }
+}

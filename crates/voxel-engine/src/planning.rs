@@ -61,6 +61,11 @@ pub trait WorldPlanner: Send + Sync + 'static {
         Vec::new()
     }
 
+    /// Names of the biome fields this planner answers `biomes_at` for.
+    fn biome_fields(&self) -> Vec<String> {
+        Vec::new()
+    }
+
     /// Blended weights at a point for a named biome field: (name, weight).
     /// Empty if the planner has no such field.
     fn biomes_at(&self, _field: &str, _p: Vec2) -> Vec<(String, f32)> {
@@ -78,18 +83,29 @@ pub trait WorldPlanner: Send + Sync + 'static {
 /// (authored placements, editor brushes).
 pub type OpsSource = Arc<dyn Fn(Vec3, Vec3) -> Vec<CsgOp> + Send + Sync>;
 
-/// How a host supplies its planning: given the level, the seed and the
-/// world's generator, build a planner. The engine calls this at startup
-/// and again on every hot reload that changes generation, so a host's
-/// layers rebuild with the world instead of going stale.
+/// How a host supplies its planning. The engine calls this at startup and
+/// again on every hot reload that changes generation, so a host's layers
+/// rebuild with the world instead of going stale.
 ///
-/// It is a factory rather than a value because the generator does not
-/// exist until the engine has read the level, and layers need it.
-pub type PlannerFactory = Arc<
-    dyn Fn(&crate::level::LevelDef, u64, &Arc<voxel_worldgen::Generator>) -> Option<Arc<dyn WorldPlanner>>
-        + Send
-        + Sync,
->;
+/// It builds rather than being built because the generator does not exist
+/// until the engine has read the level, and layers need it.
+pub trait HostPlanning: Send + Sync + 'static {
+    /// Check the level's planning data before anything is built.
+    /// Authoring errors surface HERE with a message, never as a panic
+    /// mid-generation: boot fails loudly on an invalid shipped level,
+    /// hot reload warns and keeps the running world.
+    fn validate(&self, _level: &crate::level::LevelDef) -> Result<(), String> {
+        Ok(())
+    }
+
+    /// Build this level's planner, or `None` if it declares no layers.
+    fn build(
+        &self,
+        level: &crate::level::LevelDef,
+        seed: u64,
+        generator: &Arc<voxel_worldgen::Generator>,
+    ) -> Option<Arc<dyn WorldPlanner>>;
+}
 
 /// The one facade over everything the world knows on the CPU: the
 /// generator (heights, fields, shadows) and the host's planning. Every
@@ -201,6 +217,12 @@ impl WorldQuery {
         self.planner
             .as_ref()
             .map_or_else(Vec::new, |p| p.markers_in(min, max, kind))
+    }
+
+    pub fn biome_fields(&self) -> Vec<String> {
+        self.planner
+            .as_ref()
+            .map_or_else(Vec::new, |p| p.biome_fields())
     }
 
     pub fn biomes_at(&self, field: &str, p: Vec2) -> Vec<(String, f32)> {

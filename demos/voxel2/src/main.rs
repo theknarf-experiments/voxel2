@@ -20,6 +20,7 @@ use voxel_engine::level::LevelReloaded;
 use voxel_engine::{LevelDef, LevelPlugin, VoxelStreamSource};
 
 mod grass;
+mod planning;
 mod props;
 mod ribbons;
 mod water;
@@ -171,7 +172,7 @@ fn main() {
                 remote_port: None,
                 // This demo authors its layers as JSON; a game with
                 // hand-written layers passes its own factory here.
-                planner: Some(voxel_engine::level::stack_planner_factory()),
+                planner: Some(std::sync::Arc::new(planning::StackPlanning)),
             },
         ))
         .add_systems(Startup, setup_scene)

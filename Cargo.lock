@@ -5333,8 +5333,13 @@ version = "0.1.0"
 dependencies = [
  "bevy",
  "bytemuck",
+ "glam",
+ "serde",
+ "serde_json",
+ "voxel-core",
  "voxel-debug",
  "voxel-engine",
+ "voxel-layers",
  "voxel-render",
  "voxel-worldgen",
 ]

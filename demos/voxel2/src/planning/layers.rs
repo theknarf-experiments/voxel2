@@ -8,7 +8,7 @@ use glam::{IVec3, Vec2, Vec3};
 use voxel_core::csg::CsgOp;
 use voxel_layers::{IAabb, Layer, LayerCtx};
 
-use crate::Generator;
+use voxel_worldgen::Generator;
 
 pub use voxel_core::patch::{Marker, PatchSet, RibbonSeg};
 
@@ -489,11 +489,11 @@ impl Layer for ConnectPaths {
             }
             let clo = lo.min(hi) - Vec2::splat(self.cfg.corridor_m);
             let chi = lo.max(hi) + Vec2::splat(self.cfg.corridor_m);
-            let params = crate::path::PathParams {
+            let params = voxel_worldgen::path::PathParams {
                 slope_penalty: self.cfg.slope_penalty,
                 ..Default::default()
             };
-            let waypoints = crate::path::find_path(
+            let waypoints = voxel_worldgen::path::find_path(
                 &|p| generator.height(p, 8.0),
                 lo,
                 hi,
@@ -523,8 +523,6 @@ pub struct FlowCfg {
     pub source: String,
     pub max_steps: usize,
     pub max_spill_rise: f32,
-    /// Half width at the source and at the end (linear growth).
-    pub width: [f32; 2],
 }
 
 impl Default for FlowCfg {
@@ -533,7 +531,6 @@ impl Default for FlowCfg {
             source: String::new(),
             max_steps: 400,
             max_spill_rise: 7.0,
-            width: [2.0, 7.0],
         }
     }
 }
@@ -578,13 +575,13 @@ impl Layer for FlowCourses {
                 if !in_own(start) {
                     continue;
                 }
-                let params = crate::flow::FlowParams {
+                let params = voxel_worldgen::flow::FlowParams {
                     max_steps: self.cfg.max_steps,
                     max_spill_rise: self.cfg.max_spill_rise,
                     ..Default::default()
                 };
                 let waypoints =
-                    crate::flow::flow_path(&|p| generator.height(p, 8.0), start, &params);
+                    voxel_worldgen::flow::flow_path(&|p| generator.height(p, 8.0), start, &params);
                 if waypoints.len() < 6 {
                     continue;
                 }
@@ -721,13 +718,13 @@ pub enum EmitKind {
     /// Build a structure (level data — see [`crate::structure`]) at each
     /// site of a `scatter` source, optionally dropping a marker.
     SiteStructure {
-        structure: std::sync::Arc<crate::structure::Structure>,
+        structure: std::sync::Arc<super::structure::Structure>,
         marker: Option<String>,
     },
     /// The same at each site of a `scatter3` source (interiors), seated
     /// on the site's own y rather than the terrain.
     SiteStructure3 {
-        structure: std::sync::Arc<crate::structure::Structure>,
+        structure: std::sync::Arc<super::structure::Structure>,
         marker: Option<String>,
     },
     /// Shell tubes with bored interiors along a `connect3` source —
@@ -751,9 +748,6 @@ pub struct EmitCfg {
     /// becomes the dependency padding. Author-declared, like every
     /// LayerProcGen padding.
     pub pad_m: f32,
-    /// Serve ops only to chunks at least this fine (edge meters) — the
-    /// carve-horizon gate, uniform per chunk. None = all LODs.
-    pub max_chunk_edge_m: Option<f32>,
 }
 
 #[derive(Clone)]
@@ -886,7 +880,7 @@ impl Layer for EmitPatches {
                                 ^ ((site.x.to_bits() as u64) << 32 | site.z.to_bits() as u64)
                                 ^ (site.y.to_bits() as u64) << 16,
                         ));
-                        crate::structure::build(structure, site, generator, &mut rng, &mut out.ops);
+                        super::structure::build(structure, site, generator, &mut rng, &mut out.ops);
                         if let Some(kind) = marker {
                             out.markers.push(Marker {
                                 pos: site,
@@ -937,7 +931,7 @@ impl Layer for EmitPatches {
                             ctx.seed()
                                 ^ ((site.x.to_bits() as u64) << 32 | site.y.to_bits() as u64),
                         ));
-                        crate::structure::build(
+                        super::structure::build(
                             structure,
                             Vec3::new(site.x, 0.0, site.y),
                             generator,
@@ -1098,21 +1092,17 @@ pub fn patches_in(
     out
 }
 
-/// Convenience: sites of a named scatter instance within bounds.
-pub fn sites_in(
-    mgr: &voxel_layers::LayerManager,
-    instance: &str,
-    bounds: IAabb,
-) -> Vec<Vec2> {
-    mgr.get_named::<ScatterSites>(instance, bounds)
-        .iter()
-        .flat_map(|(_, c)| c.sites.iter().copied())
-        .collect()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Sites of a named scatter instance within bounds.
+    fn sites_in(mgr: &voxel_layers::LayerManager, instance: &str, bounds: IAabb) -> Vec<Vec2> {
+        mgr.get_named::<ScatterSites>(instance, bounds)
+            .iter()
+            .flat_map(|(_, c)| c.sites.iter().copied())
+            .collect()
+    }
 
     /// Test worlds carry their generator in the manager context, exactly
     /// as the engine does — no globals involved.
@@ -1120,9 +1110,9 @@ mod tests {
         LayerManager::with_context(
             seed,
             std::sync::Arc::new(Generator::new(
-                crate::program::planet_program(),
+                voxel_worldgen::program::planet_program(),
                 seed as u32,
-                crate::program::DEFAULT_SUN_DIR,
+                voxel_worldgen::program::DEFAULT_SUN_DIR,
             )),
         )
     }
@@ -1131,12 +1121,12 @@ mod tests {
     /// must sample the world under test, not a differently-seeded one.
     fn generator(seed: u32) -> Generator {
         Generator::new(
-            crate::program::planet_program(),
+            voxel_worldgen::program::planet_program(),
             seed,
-            crate::program::DEFAULT_SUN_DIR,
+            voxel_worldgen::program::DEFAULT_SUN_DIR,
         )
     }
-    use crate::structure::{Anchor, Arrange, Extent, Part, Seat, Shape, Structure, Variant, Yaw};
+    use crate::planning::structure::{Anchor, Arrange, Extent, Part, Seat, Shape, Structure, Variant, Yaw};
     use voxel_layers::LayerManager;
 
     /// A minimal structure for emit tests: one seated block per site.
@@ -1359,7 +1349,6 @@ mod tests {
                             marker: Some("ruin".into()),
                         },
                         pad_m: 0.0,
-                        max_chunk_edge_m: None,
                     },
                     cell_m: 256,
                 },
@@ -1439,7 +1428,6 @@ mod tests {
                     // Endpoints within reach/2 of the midpoint cell, plus
                     // the pathfinding corridor.
                     pad_m: 700.0 * 0.5 + 192.0 + 64.0,
-                    max_chunk_edge_m: None,
                 },
                 cell_m: 256,
             },
@@ -1507,7 +1495,6 @@ mod tests {
                     },
                     // Courses run up to max_steps * step from their spring.
                     pad_m: 400.0 * 8.0 + 64.0,
-                    max_chunk_edge_m: Some(140.0),
                 },
                 cell_m: 512,
             },
@@ -1540,7 +1527,6 @@ mod tests {
                     source: "worm:caves".into(),
                     kind: EmitKind::WormCuts,
                     pad_m: 340.0,
-                    max_chunk_edge_m: Some(140.0),
                 },
                 cell_m: 256,
             },
@@ -1605,7 +1591,6 @@ mod tests {
                         marker: Some("pocket".into()),
                     },
                     pad_m: 0.0,
-                    max_chunk_edge_m: None,
                 },
                 cell_m: 128,
             },
@@ -1622,7 +1607,6 @@ mod tests {
                         lift_m: 3.0,
                     },
                     pad_m: 400.0 + 64.0,
-                    max_chunk_edge_m: None,
                 },
                 cell_m: 128,
             },
@@ -1822,7 +1806,6 @@ mod tests {
                         marker: Some("pocket".into()),
                     },
                     pad_m: 0.0,
-                    max_chunk_edge_m: None,
                 },
                 cell_m: 128,
             },
@@ -1839,7 +1822,6 @@ mod tests {
                         lift_m: 3.0,
                     },
                     pad_m: 464.0,
-                    max_chunk_edge_m: None,
                 },
                 cell_m: 128,
             },

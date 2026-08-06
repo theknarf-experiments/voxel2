@@ -17,7 +17,7 @@ use glam::{Vec2, Vec3};
 use voxel_core::csg::CsgOp;
 use voxel_core::seed::Rng;
 
-use crate::Generator;
+use voxel_worldgen::Generator;
 
 /// Inclusive value range, sampled uniformly.
 pub type Range = [f32; 2];
@@ -477,9 +477,9 @@ mod tests {
 
     fn generator() -> Generator {
         Generator::new(
-            crate::program::planet_program(),
+            voxel_worldgen::program::planet_program(),
             0,
-            crate::program::DEFAULT_SUN_DIR,
+            voxel_worldgen::program::DEFAULT_SUN_DIR,
         )
     }
 

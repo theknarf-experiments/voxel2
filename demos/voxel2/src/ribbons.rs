@@ -21,7 +21,7 @@ const RIBBON_RADIUS: i32 = 6;
 // The engine ensures planning data over `RIBBON_QUERY_REACH_M`; keep this
 // streamer inside that radius or it will read ungenerated regions.
 const _: () = assert!(
-    ((RIBBON_RADIUS + 1) as f32 * RIBBON_TILE_M) <= voxel_engine::level::RIBBON_QUERY_REACH_M,
+    ((RIBBON_RADIUS + 1) as f32 * RIBBON_TILE_M) <= crate::planning::RIBBON_QUERY_REACH_M,
 );
 
 #[derive(Resource, Default)]

@@ -42,7 +42,6 @@ const LAYER_VIZ_RADIUS_M: f32 = 512.0;
 pub fn draw_debug_viz(
     viz: Res<DebugViz>,
     world: Res<WorldQuery>,
-    level: Res<voxel_engine::level::LevelDef>,
     stats: Option<Res<voxel_render::SharedRenderStats>>,
     sources: voxel_engine::StreamSourceQuery,
     mut gizmos: Gizmos,
@@ -99,15 +98,12 @@ pub fn draw_debug_viz(
         }
 
         // Biome sample grid: a stake per cell colored by dominant biome.
-        for def in &level.stack {
-            let voxel_engine::level::StackLayerDef::Biomes { name, table, .. } = def else {
-                continue;
-            };
+        for name in world.biome_fields() {
             let step = LAYER_VIZ_RADIUS_M / 8.0;
             for gz in -8..=8 {
                 for gx in -8..=8 {
                     let p = c2 + Vec2::new(gx as f32, gz as f32) * step;
-                    let weights = world.biomes_at(name, p);
+                    let weights = world.biomes_at(&name, p);
                     let Some((i, (biome, w))) = weights
                         .iter()
                         .enumerate()
@@ -115,7 +111,7 @@ pub fn draw_debug_viz(
                     else {
                         continue;
                     };
-                    let _ = (biome, table);
+                    let _ = biome;
                     let y = world.generator().height(p, 8.0) + 2.0;
                     let color = Color::hsl(i as f32 * 137.5 % 360.0, 0.8, 0.5);
                     gizmos.line(

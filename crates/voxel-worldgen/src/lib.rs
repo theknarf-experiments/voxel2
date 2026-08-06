@@ -1,5 +1,11 @@
-//! Concrete world-generation: the CPU twin of the GPU generator-program
-//! interpreter ([`program`]) plus the LayerProcGen planning layers.
+//! World-generation primitives: the CPU twin of the GPU generator-program
+//! interpreter ([`program`]), plus the building blocks planning layers are
+//! written from — a grid pathfinder ([`path`]) and a descent walk
+//! ([`flow`]).
+//!
+//! There are no layers here. Concrete layers are the game's code (see
+//! `voxel_engine::planning::WorldPlanner`); this crate only supplies the
+//! pieces they compute with.
 //!
 //! [`program::eval`] MUST stay bit-compatible with
 //! `voxel-render/src/shaders/voxel_world_density.wgsl` — vegetation and
@@ -8,8 +14,6 @@
 pub mod program;
 pub mod path;
 pub mod flow;
-pub mod stack;
-pub mod structure;
 
 use glam::Vec2;
 
