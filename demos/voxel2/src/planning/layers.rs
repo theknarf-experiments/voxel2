@@ -76,7 +76,7 @@ impl Layer for ScatterSites {
 
 impl ScatterSites {
     fn build(&self, ctx: &ChunkCtx<'_, Self>) -> SitesChunk {
-        let generator = ctx.context::<Generator>();
+        let generator = &ctx.context::<crate::planning::world::WorldCtx>().generator;
         let mut rng = ctx.rng();
         if rng.next_f32() > self.cfg.chance {
             return SitesChunk { sites: Vec::new() };
@@ -484,7 +484,7 @@ impl Layer for ConnectPaths {
 
 impl ConnectPaths {
     fn build(&self, ctx: &ChunkCtx<'_, Self>) -> PathsChunk {
-        let generator = ctx.context::<Generator>();
+        let generator = &ctx.context::<crate::planning::world::WorldCtx>().generator;
         let own = ctx.chunk_bounds();
         let pad = (self.cfg.reach_m + self.cfg.corridor_m) as i32;
         let view = ctx.get_named::<ScatterSites>(&self.cfg.source, own.inflate(IVec3::new(pad, 0, pad)));
@@ -584,7 +584,7 @@ impl Layer for FlowCourses {
 
 impl FlowCourses {
     fn build(&self, ctx: &ChunkCtx<'_, Self>) -> CoursesChunk {
-        let generator = ctx.context::<Generator>();
+        let generator = &ctx.context::<crate::planning::world::WorldCtx>().generator;
         let own = ctx.chunk_bounds();
         let view = ctx.get_named::<ScatterSites>(&self.cfg.source, own);
         // Own the spring, not the whole source chunk: with mismatched
@@ -676,7 +676,7 @@ impl Layer for WormBurrows {
 
 impl WormBurrows {
     fn build(&self, ctx: &ChunkCtx<'_, Self>) -> WormsChunk {
-        let generator = ctx.context::<Generator>();
+        let generator = &ctx.context::<crate::planning::world::WorldCtx>().generator;
         let own = ctx.chunk_bounds();
         let view = ctx.get_named::<ScatterSites>(&self.cfg.source, own);
         let in_own = |p: Vec2| {
@@ -824,7 +824,7 @@ impl Layer for EmitPatches {
 
 impl EmitPatches {
     fn build(&self, ctx: &ChunkCtx<'_, Self>) -> PatchChunk {
-        let generator = ctx.context::<Generator>();
+        let generator = &ctx.context::<crate::planning::world::WorldCtx>().generator;
         let own = ctx.chunk_bounds();
         let pad = self.cfg.pad_m as i32;
         let pad_y = if self.cell_y_m > 0 { pad } else { 0 };
@@ -1251,10 +1251,12 @@ mod tests {
             Self {
                 pending: std::sync::Mutex::new(Some(LayerGraph::with_context(
                     seed,
-                    std::sync::Arc::new(Generator::new(
-                        voxel_worldgen::program::planet_program(),
-                        seed as u32,
-                        voxel_worldgen::program::DEFAULT_SUN_DIR,
+                    std::sync::Arc::new(crate::planning::world::WorldCtx::new(
+                        std::sync::Arc::new(Generator::new(
+                            voxel_worldgen::program::planet_program(),
+                            seed as u32,
+                            voxel_worldgen::program::DEFAULT_SUN_DIR,
+                        )),
                     )),
                 ))),
                 started: std::sync::OnceLock::new(),

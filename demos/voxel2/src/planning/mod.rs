@@ -10,6 +10,7 @@
 pub mod layers;
 pub mod schema;
 pub mod structure;
+pub mod world;
 
 use std::sync::Arc;
 
@@ -26,11 +27,6 @@ use schema::{validate_level, EmitDef};
 
 /// This demo's planning: interpret the level's `planning` block.
 pub struct StackPlanning;
-
-/// How far out a host is assumed to stream ribbon surfaces, so planning
-/// data is ensured over at least that radius. Hosts that stream further
-/// should raise the level's streamer radius.
-pub const RIBBON_QUERY_REACH_M: f32 = 1792.0;
 
 /// Vertical band xz-facade queries cover: enough for any current world
 /// (the deepest LOD tree spans ~±2.5 km), small enough that volumetric
@@ -49,9 +45,11 @@ pub struct StackPlanner {
     /// The level's planning stack: one graph for every layer, plus the
     /// thread keeping its top dependencies satisfied.
     stack: Option<Arc<LayerRuntime>>,
-    /// Handles for the top dependencies that follow the camera — one per
-    /// emit layer, plus one per biome field.
+    /// Handles for the top dependencies that follow the camera.
     tops: Vec<TopHandle>,
+    /// What this game's layers share, so its systems can read what they
+    /// published.
+    ctx: Option<Arc<world::WorldCtx>>,
     /// Emit instances and what each one can produce.
     emitters: Vec<Emitter>,
     /// Biome layers: (instance name, ordered biome names).
@@ -187,6 +185,12 @@ impl WorldPlanner for StackPlanner {
         }
     }
 
+    fn host_ctx(&self) -> Option<&(dyn std::any::Any + Send + Sync)> {
+        self.ctx
+            .as_ref()
+            .map(|c| c.as_ref() as &(dyn std::any::Any + Send + Sync))
+    }
+
     fn wait_idle(&self) {
         if let Some(rt) = &self.stack {
             rt.wait_idle();
@@ -239,7 +243,8 @@ impl StackPlanner {
             return None;
         }
         // Every layer into ONE graph, in author order.
-        let mut graph = LayerGraph::with_context(seed, generator.clone());
+        let ctx = Arc::new(world::WorldCtx::new(generator.clone()));
+        let mut graph = LayerGraph::with_context(seed, ctx.clone());
         let mut emitters = Vec::new();
         for layer in &def.stack {
             layer.register(&def.stack, &def.structures, &mut graph);
@@ -274,9 +279,9 @@ impl StackPlanner {
         if let Some(reach) = level.prop_query_reach_m {
             streamer_reach = streamer_reach.max(reach);
         }
-        if emitters.iter().any(|e| e.ribbons) {
-            streamer_reach = streamer_reach.max(RIBBON_QUERY_REACH_M);
-        }
+        // Ribbon surfaces used to be counted here, because a hand-rolled
+        // streamer read them at a radius nothing had declared. They are a
+        // layer now, so their reach is that layer's declared padding.
 
         if std::env::var_os("VOXEL_LOG_LAYERS").is_some() {
             info!("streamer reach {streamer_reach:.0} m");
@@ -333,10 +338,22 @@ impl StackPlanner {
             ));
         }
 
+        // Presentation layers: this game's own, sitting on the emit
+        // layers and turning what they plan into something it can draw.
+        let ribbon_sources: Vec<String> = emitters
+            .iter()
+            .filter(|e| e.ribbons)
+            .map(|e| e.name.clone())
+            .collect();
+        if let Some(top) = crate::ribbons::register(&mut graph, level, ribbon_sources) {
+            deps.push(top);
+        }
+
         let runtime = Arc::new(LayerRuntime::start(Arc::new(graph), deps));
         let tops = (0..runtime.tops()).map(|i| runtime.top(i)).collect();
         Some(Self {
             stack: Some(runtime),
+            ctx: Some(ctx),
             tops,
             emitters,
             biome_tables,

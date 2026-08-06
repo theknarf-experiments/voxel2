@@ -1,0 +1,104 @@
+//! What this game's layers share.
+//!
+//! The graph carries one opaque per-world value, handed to every chunk's
+//! create. For planning layers that was just the generator; presentation
+//! layers also need somewhere to put what they produce, because a chunk
+//! that owns a resource has to hand it back in `destroy` and the framework
+//! is deliberately ignorant of what a resource is.
+//!
+//! A sink is that somewhere: a chunk publishes its contribution under its
+//! own coordinate on create and withdraws it on destroy, and a Bevy system
+//! rebuilds whatever buffer draws it whenever the set changes. Residency
+//! decides what exists — there is no radius, no eviction scan and no
+//! "is it still near the camera" test anywhere in this file.
+
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
+
+use glam::IVec3;
+
+use crate::water::RiverSegGpu;
+
+/// Per-world state every layer in this game can reach.
+pub struct WorldCtx {
+    pub generator: Arc<voxel_worldgen::Generator>,
+    /// Ribbon surface geometry, contributed per chunk.
+    pub ribbons: Sink<RiverSegGpu>,
+}
+
+impl WorldCtx {
+    pub fn new(generator: Arc<voxel_worldgen::Generator>) -> Self {
+        Self {
+            generator,
+            ribbons: Sink::default(),
+        }
+    }
+}
+
+/// Per-chunk contributions to one shared buffer.
+///
+/// Cheap to clone into a chunk's create; the generation counter is what a
+/// renderer watches, so it rebuilds only when the resident set actually
+/// changed rather than every frame.
+pub struct Sink<T> {
+    inner: Arc<Mutex<SinkInner<T>>>,
+}
+
+struct SinkInner<T> {
+    parts: HashMap<IVec3, Vec<T>>,
+    generation: u64,
+}
+
+impl<T> Default for Sink<T> {
+    fn default() -> Self {
+        Self {
+            inner: Arc::new(Mutex::new(SinkInner {
+                parts: HashMap::new(),
+                generation: 0,
+            })),
+        }
+    }
+}
+
+impl<T: Clone> Sink<T> {
+    /// Publish a chunk's contribution. Empty contributions are not stored:
+    /// most tiles of a sparse feature have nothing in them, and an empty
+    /// entry would still cost a rebuild.
+    pub fn put(&self, coord: IVec3, items: Vec<T>) {
+        let mut inner = self.inner.lock().unwrap();
+        if items.is_empty() {
+            if inner.parts.remove(&coord).is_some() {
+                inner.generation += 1;
+            }
+            return;
+        }
+        inner.parts.insert(coord, items);
+        inner.generation += 1;
+    }
+
+    /// Withdraw a chunk's contribution, from its `destroy`.
+    pub fn take(&self, coord: IVec3) {
+        let mut inner = self.inner.lock().unwrap();
+        if inner.parts.remove(&coord).is_some() {
+            inner.generation += 1;
+        }
+    }
+
+    pub fn generation(&self) -> u64 {
+        self.inner.lock().unwrap().generation
+    }
+
+    /// Everything currently published, flattened.
+    pub fn collect(&self) -> Vec<T> {
+        let inner = self.inner.lock().unwrap();
+        inner.parts.values().flatten().cloned().collect()
+    }
+}
+
+impl<T> Clone for Sink<T> {
+    fn clone(&self) -> Self {
+        Self {
+            inner: self.inner.clone(),
+        }
+    }
+}

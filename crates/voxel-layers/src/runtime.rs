@@ -139,8 +139,20 @@ impl LayerRuntime {
 
     /// Block until every top dependency is satisfied. For tests and
     /// loading screens — never call it from a frame.
+    ///
+    /// Panics if the generation thread has died, which means a layer's
+    /// `create` panicked. Without this the wait spins forever and a plain
+    /// bug in one layer reads as a hang with no output — which is exactly
+    /// how it presented the first time.
     pub fn wait_idle(&self) {
         while !self.is_idle() {
+            assert!(
+                !self
+                    .thread
+                    .as_ref()
+                    .is_some_and(std::thread::JoinHandle::is_finished),
+                "layer generation thread stopped; a layer's create panicked",
+            );
             std::thread::sleep(Duration::from_millis(1));
         }
     }

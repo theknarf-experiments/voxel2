@@ -55,6 +55,13 @@ pub trait WorldPlanner: Send + Sync + 'static {
     /// screens and tests — never call it from a frame.
     fn wait_idle(&self) {}
 
+    /// The host's own per-world state, if it has any. The engine never
+    /// looks inside; this is how a host's systems read what its own layers
+    /// published, without the engine learning what a river is.
+    fn host_ctx(&self) -> Option<&(dyn std::any::Any + Send + Sync)> {
+        None
+    }
+
     /// Segments props must keep off (roadbeds, ribbon beds) in the xz box.
     fn clearance_in(&self, _min: Vec2, _max: Vec2) -> Vec<[Vec2; 2]> {
         Vec::new()
@@ -211,6 +218,14 @@ impl WorldQuery {
 
     pub fn stats(&self) -> PlanningStats {
         self.planner.as_ref().map_or_else(PlanningStats::default, |p| p.stats())
+    }
+
+    /// The host's per-world layer state, downcast to `C`.
+    pub fn host_ctx<C: 'static>(&self) -> Option<&C> {
+        self.planner
+            .as_ref()
+            .and_then(|p| p.host_ctx())
+            .and_then(|c| c.downcast_ref::<C>())
     }
 
     /// Block until residency has caught up. See [`WorldPlanner::wait_idle`].

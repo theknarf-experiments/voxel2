@@ -1,146 +1,179 @@
-//! Ribbon streaming: collects the planning stack's ribbon surfaces
-//! (`WorldQuery::ribbons_in`) around the camera into this demo's
-//! [`RiverWater`] buffer, which its water pipeline draws. The engine says
-//! only where the ribbons are and which material they carry; that they
-//! are rivers, and that rivers look like water, is this game's choice.
-
-use std::collections::HashMap;
+//! Ribbon surfaces, as a layer.
+//!
+//! The planning stack says where ribbons are and which material they
+//! carry; that they are rivers, and that rivers look like water, is this
+//! game's choice — so turning ribbon segments into water geometry is a
+//! layer of this game, sitting on top of the emit layers that produce
+//! them.
+//!
+//! It used to be a hand-rolled tile streamer with its own radius, its own
+//! staleness scan, a per-frame budget and a compile-time assert that its
+//! radius stayed inside whatever the engine happened to pre-generate. All
+//! of that was a worse re-implementation of the dependency graph. What is
+//! left is a chunk that declares its padding, fills itself in, and gives
+//! the geometry back when nothing needs it.
 
 use bevy::prelude::*;
-use crate::water::{RiverSegGpu, RiverWater};
+use voxel_layers::{ChunkCtx, Dep, Layer, LayerChunk, LayerGraph, TopDep};
 
-use voxel_engine::{level::{LevelDef, MaterialDef}, WorldQuery};
+use crate::planning::world::WorldCtx;
+use crate::water::{RiverSegGpu, RiverWater};
+use voxel_engine::level::{LevelDef, MaterialDef};
 
 /// Used when a ribbon's material id is not in the level table.
 const FALLBACK_TINT: [f32; 4] = [0.16, 0.34, 0.44, 0.0];
 
-const RIBBON_TILE_M: f32 = 256.0;
-/// ~1.5 km of visible river surface around the camera.
-const RIBBON_RADIUS: i32 = 6;
+const RIBBON_TILE_M: i32 = 256;
 
-// The engine ensures planning data over `RIBBON_QUERY_REACH_M`; keep this
-// streamer inside that radius or it will read ungenerated regions.
-const _: () = assert!(
-    ((RIBBON_RADIUS + 1) as f32 * RIBBON_TILE_M) <= crate::planning::RIBBON_QUERY_REACH_M,
-);
+/// How much visible river surface to keep around the camera. Formerly a
+/// tile radius policed by an assert; now simply the size of this layer's
+/// top dependency, and the graph guarantees the emit layers underneath it
+/// reach far enough because this layer declares that as padding.
+const RIBBON_VIEW_M: i32 = 3072;
 
-#[derive(Resource, Default)]
-pub struct RibbonTiles {
-    tiles: HashMap<IVec2, Vec<RiverSegGpu>>,
+/// Ribbon segments reach beyond the chunk that owns them, so a tile has to
+/// see its neighbours' emitters to catch the ones crossing into it.
+const RIBBON_PAD_M: i32 = 512;
+
+/// Turns the emit layers' ribbon segments into water geometry.
+pub struct RibbonSurface {
+    /// Emit instances that produce ribbons.
+    sources: Vec<String>,
+    /// Material id → color, resolved from the level once.
+    palette: Vec<(u32, [f32; 4])>,
 }
 
-/// The level's color for a ribbon material id.
-fn ribbon_color(level: &LevelDef, id: u32) -> [f32; 4] {
-    for m in &level.materials {
-        if let MaterialDef::Surface { id: mid, base, .. } = m {
-            if *mid == id {
-                return [base[0], base[1], base[2], 0.0];
-            }
-        }
+#[derive(Default)]
+pub struct RibbonSurfaceChunk;
+
+impl Layer for RibbonSurface {
+    type Chunk = RibbonSurfaceChunk;
+    const NAME: &'static str = "ribbon-surface";
+
+    fn chunk_extent(&self) -> IVec3 {
+        IVec3::new(RIBBON_TILE_M, 0, RIBBON_TILE_M)
     }
-    FALLBACK_TINT
+
+    fn dependencies(&self, _level: u32) -> Vec<Dep> {
+        self.sources
+            .iter()
+            .map(|name| Dep::named(name, IVec3::new(RIBBON_PAD_M, 0, RIBBON_PAD_M)))
+            .collect()
+    }
 }
 
-fn stream_ribbons(
-    probe: Res<voxel_engine::streaming::StreamProbe>,
-    level: Res<LevelDef>,
-    world: Res<WorldQuery>,
-    mut tiles: ResMut<RibbonTiles>,
-    mut rivers: ResMut<RiverWater>,
-    sources: voxel_engine::StreamSourceQuery,
-) {
-    if !probe.world_ready {
+impl RibbonSurface {
+    fn color(&self, id: u32) -> [f32; 4] {
+        self.palette
+            .iter()
+            .find_map(|(mid, c)| (*mid == id).then_some(*c))
+            .unwrap_or(FALLBACK_TINT)
+    }
+}
+
+impl LayerChunk for RibbonSurfaceChunk {
+    type Layer = RibbonSurface;
+
+    fn create(&mut self, ctx: &ChunkCtx<'_, RibbonSurface>, _level: u32) {
+        let layer = ctx.layer();
+        let own = ctx.chunk_bounds();
+        let pad = IVec3::new(RIBBON_PAD_M, 0, RIBBON_PAD_M);
+        let mut segs = Vec::new();
+        for source in &layer.sources {
+            ctx.get_named::<crate::planning::layers::EmitPatches>(source, own.inflate(pad))
+                .for_each(|_, chunk| {
+                    for s in &chunk.patches.ribbons {
+                        segs.push(RiverSegGpu {
+                            ab: [s.a.x, s.a.y, s.b.x, s.b.y],
+                            geo: [s.half_w, s.levels[0], s.levels[1], 0.0],
+                            color: layer.color(s.material),
+                        });
+                    }
+                });
+        }
+        ctx.context::<WorldCtx>().ribbons.put(ctx.coord(), segs);
+    }
+
+    fn destroy(&mut self, ctx: &ChunkCtx<'_, RibbonSurface>, _level: u32) {
+        ctx.context::<WorldCtx>().ribbons.take(ctx.coord());
+    }
+}
+
+/// Register the layer and its top dependency. Called while the world's
+/// graph is being built, after the emit layers it reads.
+pub fn register(graph: &mut LayerGraph, level: &LevelDef, ribbon_sources: Vec<String>) -> Option<TopDep> {
+    if ribbon_sources.is_empty() {
+        return None; // a level with no ribbons registers no ribbon layer
+    }
+    let palette = level
+        .materials
+        .iter()
+        .filter_map(|m| match m {
+            MaterialDef::Surface { id, base, .. } => Some((*id, [base[0], base[1], base[2], 0.0])),
+            _ => None,
+        })
+        .collect();
+    graph.register(RibbonSurface {
+        sources: ribbon_sources,
+        palette,
+    });
+    Some(TopDep::at_level(
+        RibbonSurface::NAME,
+        0,
+        IVec3::new(2 * RIBBON_VIEW_M, 0, 2 * RIBBON_VIEW_M),
+    ))
+}
+
+/// Rebuild the water pipeline's buffer when the resident set changed.
+fn publish_ribbons(world: Res<voxel_engine::WorldQuery>, mut rivers: ResMut<RiverWater>) {
+    let Some(sink) = world.host_ctx::<WorldCtx>().map(|c| c.ribbons.clone()) else {
+        return;
+    };
+    let generation = sink.generation();
+    if generation == rivers.generation {
         return;
     }
-    let Ok(source) = sources.single() else {
-        return; // no streaming source tagged yet
-    };
-    let camera = source.translation();
-    let center = IVec2::new(
-        (camera.x / RIBBON_TILE_M).floor() as i32,
-        (camera.z / RIBBON_TILE_M).floor() as i32,
-    );
-    let mut changed = false;
-    // A couple of tiles per tick keeps the query cost off any one frame.
-    let mut budget = 2;
-    'outer: for dz in -RIBBON_RADIUS..=RIBBON_RADIUS {
-        for dx in -RIBBON_RADIUS..=RIBBON_RADIUS {
-            let tile = center + IVec2::new(dx, dz);
-            if tiles.tiles.contains_key(&tile) {
-                continue;
-            }
-            let origin = tile.as_vec2() * RIBBON_TILE_M;
-            let segs: Vec<RiverSegGpu> = world
-                .ribbons_in(origin, origin + Vec2::splat(RIBBON_TILE_M))
-                .iter()
-                .map(|s| RiverSegGpu {
-                    ab: [s.a.x, s.a.y, s.b.x, s.b.y],
-                    geo: [s.half_w, s.levels[0], s.levels[1], 0.0],
-                    color: ribbon_color(&level, s.material),
-                })
-                .collect();
-            changed |= !segs.is_empty();
-            tiles.tiles.insert(tile, segs);
-            budget -= 1;
-            if budget == 0 {
-                break 'outer;
-            }
-        }
-    }
-    let keep = RIBBON_RADIUS + 1;
-    let stale: Vec<IVec2> = tiles
-        .tiles
-        .keys()
-        .filter(|t| (**t - center).abs().max_element() > keep)
-        .copied()
-        .collect();
-    for t in stale {
-        if let Some(segs) = tiles.tiles.remove(&t) {
-            changed |= !segs.is_empty();
-        }
-    }
-    if changed {
-        rivers.segments = tiles.tiles.values().flatten().copied().collect();
-        rivers.generation += 1;
-    }
+    rivers.segments = sink.collect();
+    rivers.generation = generation;
 }
 
-/// Streams the level's ribbon surfaces into the demo's water buffer.
+/// Draws the level's ribbon surfaces as this game's water.
 pub struct RibbonsPlugin;
 
 impl Plugin for RibbonsPlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<RibbonTiles>()
-            .init_resource::<crate::water::RiverWater>()
-            .add_systems(Update, (stream_ribbons, reset_on_reload));
+        app.init_resource::<RiverWater>()
+            .add_systems(Update, publish_ribbons);
     }
-}
-
-/// A reload can swap the whole world, so cached tiles must go with it.
-fn reset_on_reload(
-    mut reloaded: MessageReader<voxel_engine::level::LevelReloaded>,
-    mut tiles: ResMut<RibbonTiles>,
-    mut rivers: ResMut<crate::water::RiverWater>,
-) {
-    if reloaded.read().count() == 0 {
-        return;
-    }
-    *tiles = RibbonTiles::default();
-    rivers.segments.clear();
-    rivers.generation += 1;
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    fn surface_for(level: &LevelDef) -> RibbonSurface {
+        RibbonSurface {
+            sources: vec!["rivers".into()],
+            palette: level
+                .materials
+                .iter()
+                .filter_map(|m| match m {
+                    MaterialDef::Surface { id, base, .. } => {
+                        Some((*id, [base[0], base[1], base[2], 0.0]))
+                    }
+                    _ => None,
+                })
+                .collect(),
+        }
+    }
+
     #[test]
     fn water_color_reads_the_material_table_with_fallback() {
         let mut level = LevelDef::from_json(include_str!("../../../levels/planet.json")).unwrap();
         // planet material 4 is the river surface color.
-        let c = ribbon_color(&level, 4);
+        let c = surface_for(&level).color(4);
         assert!(c[0] > 0.0 && c[2] > c[0], "unexpected river tint {c:?}");
         level.materials.clear();
-        assert_eq!(ribbon_color(&level, 4), FALLBACK_TINT);
+        assert_eq!(surface_for(&level).color(4), FALLBACK_TINT);
     }
 }
