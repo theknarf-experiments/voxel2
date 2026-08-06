@@ -1,0 +1,26 @@
+# Project tasks (https://mise.jdx.dev). Run `mise run setup` once after
+# cloning to install the git hooks; `mise tasks` lists everything.
+
+[tasks.setup]
+description = "One-time repo setup: install the git pre-commit hook"
+run = [
+    "chmod +x .hooks/pre-commit",
+    "git config core.hooksPath .hooks",
+    "echo 'pre-commit hook installed (core.hooksPath = .hooks)'",
+]
+
+[tasks.check]
+description = "Type-check every workspace target"
+run = "cargo check --workspace --all-targets"
+
+[tasks.clippy]
+description = "Lint every workspace target; warnings are errors"
+run = "cargo clippy --workspace --all-targets -- -D warnings"
+
+[tasks.test]
+description = "Run the workspace test suite"
+run = "cargo test --workspace"
+
+[tasks.eval]
+description = "Hole-coverage eval on the planet level (the render gate)"
+run = "bash scripts/eval_holes.sh levels/planet.json 24"
