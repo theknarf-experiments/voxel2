@@ -1,23 +1,31 @@
 // Chunk draw: camera-relative vertex transform over the slab buffers, with
-// fully procedural, fully data-driven shading (no texture assets, no
+// fully procedural, fully data-driven surfaces (no texture assets, no
 // world-specific branches): the per-vertex material id indexes the level's
-// material table, and lighting/atmosphere come from the level's
-// environment uniform.
+// material table, which produces the albedo/emissive fed to Bevy's PBR.
+//
+// Lighting is BEVY'S: groups 0 and 1 are the mesh view bind group, so
+// terrain sees the app's directional/point lights, cascaded shadow maps,
+// ambient and environment light, distance fog and tonemapping exactly
+// like any `Mesh3d` does. Group 2 is where Bevy puts per-mesh data; ours
+// sits there so the material group at 3 stays free.
 //
 // Vertices are chunk-local; the per-chunk uniform carries the chunk origin
 // relative to the camera (computed in f64 on CPU). Multiplying the view
 // matrix with w = 0 drops its translation, so the camera effectively sits at
 // the origin and world-space f32 error never grows with distance.
 
-#import bevy_render::view::View
-
-@group(0) @binding(0) var<uniform> view: View;
+#import bevy_pbr::{
+    mesh_view_bindings::view,
+    mesh_types::MESH_FLAGS_SHADOW_RECEIVER_BIT,
+    pbr_types,
+    pbr_functions,
+}
 
 struct ChunkDrawUniform {
     // xyz = chunk minimum corner relative to the camera (m), w = voxel size.
     offset: vec4<f32>,
 }
-@group(1) @binding(0) var<uniform> chunk: ChunkDrawUniform;
+@group(2) @binding(0) var<uniform> chunk: ChunkDrawUniform;
 
 // Material recipes (128 B each, layout mirrors voxel-render WorldMaterial).
 // head.x = kind: 0 = surface (base/grain/bands/grime/streaks/moss/emissive),
@@ -35,9 +43,11 @@ struct WorldMaterial {
 struct MaterialTable {
     materials: array<WorldMaterial, 8>,
 }
-@group(1) @binding(1) var<uniform> mats: MaterialTable;
+@group(2) @binding(1) var<uniform> mats: MaterialTable;
 
-// Level lighting + atmosphere.
+// Shared with the grass/water pipelines, which still shade themselves.
+// The chunk pass reads only `sun_dir.w` (the coverage-eval flag) — its
+// lighting comes from Bevy.
 struct EnvParams {
     haze: vec4<f32>,      // rgb | density
     haze_tint: vec4<f32>, // rgb | tint power (0 = untinted)
@@ -46,7 +56,7 @@ struct EnvParams {
     ground: vec4<f32>,    // ambient ground rgb | up exponent
     sun_dir: vec4<f32>,   // toward the sun | unused
 }
-@group(1) @binding(2) var<uniform> env: EnvParams;
+@group(2) @binding(2) var<uniform> env: EnvParams;
 
 struct VsIn {
     // Quantized position: unorm16 x4 mapping [-8, 40] voxels (w unused).
@@ -66,6 +76,10 @@ struct VsOut {
 
 const POS_BIAS: f32 = 8.0;
 const POS_RANGE: f32 = 48.0;
+
+// Where the baked sun shadow takes over from Bevy's cascades (m).
+const BAKED_SHADOW_NEAR: f32 = 140.0;
+const BAKED_SHADOW_FAR: f32 = 320.0;
 
 fn oct_decode(o: vec2<f32>) -> vec3<f32> {
     var n = vec3<f32>(o, 1.0 - abs(o.x) - abs(o.y));
@@ -315,33 +329,45 @@ fn fragment(in: VsOut) -> @location(0) vec4<f32> {
         base = surface_albedo(m, world, n, dist);
     }
 
-    // --- lighting: sun (baked-shadowed) + hemispheric ambient ---------------
-    let sun_dir = normalize(env.sun_dir.xyz);
-    let nd = max(dot(nl, sun_dir), 0.0);
-    let up = nl.y * 0.5 + 0.5;
-    let ambient = mix(env.ground.rgb, env.sky.rgb, pow(up, env.ground.w)) * env.sky.w;
-    var lit = base * (env.sun.rgb * nd * env.sun.w * in.shadow + ambient) * ao;
-
-    // --- emissive ceiling light strips (surface materials) -------------------
+    // Emissive ceiling light strips (surface materials).
+    var emissive = vec3<f32>(0.0);
     if (m.head.x == 0u && m.c3.w > 0.0) {
         let lf = floor(world.y / m.p1.w);
         let ceilingness = smoothstep(-0.55, -0.85, n.y);
         let line = 1.0 - smoothstep(0.25, 0.75, abs(fract(world.z / m.p1.z) - 0.5) * m.p1.z);
         let works = step(1.0 - m.p2.x, hash3(vec3<i32>(i32(floor(world.z / m.p1.z)), i32(lf), 7)));
-        lit += m.c3.rgb * m.c3.w * ceilingness * line * works;
+        emissive += m.c3.rgb * m.c3.w * ceilingness * line * works;
         // Faint up-glow from the strips onto nearby floors.
         let floorness = smoothstep(0.55, 0.85, n.y);
-        lit += m.c3.rgb * m.p2.y * floorness * line * works;
+        emissive += m.c3.rgb * m.p2.y * floorness * line * works;
     }
 
-    // --- haze, optionally tinted toward the sun ------------------------------
-    let haze_amount = 1.0 - exp(-dist * env.haze.w);
-    var haze_color = env.haze.rgb;
-    if (env.haze_tint.w > 0.0) {
-        let view_dir = normalize(in.cam_rel);
-        let sun_amount = pow(max(dot(view_dir, sun_dir), 0.0), env.haze_tint.w);
-        haze_color = mix(haze_color, env.haze_tint.rgb, sun_amount);
-    }
-    lit = mix(lit, haze_color, haze_amount);
-    return vec4<f32>(lit, 1.0);
+    var pbr_input = pbr_types::pbr_input_new();
+    pbr_input.material.base_color = vec4<f32>(base, 1.0);
+    // w is the exposure weight, not alpha: 0 keeps the recipe's emissive
+    // in display units (Bevy's own StandardMaterial default), so light
+    // strips read the same regardless of the camera's exposure.
+    pbr_input.material.emissive = vec4<f32>(emissive, 0.0);
+    // Rock, soil and concrete: rough dielectrics. (Per-material control
+    // arrives with the material-asset slice.)
+    pbr_input.material.perceptual_roughness = 0.95;
+    pbr_input.material.metallic = 0.0;
+    pbr_input.material.flags = pbr_types::STANDARD_MATERIAL_FLAGS_FOG_ENABLED_BIT;
+    pbr_input.frag_coord = in.clip;
+    pbr_input.world_position = vec4<f32>(world, 1.0);
+    pbr_input.world_normal = nl;
+    pbr_input.N = nl;
+    pbr_input.V = normalize(-in.cam_rel);
+    pbr_input.diffuse_occlusion = vec3<f32>(ao);
+    pbr_input.flags = MESH_FLAGS_SHADOW_RECEIVER_BIT;
+
+    var color = pbr_functions::apply_pbr_lighting(pbr_input);
+
+    // Baked horizon sun shadow, faded in past the cascade range: Bevy's
+    // shadow maps cover the near field, the mesh-time march covers the
+    // kilometres they can't reach. Never both at full strength.
+    let baked = mix(1.0, in.shadow, smoothstep(BAKED_SHADOW_NEAR, BAKED_SHADOW_FAR, dist));
+    color = vec4<f32>(color.rgb * baked, color.a);
+
+    return pbr_functions::main_pass_post_lighting_processing(pbr_input, color);
 }

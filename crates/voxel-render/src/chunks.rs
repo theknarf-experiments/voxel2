@@ -32,9 +32,16 @@ use bevy::{
     },
     math::DVec3,
     mesh::VertexBufferLayout,
+    light::ShadowFilteringMethod,
+    pbr::{
+        tonemapping_pipeline_key, MeshPipelineKey, MeshPipelineViewLayoutKey,
+        MeshPipelineViewLayouts, SetMeshViewBindGroup, SetMeshViewBindingArrayBindGroup,
+    },
     prelude::*,
+    shader::ShaderDefVal,
+    core_pipeline::tonemapping::{DebandDither, Tonemapping},
     render::{
-        camera::{DirtySpecializations, PendingQueues},
+        camera::{DirtySpecializations, ExtractedCamera, PendingQueues},
         extract_component::{ExtractComponent, ExtractComponentPlugin},
         mesh::allocator::MeshSlabs,
         render_phase::{
@@ -53,9 +60,8 @@ use bevy::{
             UniformBuffer, Variants, VertexAttribute, VertexFormat, VertexState, VertexStepMode,
         },
         renderer::{RenderContext, RenderDevice, RenderGraph, RenderQueue},
-        view::{
-            ExtractedView, RenderVisibleEntities, ViewUniform, ViewUniformOffset, ViewUniforms,
-        },
+
+        view::{ExtractedView, RenderVisibleEntities},
         Extract, Render, RenderApp, RenderStartup, RenderSystems,
     },
 };
@@ -421,7 +427,13 @@ impl Plugin for VoxelChunksPlugin {
             .init_resource::<PendingVoxelQueues>()
             .init_resource::<ViewBindGroupRes>()
             .add_render_command::<Opaque3d, DrawVoxelChunksCommands>()
-            .add_systems(RenderStartup, init_chunk_resources)
+            // The draw pipeline's layout comes from Bevy's view layouts,
+            // which are built in the same schedule — order is otherwise
+            // ambiguous and only sometimes lands the right way.
+            .add_systems(
+                RenderStartup,
+                init_chunk_resources.after(bevy::pbr::init_mesh_pipeline_view_layouts),
+            )
             .add_systems(
                 ExtractSchedule,
                 (extract_chunk_commands, extract_camera_pos, extract_program),
@@ -626,14 +638,12 @@ struct ChunkPipelines {
 
 #[derive(Resource)]
 struct ChunkDrawPipeline {
-    view_layout: BindGroupLayoutDescriptor,
     chunk_layout: BindGroupLayoutDescriptor,
     variants: Variants<RenderPipeline, VoxelChunksSpecializer>,
 }
 
 #[derive(Resource, Default)]
 struct ViewBindGroupRes {
-    view: Option<BindGroup>,
     chunk: Option<BindGroup>,
 }
 
@@ -642,6 +652,7 @@ fn init_chunk_resources(
     render_device: Res<RenderDevice>,
     asset_server: Res<AssetServer>,
     pipeline_cache: Res<PipelineCache>,
+    view_layouts: Res<MeshPipelineViewLayouts>,
 ) {
     let buffer = |label: &str, size: u64, usage: BufferUsages| {
         render_device.create_buffer(&BufferDescriptor {
@@ -781,14 +792,10 @@ fn init_chunk_resources(
         mesh_layout,
     });
 
-    // Draw pipeline.
-    let view_layout = BindGroupLayoutDescriptor::new(
-        "voxel_chunks_view_layout",
-        &BindGroupLayoutEntries::sequential(
-            ShaderStages::VERTEX_FRAGMENT,
-            (uniform_buffer::<ViewUniform>(true),),
-        ),
-    );
+    // Draw pipeline. Groups 0 and 1 are Bevy's mesh view bind groups
+    // (lights, shadow maps, clusters, fog, tonemapping LUTs); group 2 is
+    // where Bevy puts per-mesh data, so ours slots in without disturbing
+    // the material group at 3.
     let chunk_layout = BindGroupLayoutDescriptor::new(
         "voxel_chunks_chunk_layout",
         &BindGroupLayoutEntries::sequential(
@@ -804,7 +811,13 @@ fn init_chunk_resources(
         load_embedded_asset!(asset_server.as_ref(), "shaders/voxel_chunk_draw.wgsl");
     let base_descriptor = RenderPipelineDescriptor {
         label: Some("voxel_chunks_draw".into()),
-        layout: vec![view_layout.clone(), chunk_layout.clone()],
+        // Groups 0/1 are replaced per key by the specializer (the view
+        // layout depends on msaa, fog and tonemapping).
+        layout: vec![
+            chunk_layout.clone(),
+            chunk_layout.clone(),
+            chunk_layout.clone(),
+        ],
         vertex: VertexState {
             shader: draw_shader.clone(),
             shader_defs: vec![],
@@ -846,9 +859,13 @@ fn init_chunk_resources(
         ..default()
     };
     commands.insert_resource(ChunkDrawPipeline {
-        view_layout,
         chunk_layout,
-        variants: Variants::new(VoxelChunksSpecializer, base_descriptor),
+        variants: Variants::new(
+            VoxelChunksSpecializer {
+                view_layouts: view_layouts.clone(),
+            },
+            base_descriptor,
+        ),
     });
 }
 
@@ -1665,10 +1682,15 @@ fn dispatch_chunk_work(
 
 // --- drawing -----------------------------------------------------------------
 
-struct VoxelChunksSpecializer;
+struct VoxelChunksSpecializer {
+    view_layouts: MeshPipelineViewLayouts,
+}
 
+/// Keyed by Bevy's own mesh pipeline key: the view bind group layout, the
+/// shader defs and the color target must all agree with what the mesh
+/// view bind group actually contains, and Bevy derives all three from it.
 #[derive(Copy, Clone, PartialEq, Eq, Hash, SpecializerKey)]
-struct VoxelChunksKey(Msaa);
+struct VoxelChunksKey(MeshPipelineKey);
 
 impl Specializer<RenderPipeline> for VoxelChunksSpecializer {
     type Key = VoxelChunksKey;
@@ -1678,16 +1700,104 @@ impl Specializer<RenderPipeline> for VoxelChunksSpecializer {
         key: Self::Key,
         descriptor: &mut RenderPipelineDescriptor,
     ) -> Result<Canonical<Self::Key>, BevyError> {
-        descriptor.multisample.count = key.0.samples();
+        let mesh_key = key.0;
+        descriptor.multisample.count = mesh_key.msaa_samples();
+
+        let view_layout = self
+            .view_layouts
+            .get_view_layout(MeshPipelineViewLayoutKey::from(mesh_key));
+        descriptor.layout[0] = view_layout.main_layout.clone();
+        descriptor.layout[1] = view_layout.binding_array_layout.clone();
+
+        let mut defs: Vec<ShaderDefVal> = vec![
+            // `bevy_pbr::pbr_functions` pulls in the material bindings even
+            // though we never sample them; the group index has to resolve.
+            ShaderDefVal::UInt("MATERIAL_BIND_GROUP".into(), 3),
+        ];
+        if mesh_key.msaa_samples() > 1 {
+            defs.push("MULTISAMPLED".into());
+        }
+        if mesh_key.contains(MeshPipelineKey::DISTANCE_FOG) {
+            defs.push("DISTANCE_FOG".into());
+        }
+        // Without a filter method `sample_shadow_map` returns 0 — every
+        // lit surface reads as fully shadowed.
+        let filter = mesh_key.intersection(MeshPipelineKey::SHADOW_FILTER_METHOD_RESERVED_BITS);
+        if filter == MeshPipelineKey::SHADOW_FILTER_METHOD_HARDWARE_2X2 {
+            defs.push("SHADOW_FILTER_METHOD_HARDWARE_2X2".into());
+        } else if filter == MeshPipelineKey::SHADOW_FILTER_METHOD_TEMPORAL {
+            defs.push("SHADOW_FILTER_METHOD_TEMPORAL".into());
+        } else {
+            defs.push("SHADOW_FILTER_METHOD_GAUSSIAN".into());
+        }
+        if mesh_key.contains(MeshPipelineKey::TONEMAP_IN_SHADER) {
+            defs.push("TONEMAP_IN_SHADER".into());
+            defs.push(ShaderDefVal::UInt(
+                "TONEMAPPING_LUT_TEXTURE_BINDING_INDEX".into(),
+                bevy::pbr::TONEMAPPING_LUT_TEXTURE_BINDING_INDEX,
+            ));
+            defs.push(ShaderDefVal::UInt(
+                "TONEMAPPING_LUT_SAMPLER_BINDING_INDEX".into(),
+                bevy::pbr::TONEMAPPING_LUT_SAMPLER_BINDING_INDEX,
+            ));
+            defs.push(tonemap_method_def(mesh_key));
+            if mesh_key.contains(MeshPipelineKey::DEBAND_DITHER) {
+                defs.push("DEBAND_DITHER".into());
+            }
+        }
+        descriptor.vertex.shader_defs = defs.clone();
+        if let Some(fragment) = descriptor.fragment.as_mut() {
+            fragment.shader_defs = defs;
+            if let Some(Some(target)) = fragment.targets.first_mut() {
+                target.format = mesh_key.target_format();
+            }
+        }
         Ok(key)
     }
 }
+
+/// The tonemapping method def matching the key's reserved bits — the LUT
+/// path in `main_pass_post_lighting_processing` switches on it.
+fn tonemap_method_def(key: MeshPipelineKey) -> ShaderDefVal {
+    let method = key.intersection(MeshPipelineKey::TONEMAP_METHOD_RESERVED_BITS);
+    if method == MeshPipelineKey::TONEMAP_METHOD_NONE {
+        "TONEMAP_METHOD_NONE".into()
+    } else if method == MeshPipelineKey::TONEMAP_METHOD_REINHARD {
+        "TONEMAP_METHOD_REINHARD".into()
+    } else if method == MeshPipelineKey::TONEMAP_METHOD_REINHARD_LUMINANCE {
+        "TONEMAP_METHOD_REINHARD_LUMINANCE".into()
+    } else if method == MeshPipelineKey::TONEMAP_METHOD_ACES_FITTED {
+        "TONEMAP_METHOD_ACES_FITTED".into()
+    } else if method == MeshPipelineKey::TONEMAP_METHOD_AGX {
+        "TONEMAP_METHOD_AGX".into()
+    } else if method == MeshPipelineKey::TONEMAP_METHOD_SOMEWHAT_BORING_DISPLAY_TRANSFORM {
+        "TONEMAP_METHOD_SOMEWHAT_BORING_DISPLAY_TRANSFORM".into()
+    } else if method == MeshPipelineKey::TONEMAP_METHOD_BLENDER_FILMIC {
+        "TONEMAP_METHOD_BLENDER_FILMIC".into()
+    } else if method == MeshPipelineKey::TONEMAP_METHOD_PBR_NEUTRAL {
+        "TONEMAP_METHOD_PBR_NEUTRAL".into()
+    } else {
+        "TONEMAP_METHOD_TONY_MC_MAPFACE".into()
+    }
+}
+
+/// Everything the pipeline key depends on, mirroring the inputs of Bevy's
+/// own mesh view key.
+type VoxelViewQuery = (
+    &'static ExtractedView,
+    Option<&'static ExtractedCamera>,
+    &'static RenderVisibleEntities,
+    &'static Msaa,
+    Option<&'static Tonemapping>,
+    Option<&'static DebandDither>,
+    Option<&'static ShadowFilteringMethod>,
+    Has<DistanceFog>,
+);
 
 #[derive(Default, Deref, DerefMut, Resource)]
 struct PendingVoxelQueues(PendingQueues);
 
 fn prepare_view_bind_group(
-    view_uniforms: Res<ViewUniforms>,
     pipeline: Option<Res<ChunkDrawPipeline>>,
     gpu: Option<Res<ChunkGpuResources>>,
     pipeline_cache: Res<PipelineCache>,
@@ -1697,14 +1807,6 @@ fn prepare_view_bind_group(
     let (Some(pipeline), Some(gpu)) = (pipeline, gpu) else {
         return;
     };
-    let Some(view_binding) = view_uniforms.uniforms.binding() else {
-        return;
-    };
-    bind_groups.view = Some(render_device.create_bind_group(
-        "voxel_chunks_view_bg",
-        &pipeline_cache.get_bind_group_layout(&pipeline.view_layout),
-        &BindGroupEntries::sequential((view_binding,)),
-    ));
     let (Some(chunk_binding), Some(materials_binding), Some(env_binding)) = (
         gpu.draw_uniforms.binding(),
         gpu.materials_uniform.binding(),
@@ -1726,7 +1828,7 @@ fn queue_voxel_chunks(
     pipeline: Option<ResMut<ChunkDrawPipeline>>,
     mut opaque_render_phases: ResMut<ViewBinnedRenderPhases<Opaque3d>>,
     opaque_draw_functions: Res<DrawFunctions<Opaque3d>>,
-    views: Query<(&ExtractedView, &RenderVisibleEntities, &Msaa)>,
+    views: Query<VoxelViewQuery>,
     dirty_specializations: Res<DirtySpecializations>,
     mut pending_queues: ResMut<PendingVoxelQueues>,
 ) {
@@ -1735,7 +1837,17 @@ fn queue_voxel_chunks(
     };
     let draw_function = opaque_draw_functions.read().id::<DrawVoxelChunksCommands>();
 
-    for (view, view_visible_entities, msaa) in views.iter() {
+    for (
+        view,
+        camera,
+        view_visible_entities,
+        msaa,
+        tonemapping,
+        dither,
+        shadow_filter_method,
+        distance_fog,
+    ) in views.iter()
+    {
         let Some(opaque_phase) = opaque_render_phases.get_mut(&view.retained_view_entity) else {
             continue;
         };
@@ -1743,6 +1855,33 @@ fn queue_voxel_chunks(
             continue;
         };
         let view_pending = pending_queues.prepare_for_new_frame(view.retained_view_entity);
+        // Mirrors Bevy's own view key so our pipeline and its mesh view
+        // bind group agree on layout, defs and target format.
+        let mut mesh_key = MeshPipelineKey::from_msaa_samples(msaa.samples())
+            | MeshPipelineKey::from_target_format(view.target_format);
+        if !camera.is_some_and(|camera| camera.hdr) {
+            if let Some(tonemapping) = tonemapping {
+                mesh_key |= MeshPipelineKey::TONEMAP_IN_SHADER;
+                mesh_key |= tonemapping_pipeline_key(*tonemapping);
+            }
+            if let Some(DebandDither::Enabled) = dither {
+                mesh_key |= MeshPipelineKey::DEBAND_DITHER;
+            }
+        }
+        if distance_fog {
+            mesh_key |= MeshPipelineKey::DISTANCE_FOG;
+        }
+        match shadow_filter_method.copied().unwrap_or_default() {
+            ShadowFilteringMethod::Hardware2x2 => {
+                mesh_key |= MeshPipelineKey::SHADOW_FILTER_METHOD_HARDWARE_2X2;
+            }
+            ShadowFilteringMethod::Gaussian => {
+                mesh_key |= MeshPipelineKey::SHADOW_FILTER_METHOD_GAUSSIAN;
+            }
+            ShadowFilteringMethod::Temporal => {
+                mesh_key |= MeshPipelineKey::SHADOW_FILTER_METHOD_TEMPORAL;
+            }
+        }
 
         for &main_entity in
             dirty_specializations.iter_to_dequeue(view.retained_view_entity, visible)
@@ -1755,7 +1894,7 @@ fn queue_voxel_chunks(
         {
             let Ok(pipeline_id) = pipeline
                 .variants
-                .specialize(&pipeline_cache, VoxelChunksKey(*msaa))
+                .specialize(&pipeline_cache, VoxelChunksKey(mesh_key))
             else {
                 continue;
             };
@@ -1778,7 +1917,12 @@ fn queue_voxel_chunks(
     }
 }
 
-type DrawVoxelChunksCommands = (SetItemPipeline, DrawVoxelChunks);
+type DrawVoxelChunksCommands = (
+    SetItemPipeline,
+    SetMeshViewBindGroup<0>,
+    SetMeshViewBindingArrayBindGroup<1>,
+    DrawVoxelChunks,
+);
 
 struct DrawVoxelChunks;
 
@@ -1791,12 +1935,12 @@ where
         SRes<ViewBindGroupRes>,
         SRes<VoxelDrawList>,
     );
-    type ViewQuery = &'static ViewUniformOffset;
+    type ViewQuery = ();
     type ItemQuery = ();
 
     fn render<'w>(
         _: &P,
-        view_offset: ROQueryItem<'w, '_, Self::ViewQuery>,
+        _: ROQueryItem<'w, '_, Self::ViewQuery>,
         _: Option<ROQueryItem<'w, '_, Self::ItemQuery>>,
         (gpu, bind_groups, draw_list): SystemParamItem<'w, '_, Self::Param>,
         pass: &mut TrackedRenderPass<'w>,
@@ -1804,17 +1948,16 @@ where
         let gpu = gpu.into_inner();
         let bind_groups = bind_groups.into_inner();
         let draw_list = draw_list.into_inner();
-        let (Some(view_bg), Some(chunk_bg)) = (&bind_groups.view, &bind_groups.chunk) else {
+        let Some(chunk_bg) = &bind_groups.chunk else {
             return RenderCommandResult::Skip;
         };
         if draw_list.0.is_empty() {
             return RenderCommandResult::Success;
         }
-        pass.set_bind_group(0, view_bg, &[view_offset.offset]);
         pass.set_vertex_buffer(0, gpu.vertex_slab.slice(..));
         pass.set_index_buffer(gpu.index_slab.slice(..), IndexFormat::Uint16);
         for entry in &draw_list.0 {
-            pass.set_bind_group(1, chunk_bg, &[entry.uniform_offset]);
+            pass.set_bind_group(2, chunk_bg, &[entry.uniform_offset]);
             pass.draw_indexed(
                 entry.first_index..entry.first_index + entry.index_count,
                 entry.base_vertex as i32,

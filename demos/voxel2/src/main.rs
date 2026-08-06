@@ -11,6 +11,7 @@
 //! the same way, in code; the engine only asks that some entity carries
 //! [`VoxelStreamSource`].
 
+use bevy::light::CascadeShadowConfigBuilder;
 use bevy::prelude::*;
 use bevy::winit::{UpdateMode, WinitSettings};
 use voxel_debug::prelude::*;
@@ -31,12 +32,15 @@ struct Scene {
     look: Vec3,
     walk_speed: f32,
     run_speed: f32,
-    /// Directional light strength, if the world has a visible sun. Its
-    /// *direction* is engine data (the shadow bake needs it) and comes
+    /// Directional light strength in lux, if the world has a visible sun.
+    /// Its *direction* is engine data (the shadow bake needs it) and comes
     /// from the level's `environment`.
     sun_illuminance: Option<f32>,
     ambient_color: Color,
     ambient_brightness: f32,
+    /// Atmospheric haze. Voxel surfaces shade through Bevy's PBR, so this
+    /// is an ordinary `DistanceFog` on the camera.
+    fog: Option<DistanceFog>,
 }
 
 /// Which scene to dress a world with. Keying off the level file's name
@@ -53,7 +57,8 @@ fn scene_for(level_path: &std::path::Path) -> Scene {
             // Interiors are lit by the level's own emissive materials.
             sun_illuminance: None,
             ambient_color: Color::srgb(0.6, 0.7, 0.9),
-            ambient_brightness: 120.0,
+            ambient_brightness: 700.0,
+            fog: None,
         },
         _ => Scene {
             clear_color: Color::srgb(0.65, 0.77, 0.94),
@@ -61,9 +66,18 @@ fn scene_for(level_path: &std::path::Path) -> Scene {
             look: Vec3::new(0.4, -0.35, 0.4),
             walk_speed: 60.0,
             run_speed: 600.0,
-            sun_illuminance: Some(25000.0),
+            // Low for daylight (Bevy's default exposure is EV100 9.7), because
+            // the level's material colors are authored as final look colors
+            // rather than physical albedo. Real albedos want ~15 000 lux.
+            sun_illuminance: Some(2_800.0),
             ambient_color: Color::srgb(0.7, 0.8, 1.0),
-            ambient_brightness: 400.0,
+            ambient_brightness: 200.0,
+            fog: Some(DistanceFog {
+                color: Color::srgb(0.62, 0.72, 0.88),
+                directional_light_color: Color::srgb(0.92, 0.85, 0.72),
+                directional_light_exponent: 4.0,
+                falloff: FogFalloff::Exponential { density: 6.0e-5 },
+            }),
         },
     }
 }
@@ -182,8 +196,19 @@ fn setup_scene(mut commands: Commands, scene: Res<HostScene>, level: Res<LevelDe
             LevelSun,
             DirectionalLight {
                 illuminance,
+                shadow_maps_enabled: true,
                 ..default()
             },
+            // Explicit cascades: the default bounds come from the camera's
+            // far plane, which is useless in a world this size.
+            CascadeShadowConfigBuilder {
+                num_cascades: 4,
+                minimum_distance: 0.5,
+                first_cascade_far_bound: 24.0,
+                maximum_distance: 420.0,
+                overlap_proportion: 0.2,
+            }
+            .build(),
             Transform::from_translation(Vec3::ZERO).looking_to(-sun_direction(&level), Vec3::Y),
         ));
     }
@@ -201,7 +226,7 @@ fn setup_scene(mut commands: Commands, scene: Res<HostScene>, level: Res<LevelDe
         .ok()
         .and_then(parse3)
         .unwrap_or(host.look);
-    commands.spawn((
+    let mut camera = commands.spawn((
         Camera3d::default(),
         Transform::from_translation(start).looking_at(start + look * 1000.0, up_for(look)),
         // The engine streams around whatever carries this.
@@ -212,6 +237,9 @@ fn setup_scene(mut commands: Commands, scene: Res<HostScene>, level: Res<LevelDe
             ..default()
         },
     ));
+    if let Some(fog) = host.fog.clone() {
+        camera.insert(fog);
+    }
 }
 
 #[derive(Component)]

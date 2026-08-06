@@ -11,6 +11,7 @@
 use std::collections::HashMap;
 
 use bevy::mesh::{Indices, PrimitiveTopology};
+use bevy::light::NotShadowCaster;
 use bevy::prelude::*;
 use voxel_engine::level::WorldQuery;
 use voxel_engine::scatter::{tile_placements, ScatterInstance};
@@ -95,7 +96,8 @@ impl PropTable {
                         }),
                     },
                 ],
-                blob_shadow: true,
+                // Real cascaded shadows now; no fake disc needed.
+                blob_shadow: false,
                 squash: Vec3::ONE,
             },
         );
@@ -401,6 +403,9 @@ fn build_super_tile(
                 Mesh3d(meshes.add(b.build())),
                 MeshMaterial3d(assets.impostor_mat.clone()),
                 Transform::default(),
+                // Silhouettes stand in for trees that are too far to see;
+                // letting them into the shadow map would blanket the world.
+                NotShadowCaster,
             ))
             .id(),
     )
