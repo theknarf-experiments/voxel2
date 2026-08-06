@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 use voxel_core::csg::CsgOp;
 use voxel_core::worldop::*;
 
-use crate::planning::{ops_prepare, ops_provider, HostPlanning, OpsSource, PlanningLayers, WorldQuery};
+use crate::planning::{ops_provider, HostPlanning, OpsSource, WorldQuery};
 use crate::streaming::StreamingRebuild;
 use crate::{LodConfig, VoxelEnginePlugin};
 
@@ -1098,9 +1098,7 @@ impl Plugin for LevelPlugin {
         }
         let world_query =
             build_ops_provider(&level, self.seed, &generator, self.planner.as_ref());
-        let planning_layers = PlanningLayers(world_query.layer_managers());
         app.insert_resource(program)
-            .insert_resource(crate::planning::ops_prepare(&world_query))
             .insert_resource(crate::planning::ops_provider(&world_query))
             .insert_resource(material_table(&level))
             .insert_resource(env_params(&level))
@@ -1112,10 +1110,9 @@ impl Plugin for LevelPlugin {
                 merge_k: level.lod.merge_k,
             })
             .insert_resource(world_query)
-            .insert_resource(planning_layers)
             .insert_resource(level.clone())
             .add_plugins(VoxelEnginePlugin { vegetation: true })
-            .add_systems(Update, crate::planning::roll_planning_caches);
+            .add_systems(Update, crate::planning::follow_stream_source);
 
         if let Some(port) = self.remote_port {
             let _ = port; // BRP tooling lives in voxel-debug; see VoxelRemotePlugin
@@ -1269,9 +1266,7 @@ fn reload_level(
         lod.top_radius = new.lod.top_radius;
         lod.top_y = new.lod.top_y;
         let world_query = build_ops_provider(&new, seed.0, &generator, planner.0.as_ref());
-        commands.insert_resource(ops_prepare(&world_query));
         commands.insert_resource(ops_provider(&world_query));
-        commands.insert_resource(PlanningLayers(world_query.layer_managers()));
         commands.insert_resource(world_query);
         rebuild.0 = true;
         info!("level reload: generation changed — rebuilding world");

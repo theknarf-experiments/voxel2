@@ -385,8 +385,14 @@ fn runtime_follows_a_published_focus() {
     assert!(resident > 0, "focus published but nothing generated");
 
     // Somewhere else entirely: the old closure goes, the new one arrives,
-    // and the resident count does not grow.
-    handle.set_focus(IVec3::new(CELL * 500, 0, -CELL * 500));
+    // and the resident count does not grow. Same offset within a chunk —
+    // a half-open window spans one more chunk when it straddles a
+    // boundary than when it aligns to one.
+    handle.set_focus(IVec3::new(
+        CELL * 500 + CELL / 2,
+        0,
+        -CELL * 500 + CELL / 2,
+    ));
     runtime.wait_idle();
     assert_eq!(graph.resident_in("play"), resident);
 }

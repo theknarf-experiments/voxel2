@@ -40,11 +40,20 @@ pub trait WorldPlanner: Send + Sync + 'static {
     /// neighboring LODs and cracks every seam.
     fn ops_in(&self, min: Vec3, max: Vec3, chunk_edge_m: f32) -> Vec<CsgOp>;
 
-    /// Pre-generate the planning every chunk in `keys` is about to query,
-    /// before anything reads it. Generation is dependency-driven: without
-    /// this, the first read generates on whatever thread reads it.
-    /// `voxctl status` → `stream.read_generated` staying ~0 is the check.
-    fn prepare(&self, _keys: &[ChunkKey]) {}
+    /// Publish where the streaming source is. A planner decides for
+    /// itself what follows it — how far each of its layers stays
+    /// resident is a declaration it owns, not a region the engine
+    /// computes on its behalf.
+    fn set_focus(&self, _focus: IVec3) {}
+
+    /// Residency and health, for the HUD and the eval.
+    fn stats(&self) -> PlanningStats {
+        PlanningStats::default()
+    }
+
+    /// Block until residency has caught up with the focus. For loading
+    /// screens and tests — never call it from a frame.
+    fn wait_idle(&self) {}
 
     /// Segments props must keep off (roadbeds, ribbon beds) in the xz box.
     fn clearance_in(&self, _min: Vec2, _max: Vec2) -> Vec<[Vec2; 2]> {
@@ -72,11 +81,22 @@ pub trait WorldPlanner: Send + Sync + 'static {
         Vec::new()
     }
 
-    /// The layer managers backing this planner, so the engine can roll
-    /// their caches with the camera and report their stats.
-    fn layer_managers(&self) -> Vec<Arc<voxel_layers::LayerManager>> {
-        Vec::new()
-    }
+}
+
+/// What a planner reports about itself.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct PlanningStats {
+    /// Chunks currently held resident. With a dependency graph this is
+    /// the exact transitive closure of the top dependencies, so it should
+    /// be flat while the camera orbits — a sawtooth means something is
+    /// releasing and regenerating.
+    pub resident_chunks: usize,
+    /// Reads that found no resident chunk. Anything but 0 means a
+    /// consumer's working set is not covered by a top dependency, or a
+    /// layer under-declared its padding.
+    pub reads_missed: usize,
+    /// A generation pass is running.
+    pub generating: bool,
 }
 
 /// A source of ops for a world-space box, independent of any layer stack
@@ -181,14 +201,22 @@ impl WorldQuery {
         self.ops_in(min, max, edge)
     }
 
-    /// Pre-generate the planning `keys` will query. See
-    /// [`WorldPlanner::prepare`].
-    pub fn prepare(&self, keys: &[ChunkKey]) {
-        if std::env::var_os("VOXEL_NO_PREPARE").is_some() {
-            return; // A/B kill switch: fall back to read-driven generation
-        }
+    /// Publish where the streaming source is, so the planner's top
+    /// dependencies can follow it.
+    pub fn set_focus(&self, focus: IVec3) {
         if let Some(planner) = &self.planner {
-            planner.prepare(keys);
+            planner.set_focus(focus);
+        }
+    }
+
+    pub fn stats(&self) -> PlanningStats {
+        self.planner.as_ref().map_or_else(PlanningStats::default, |p| p.stats())
+    }
+
+    /// Block until residency has caught up. See [`WorldPlanner::wait_idle`].
+    pub fn wait_idle(&self) {
+        if let Some(planner) = &self.planner {
+            planner.wait_idle();
         }
     }
 
@@ -231,63 +259,35 @@ impl WorldQuery {
             .map_or_else(Vec::new, |p2| p2.biomes_at(field, p))
     }
 
-    /// The layer managers behind this world, for cache rolling and stats.
-    pub fn layer_managers(&self) -> Vec<Arc<voxel_layers::LayerManager>> {
-        self.planner
-            .as_ref()
-            .map_or_else(Vec::new, |p| p.layer_managers())
-    }
-}
-
-/// Layer managers backing the world query, resolved once so the engine can
-/// roll their caches with the camera (they grow unboundedly otherwise) and
-/// report cache stats in the HUD.
-#[derive(Resource, Default, Clone)]
-pub struct PlanningLayers(pub Vec<Arc<voxel_layers::LayerManager>>);
-
-/// The engine's top dependency: pre-generate planning for a batch of
-/// chunk keys in the async planning task, so the per-chunk ops queries
-/// that follow are cache reads.
-pub fn ops_prepare(world: &WorldQuery) -> crate::streaming::ChunkOpsPrepare {
-    let world = world.clone();
-    crate::streaming::ChunkOpsPrepare(Some(Arc::new(move |keys: &[ChunkKey]| {
-        world.prepare(keys);
-    })))
 }
 
 /// The per-chunk ops provider for a world query.
+///
+/// It waits for planning to be resident before reading. Until the voxel
+/// chunks are layers themselves — depending on the planning layers, so the
+/// framework orders this for us — the streamer has no declared dependency
+/// on planning and would otherwise read an empty graph on the frame the
+/// world starts, baking featureless chunks that nothing ever revisits.
+///
+/// This runs in the async planning task, never on a frame, and the wait is
+/// one atomic load once residency has caught up.
 pub fn ops_provider(world: &WorldQuery) -> crate::streaming::ChunkOpsProvider {
     if world.is_empty() {
         return crate::streaming::ChunkOpsProvider(None);
     }
     let world = world.clone();
-    crate::streaming::ChunkOpsProvider(Some(Arc::new(move |key: ChunkKey| world.chunk_ops(key))))
+    crate::streaming::ChunkOpsProvider(Some(Arc::new(move |key: ChunkKey| {
+        world.wait_idle();
+        world.chunk_ops(key)
+    })))
 }
 
-/// Rolling eviction for the planning-layer caches: every few seconds, drop
-/// cached layer chunks far outside the region any chunk request can reach.
-/// Everything is regenerable, so the only cost of evicting too eagerly is
-/// regeneration.
-pub fn roll_planning_caches(
-    layers: Res<PlanningLayers>,
-    time: Res<Time>,
-    mut last: Local<f32>,
-    sources: crate::StreamSourceQuery,
-) {
-    if time.elapsed_secs() - *last < 5.0 {
-        return;
-    }
-    *last = time.elapsed_secs();
+/// Publish the streaming source's position to the world's planner every
+/// frame. The planner's own quantization decides whether that is a change
+/// worth acting on, so this is a store, never a wait.
+pub fn follow_stream_source(world: Res<WorldQuery>, sources: crate::StreamSourceQuery) {
     let Ok(source) = sources.single() else {
         return; // no streaming source tagged yet
     };
-    let p = source.translation();
-    const KEEP_M: i32 = 8_000;
-    let keep = voxel_layers::IAabb::new(
-        bevy::math::IVec3::new(p.x as i32 - KEEP_M, i32::MIN / 2, p.z as i32 - KEEP_M),
-        bevy::math::IVec3::new(p.x as i32 + KEEP_M, i32::MAX / 2, p.z as i32 + KEEP_M),
-    );
-    for mgr in &layers.0 {
-        mgr.evict_outside(keep);
-    }
+    world.set_focus(source.translation().as_ivec3());
 }

@@ -1,9 +1,5 @@
 //! Bevy wiring for the layer graph.
 //!
-//! Two pieces. [`WorldLayers`] holds the running graph and pumps its top
-//! dependencies from the streaming source, so residency follows the
-//! player without the frame loop ever waiting on generation.
-//!
 //! [`MainThreadQueue`] is the other half of `create`/`destroy` symmetry.
 //! Chunks are generated on worker threads, but a chunk that owns Bevy
 //! entities cannot spawn or despawn them there. It queues the work
@@ -16,38 +12,6 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use bevy::prelude::*;
-use voxel_layers::v2::{LayerRuntime, TopHandle};
-
-/// The running layer graph for this world.
-#[derive(Resource)]
-pub struct WorldLayers {
-    runtime: Arc<LayerRuntime>,
-    /// Top dependencies that follow the streaming source. Any not listed
-    /// here keep whatever focus the host set.
-    followers: Vec<TopHandle>,
-}
-
-impl WorldLayers {
-    /// Wrap a runtime whose top dependencies at `follower_indices` should
-    /// track the streaming source.
-    pub fn new(runtime: Arc<LayerRuntime>, follower_indices: impl IntoIterator<Item = usize>) -> Self {
-        let followers = follower_indices
-            .into_iter()
-            .map(|i| runtime.top(i))
-            .collect();
-        Self { runtime, followers }
-    }
-
-    /// Every top dependency follows the streaming source.
-    pub fn following_all(runtime: Arc<LayerRuntime>) -> Self {
-        let n = runtime.tops();
-        Self::new(runtime, 0..n)
-    }
-
-    pub fn runtime(&self) -> &Arc<LayerRuntime> {
-        &self.runtime
-    }
-}
 
 /// One piece of deferred chunk work.
 type MainThreadAction = Box<dyn FnOnce(&mut World) + Send>;
@@ -84,32 +48,14 @@ impl Default for MainThreadBudget {
     }
 }
 
-/// Installs the queue and the focus pump. A host adds [`WorldLayers`]
-/// itself, once it has built its layers.
+/// Installs the main-thread queue and its drain.
 pub struct VoxelLayersPlugin;
 
 impl Plugin for VoxelLayersPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<MainThreadQueue>()
             .init_resource::<MainThreadBudget>()
-            .add_systems(Update, follow_stream_source)
-            .add_systems(Update, drain_main_thread_queue.after(follow_stream_source));
-    }
-}
-
-/// Publish the streaming source's position to every following top
-/// dependency. A plain atomic store — the quantization that decides
-/// whether this is a *change* lives in the graph.
-fn follow_stream_source(layers: Option<Res<WorldLayers>>, sources: crate::StreamSourceQuery) {
-    let Some(layers) = layers else {
-        return;
-    };
-    let Ok(source) = sources.single() else {
-        return; // no streaming source tagged yet
-    };
-    let focus = source.translation().as_ivec3();
-    for top in &layers.followers {
-        top.set_focus(focus);
+            .add_systems(Update, drain_main_thread_queue);
     }
 }
 

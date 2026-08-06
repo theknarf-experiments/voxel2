@@ -62,9 +62,13 @@ struct Shared {
     /// True while the thread is inside a `process_top`. A HUD signal, not
     /// a synchronization primitive.
     generating: AtomicBool,
-    /// Completed top-dependency passes, so a test or a loading screen can
-    /// wait for the world to catch up with the camera.
-    passes: AtomicUsize,
+    /// Bumped by every setter. A pass may only declare itself idle if
+    /// this has not moved while it ran — otherwise a request that landed
+    /// mid-pass would be reported as already satisfied.
+    requests: AtomicUsize,
+    /// Every top dependency is satisfied and nothing new has been asked
+    /// for.
+    idle: AtomicBool,
 }
 
 /// A running layer graph: the graph itself plus the thread that keeps its
@@ -86,7 +90,8 @@ impl LayerRuntime {
             tops: tops.iter().map(|t| TopSlot::new(t.size())).collect(),
             stop: AtomicBool::new(false),
             generating: AtomicBool::new(false),
-            passes: AtomicUsize::new(0),
+            requests: AtomicUsize::new(0),
+            idle: AtomicBool::new(false),
         });
         let thread = std::thread::Builder::new()
             .name("voxel-layers".into())
@@ -126,23 +131,17 @@ impl LayerRuntime {
         self.shared.generating.load(Ordering::Relaxed)
     }
 
-    /// Completed passes. Waiting for this to advance twice after moving a
-    /// focus guarantees the move has been acted on.
-    pub fn passes(&self) -> usize {
-        self.shared.passes.load(Ordering::Relaxed)
+    /// True when every top dependency is satisfied and nothing further
+    /// has been requested.
+    pub fn is_idle(&self) -> bool {
+        self.shared.idle.load(Ordering::Acquire)
     }
 
     /// Block until every top dependency is satisfied. For tests and
     /// loading screens — never call it from a frame.
     pub fn wait_idle(&self) {
-        let mut seen = self.passes();
-        loop {
+        while !self.is_idle() {
             std::thread::sleep(Duration::from_millis(1));
-            let now = self.passes();
-            if now == seen && !self.is_generating() {
-                return;
-            }
-            seen = now;
         }
     }
 }
@@ -158,6 +157,9 @@ impl Drop for LayerRuntime {
 
 fn run(graph: Arc<LayerGraph>, shared: Arc<Shared>, mut tops: Vec<TopDep>) {
     while !shared.stop.load(Ordering::Relaxed) {
+        // Sampled before the pass: a request arriving while it runs must
+        // not be swallowed by the idle flag it sets afterwards.
+        let requests = shared.requests.load(Ordering::Acquire);
         let mut worked = false;
         for (slot, top) in shared.tops.iter().zip(tops.iter_mut()) {
             top.set_size(TopSlot::load(&slot.size));
@@ -174,8 +176,9 @@ fn run(graph: Arc<LayerGraph>, shared: Arc<Shared>, mut tops: Vec<TopDep>) {
                 break;
             }
         }
-        shared.passes.fetch_add(1, Ordering::Relaxed);
-        if !worked {
+        let quiet = !worked && shared.requests.load(Ordering::Acquire) == requests;
+        shared.idle.store(quiet, Ordering::Release);
+        if quiet {
             std::thread::sleep(IDLE_SLEEP);
         }
     }
@@ -196,16 +199,26 @@ pub struct TopHandle {
 
 impl TopHandle {
     pub fn set_focus(&self, focus: IVec3) {
+        self.request();
         TopSlot::store(&self.shared.tops[self.index].focus, focus);
     }
 
     pub fn set_size(&self, size: IVec3) {
+        self.request();
         TopSlot::store(&self.shared.tops[self.index].size, size);
     }
 
     pub fn set_active(&self, active: bool) {
+        self.request();
         self.shared.tops[self.index]
             .active
             .store(active, Ordering::Relaxed);
+    }
+
+    /// Announce a change before making it, so a pass already running
+    /// cannot conclude it satisfied this one.
+    fn request(&self) {
+        self.shared.idle.store(false, Ordering::Release);
+        self.shared.requests.fetch_add(1, Ordering::Release);
     }
 }

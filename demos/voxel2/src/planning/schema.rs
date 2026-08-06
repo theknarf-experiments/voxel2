@@ -811,7 +811,7 @@ impl StackLayerDef {
         &self,
         stack: &[StackLayerDef],
         structures: &std::collections::HashMap<String, StructureDef>,
-        mgr: &mut voxel_layers::LayerManager,
+        mgr: &mut voxel_layers::v2::LayerGraph,
     ) {
         use layers::*;
         match self.clone() {

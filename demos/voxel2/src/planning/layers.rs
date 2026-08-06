@@ -6,7 +6,7 @@
 
 use glam::{IVec3, Vec2, Vec3};
 use voxel_core::csg::CsgOp;
-use voxel_layers::{IAabb, Layer, LayerCtx};
+use voxel_layers::v2::{ChunkCtx, Dep, IAabb, Layer, LayerChunk, LayerGraph};
 
 use voxel_worldgen::Generator;
 
@@ -49,6 +49,7 @@ pub struct ScatterSites {
     pub cfg: ScatterCfg,
 }
 
+#[derive(Default)]
 pub struct SitesChunk {
     pub sites: Vec<Vec2>,
 }
@@ -61,9 +62,9 @@ impl Layer for ScatterSites {
         IVec3::new(self.cfg.cell_m, 0, self.cfg.cell_m)
     }
 
-    fn dependencies(&self) -> Vec<voxel_layers::Dep> {
+    fn dependencies(&self, _level: u32) -> Vec<Dep> {
         match &self.cfg.biome {
-            Some(gate) => vec![voxel_layers::Dep::named(
+            Some(gate) => vec![Dep::named(
                 &gate.instance,
                 IVec3::new(BIOME_INFLUENCE_CELLS, 0, BIOME_INFLUENCE_CELLS),
             )],
@@ -71,7 +72,10 @@ impl Layer for ScatterSites {
         }
     }
 
-    fn generate(&self, ctx: &LayerCtx<'_, Self>, _coord: IVec3) -> SitesChunk {
+}
+
+impl ScatterSites {
+    fn build(&self, ctx: &ChunkCtx<'_, Self>) -> SitesChunk {
         let generator = ctx.context::<Generator>();
         let mut rng = ctx.rng();
         if rng.next_f32() > self.cfg.chance {
@@ -130,6 +134,7 @@ pub struct BiomeField {
     pub cfg: BiomeCfg,
 }
 
+#[derive(Default)]
 pub struct BiomeChunk {
     /// Seed site and its index into the cfg table.
     pub site: Vec2,
@@ -144,7 +149,10 @@ impl Layer for BiomeField {
         IVec3::new(self.cfg.cell_m, 0, self.cfg.cell_m)
     }
 
-    fn generate(&self, ctx: &LayerCtx<'_, Self>, _coord: IVec3) -> BiomeChunk {
+}
+
+impl BiomeField {
+    fn build(&self, ctx: &ChunkCtx<'_, Self>) -> BiomeChunk {
         let mut rng = ctx.rng();
         let b = ctx.chunk_bounds();
         let cell = self.cfg.cell_m as f32;
@@ -189,7 +197,7 @@ pub fn biome_weights_from(sites: &[(Vec2, u32)], n_biomes: usize, p: Vec2) -> Ve
 
 /// Biome weights at `p`, read through a manager (facade queries).
 pub fn biome_weights_at(
-    mgr: &voxel_layers::LayerManager,
+    mgr: &LayerGraph,
     instance: &str,
     n_biomes: usize,
     p: Vec2,
@@ -203,7 +211,7 @@ pub fn biome_weights_at(
         IVec3::new(p.x as i32 + pad, 1, p.y as i32 + pad),
     );
     let sites: Vec<(Vec2, u32)> = mgr
-        .get_named::<BiomeField>(instance, bounds)
+        .view::<BiomeField>(instance, bounds)
         .iter()
         .map(|(_, c)| (c.site, c.biome))
         .collect();
@@ -260,6 +268,7 @@ pub struct Scatter3Sites {
     pub cfg: Scatter3Cfg,
 }
 
+#[derive(Default)]
 pub struct Sites3Chunk {
     pub sites: Vec<Vec3>,
 }
@@ -272,9 +281,9 @@ impl Layer for Scatter3Sites {
         IVec3::new(self.cfg.cell_m, self.cfg.cell_y_m, self.cfg.cell_m)
     }
 
-    fn dependencies(&self) -> Vec<voxel_layers::Dep> {
+    fn dependencies(&self, _level: u32) -> Vec<Dep> {
         match &self.cfg.biome {
-            Some(gate) => vec![voxel_layers::Dep::named(
+            Some(gate) => vec![Dep::named(
                 &gate.instance,
                 IVec3::new(BIOME_INFLUENCE_CELLS, 0, BIOME_INFLUENCE_CELLS),
             )],
@@ -282,7 +291,10 @@ impl Layer for Scatter3Sites {
         }
     }
 
-    fn generate(&self, ctx: &LayerCtx<'_, Self>, _coord: IVec3) -> Sites3Chunk {
+}
+
+impl Scatter3Sites {
+    fn build(&self, ctx: &ChunkCtx<'_, Self>) -> Sites3Chunk {
         let mut rng = ctx.rng();
         if rng.next_f32() > self.cfg.chance {
             return Sites3Chunk { sites: Vec::new() };
@@ -341,6 +353,7 @@ pub struct Connect3Paths {
     pub cell_y_m: i32,
 }
 
+#[derive(Default)]
 pub struct Paths3Chunk {
     /// Orthogonal waypoint chains (every segment varies along one axis).
     pub paths: Vec<Vec<Vec3>>,
@@ -354,16 +367,20 @@ impl Layer for Connect3Paths {
         IVec3::new(self.cell_m, self.cell_y_m, self.cell_m)
     }
 
-    fn dependencies(&self) -> Vec<voxel_layers::Dep> {
+    fn dependencies(&self, _level: u32) -> Vec<Dep> {
         let pad = self.cfg.reach_m as i32;
-        vec![voxel_layers::Dep::named(&self.cfg.source, IVec3::splat(pad))]
+        vec![Dep::named(&self.cfg.source, IVec3::splat(pad))]
     }
 
-    fn generate(&self, ctx: &LayerCtx<'_, Self>, _coord: IVec3) -> Paths3Chunk {
+}
+
+impl Connect3Paths {
+    fn build(&self, ctx: &ChunkCtx<'_, Self>) -> Paths3Chunk {
         let own = ctx.chunk_bounds();
         let pad = self.cfg.reach_m as i32;
         let view = ctx.get_named::<Scatter3Sites>(&self.cfg.source, own.inflate(IVec3::splat(pad)));
-        let sites: Vec<Vec3> = view.iter().flat_map(|(_, c)| c.sites.iter().copied()).collect();
+        let mut sites: Vec<Vec3> = Vec::new();
+        view.for_each(|_, c| sites.extend(c.sites.iter().copied()));
         let in_own = |p: Vec3| {
             p.x >= own.min.x as f32
                 && p.x < own.max.x as f32
@@ -442,6 +459,7 @@ pub struct ConnectPaths {
     pub cell_m: i32,
 }
 
+#[derive(Default)]
 pub struct PathsChunk {
     pub paths: Vec<Vec<Vec2>>,
 }
@@ -454,20 +472,24 @@ impl Layer for ConnectPaths {
         IVec3::new(self.cell_m, 0, self.cell_m)
     }
 
-    fn dependencies(&self) -> Vec<voxel_layers::Dep> {
+    fn dependencies(&self, _level: u32) -> Vec<Dep> {
         let pad = (self.cfg.reach_m + self.cfg.corridor_m) as i32;
-        vec![voxel_layers::Dep::named(
+        vec![Dep::named(
             &self.cfg.source,
             IVec3::new(pad, 0, pad),
         )]
     }
 
-    fn generate(&self, ctx: &LayerCtx<'_, Self>, _coord: IVec3) -> PathsChunk {
+}
+
+impl ConnectPaths {
+    fn build(&self, ctx: &ChunkCtx<'_, Self>) -> PathsChunk {
         let generator = ctx.context::<Generator>();
         let own = ctx.chunk_bounds();
         let pad = (self.cfg.reach_m + self.cfg.corridor_m) as i32;
         let view = ctx.get_named::<ScatterSites>(&self.cfg.source, own.inflate(IVec3::new(pad, 0, pad)));
-        let sites: Vec<Vec2> = view.iter().flat_map(|(_, c)| c.sites.iter().copied()).collect();
+        let mut sites: Vec<Vec2> = Vec::new();
+        view.for_each(|_, c| sites.extend(c.sites.iter().copied()));
         let in_own = |p: Vec2| {
             p.x >= own.min.x as f32
                 && p.x < own.max.x as f32
@@ -541,6 +563,7 @@ pub struct FlowCourses {
     pub cell_m: i32,
 }
 
+#[derive(Default)]
 pub struct CoursesChunk {
     pub courses: Vec<(Vec<Vec2>, Vec<f32>)>,
 }
@@ -553,11 +576,14 @@ impl Layer for FlowCourses {
         IVec3::new(self.cell_m, 0, self.cell_m)
     }
 
-    fn dependencies(&self) -> Vec<voxel_layers::Dep> {
-        vec![voxel_layers::Dep::named(&self.cfg.source, IVec3::ZERO)]
+    fn dependencies(&self, _level: u32) -> Vec<Dep> {
+        vec![Dep::named(&self.cfg.source, IVec3::ZERO)]
     }
 
-    fn generate(&self, ctx: &LayerCtx<'_, Self>, _coord: IVec3) -> CoursesChunk {
+}
+
+impl FlowCourses {
+    fn build(&self, ctx: &ChunkCtx<'_, Self>) -> CoursesChunk {
         let generator = ctx.context::<Generator>();
         let own = ctx.chunk_bounds();
         let view = ctx.get_named::<ScatterSites>(&self.cfg.source, own);
@@ -628,6 +654,7 @@ pub struct WormBurrows {
     pub cell_m: i32,
 }
 
+#[derive(Default)]
 pub struct WormsChunk {
     /// Each worm: sphere centers with radii.
     pub worms: Vec<Vec<(Vec3, f32)>>,
@@ -641,11 +668,14 @@ impl Layer for WormBurrows {
         IVec3::new(self.cell_m, 0, self.cell_m)
     }
 
-    fn dependencies(&self) -> Vec<voxel_layers::Dep> {
-        vec![voxel_layers::Dep::named(&self.cfg.source, IVec3::ZERO)]
+    fn dependencies(&self, _level: u32) -> Vec<Dep> {
+        vec![Dep::named(&self.cfg.source, IVec3::ZERO)]
     }
 
-    fn generate(&self, ctx: &LayerCtx<'_, Self>, _coord: IVec3) -> WormsChunk {
+}
+
+impl WormBurrows {
+    fn build(&self, ctx: &ChunkCtx<'_, Self>) -> WormsChunk {
         let generator = ctx.context::<Generator>();
         let own = ctx.chunk_bounds();
         let view = ctx.get_named::<ScatterSites>(&self.cfg.source, own);
@@ -760,6 +790,7 @@ pub struct EmitPatches {
     pub cell_y_m: i32,
 }
 
+#[derive(Default)]
 pub struct PatchChunk {
     pub patches: PatchSet,
 }
@@ -777,19 +808,22 @@ impl Layer for EmitPatches {
         IVec3::new(self.cell_m, self.cell_y_m, self.cell_m)
     }
 
-    fn dependencies(&self) -> Vec<voxel_layers::Dep> {
+    fn dependencies(&self, _level: u32) -> Vec<Dep> {
         let pad = self.cfg.pad_m as i32;
         // Volumetric sources reach vertically too (a link's vertical leg
         // spans rows far from the owning cell); planar emits keep y
         // collapsed.
         let pad_y = if self.cell_y_m > 0 { pad } else { 0 };
-        vec![voxel_layers::Dep::named(
+        vec![Dep::named(
             &self.cfg.source,
             IVec3::new(pad, pad_y, pad),
         )]
     }
 
-    fn generate(&self, ctx: &LayerCtx<'_, Self>, _coord: IVec3) -> PatchChunk {
+}
+
+impl EmitPatches {
+    fn build(&self, ctx: &ChunkCtx<'_, Self>) -> PatchChunk {
         let generator = ctx.context::<Generator>();
         let own = ctx.chunk_bounds();
         let pad = self.cfg.pad_m as i32;
@@ -1038,7 +1072,7 @@ fn ribbon_bed_ops(a: Vec2, b: Vec2, half_w: f32, levels: [f32; 2], out: &mut Vec
 /// filtered to elements that touch it. Local: reads only the index cells
 /// within `ELEM_PAD_M` of the box.
 pub fn patches_in(
-    mgr: &voxel_layers::LayerManager,
+    mgr: &LayerGraph,
     instance: &str,
     min: Vec3,
     max: Vec3,
@@ -1061,7 +1095,7 @@ pub fn patches_in(
         lo.x <= max.x && hi.x >= min.x && lo.y <= max.z && hi.y >= min.z
     };
     let mut out = PatchSet::default();
-    for (_, c) in mgr.get_named::<EmitPatches>(instance, bounds).iter() {
+    for (_, c) in mgr.view::<EmitPatches>(instance, bounds).iter() {
         for op in &c.patches.ops {
             if op.touches(min, max) {
                 out.ops.push(*op);
@@ -1092,29 +1126,183 @@ pub fn patches_in(
     out
 }
 
+impl LayerChunk for SitesChunk {
+    type Layer = ScatterSites;
+
+    fn create(&mut self, ctx: &ChunkCtx<'_, ScatterSites>, _level: u32) {
+        *self = ctx.layer().build(ctx);
+    }
+
+    fn destroy(&mut self, _ctx: &ChunkCtx<'_, ScatterSites>, _level: u32) {
+        *self = Self::default();
+    }
+}
+
+impl LayerChunk for BiomeChunk {
+    type Layer = BiomeField;
+
+    fn create(&mut self, ctx: &ChunkCtx<'_, BiomeField>, _level: u32) {
+        *self = ctx.layer().build(ctx);
+    }
+
+    fn destroy(&mut self, _ctx: &ChunkCtx<'_, BiomeField>, _level: u32) {
+        *self = Self::default();
+    }
+}
+
+impl LayerChunk for Sites3Chunk {
+    type Layer = Scatter3Sites;
+
+    fn create(&mut self, ctx: &ChunkCtx<'_, Scatter3Sites>, _level: u32) {
+        *self = ctx.layer().build(ctx);
+    }
+
+    fn destroy(&mut self, _ctx: &ChunkCtx<'_, Scatter3Sites>, _level: u32) {
+        *self = Self::default();
+    }
+}
+
+impl LayerChunk for Paths3Chunk {
+    type Layer = Connect3Paths;
+
+    fn create(&mut self, ctx: &ChunkCtx<'_, Connect3Paths>, _level: u32) {
+        *self = ctx.layer().build(ctx);
+    }
+
+    fn destroy(&mut self, _ctx: &ChunkCtx<'_, Connect3Paths>, _level: u32) {
+        *self = Self::default();
+    }
+}
+
+impl LayerChunk for PathsChunk {
+    type Layer = ConnectPaths;
+
+    fn create(&mut self, ctx: &ChunkCtx<'_, ConnectPaths>, _level: u32) {
+        *self = ctx.layer().build(ctx);
+    }
+
+    fn destroy(&mut self, _ctx: &ChunkCtx<'_, ConnectPaths>, _level: u32) {
+        *self = Self::default();
+    }
+}
+
+impl LayerChunk for CoursesChunk {
+    type Layer = FlowCourses;
+
+    fn create(&mut self, ctx: &ChunkCtx<'_, FlowCourses>, _level: u32) {
+        *self = ctx.layer().build(ctx);
+    }
+
+    fn destroy(&mut self, _ctx: &ChunkCtx<'_, FlowCourses>, _level: u32) {
+        *self = Self::default();
+    }
+}
+
+impl LayerChunk for WormsChunk {
+    type Layer = WormBurrows;
+
+    fn create(&mut self, ctx: &ChunkCtx<'_, WormBurrows>, _level: u32) {
+        *self = ctx.layer().build(ctx);
+    }
+
+    fn destroy(&mut self, _ctx: &ChunkCtx<'_, WormBurrows>, _level: u32) {
+        *self = Self::default();
+    }
+}
+
+impl LayerChunk for PatchChunk {
+    type Layer = EmitPatches;
+
+    fn create(&mut self, ctx: &ChunkCtx<'_, EmitPatches>, _level: u32) {
+        *self = ctx.layer().build(ctx);
+    }
+
+    fn destroy(&mut self, _ctx: &ChunkCtx<'_, EmitPatches>, _level: u32) {
+        *self = Self::default();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     /// Sites of a named scatter instance within bounds.
-    fn sites_in(mgr: &voxel_layers::LayerManager, instance: &str, bounds: IAabb) -> Vec<Vec2> {
-        mgr.get_named::<ScatterSites>(instance, bounds)
-            .iter()
-            .flat_map(|(_, c)| c.sites.iter().copied())
-            .collect()
+    fn sites_in(mgr: &LayerGraph, instance: &str, bounds: IAabb) -> Vec<Vec2> {
+        let mut out = Vec::new();
+        mgr.view::<ScatterSites>(instance, bounds)
+            .for_each(|_, c| out.extend(c.sites.iter().copied()));
+        out
     }
 
-    /// Test worlds carry their generator in the manager context, exactly
-    /// as the engine does — no globals involved.
-    fn test_manager(seed: u64) -> LayerManager {
-        LayerManager::with_context(
-            seed,
-            std::sync::Arc::new(Generator::new(
-                voxel_worldgen::program::planet_program(),
-                seed as u32,
-                voxel_worldgen::program::DEFAULT_SUN_DIR,
-            )),
-        )
+    /// A test world: layers registered up front, then residency started
+    /// on the first read. Reads no longer generate, so a test has to hold
+    /// a top dependency exactly like the game does.
+    struct TestWorld {
+        pending: std::sync::Mutex<Option<LayerGraph>>,
+        started: std::sync::OnceLock<std::sync::Arc<LayerRuntime>>,
+        focus: IVec3,
+        size: IVec3,
+    }
+
+    impl TestWorld {
+        /// Carries its generator in the graph context, exactly as the
+        /// engine does — no globals involved.
+        fn new(seed: u64) -> Self {
+            Self {
+                pending: std::sync::Mutex::new(Some(LayerGraph::with_context(
+                    seed,
+                    std::sync::Arc::new(Generator::new(
+                        voxel_worldgen::program::planet_program(),
+                        seed as u32,
+                        voxel_worldgen::program::DEFAULT_SUN_DIR,
+                    )),
+                ))),
+                started: std::sync::OnceLock::new(),
+                focus: IVec3::ZERO,
+                size: IVec3::splat(8192),
+            }
+        }
+
+        fn around(mut self, focus: IVec3, size: IVec3) -> Self {
+            self.focus = focus;
+            self.size = size;
+            self
+        }
+
+        fn register_as<L: Layer>(&mut self, instance: &str, layer: L) {
+            self.pending
+                .lock()
+                .unwrap()
+                .as_mut()
+                .expect("register before the first read")
+                .register_as(instance, layer);
+        }
+
+        /// One top dependency per registered instance — a test reads
+        /// whatever it likes, so everything stays resident for it.
+        fn graph(&self) -> &LayerGraph {
+            self.started
+                .get_or_init(|| {
+                    let graph = self.pending.lock().unwrap().take().expect("started twice");
+                    let tops = graph
+                        .instances()
+                        .iter()
+                        .map(|name| TopDep::at_level(name, 0, self.size))
+                        .collect();
+                    let runtime =
+                        std::sync::Arc::new(LayerRuntime::start(std::sync::Arc::new(graph), tops));
+                    for i in 0..runtime.tops() {
+                        runtime.top(i).set_focus(self.focus);
+                    }
+                    runtime.wait_idle();
+                    runtime
+                })
+                .graph()
+        }
+    }
+
+    fn test_manager(seed: u64) -> TestWorld {
+        TestWorld::new(seed)
     }
 
     /// The same world a `test_manager(seed)` generates for — assertions
@@ -1127,7 +1315,7 @@ mod tests {
         )
     }
     use crate::planning::structure::{Anchor, Arrange, Extent, Part, Seat, Shape, Structure, Variant, Yaw};
-    use voxel_layers::LayerManager;
+    use voxel_layers::v2::{LayerRuntime, TopDep};
 
     /// A minimal structure for emit tests: one seated block per site.
     fn test_structure(material: u32, cut: bool, seat: Seat) -> std::sync::Arc<Structure> {
@@ -1167,9 +1355,12 @@ mod tests {
 
     /// A region of the reference planet known to be land (the test area
     /// around the shipped level's start) — world origin is open ocean and
-    /// altitude-filtered scatters would be vacuously empty there.
+    /// altitude-filtered scatters would be vacuously empty there. A test
+    /// reading here has to focus its residency here too.
+    const LAND: IVec3 = IVec3::new(-27000, 0, -38000);
+
     fn land_bounds(r: i32) -> IAabb {
-        let c = IVec3::new(-27000, 0, -38000);
+        let c = LAND;
         IAabb::new(
             IVec3::new(c.x - r, 0, c.z - r),
             IVec3::new(c.x + r, 1, c.z + r),
@@ -1197,8 +1388,8 @@ mod tests {
                 },
             },
         );
-        let common = sites_in(&mgr, "sites:common", bounds(4096));
-        let rare = sites_in(&mgr, "sites:rare", bounds(4096));
+        let common = sites_in(mgr.graph(), "sites:common", bounds(4096));
+        let rare = sites_in(mgr.graph(), "sites:rare", bounds(4096));
         assert!(common.len() > rare.len() * 3, "chance config ignored: {} vs {}", common.len(), rare.len());
 
         let mut mgr2 = test_manager(3);
@@ -1211,12 +1402,12 @@ mod tests {
                 },
             },
         );
-        assert_eq!(common, sites_in(&mgr2, "sites:common", bounds(4096)));
+        assert_eq!(common, sites_in(mgr2.graph(), "sites:common", bounds(4096)));
     }
 
     #[test]
     fn connect_paths_join_sites_within_reach() {
-        let mut mgr = test_manager(5);
+        let mut mgr = test_manager(5).around(LAND, IVec3::new(9216, 0, 9216));
         mgr.register_as(
             "sites:towns",
             ScatterSites {
@@ -1239,7 +1430,7 @@ mod tests {
         );
         let b = land_bounds(4096);
         let mut total = 0;
-        for (_, c) in mgr.get_named::<ConnectPaths>("roads", b).iter() {
+        for (_, c) in mgr.graph().view::<ConnectPaths>("roads", b).iter() {
             for path in &c.paths {
                 total += 1;
                 assert!(path.len() >= 2);
@@ -1258,7 +1449,7 @@ mod tests {
 
     #[test]
     fn flow_and_worm_kinds_generate_from_scatter_instances() {
-        let mut mgr = test_manager(5);
+        let mut mgr = test_manager(5).around(LAND, IVec3::new(9216, 0, 9216));
         mgr.register_as(
             "sites:springs",
             ScatterSites {
@@ -1302,7 +1493,7 @@ mod tests {
         );
         let b = land_bounds(4096);
         let mut courses = 0;
-        for (_, c) in mgr.get_named::<FlowCourses>("rivers", b).iter() {
+        for (_, c) in mgr.graph().view::<FlowCourses>("rivers", b).iter() {
             for (wp, levels) in &c.courses {
                 courses += 1;
                 assert_eq!(wp.len(), levels.len());
@@ -1314,7 +1505,7 @@ mod tests {
         }
         assert!(courses > 0, "no rivers");
         let mut worms = 0;
-        for (_, c) in mgr.get_named::<WormBurrows>("caves", b).iter() {
+        for (_, c) in mgr.graph().view::<WormBurrows>("caves", b).iter() {
             for worm in &c.worms {
                 worms += 1;
                 assert!(worm.len() as u32 == WormCfg::default().steps);
@@ -1326,7 +1517,7 @@ mod tests {
     #[test]
     fn emit_site_recipe_produces_ops_and_markers_at_sites() {
         let build = || {
-            let mut mgr = test_manager(7);
+            let mut mgr = test_manager(7).around(LAND, IVec3::new(9216, 0, 9216));
             mgr.register_as(
                 "sites:ruins",
                 ScatterSites {
@@ -1361,10 +1552,10 @@ mod tests {
             Vec3::new(b.min.x as f32, -100.0, b.min.z as f32),
             Vec3::new(b.max.x as f32, 500.0, b.max.z as f32),
         );
-        let patches = build_patches(&mgr, "ruins", min, max);
+        let patches = build_patches(mgr.graph(), "ruins", min, max);
         // sites_in returns whole overlapping cells; markers are filtered
         // to the exact box — compare against the filtered set.
-        let all_sites = sites_in(&mgr, "sites:ruins", b.inflate(IVec3::splat(512)));
+        let all_sites = sites_in(mgr.graph(), "sites:ruins", b.inflate(IVec3::splat(512)));
         let sites: Vec<Vec2> = all_sites
             .iter()
             .copied()
@@ -1378,11 +1569,11 @@ mod tests {
             let near = all_sites.iter().any(|s| s.distance(p) < ELEM_PAD_M);
             assert!(near, "op at {p:?} far from every site");
         }
-        assert_eq!(patches, build_patches(&build(), "ruins", min, max));
+        assert_eq!(patches, build_patches(build().graph(), "ruins", min, max));
     }
 
     fn build_patches(
-        mgr: &LayerManager,
+        mgr: &LayerGraph,
         instance: &str,
         min: Vec3,
         max: Vec3,
@@ -1392,7 +1583,7 @@ mod tests {
 
     #[test]
     fn emit_path_slabs_seat_on_terrain_with_clearance() {
-        let mut mgr = test_manager(5);
+        let mut mgr = test_manager(5).around(LAND, IVec3::new(9216, 0, 9216));
         mgr.register_as(
             "sites:towns",
             ScatterSites {
@@ -1437,7 +1628,7 @@ mod tests {
             Vec3::new(b.min.x as f32, -100.0, b.min.z as f32),
             Vec3::new(b.max.x as f32, 500.0, b.max.z as f32),
         );
-        let patches = patches_in(&mgr, "roads", min, max);
+        let patches = patches_in(mgr.graph(), "roads", min, max);
         assert!(!patches.ops.is_empty(), "no road slabs");
         assert!(!patches.clearance.is_empty(), "no clearance segments");
         for op in &patches.ops {
@@ -1449,7 +1640,7 @@ mod tests {
             min + Vec3::new(2048.0, 0.0, 2048.0),
             max - Vec3::new(2048.0, 0.0, 2048.0),
         );
-        let sub = patches_in(&mgr, "roads", smin, smax);
+        let sub = patches_in(mgr.graph(), "roads", smin, smax);
         let expect: Vec<_> = patches
             .ops
             .iter()
@@ -1461,7 +1652,7 @@ mod tests {
 
     #[test]
     fn emit_ribbon_and_worm_cuts() {
-        let mut mgr = test_manager(5);
+        let mut mgr = test_manager(5).around(LAND, IVec3::new(9216, 0, 9216));
         mgr.register_as(
             "sites:springs",
             ScatterSites {
@@ -1536,7 +1727,7 @@ mod tests {
             Vec3::new(b.min.x as f32, -200.0, b.min.z as f32),
             Vec3::new(b.max.x as f32, 500.0, b.max.z as f32),
         );
-        let rivers = patches_in(&mgr, "rivers", min, max);
+        let rivers = patches_in(mgr.graph(), "rivers", min, max);
         assert!(!rivers.ribbons.is_empty(), "no ribbon segments");
         assert!(!rivers.ops.is_empty(), "no river bed ops");
         assert!(!rivers.clearance.is_empty(), "no river clearance");
@@ -1550,7 +1741,7 @@ mod tests {
             assert!(w.levels[1] <= w.levels[0] + 1e-4, "ribbon surface flows uphill");
             assert_eq!(w.material, 4);
         }
-        let caves = patches_in(&mgr, "caves", min, max);
+        let caves = patches_in(mgr.graph(), "caves", min, max);
         assert!(!caves.ops.is_empty(), "no cave cuts");
         for op in &caves.ops {
             assert_eq!(op.kind, voxel_core::csg::CSG_KIND_SPHERE_CUT);
@@ -1559,7 +1750,7 @@ mod tests {
 
     #[test]
     fn interior_stack_links_pockets_with_orthogonal_tubes() {
-        let mut mgr = test_manager(9);
+        let mut mgr = test_manager(9).around(IVec3::ZERO, IVec3::new(3072, 768, 3072));
         mgr.register_as(
             "sites:pockets",
             Scatter3Sites {
@@ -1615,7 +1806,7 @@ mod tests {
 
         // Sites snap to the floor lattice.
         let mut sites = Vec::new();
-        for (_, c) in mgr.get_named::<Scatter3Sites>("sites:pockets", b).iter() {
+        for (_, c) in mgr.graph().view::<Scatter3Sites>("sites:pockets", b).iter() {
             for s in &c.sites {
                 assert!((s.y / 44.0 - (s.y / 44.0).round()).abs() < 1e-3);
                 sites.push(*s);
@@ -1625,7 +1816,7 @@ mod tests {
 
         // Links exist, are orthogonal, and join real sites within reach.
         let mut links = 0;
-        for (_, c) in mgr.get_named::<Connect3Paths>("links", b).iter() {
+        for (_, c) in mgr.graph().view::<Connect3Paths>("links", b).iter() {
             for path in &c.paths {
                 links += 1;
                 assert!(path[0].distance(*path.last().unwrap()) < 400.0);
@@ -1644,10 +1835,10 @@ mod tests {
             Vec3::new(-1024.0, -264.0, -1024.0),
             Vec3::new(1024.0, 264.0, 1024.0),
         );
-        let pockets = patches_in(&mgr, "pockets", min, max);
+        let pockets = patches_in(mgr.graph(), "pockets", min, max);
         assert!(!pockets.ops.is_empty());
         assert!(!pockets.markers.is_empty());
-        let tubes = patches_in(&mgr, "tubes", min, max);
+        let tubes = patches_in(mgr.graph(), "tubes", min, max);
         assert!(!tubes.ops.is_empty(), "no tube geometry");
         assert!(
             tubes.ops.iter().any(|op| op.kind & 1 == 0)
@@ -1655,7 +1846,7 @@ mod tests {
             "tubes need both shell adds and bore cuts"
         );
         // Determinism.
-        let mut mgr2 = test_manager(9);
+        let mut mgr2 = test_manager(9).around(IVec3::ZERO, IVec3::new(3072, 768, 3072));
         mgr2.register_as(
             "sites:pockets",
             Scatter3Sites {
@@ -1666,7 +1857,7 @@ mod tests {
             },
         );
         let mut sites2 = Vec::new();
-        for (_, c) in mgr2.get_named::<Scatter3Sites>("sites:pockets", b).iter() {
+        for (_, c) in mgr2.graph().view::<Scatter3Sites>("sites:pockets", b).iter() {
             sites2.extend(c.sites.iter().copied());
         }
         assert_eq!(sites, sites2);
@@ -1674,7 +1865,11 @@ mod tests {
 
     #[test]
     fn biome_weights_partition_and_blend() {
-        let mut mgr = test_manager(11);
+        // The probe sweep below spans ~60 km of x and ~40 km of z.
+        let mut mgr = test_manager(11).around(
+            IVec3::new(768, 0, -20672),
+            IVec3::new(86016, 0, 61440),
+        );
         mgr.register_as(
             "biomes",
             BiomeField {
@@ -1688,7 +1883,7 @@ mod tests {
         let mut seen = [false; 2];
         for i in 0..64 {
             let p = Vec2::new(-30000.0 + 977.0 * i as f32, -40000.0 + 613.0 * i as f32);
-            let w = biome_weights_at(&mgr, "biomes", 2, p);
+            let w = biome_weights_at(mgr.graph(), "biomes", 2, p);
             let sum: f32 = w.iter().sum();
             assert!((sum - 1.0).abs() < 1e-4, "weights sum {sum}");
             for (b, &v) in w.iter().enumerate() {
@@ -1702,15 +1897,18 @@ mod tests {
         // Weights match a direct site query and blend near a site: at the
         // seed itself its biome dominates.
         let b = IAabb::new(IVec3::new(-8192, 0, -8192), IVec3::new(8192, 1, 8192));
-        for (_, c) in mgr.get_named::<BiomeField>("biomes", b).iter() {
-            let w = biome_weights_at(&mgr, "biomes", 2, c.site);
+        for (_, c) in mgr.graph().view::<BiomeField>("biomes", b).iter() {
+            let w = biome_weights_at(mgr.graph(), "biomes", 2, c.site);
             assert!(
                 w[c.biome as usize] > 0.9,
                 "seed site not dominated by its own biome"
             );
         }
         // Determinism.
-        let mut mgr2 = test_manager(11);
+        let mut mgr2 = test_manager(11).around(
+            IVec3::new(768, 0, -20672),
+            IVec3::new(86016, 0, 61440),
+        );
         mgr2.register_as(
             "biomes",
             BiomeField {
@@ -1722,14 +1920,14 @@ mod tests {
         );
         let p = Vec2::new(-27000.0, -38000.0);
         assert_eq!(
-            biome_weights_at(&mgr, "biomes", 2, p),
-            biome_weights_at(&mgr2, "biomes", 2, p)
+            biome_weights_at(mgr.graph(), "biomes", 2, p),
+            biome_weights_at(mgr2.graph(), "biomes", 2, p)
         );
     }
 
     #[test]
     fn biome_gated_scatter_concentrates_in_its_biome() {
-        let mut mgr = test_manager(11);
+        let mut mgr = test_manager(11).around(LAND, IVec3::new(17408, 0, 17408));
         mgr.register_as(
             "biomes",
             BiomeField {
@@ -1754,13 +1952,13 @@ mod tests {
             },
         );
         let b = land_bounds(8192);
-        let sites = sites_in(&mgr, "sites:gated", b);
+        let sites = sites_in(mgr.graph(), "sites:gated", b);
         assert!(!sites.is_empty(), "gate rejected everything");
         // Accepted sites average a high weight of their biome; the
         // probabilistic gate keeps some low-weight border sites (blending).
         let mean: f32 = sites
             .iter()
-            .map(|&p| biome_weights_at(&mgr, "biomes", 2, p)[0])
+            .map(|&p| biome_weights_at(mgr.graph(), "biomes", 2, p)[0])
             .sum::<f32>()
             / sites.len() as f32;
         // Acceptance probability = weight, so the accepted mean is
@@ -1774,7 +1972,7 @@ mod tests {
     /// cross, and floor-snapped sites must stay inside their owning cell.
     #[test]
     fn volumetric_emits_cover_all_y_rows_and_vertical_legs() {
-        let mut mgr = test_manager(9);
+        let mut mgr = test_manager(9).around(IVec3::ZERO, IVec3::new(3072, 1536, 3072));
         mgr.register_as(
             "sites:pockets",
             Scatter3Sites {
@@ -1829,7 +2027,7 @@ mod tests {
 
         // Sites stay strictly inside their owning cell after snapping.
         let b = IAabb::new(IVec3::new(-1024, -528, -1024), IVec3::new(1024, 528, 1024));
-        for (coord, c) in mgr.get_named::<Scatter3Sites>("sites:pockets", b).iter() {
+        for (coord, c) in mgr.graph().view::<Scatter3Sites>("sites:pockets", b).iter() {
             for site in &c.sites {
                 let lo = coord.y * 132;
                 let hi = lo + 132;
@@ -1844,7 +2042,7 @@ mod tests {
         // Markers surface from EVERY y row that has sites — including a
         // facade-style sentinel-y query.
         let all = patches_in(
-            &mgr,
+            mgr.graph(),
             "pockets",
             Vec3::new(-1024.0, -1.0e9, -1024.0),
             Vec3::new(1024.0, 1.0e9, 1024.0),
@@ -1862,7 +2060,7 @@ mod tests {
         );
         // A bounded-row query returns exactly that row's markers.
         let row1 = patches_in(
-            &mgr,
+            mgr.graph(),
             "pockets",
             Vec3::new(-1024.0, 132.0, -1024.0),
             Vec3::new(1024.0, 264.0, 1024.0),
@@ -1877,7 +2075,7 @@ mod tests {
         // exist near the leg midpoint even when it is far from the link
         // midpoint's owning row.
         let mut vertical_checked = 0;
-        for (_, c) in mgr.get_named::<Connect3Paths>("links", b).iter() {
+        for (_, c) in mgr.graph().view::<Connect3Paths>("links", b).iter() {
             for path in &c.paths {
                 for seg in path.windows(2) {
                     let d = seg[1] - seg[0];
@@ -1886,7 +2084,7 @@ mod tests {
                     }
                     let mid = (seg[0] + seg[1]) * 0.5 + Vec3::Y * 3.0;
                     let near = patches_in(
-                        &mgr,
+                        mgr.graph(),
                         "tubes",
                         mid - Vec3::splat(20.0),
                         mid + Vec3::splat(20.0),
@@ -1904,7 +2102,7 @@ mod tests {
 
     #[test]
     fn scatter_respects_terrain_filters() {
-        let mut mgr = test_manager(3);
+        let mut mgr = test_manager(3).around(LAND, IVec3::new(13312, 0, 13312));
         mgr.register_as(
             "sites:highland",
             ScatterSites {
@@ -1916,7 +2114,7 @@ mod tests {
                 },
             },
         );
-        let found = sites_in(&mgr, "sites:highland", land_bounds(6000));
+        let found = sites_in(mgr.graph(), "sites:highland", land_bounds(6000));
         assert!(!found.is_empty(), "no highland sites on the land region");
         let generator = generator(3);
         for p in found {

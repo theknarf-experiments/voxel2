@@ -14,11 +14,12 @@ pub mod structure;
 use std::sync::Arc;
 
 use bevy::prelude::*;
-use voxel_core::{csg::CsgOp, ChunkKey};
+use voxel_core::csg::CsgOp;
 use voxel_engine::{
     level::LevelDef,
-    planning::{HostPlanning, Marker, RibbonSeg, WorldPlanner, OPS_HORIZON_EDGE_M},
+    planning::{HostPlanning, Marker, PlanningStats, RibbonSeg, WorldPlanner, OPS_HORIZON_EDGE_M},
 };
+use voxel_layers::v2::{LayerGraph, LayerRuntime, TopDep, TopHandle};
 
 pub use schema::{PlanningDef, StackLayerDef};
 use schema::{validate_level, EmitDef};
@@ -45,17 +46,16 @@ const FACADE_Y_M: f32 = 2_560.0;
 /// layers implements [`WorldPlanner`] itself and never touches this.
 #[derive(Clone, Default)]
 pub struct StackPlanner {
-    /// The level's planning stack (one manager for all layers).
-    stack: Option<Arc<voxel_layers::LayerManager>>,
+    /// The level's planning stack: one graph for every layer, plus the
+    /// thread keeping its top dependencies satisfied.
+    stack: Option<Arc<LayerRuntime>>,
+    /// Handles for the top dependencies that follow the camera — one per
+    /// emit layer, plus one per biome field.
+    tops: Vec<TopHandle>,
     /// Emit instances and what each one can produce.
     emitters: Vec<Emitter>,
     /// Biome layers: (instance name, ordered biome names).
     biome_tables: Vec<(String, Vec<String>)>,
-    /// Radius (m) the prop/ribbon streamers query around the camera,
-    /// `None` when the level has neither. They ignore the LOD gates, so
-    /// they need their own ensure pass — a second top dependency with a
-    /// different size, in LayerProcGen terms.
-    streamer_radius: Option<f32>,
 }
 
 /// One emit layer as the facade sees it. `produces` keeps a query from
@@ -97,7 +97,8 @@ impl WorldPlanner for StackPlanner {
     /// per chunk, never per op.
     fn ops_in(&self, min: Vec3, max: Vec3, chunk_edge_m: f32) -> Vec<CsgOp> {
         let mut out = Vec::new();
-        if let Some(mgr) = &self.stack {
+        if let Some(rt) = &self.stack {
+            let mgr = rt.graph();
             for e in &self.emitters {
                 if e.gate.is_none_or(|g| chunk_edge_m <= g) {
                     out.extend(layers::patches_in(mgr, &e.name, min, max).ops);
@@ -107,91 +108,14 @@ impl WorldPlanner for StackPlanner {
         out
     }
 
-    /// Ensure the planning data every emitter needs for `keys` exists,
-    /// before anything reads it. Each emitter is ensured over the union
-    /// of the chunks that will actually query it: chunks past the global
-    /// ops horizon or past the emitter's carve-horizon gate are excluded,
-    /// so the resident planning set matches what can render.
-    fn prepare(&self, keys: &[ChunkKey]) {
-        let Some(mgr) = &self.stack else {
-            return;
-        };
-        // Per chunk, the exact box its ops query will cover: the chunk,
-        // the density apron the provider adds, and the element padding
-        // patches_in applies. A hull around all of them would generate
-        // planning for the hollow middle of the LOD shell.
-        let elem_pad = layers::ELEM_PAD_M;
-        let region_of = |key: &ChunkKey| -> voxel_layers::IAabb {
-            let edge = key.edge_m() as f32;
-            let apron = 4.0 * key.voxel_size_m() as f32;
-            let lo = key.min_corner_m().as_vec3() - Vec3::splat(apron + elem_pad);
-            let hi = key.min_corner_m().as_vec3() + Vec3::splat(edge + apron + elem_pad);
-            voxel_layers::IAabb::new(lo.as_ivec3(), hi.as_ivec3())
-        };
-        let focus = keys
-            .iter()
-            .min_by_key(|k| k.edge_m() as i64)
-            .map(|k| k.min_corner_m().as_vec3().as_ivec3())
-            .unwrap_or(bevy::math::IVec3::ZERO);
-        let mut regions: Vec<voxel_layers::IAabb> = Vec::with_capacity(keys.len());
-        for e in &self.emitters {
-            regions.clear();
-            regions.extend(
-                keys.iter()
-                    .filter(|k| {
-                        let edge = k.edge_m() as f32;
-                        edge <= OPS_HORIZON_EDGE_M && !e.gate.is_some_and(|g| edge > g)
-                    })
-                    .map(region_of),
-            );
-            if regions.is_empty() {
-                continue; // nothing in this batch queries this emitter
-            }
-            let stats = mgr.ensure_loaded_regions(&e.name, &regions, focus);
-            if std::env::var_os("VOXEL_LOG_LAYERS").is_some() {
-                info!(
-                    "prepare {}: {} generated, {} present, {} regions",
-                    e.name,
-                    stats.generated,
-                    stats.present,
-                    regions.len()
-                );
-            }
-        }
-
-        // Second top dependency: the streamers query a fixed radius around
-        // the camera, ungated — without this their first tiles generate
-        // planning (400-step river descents, scatter filters) on the MAIN
-        // thread.
-        let Some(radius) = self.streamer_radius else {
-            return;
-        };
-        let band = bevy::math::IVec3::new(radius as i32, FACADE_Y_M as i32, radius as i32);
-        let near = voxel_layers::IAabb::new(focus - band, focus + band);
-        // Every emitter: the prop streamers' carved-ground check
-        // (`cuts_in`) queries all of them, not just the ones producing
-        // ribbons or clearance.
-        for e in &self.emitters {
-            mgr.ensure_loaded_regions(&e.name, std::slice::from_ref(&near), focus);
-        }
-        // Spawner biome gates sample a wide influence window.
-        let biome_pad = bevy::math::IVec3::new(
-            layers::BIOME_INFLUENCE_CELLS,
-            0,
-            layers::BIOME_INFLUENCE_CELLS,
-        );
-        for (name, _) in &self.biome_tables {
-            mgr.ensure_loaded_regions(name, &[near.inflate(biome_pad)], focus);
-        }
-    }
-
     fn clearance_in(&self, min: bevy::math::Vec2, max: bevy::math::Vec2) -> Vec<[bevy::math::Vec2; 2]> {
         let (min3, max3) = (
             Vec3::new(min.x, -FACADE_Y_M, min.y),
             Vec3::new(max.x, FACADE_Y_M, max.y),
         );
         let mut out = Vec::new();
-        if let Some(mgr) = &self.stack {
+        if let Some(rt) = &self.stack {
+            let mgr = rt.graph();
             for e in self.emitters.iter().filter(|e| e.clearance) {
                 out.extend(layers::patches_in(mgr, &e.name, min3, max3).clearance);
             }
@@ -205,7 +129,8 @@ impl WorldPlanner for StackPlanner {
             Vec3::new(max.x, FACADE_Y_M, max.y),
         );
         let mut out = Vec::new();
-        if let Some(mgr) = &self.stack {
+        if let Some(rt) = &self.stack {
+            let mgr = rt.graph();
             for e in self.emitters.iter().filter(|e| e.ribbons) {
                 out.extend(layers::patches_in(mgr, &e.name, min3, max3).ribbons);
             }
@@ -218,9 +143,10 @@ impl WorldPlanner for StackPlanner {
     }
 
     fn biomes_at(&self, instance: &str, p: bevy::math::Vec2) -> Vec<(String, f32)> {
-        let Some(mgr) = &self.stack else {
+        let Some(rt) = &self.stack else {
             return Vec::new();
         };
+        let mgr = rt.graph();
         let Some(table) = self.biome_tables.iter().find_map(|(n, t)| {
             (n == instance).then_some(t)
         }) else {
@@ -241,7 +167,8 @@ impl WorldPlanner for StackPlanner {
             Vec3::new(max.x, FACADE_Y_M, max.y),
         );
         let mut out = Vec::new();
-        if let Some(mgr) = &self.stack {
+        if let Some(rt) = &self.stack {
+            let mgr = rt.graph();
             for e in self.emitters.iter().filter(|e| e.markers) {
                 out.extend(
                     layers::patches_in(mgr, &e.name, min3, max3)
@@ -254,9 +181,49 @@ impl WorldPlanner for StackPlanner {
         out
     }
 
-    fn layer_managers(&self) -> Vec<Arc<voxel_layers::LayerManager>> {
-        self.stack.iter().cloned().collect()
+    fn set_focus(&self, focus: bevy::math::IVec3) {
+        for top in &self.tops {
+            top.set_focus(focus);
+        }
     }
+
+    fn wait_idle(&self) {
+        if let Some(rt) = &self.stack {
+            rt.wait_idle();
+        }
+    }
+
+    fn stats(&self) -> PlanningStats {
+        self.stack.as_ref().map_or_else(PlanningStats::default, |rt| PlanningStats {
+            resident_chunks: rt.graph().resident_chunks(),
+            reads_missed: rt.graph().reads_missed(),
+            generating: rt.is_generating(),
+        })
+    }
+}
+
+/// A consumer's stated reach is where it starts asking, not where its
+/// question ends: a tile 3.3 km out still spans a kilometre of its own,
+/// and a chunk's ops query covers the chunk plus its density apron.
+/// Residency has to hold the far side of the box, so every reach gets the
+/// largest query box any consumer issues added to it.
+///
+/// Empirical, and that is the smell: this demo's streamers do not declare
+/// what they actually ask for — `prop_query_reach_m` says 3.3 km while
+/// something issues a kilometre-wide box out at 5.8 km. The old cache hid
+/// it by generating on read. The real fix is for those streamers to become
+/// layers with declared padding, at which point this constant goes away.
+const QUERY_BOX_SLACK_M: f32 = 3072.0;
+
+/// The largest chunk edge not exceeding `cap`. Chunk edges are
+/// `32 * 2^level`, so the ops horizon admits a specific edge, not the
+/// horizon value itself — and residency follows the edge.
+fn largest_leaf_edge(cap: f32) -> f32 {
+    let mut edge = 32.0f32;
+    while edge * 2.0 <= cap {
+        edge *= 2.0;
+    }
+    edge
 }
 
 impl StackPlanner {
@@ -271,11 +238,11 @@ impl StackPlanner {
         if def.stack.is_empty() {
             return None;
         }
-        // Every layer into ONE manager, in author order.
-        let mut mgr = voxel_layers::LayerManager::with_context(seed, generator.clone());
+        // Every layer into ONE graph, in author order.
+        let mut graph = LayerGraph::with_context(seed, generator.clone());
         let mut emitters = Vec::new();
         for layer in &def.stack {
-            layer.register(&def.stack, &def.structures, &mut mgr);
+            layer.register(&def.stack, &def.structures, &mut graph);
             if let StackLayerDef::Emit {
                 name,
                 max_chunk_edge_m,
@@ -286,7 +253,7 @@ impl StackPlanner {
                 emitters.push(Emitter::new(name.clone(), *max_chunk_edge_m, emit));
             }
         }
-        let biome_tables = def
+        let biome_tables: Vec<(String, Vec<String>)> = def
             .stack
             .iter()
             .filter_map(|d| match d {
@@ -297,27 +264,82 @@ impl StackPlanner {
                 _ => None,
             })
             .collect();
-        // Streamer working set, derived from the streamers themselves:
-        // scattered props (the far ring dominates) and ribbon surfaces.
-        // Levels with neither skip the pass entirely.
-        let mut streamer_radius: Option<f32> = None;
-        let mut want = |reach: f32| {
-            streamer_radius = Some(streamer_radius.map_or(reach, |r: f32| r.max(reach)));
-        };
-        for def in &level.scatter {
-            want((def.radius_tiles + 2) as f32 * def.tile_m);
+
+        // How far the host's own streamers query, ungated: scattered props
+        // (the far ring dominates) and ribbon surfaces.
+        let mut streamer_reach = 0.0f32;
+        for scatter in &level.scatter {
+            streamer_reach = streamer_reach.max((scatter.radius_tiles + 2) as f32 * scatter.tile_m);
         }
         if let Some(reach) = level.prop_query_reach_m {
-            want(reach);
+            streamer_reach = streamer_reach.max(reach);
         }
         if emitters.iter().any(|e| e.ribbons) {
-            want(RIBBON_QUERY_REACH_M);
+            streamer_reach = streamer_reach.max(RIBBON_QUERY_REACH_M);
         }
+
+        if std::env::var_os("VOXEL_LOG_LAYERS").is_some() {
+            info!("streamer reach {streamer_reach:.0} m");
+        }
+        // One top dependency per emit layer, sized to the furthest thing
+        // that can ask it for ops.
+        //
+        // A chunk of edge E stays a leaf while the camera is within
+        // `split_k * 2E` of it, so an emitter gated at edge G is never
+        // queried from further than that. The carve-horizon gate stops
+        // being a per-query filter and becomes a residency size — which is
+        // the whole point of expressing this as a dependency graph.
+        let split_k = level.lod.split_k as f32;
+        let mut deps = Vec::new();
+        for e in &emitters {
+            // What the chunk streamer needs is exact. A leaf of edge E
+            // stays a leaf while the camera is within `split_k * 2E`, and
+            // its ops query covers the chunk plus the density apron and
+            // the element pad. So a carve-horizon gate is not a filter any
+            // more — it is a residency size, in every axis.
+            let edge = largest_leaf_edge(e.gate.unwrap_or(OPS_HORIZON_EDGE_M));
+            let ops_reach = 2.0 * split_k * edge + edge + edge / 8.0 + layers::ELEM_PAD_M;
+
+            // What the host's own streamers need is not: they ignore gates
+            // and ask in boxes of their own. Only levels that have them pay
+            // for them — and only in xz, since those queries are facades
+            // over a fixed vertical band.
+            let (xz, y) = if streamer_reach > 0.0 {
+                (
+                    ops_reach.max(streamer_reach + QUERY_BOX_SLACK_M + layers::ELEM_PAD_M),
+                    FACADE_Y_M,
+                )
+            } else {
+                (ops_reach, ops_reach)
+            };
+            let size = bevy::math::IVec3::new(
+                (2.0 * xz) as i32,
+                (2.0 * y) as i32,
+                (2.0 * xz) as i32,
+            );
+            if std::env::var_os("VOXEL_LOG_LAYERS").is_some() {
+                info!("top dep {:?}: size {size:?}", e.name);
+            }
+            deps.push(TopDep::at_level(&e.name, 0, size));
+        }
+        // Biome gates are sampled directly by the host's spawners, over a
+        // wider window than any emitter covers.
+        let biome_reach = streamer_reach as i32 + layers::BIOME_INFLUENCE_CELLS;
+        for (name, _) in &biome_tables {
+            deps.push(TopDep::at_level(
+                name,
+                0,
+                bevy::math::IVec3::new(2 * biome_reach, 0, 2 * biome_reach),
+            ));
+        }
+
+        let runtime = Arc::new(LayerRuntime::start(Arc::new(graph), deps));
+        let tops = (0..runtime.tops()).map(|i| runtime.top(i)).collect();
         Some(Self {
-            stack: Some(Arc::new(mgr)),
+            stack: Some(runtime),
+            tops,
             emitters,
             biome_tables,
-            streamer_radius,
         })
     }
 }
@@ -375,12 +397,21 @@ mod tests {
     }
 
     fn seeded_world_for(def: &LevelDef, seed: u64) -> WorldQuery {
+        world_at(def, seed, Vec3::ZERO)
+    }
+
+    /// A world whose residency is focused where the test reads. Reads no
+    /// longer generate, so a test declares its working set like the game.
+    fn world_at(def: &LevelDef, seed: u64, focus: Vec3) -> WorldQuery {
         let generator = Arc::new(def.generator(seed));
         let world = WorldQuery::new(generator.clone());
-        match StackPlanning.build(def, seed, &generator) {
+        let world = match StackPlanning.build(def, seed, &generator) {
             Some(planner) => world.with_planner(planner),
             None => world,
-        }
+        };
+        world.set_focus(focus.as_ivec3());
+        world.wait_idle();
+        world
     }
 
     /// The whole point of per-world generator state: two levels with
@@ -529,8 +560,8 @@ mod tests {
     #[test]
     fn planet_stack_serves_gated_ops_through_world_query() {
         let planet = shipped("planet.json");
-        let world = world_for(&planet);
         // A land region large enough to hold every feature kind.
+        let world = world_at(&planet, 0, Vec3::new(-27000.0, 0.0, -38000.0));
         let min = Vec3::new(-31096.0, -200.0, -42096.0);
         let max = Vec3::new(-22904.0, 500.0, -33904.0);
         let fine = world.ops_in(min, max, 12.8);
@@ -576,7 +607,7 @@ mod tests {
         }
         assert!(dominant[0] && dominant[1], "biomes not regional: {dominant:?}");
         // Determinism across a fresh build.
-        let world2 = world_for(&planet);
+        let world2 = world_at(&planet, 0, Vec3::new(-27000.0, 0.0, -38000.0));
         assert_eq!(fine, world2.ops_in(min, max, 12.8));
     }
 }

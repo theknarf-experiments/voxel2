@@ -212,6 +212,12 @@ impl LayerGraph {
             .unwrap_or_else(|| panic!("layer instance is not registered"))
     }
 
+    /// Every registered instance name, for tooling that wants to hold
+    /// residency over a whole graph.
+    pub fn instances(&self) -> Vec<String> {
+        self.layers.values().map(|e| e.name.clone()).collect()
+    }
+
     /// Top level of a registered instance.
     pub fn top_level(&self, instance: &str) -> u32 {
         self.entry(layer_key(instance)).levels - 1
@@ -486,7 +492,19 @@ impl LayerGraph {
             }
         }
         if missing > 0 {
-            self.reads_missed.fetch_add(missing, Ordering::Relaxed);
+            let n = self.reads_missed.fetch_add(missing, Ordering::Relaxed);
+            // A miss means someone's working set is not covered. Name the
+            // instance and the box, capped so a systemic miss cannot
+            // drown the log.
+            if n < 40 && std::env::var_os("VOXEL_LOG_LAYERS").is_some() {
+                eprintln!(
+                    "read miss: {:?} level {level} wanted {:?}..{:?}, {missing} of {} chunks absent",
+                    entry.name,
+                    bounds.min,
+                    bounds.max,
+                    missing + chunks.len(),
+                );
+            }
         }
         View {
             chunks,
@@ -757,7 +775,36 @@ pub struct View<L: Layer> {
     _marker: PhantomData<L>,
 }
 
+/// A borrowed chunk. Holds the read lock for as long as it is alive, so
+/// iteration releases each chunk before touching the next.
+pub struct ChunkRef<'a, C> {
+    guard: std::sync::RwLockReadGuard<'a, ErasedChunk>,
+    _marker: PhantomData<C>,
+}
+
+impl<C: 'static> std::ops::Deref for ChunkRef<'_, C> {
+    type Target = C;
+    fn deref(&self) -> &C {
+        self.guard
+            .downcast_ref::<C>()
+            .expect("layer chunk type mismatch")
+    }
+}
+
 impl<L: Layer> View<L> {
+    /// The resident chunks, in deterministic (z, y, x ascending) order.
+    pub fn iter(&self) -> impl Iterator<Item = (IVec3, ChunkRef<'_, L::Chunk>)> {
+        self.chunks.iter().map(|(coord, slot)| {
+            (
+                *coord,
+                ChunkRef {
+                    guard: slot.data.read().unwrap(),
+                    _marker: PhantomData,
+                },
+            )
+        })
+    }
+
     pub fn for_each(&self, mut f: impl FnMut(IVec3, &L::Chunk)) {
         for (coord, slot) in &self.chunks {
             let data = slot.data.read().unwrap();

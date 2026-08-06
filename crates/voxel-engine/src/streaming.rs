@@ -99,17 +99,6 @@ impl Default for LodConfig {
 #[derive(Resource, Default)]
 pub struct StreamingRebuild(pub bool);
 
-/// Dependency-driven pre-generation for a batch of chunks the planner is
-/// about to request — the engine's "top dependency" in LayerProcGen
-/// terms. Called inside the async planning task BEFORE any ops query, so
-/// the planning closure generates in parallel, nearest-first, off the
-/// main thread; the per-chunk ops queries that follow are cache reads.
-#[derive(Resource, Default, Clone)]
-pub struct ChunkOpsPrepare(pub Option<Arc<PrepareFn>>);
-
-/// Pre-generate planning data for a batch of chunk keys.
-pub type PrepareFn = dyn Fn(&[ChunkKey]) + Send + Sync;
-
 /// The fully-converged starting configuration for a fresh world: the
 /// exact final LOD per region (no intermediate levels are ever
 /// generated), revealed in one atomic commit — the alternative,
@@ -129,7 +118,6 @@ fn plan_genesis(
     config: &LodConfig,
     anchor: DVec3,
     provider: Option<&(dyn Fn(ChunkKey) -> Vec<CsgOp> + Send + Sync)>,
-    prepare: Option<&PrepareFn>,
 ) -> GenesisPlan {
     let t0 = std::time::Instant::now();
     // 1. Pure field descent: the exact configuration the field wants.
@@ -208,13 +196,6 @@ fn plan_genesis(
             }
         })
     };
-    // Pre-generate the planning closure for everything about to be
-    // requested, then read: one parallel pass instead of thousands of
-    // serial read-driven generations.
-    let keys: Vec<ChunkKey> = leaves.iter().copied().collect();
-    if let Some(prepare) = prepare {
-        prepare(&keys);
-    }
     let mut to_request = Vec::new();
     for leaf in &leaves {
         let mask = post.seam_mask(config.max_level, *leaf);
@@ -543,7 +524,6 @@ impl Plugin for VoxelStreamingPlugin {
             .init_resource::<StreamingRebuild>()
             .init_resource::<LodTree>()
             .init_resource::<StreamProbe>()
-            .init_resource::<ChunkOpsPrepare>()
             .add_systems(Update, (lod_tick, log_fps));
     }
 }
@@ -575,7 +555,6 @@ fn plan_epoch(tree: &LodTree, config: &LodConfig, anchor: DVec3) -> Option<Epoch
         config,
         anchor,
         None,
-        None,
         EPOCH_MAX_SPLITS,
     )
 }
@@ -587,7 +566,6 @@ fn plan_epoch_snapshot(
     config: &LodConfig,
     anchor: DVec3,
     provider: Option<&(dyn Fn(ChunkKey) -> Vec<CsgOp> + Send + Sync)>,
-    prepare: Option<&PrepareFn>,
     split_cap: usize,
 ) -> Option<Epoch> {
     // Deep splits: each wanted leaf is replaced by its full field-wanted
@@ -784,12 +762,7 @@ fn plan_epoch_snapshot(
             epoch.to_request.push((leaf, m, true, None));
         }
     }
-    // Pre-generate the planning closure for the whole epoch in one
-    // parallel pass, then fill the per-chunk ops from cache.
-    if let Some(prepare) = prepare {
-        let keys: Vec<ChunkKey> = epoch.to_request.iter().map(|(k, ..)| *k).collect();
-        prepare(&keys);
-    }
+    // Fill each chunk's ops from resident planning, off the main thread.
     for (key, _, _, ops) in epoch.to_request.iter_mut() {
         *ops = ops_for(*key);
     }
@@ -827,8 +800,7 @@ fn lod_tick(
     mut tree: ResMut<LodTree>,
     queue: Res<ChunkCommandQueue>,
     ops_provider: Res<ChunkOpsProvider>,
-    prepare: Res<ChunkOpsPrepare>,
-    layers: Res<crate::planning::PlanningLayers>,
+    world: Res<crate::planning::WorldQuery>,
     mut rebuild: ResMut<StreamingRebuild>,
     ready_rx: Res<ChunkReadyChannel>,
     mut field: ResMut<voxel_render::FieldParams>,
@@ -929,8 +901,8 @@ fn lod_tick(
                 info!(
                     "genesis: world revealed ({} chunks, {} planning chunks cached, {} read-generated)",
                     tree.leaves.len(),
-                    layers.0.iter().map(|m| m.cached_chunks()).sum::<usize>(),
-                    layers.0.iter().map(|m| m.read_generated()).sum::<usize>(),
+                    world.stats().resident_chunks,
+                    world.stats().reads_missed,
                 );
             } else {
                 tree.genesis = Some(plan);
@@ -938,10 +910,9 @@ fn lod_tick(
         } else {
             let config = config.clone();
             let provider = ops_provider.0.clone();
-            let prepare = prepare.0.clone();
             tree.genesis_planning = Some(bevy::tasks::AsyncComputeTaskPool::get().spawn(
                 async move {
-                    plan_genesis(&config, anchor, provider.as_deref(), prepare.as_deref())
+                    plan_genesis(&config, anchor, provider.as_deref())
                 },
             ));
         }
@@ -1007,7 +978,6 @@ fn lod_tick(
             let sent_masks = tree.sent_masks.clone();
             let config = config.clone();
             let provider = ops_provider.0.clone();
-            let prepare = prepare.0.clone();
             let split_cap = if tree
                 .split_cooldown_until
                 .is_none_or(|until| std::time::Instant::now() >= until)
@@ -1024,7 +994,6 @@ fn lod_tick(
                     &config,
                     anchor,
                     provider.as_deref(),
-                    prepare.as_deref(),
                     split_cap,
                 )
             }));
@@ -1137,11 +1106,7 @@ fn lod_tick(
         }
     }
 
-    probe.read_generated = layers
-        .0
-        .iter()
-        .map(|mgr| mgr.read_generated())
-        .sum();
+    probe.read_generated = world.stats().reads_missed;
     probe.world_ready =
         tree.genesis.is_none() && tree.genesis_planning.is_none() && !tree.leaves.is_empty();
     probe.leaves = tree.leaves.len();
