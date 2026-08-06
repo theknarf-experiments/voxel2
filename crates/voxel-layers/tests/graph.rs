@@ -364,3 +364,51 @@ fn shared_chunks_survive_one_holder_leaving() {
     graph.process_top(&mut b);
     assert_eq!(graph.resident_chunks(), 0);
 }
+
+// ------------------------------------------------------------------ runtime
+
+/// The generation thread picks up a focus published by another thread and
+/// brings residency in line with it — the app never blocks on generation.
+#[test]
+fn runtime_follows_a_published_focus() {
+    use voxel_layers::v2::LayerRuntime;
+
+    let ledger = Arc::new(Ledger::default());
+    let graph = Arc::new(graph(ledger.clone(), 0, 0, 2));
+    let top = TopDep::new(&graph, "play", IVec3::new(CELL * 4, 0, CELL * 4));
+    let runtime = LayerRuntime::start(graph.clone(), vec![top]);
+    let handle = runtime.top(0);
+
+    handle.set_focus(IVec3::new(CELL / 2, 0, CELL / 2));
+    runtime.wait_idle();
+    let resident = graph.resident_in("play");
+    assert!(resident > 0, "focus published but nothing generated");
+
+    // Somewhere else entirely: the old closure goes, the new one arrives,
+    // and the resident count does not grow.
+    handle.set_focus(IVec3::new(CELL * 500, 0, -CELL * 500));
+    runtime.wait_idle();
+    assert_eq!(graph.resident_in("play"), resident);
+}
+
+/// Dropping a world runs every chunk's destroy. Without that, a layer that
+/// owned entities or GPU slots would leak them on teardown.
+#[test]
+fn dropping_the_runtime_releases_everything() {
+    use voxel_layers::v2::LayerRuntime;
+
+    let ledger = Arc::new(Ledger::default());
+    let graph = Arc::new(graph(ledger.clone(), 1, CELL, 2));
+    {
+        let top = TopDep::new(&graph, "play", IVec3::new(CELL * 3, 0, CELL * 3));
+        let runtime = LayerRuntime::start(graph.clone(), vec![top]);
+        runtime.top(0).set_focus(IVec3::new(CELL / 2, 0, CELL / 2));
+        runtime.wait_idle();
+        assert!(graph.resident_chunks() > 0);
+    }
+    assert_eq!(graph.resident_chunks(), 0);
+    assert_eq!(
+        ledger.created.load(Ordering::Relaxed),
+        ledger.destroyed.load(Ordering::Relaxed),
+    );
+}

@@ -26,9 +26,11 @@
 
 mod graph;
 mod layer;
+mod runtime;
 mod store;
 
 pub use graph::{ChunkCtx, LayerGraph, TopDep, View};
+pub use runtime::{LayerRuntime, TopHandle};
 pub use layer::{Dep, Layer, LayerChunk, FINAL_LEVEL};
 pub use store::Usage;
 

@@ -597,6 +597,10 @@ impl TopDep {
         }
     }
 
+    pub fn size(&self) -> IVec3 {
+        self.size
+    }
+
     pub fn changed(&self) -> bool {
         self.changed
     }
