@@ -101,7 +101,7 @@ fn status(
             "epoch_waits": p.epoch_waits,
             "epoch_to_request": p.epoch_to_request,
             "epoch_age_s": p.epoch_age_s,
-            "read_generated": p.read_generated,
+            "reads_missed": p.reads_missed,
         });
     }
     if let Some(s) = stats {

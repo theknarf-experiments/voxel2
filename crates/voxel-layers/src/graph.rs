@@ -816,15 +816,6 @@ impl<L: Layer> View<L> {
         }
     }
 
-    /// Fold over the resident chunks — `for_each` with an accumulator, for
-    /// the common "collect things from the neighbourhood" shape.
-    pub fn fold<T>(&self, init: T, mut f: impl FnMut(T, IVec3, &L::Chunk) -> T) -> T {
-        let mut acc = Some(init);
-        self.for_each(|coord, chunk| {
-            acc = Some(f(acc.take().expect("fold accumulator"), coord, chunk));
-        });
-        acc.expect("fold accumulator")
-    }
 
     pub fn len(&self) -> usize {
         self.chunks.len()

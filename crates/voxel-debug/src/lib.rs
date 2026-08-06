@@ -38,8 +38,8 @@ fn engine_hud(
         }
     }
     hud.0.push(format!(
-        "leaves: {} | planning cached reads: {}",
-        probe.leaves, probe.read_generated
+        "leaves: {} | planning reads missed: {}",
+        probe.leaves, probe.reads_missed
     ));
 }
 
