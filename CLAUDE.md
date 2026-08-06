@@ -9,16 +9,20 @@ architecture. Design plan: `~/.claude/plans/binary-twirling-brooks.md`.
 - `cargo run -p voxel2 -- levels/<name>.json` — visual verification is
   mandatory for render changes: run ~35 s (LOD refinement needs time),
   screenshot, and look. Use `caffeinate -dis` so the display can't sleep,
-  and capture only the app window region: `screencapture -x -R390,160,1245,730 out.png`.
+  and take shots with `voxctl shot` — NEVER `screencapture -R`, which
+  grabs whatever is on screen, not the app.
 - Env vars for repeatable scenes: `VOXEL_START=x,y,z`, `VOXEL_LOOK=dx,dy,dz`,
   `VOXEL_AUTOPILOT=<m/s>`.
 - PREFER live verification over relaunch cycles: run with `VOXEL_REMOTE=1`
   and drive via `cargo run -p voxctl -q -- status | goto X Y Z [DIR] |
-  water/markers/ops X Z [R] | scan X Z [R] [STEP] | shot PATH`
+  ribbons/markers/ops X Z [R] | scan X Z [R] [STEP] | shot PATH`
   (offscreen screenshots; wait ~1 s for the file, ~10-15 s after a goto
   for streaming). `scan` ranks scenic spots; F8/F9 (or `raw voxel/viz`)
   toggle chunk/layer debug overlays.
 - Zero `Validation Error` lines in the log is part of "verified".
+- Kill running app processes before spawning another and after each
+  capture. An fps reading taken while anything else compiles is
+  contention, not a measurement.
 
 ## Invariants that bite
 
@@ -32,16 +36,23 @@ architecture. Design plan: `~/.claude/plans/binary-twirling-brooks.md`.
   baked-shadow march (mesh shader ↔ voxel_worldgen::sun_shadow).
 - **Worlds are data, not code**: never add a world-kind enum,
   world-specific shader, feature flag, or shading branch; extend the op
-  set (voxel-core::worldop + both interpreters + GenOpDef — water is a
-  meta op; vegetation is spawner data), the planning-stack vocabulary
-  (voxel_worldgen::stack + StackLayerDef + validate_stack), the
-  structure grammar (voxel_worldgen::structure + StructureDef — NEVER
-  add a hand-written recipe fn; a new structure is level JSON), or the
-  material recipe kinds
-  (voxel-render WorldMaterial ↔ MaterialDef::pack ↔ the WGSL
-  MaterialTable — field-position layout twins) and express the world in
-  the level JSON. Lighting/haze are the level's `environment` block.
-  `voxel_engine` tests pin the shipped JSONs to the reference programs.
+  set (voxel-core::worldop + both interpreters + GenOpDef — vegetation is
+  scatter data), the material recipe kinds (voxel-render WorldMaterial ↔
+  MaterialDef::pack ↔ the WGSL MaterialTable — field-position layout
+  twins), or the host's planning vocabulary, and express the world in the
+  level JSON. `voxel_engine` tests pin the shipped JSONs to the reference
+  programs.
+- **The crates hold no named nouns and no concrete layers.** A reusable
+  crate may contain primitives (ribbon, scatter point, descent walk,
+  A* path) but never an instance of a domain noun — water, river, grass,
+  tree, ruin are level data the host interprets. Likewise `voxel-layers`
+  is the LayerProcGen *framework* only; concrete layers are the game's,
+  written against `voxel_engine::planning::WorldPlanner` (this demo's
+  live in `demos/voxel2/src/planning/`, driven by the level's opaque
+  `planning` block — NEVER add a hand-written structure recipe fn; a new
+  structure is level JSON). The engine keeps only what seams depend on:
+  the ops horizon, the density apron, and per-chunk (never per-op)
+  gating.
 - Count pass and emit passes in `voxel_mesh_chunks.wgsl` must agree
   *exactly* on skip rules — allocation uses counted values.
 - `map_async` on the counts staging ring only the frame *after* the copy
