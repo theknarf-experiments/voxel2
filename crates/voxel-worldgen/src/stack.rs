@@ -944,8 +944,15 @@ impl Layer for EmitPatches {
     }
 }
 
+/// Planar structure recipes the `site_recipe` emit accepts (level
+/// loaders validate against this before registration).
+pub const RECIPES: &[&str] = &["ruin", "dungeon"];
+/// Volumetric recipes the `site_recipe3` emit accepts.
+pub const RECIPES3: &[&str] = &["pocket"];
+
 /// Structure recipes by name. Unknown names panic: level JSON referencing
-/// a recipe that does not exist is an authoring error, not a soft skip.
+/// a recipe that does not exist is an authoring error the level loader
+/// screens out before registration — reaching this is a bug.
 fn recipe_ops(recipe: &str, site: Vec2, rng: &mut voxel_core::seed::Rng, out: &mut Vec<CsgOp>) {
     match recipe {
         "ruin" => crate::ruins::ruin_recipe_ops(site, rng, out),

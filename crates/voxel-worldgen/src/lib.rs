@@ -99,6 +99,12 @@ pub fn patch_density(xz: Vec2, scale: f32, offset: Vec2, contrast: f32, bias: f3
 /// heightfield. Mirrors the WGSL bake in voxel_mesh_chunks.wgsl (sun
 /// direction and falloff must stay in sync).
 pub fn sun_shadow(pos: glam::Vec3) -> f32 {
+    // Twin of the GPU gate: a heightless program (interiors) casts no
+    // terrain shadow — without this, terrain_height == 0 darkens
+    // everything below y = 0 on the CPU side only.
+    if !program::program().iter().any(|op| op.is_height_op()) {
+        return 1.0;
+    }
     let sun = program::sun_direction().normalize();
     let mut occ = 0.0f32;
     let mut t = 8.0f32;

@@ -1327,30 +1327,162 @@ impl EmitDef {
     }
 }
 
+/// The kind tag of a stack layer, for source-compatibility checks.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum StackKind {
+    Biomes,
+    Scatter,
+    Scatter3,
+    Connect,
+    Connect3,
+    Flow,
+    Worm,
+    Emit,
+}
+
+/// Validate a level's planning stack before anything registers: every
+/// authoring error (bad reference, unknown recipe, kind mismatch,
+/// misordered declaration) fails HERE with a message, never as a panic
+/// at registration or mid-generation. Boot fails loudly on an invalid
+/// shipped level; hot reload warns and keeps the running world.
+pub fn validate_stack(stack: &[StackLayerDef]) -> Result<(), String> {
+    use voxel_worldgen::stack::{RECIPES, RECIPES3};
+    let mut declared: Vec<(&str, StackKind)> = Vec::new();
+    let kind_of = |declared: &[(&str, StackKind)], source: &str| -> Option<StackKind> {
+        declared
+            .iter()
+            .find_map(|(n, k)| (*n == source).then_some(*k))
+    };
+    // A `source` must name an EARLIER layer of the expected kind (the
+    // registration order the layer manager requires).
+    let check_source = |declared: &[(&str, StackKind)],
+                        owner: &str,
+                        source: &str,
+                        expect: StackKind|
+     -> Result<(), String> {
+        match kind_of(declared, source) {
+            Some(k) if k == expect => Ok(()),
+            Some(k) => Err(format!(
+                "layer {owner:?}: source {source:?} is a {k:?} layer, expected {expect:?}"
+            )),
+            None => Err(format!(
+                "layer {owner:?}: source {source:?} is not declared earlier in the stack"
+            )),
+        }
+    };
+    for def in stack {
+        let (name, kind) = match def {
+            StackLayerDef::Biomes { name, table, .. } => {
+                if table.is_empty() {
+                    return Err(format!("biome layer {name:?} has an empty table"));
+                }
+                (name.as_str(), StackKind::Biomes)
+            }
+            StackLayerDef::Scatter { name, biome, .. }
+            | StackLayerDef::Scatter3 { name, biome, .. } => {
+                if let Some(reference) = biome {
+                    StackLayerDef::biome_gate(&declared, stack, name, reference)?;
+                }
+                let kind = if matches!(def, StackLayerDef::Scatter { .. }) {
+                    StackKind::Scatter
+                } else {
+                    StackKind::Scatter3
+                };
+                (name.as_str(), kind)
+            }
+            StackLayerDef::Connect { name, source, .. } => {
+                check_source(&declared, name, source, StackKind::Scatter)?;
+                (name.as_str(), StackKind::Connect)
+            }
+            StackLayerDef::Connect3 { name, source, .. } => {
+                check_source(&declared, name, source, StackKind::Scatter3)?;
+                (name.as_str(), StackKind::Connect3)
+            }
+            StackLayerDef::Flow { name, source, .. } => {
+                check_source(&declared, name, source, StackKind::Scatter)?;
+                (name.as_str(), StackKind::Flow)
+            }
+            StackLayerDef::Worm { name, source, .. } => {
+                check_source(&declared, name, source, StackKind::Scatter)?;
+                (name.as_str(), StackKind::Worm)
+            }
+            StackLayerDef::Emit {
+                name,
+                source,
+                emit,
+                ..
+            } => {
+                let expect = match emit {
+                    EmitDef::PathSlabs { .. } => StackKind::Connect,
+                    EmitDef::CourseWater { .. } => StackKind::Flow,
+                    EmitDef::WormCuts => StackKind::Worm,
+                    EmitDef::SiteRecipe { recipe, .. } => {
+                        if !RECIPES.contains(&recipe.as_str()) {
+                            return Err(format!(
+                                "layer {name:?}: unknown recipe {recipe:?} (known: {RECIPES:?})"
+                            ));
+                        }
+                        StackKind::Scatter
+                    }
+                    EmitDef::SiteRecipe3 { recipe, .. } => {
+                        if !RECIPES3.contains(&recipe.as_str()) {
+                            return Err(format!(
+                                "layer {name:?}: unknown recipe {recipe:?} (known: {RECIPES3:?})"
+                            ));
+                        }
+                        StackKind::Scatter3
+                    }
+                    EmitDef::Tubes { .. } => StackKind::Connect3,
+                };
+                check_source(&declared, name, source, expect)?;
+                (name.as_str(), StackKind::Emit)
+            }
+        };
+        if declared.iter().any(|(n, _)| *n == name) {
+            return Err(format!("duplicate stack layer name {name:?}"));
+        }
+        declared.push((name, kind));
+    }
+    Ok(())
+}
+
 impl StackLayerDef {
     /// Resolve an "instance:biome" reference against earlier stack layers.
-    fn biome_gate(stack: &[StackLayerDef], reference: &str) -> voxel_worldgen::stack::BiomeGate {
-        let (instance, biome_name) = reference
-            .rsplit_once(':')
-            .unwrap_or_else(|| panic!("biome ref {reference:?} is not \"instance:biome\""));
+    fn biome_gate(
+        declared: &[(&str, StackKind)],
+        stack: &[StackLayerDef],
+        owner: &str,
+        reference: &str,
+    ) -> Result<voxel_worldgen::stack::BiomeGate, String> {
+        let Some((instance, biome_name)) = reference.rsplit_once(':') else {
+            return Err(format!(
+                "layer {owner:?}: biome ref {reference:?} is not \"instance:biome\""
+            ));
+        };
+        if !declared.is_empty() && !declared.iter().any(|(n, _)| *n == instance) {
+            return Err(format!(
+                "layer {owner:?}: biome layer {instance:?} is not declared earlier in the stack"
+            ));
+        }
         for def in stack {
             if let StackLayerDef::Biomes { name, table, .. } = def {
                 if name == instance {
-                    let biome = table
-                        .iter()
-                        .position(|(n, _)| n == biome_name)
-                        .unwrap_or_else(|| {
-                            panic!("biome {biome_name:?} not in layer {instance:?}")
-                        });
-                    return voxel_worldgen::stack::BiomeGate {
+                    let Some(biome) = table.iter().position(|(n, _)| n == biome_name) else {
+                        return Err(format!(
+                            "layer {owner:?}: biome {biome_name:?} not in layer {instance:?}"
+                        ));
+                    };
+                    return Ok(voxel_worldgen::stack::BiomeGate {
                         instance: instance.to_string(),
                         biome: biome as u32,
                         n_biomes: table.len(),
-                    };
+                    });
                 }
             }
         }
-        panic!("biome layer {instance:?} not found in stack");
+        Err(format!(
+            "layer {owner:?}: biome layer {instance:?} not found in stack"
+        ))
     }
 
     fn register(&self, stack: &[StackLayerDef], mgr: &mut voxel_layers::LayerManager) {
@@ -1380,7 +1512,10 @@ impl StackLayerDef {
                         margin_m,
                         altitude,
                         up,
-                        biome: biome.map(|r| Self::biome_gate(stack, &r)),
+                        biome: biome.map(|r| {
+                            Self::biome_gate(&[], stack, &name, &r)
+                                .expect("stack validated before registration")
+                        }),
                     },
                 },
             ),
@@ -1457,7 +1592,10 @@ impl StackLayerDef {
                         chance,
                         margin_m,
                         snap_y_m,
-                        biome: biome.map(|r| Self::biome_gate(stack, &r)),
+                        biome: biome.map(|r| {
+                            Self::biome_gate(&[], stack, &name, &r)
+                                .expect("stack validated before registration")
+                        }),
                     },
                 },
             ),
@@ -1643,6 +1781,9 @@ impl Plugin for LevelPlugin {
 
         let program = apply_generator(&level);
         let water = water_surface(&program);
+        if let Err(e) = validate_stack(&level.stack) {
+            panic!("level {:?} has an invalid planning stack: {e}", level.name);
+        }
         let (ops_provider, world_query, planning_layers) = build_ops_provider(&level);
         // Pre-warm the planning caches the vegetation streamers will hit,
         // inside the async genesis task (cold layer generation must never
@@ -2077,6 +2218,12 @@ fn reload_level(
             return;
         }
     };
+    // Authoring errors in the stack must never take down a live session:
+    // keep the running world and report, exactly like a parse error.
+    if let Err(e) = validate_stack(&new.stack) {
+        warn!("level reload: invalid planning stack — {e}");
+        return;
+    }
 
     // Presentation: apply directly.
     let c = new.clear_color;
@@ -2421,6 +2568,65 @@ mod tests {
             "no ops within 40 m of pocket marker at {:?}",
             m.pos
         );
+    }
+
+    #[test]
+    fn stack_validation_catches_authoring_errors() {
+        let parse = |json: &str| -> Vec<StackLayerDef> { serde_json::from_str(json).unwrap() };
+        // The shipped stacks validate.
+        let planet = LevelDef::from_json(&shipped("planet.json")).unwrap();
+        validate_stack(&planet.stack).unwrap();
+        let mega = LevelDef::from_json(&shipped("megastructure.json")).unwrap();
+        validate_stack(&mega.stack).unwrap();
+
+        let cases: &[(&str, &str)] = &[
+            // Unknown recipe name.
+            (
+                r#"[{"kind":"scatter","name":"s","chance":1.0},
+                    {"kind":"emit","name":"e","source":"s","pad_m":0.0,
+                     "emit":{"type":"site_recipe","recipe":"castle"}}]"#,
+                "unknown recipe",
+            ),
+            // Biome ref to a missing layer.
+            (
+                r#"[{"kind":"scatter","name":"s","chance":1.0,"biome":"nope:forest"}]"#,
+                "not found in stack",
+            ),
+            // Biome name missing from the table.
+            (
+                r#"[{"kind":"biomes","name":"b","table":[["forest",1.0]]},
+                    {"kind":"scatter","name":"s","chance":1.0,"biome":"b:desert"}]"#,
+                "not in layer",
+            ),
+            // Source declared later (registration order).
+            (
+                r#"[{"kind":"connect","name":"c","source":"s"},
+                    {"kind":"scatter","name":"s","chance":1.0}]"#,
+                "not declared earlier",
+            ),
+            // Source of the wrong kind for the emit.
+            (
+                r#"[{"kind":"scatter","name":"s","chance":1.0},
+                    {"kind":"emit","name":"e","source":"s","pad_m":0.0,
+                     "emit":{"type":"worm_cuts"}}]"#,
+                "expected Worm",
+            ),
+            // Duplicate names.
+            (
+                r#"[{"kind":"scatter","name":"s","chance":1.0},
+                    {"kind":"scatter","name":"s","chance":0.5}]"#,
+                "duplicate",
+            ),
+            // Empty biome table.
+            (r#"[{"kind":"biomes","name":"b","table":[]}]"#, "empty table"),
+        ];
+        for (json, expect) in cases {
+            let err = validate_stack(&parse(json)).unwrap_err();
+            assert!(
+                err.contains(expect),
+                "error {err:?} missing {expect:?} for {json}"
+            );
+        }
     }
 
     #[test]

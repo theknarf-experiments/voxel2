@@ -89,6 +89,14 @@ fn smin(a: f32, b: f32, k: f32) -> f32 {
 
 // --- deterministic hashes / noise --------------------------------------------
 
+// Round half-up, shared with the CPU twin (`round_half_up` there):
+// WGSL round() is half-to-even, Rust's is half-away-from-zero, and
+// lattice registers land exactly on halves — the hash gates keyed on
+// the rounded level must agree bit-for-bit across the twins.
+fn round_half_up(x: f32) -> f32 {
+    return floor(x + 0.5);
+}
+
 fn hash2(p: vec2<i32>) -> f32 {
     var h: u32 = u32(p.x) * 374761393u + u32(p.y) * 668265263u
         + prog.count.z * 2654435769u;
@@ -236,7 +244,7 @@ fn eval_program(p: vec3<f32>, vs: f32) -> WorldSample {
                 if (SOLID < d) { d = SOLID; mat = op.head.z; }
             }
             case 4u: { // y lattice registers
-                level = round(p.y / op.p0.x);
+                level = round_half_up(p.y / op.p0.x);
                 fy = p.y - level * op.p0.x;
             }
             case 5u: { // slabs on the lattice
@@ -254,7 +262,7 @@ fn eval_program(p: vec3<f32>, vs: f32) -> WorldSample {
             }
             case 7u: { // pillars
                 let sp = op.p0.x;
-                let c = vec2<i32>(round(pxz / sp));
+                let c = vec2<i32>(vec2<f32>(round_half_up(pxz.x / sp), round_half_up(pxz.y / sp)));
                 let jit = vec2<f32>(hash2(c) - 0.5, hash2(c + vec2<i32>(311, 77)) - 0.5) * op.p0.y;
                 let q = pxz - vec2<f32>(c) * sp - jit;
                 let girth = op.p0.z + hash2(c + vec2<i32>(9, -4)) * op.p0.w;
@@ -267,12 +275,12 @@ fn eval_program(p: vec3<f32>, vs: f32) -> WorldSample {
                 var a = p.x;
                 var b = p.z;
                 if (along_z) { a = p.z; b = p.x; }
-                let wi = round(a / sp);
+                let wi = round_half_up(a / sp);
                 let w = a - wi * sp;
                 if (hash2(vec2<i32>(i32(wi) + i32(op.p1.x), i32(level))) < op.p0.z) {
                     var wall = abs(w) - op.p0.y;
                     let dc = op.p1.y;
-                    let ci = round(b / dc);
+                    let ci = round_half_up(b / dc);
                     let cl = b - ci * dc;
                     if (hash3(vec3<i32>(i32(wi), i32(ci), i32(level) + i32(op.p1.w))) < op.p1.z) {
                         let doorway = sd_box(vec3<f32>(w, fy + op.p2.w, cl), op.p2.xyz);
@@ -283,7 +291,7 @@ fn eval_program(p: vec3<f32>, vs: f32) -> WorldSample {
             }
             case 9u: { // shaft registers
                 let sp = op.p0.x;
-                let c = vec2<i32>(round(pxz / sp));
+                let c = vec2<i32>(vec2<f32>(round_half_up(pxz.x / sp), round_half_up(pxz.y / sp)));
                 let jit = vec2<f32>(
                     hash2(c + vec2<i32>(41, 13)) - 0.5,
                     hash2(c + vec2<i32>(-7, 99)) - 0.5,
@@ -297,7 +305,7 @@ fn eval_program(p: vec3<f32>, vs: f32) -> WorldSample {
             }
             case 11u: { // catwalk beams
                 let n = op.p0.x;
-                if (abs(level - round(level / n) * n) < 0.5) {
+                if (abs(level - round_half_up(level / n) * n) < 0.5) {
                     let beam = max(
                         max(abs(sxz.y) - op.p0.y, abs(fy + op.p0.z) - op.p0.w),
                         length(sxz) - (sr + op.p1.x),

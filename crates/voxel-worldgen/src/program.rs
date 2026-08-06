@@ -8,6 +8,15 @@
 use std::sync::{Arc, RwLock};
 
 use glam::{IVec2, IVec3, Vec2, Vec3};
+
+/// Round half-up, shared with the WGSL twin (`round_half_up` there):
+/// WGSL `round` is half-to-even, Rust's is half-away-from-zero, and
+/// lattice registers land exactly on halves (spacing 44 at y = 22) —
+/// hash gates key on the rounded level, so the twins must agree.
+#[inline]
+fn round_half_up(x: f32) -> f32 {
+    (x + 0.5).floor()
+}
 use voxel_core::worldop::*;
 
 use crate::{fbm_mode, hash2};
@@ -133,7 +142,7 @@ pub fn eval(ops: &[WorldOp], p: Vec3, vs: f32) -> (f32, u32) {
                 mat = op.material;
             }
             WOP_LATTICE_Y => {
-                level = (p.y / op.p0[0]).round();
+                level = round_half_up(p.y / op.p0[0]);
                 fy = p.y - level * op.p0[0];
             }
             WOP_SLABS_Y => {
@@ -157,7 +166,7 @@ pub fn eval(ops: &[WorldOp], p: Vec3, vs: f32) -> (f32, u32) {
             }
             WOP_PILLARS_XZ => {
                 let sp = op.p0[0];
-                let c = IVec2::new((p.x / sp).round() as i32, (p.z / sp).round() as i32);
+                let c = IVec2::new(round_half_up(p.x / sp) as i32, round_half_up(p.z / sp) as i32);
                 let jit =
                     Vec2::new(hash2(c) - 0.5, hash2(c + IVec2::new(311, 77)) - 0.5) * op.p0[1];
                 let q = pxz - Vec2::new(c.x as f32, c.y as f32) * sp - jit;
@@ -172,13 +181,13 @@ pub fn eval(ops: &[WorldOp], p: Vec3, vs: f32) -> (f32, u32) {
                 let sp = op.p0[0];
                 let along_z = op.p0[3] > 0.5;
                 let (a, b) = if along_z { (p.z, p.x) } else { (p.x, p.z) };
-                let wi = (a / sp).round();
+                let wi = round_half_up(a / sp);
                 let w = a - wi * sp;
                 let gate = hash2(IVec2::new(wi as i32 + op.p1[0] as i32, level as i32));
                 if gate < op.p0[2] {
                     let mut wall = w.abs() - op.p0[1];
                     let dc = op.p1[1];
-                    let ci = (b / dc).round();
+                    let ci = round_half_up(b / dc);
                     let cl = b - ci * dc;
                     if hash3(IVec3::new(
                         wi as i32,
@@ -200,7 +209,7 @@ pub fn eval(ops: &[WorldOp], p: Vec3, vs: f32) -> (f32, u32) {
             }
             WOP_SHAFTS_XZ => {
                 let sp = op.p0[0];
-                let c = IVec2::new((p.x / sp).round() as i32, (p.z / sp).round() as i32);
+                let c = IVec2::new(round_half_up(p.x / sp) as i32, round_half_up(p.z / sp) as i32);
                 let jit = Vec2::new(
                     hash2(c + IVec2::new(41, 13)) - 0.5,
                     hash2(c + IVec2::new(-7, 99)) - 0.5,
@@ -212,7 +221,7 @@ pub fn eval(ops: &[WorldOp], p: Vec3, vs: f32) -> (f32, u32) {
             WOP_SHAFTS_CUT => d = d.max(-shaft),
             WOP_BEAMS => {
                 let n = op.p0[0];
-                if (level - (level / n).round() * n).abs() < 0.5 {
+                if (level - round_half_up(level / n) * n).abs() < 0.5 {
                     let beam = (sxz.y.abs() - op.p0[1])
                         .max((fy + op.p0[2]).abs() - op.p0[3])
                         .max(sxz.length() - (sr + op.p1[0]));
