@@ -1,66 +1,15 @@
-//! Ruins planning: deterministic scattered ruin sites (broken wall rings,
-//! tower stubs, fallen blocks) emitted as CSG ops for the GPU density pass.
-//!
-//! Structured as a self-contained 256 m planning cell for now; this slots
-//! into a `voxel-layers` Layer the moment ruins need cross-cell context
-//! (roads between sites, etc.). Placement conforms to the terrain via the
-//! CPU height mirror, so walls sit on slopes correctly.
+//! The "ruin" structure recipe (broken wall ring, tower stubs, fallen
+//! blocks), placed by the stack's `site_recipe` emit. Geometry conforms
+//! to the terrain via the CPU height mirror, so walls sit on slopes.
 
-use glam::{IVec3, Vec2, Vec3};
+use glam::{Vec2, Vec3};
 use voxel_core::csg::CsgOp;
-use voxel_core::seed::{chunk_seed, Rng};
+use voxel_core::seed::Rng;
 
-use crate::{terrain_height, terrain_up};
+use crate::terrain_height;
 
-const CELL_M: f32 = 256.0;
-const RUIN_SEED: u64 = 0x8115;
 /// Stone material id for carved/added geometry.
 pub const MAT_STONE: u32 = 3;
-
-/// All ops from ruin cells overlapping the box `[min, max]` (world meters),
-/// filtered to ops that actually touch it.
-pub fn ruins_ops(seed: u64, chance: f32, min: Vec3, max: Vec3) -> Vec<CsgOp> {
-    let lo_x = ((min.x - 40.0) / CELL_M).floor() as i32;
-    let hi_x = ((max.x + 40.0) / CELL_M).floor() as i32;
-    let lo_z = ((min.z - 40.0) / CELL_M).floor() as i32;
-    let hi_z = ((max.z + 40.0) / CELL_M).floor() as i32;
-    let mut out = Vec::new();
-    for cz in lo_z..=hi_z {
-        for cx in lo_x..=hi_x {
-            cell_ops(seed, chance, cx, cz, &mut out);
-        }
-    }
-    out.retain(|op| op.touches(min, max));
-    out
-}
-
-/// The ruin site of a 256 m planning cell, if any. Shared by the ruin
-/// geometry below and the sites/roads layers.
-pub fn site_center(seed: u64, chance: f32, cx: i32, cz: i32) -> Option<Vec2> {
-    let mut rng = Rng::new(chunk_seed(RUIN_SEED ^ seed, 0x101, IVec3::new(cx, 0, cz)));
-    if rng.next_f32() > chance {
-        return None; // most cells have no ruin
-    }
-    let center_xz = Vec2::new(
-        cx as f32 * CELL_M + 32.0 + rng.next_f32() * (CELL_M - 64.0),
-        cz as f32 * CELL_M + 32.0 + rng.next_f32() * (CELL_M - 64.0),
-    );
-    let ground = terrain_height(center_xz, 1.0);
-    // Ruins stand on gentle inland ground.
-    if !(8.0..280.0).contains(&ground) || terrain_up(center_xz, 1.0) < 0.88 {
-        return None;
-    }
-    Some(center_xz)
-}
-
-fn cell_ops(seed: u64, chance: f32, cx: i32, cz: i32, out: &mut Vec<CsgOp>) {
-    let Some(center_xz) = site_center(seed, chance, cx, cz) else {
-        return;
-    };
-    // Fresh sub-seeded stream for the layout, independent of site selection.
-    let mut rng = Rng::new(chunk_seed(RUIN_SEED ^ seed, 0x202, IVec3::new(cx, 0, cz)));
-    ruin_recipe_ops(center_xz, &mut rng, out);
-}
 
 /// The ruin structure recipe: geometry for one site, from any rng stream.
 /// Largest reach from the site: ring radius (17) + tower radius — well
@@ -135,32 +84,25 @@ pub fn ruin_recipe_ops(center_xz: Vec2, rng: &mut Rng, out: &mut Vec<CsgOp>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use voxel_core::seed::{chunk_seed, Rng};
 
     #[test]
-    fn deterministic_and_culled() {
-        let min = Vec3::new(-2048.0, -100.0, -2048.0);
-        let max = Vec3::new(2048.0, 400.0, 2048.0);
-        let a = ruins_ops(0, 0.32, min, max);
-        let b = ruins_ops(0, 0.32, min, max);
-        assert_eq!(a.len(), b.len());
-        for (x, y) in a.iter().zip(&b) {
-            assert_eq!(x, y);
-        }
-        // Everything returned touches the query box.
+    fn recipe_is_deterministic_and_terrain_seated() {
+        let site = Vec2::new(-26800.0, -37900.0);
+        let ops = |salt: u64| {
+            let mut rng = Rng::new(chunk_seed(salt, 0x77, glam::IVec3::new(4, 0, 2)));
+            let mut out = Vec::new();
+            ruin_recipe_ops(site, &mut rng, &mut out);
+            out
+        };
+        let a = ops(1);
+        assert_eq!(a, ops(1));
+        assert_ne!(a, ops(2));
+        assert!(!a.is_empty());
+        // Walls seat near the terrain around the site.
         for op in &a {
-            assert!(op.touches(min, max));
+            let ground = terrain_height(Vec2::new(op.center[0], op.center[2]), 1.0);
+            assert!((op.center[1] - ground).abs() < 14.0, "op far from ground");
         }
-    }
-
-    #[test]
-    fn some_region_has_ruins() {
-        // Over a large area at least one ruin site must exist.
-        let ops = ruins_ops(
-            0,
-            0.32,
-            Vec3::new(-8192.0, -500.0, -8192.0),
-            Vec3::new(8192.0, 600.0, 8192.0),
-        );
-        assert!(!ops.is_empty(), "no ruins in 16 km x 16 km");
     }
 }

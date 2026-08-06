@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use glam::{IVec3, Vec2};
 use voxel_core::seed::Rng;
-use voxel_layers::{Dep, IAabb, Layer, LayerCtx, LayerManager};
+use voxel_layers::{Dep, Layer, LayerCtx, LayerManager};
 
 const CHUNK_M: i32 = 256;
 const POINTS_PER_CHUNK: usize = 8;

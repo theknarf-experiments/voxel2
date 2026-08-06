@@ -1688,8 +1688,8 @@ impl Plugin for LevelPlugin {
             .add_systems(Startup, setup_level)
             .add_systems(Update, (autopilot, walk_mode).chain())
             .add_systems(Update, roll_planning_caches)
-            .init_resource::<crate::water_mesh::WaterMeshTiles>()
-            .add_systems(Update, crate::water_mesh::stream_water_meshes)
+            .init_resource::<crate::river_water::RiverWaterTiles>()
+            .add_systems(Update, crate::river_water::stream_river_water)
             .init_resource::<crate::debug_viz::DebugViz>()
             .add_systems(
                 Update,
@@ -1810,7 +1810,7 @@ impl WorldQuery {
             return Vec::new();
         };
         let w = voxel_worldgen::stack::biome_weights_at(mgr, instance, table.len(), p);
-        table.iter().cloned().zip(w).map(|(n, v)| (n, v)).collect()
+        table.iter().cloned().zip(w).collect()
     }
 
     /// Markers overlapping the xz box, optionally of one kind (findable
@@ -2174,6 +2174,126 @@ fn reload_level(
     *level = new;
 }
 
+
+/// Flies the camera forward when `VOXEL_AUTOPILOT` is set (m/s).
+fn autopilot(mut cameras: Query<&mut Transform, With<Camera3d>>, time: Res<Time>) {
+    let Ok(speed) = std::env::var("VOXEL_AUTOPILOT") else {
+        return;
+    };
+    let speed: f32 = speed.parse().unwrap_or(50.0);
+    let level_flight = std::env::var("VOXEL_AUTOPILOT_LEVEL").is_ok();
+    for mut transform in &mut cameras {
+        let mut dir = *transform.forward();
+        if level_flight {
+            dir.y = 0.0;
+            dir = dir.normalize_or_zero();
+        }
+        transform.translation += dir * speed * time.delta_secs();
+    }
+}
+
+/// `VOXEL_WALK=1`: on-foot mode. `walk: terrain` glues the camera to the
+/// generator's heightfield mirror; `walk: sdf` does gravity + capsule
+/// collision against the full SDF mirror (including planned ops).
+fn walk_mode(
+    level: Res<LevelDef>,
+    world: Res<WorldQuery>,
+    mut cameras: Query<&mut Transform, With<Camera3d>>,
+    time: Res<Time>,
+    mut fall_speed: Local<f32>,
+    mut spawned: Local<bool>,
+) {
+    if std::env::var("VOXEL_WALK").is_err() {
+        return;
+    }
+    match level.walk {
+        WalkDef::Terrain => {
+            for mut t in &mut cameras {
+                let h = voxel_worldgen::terrain_height(
+                    bevy::math::Vec2::new(t.translation.x, t.translation.z),
+                    1.0,
+                );
+                t.translation.y = h + 1.75;
+            }
+        }
+        WalkDef::Sdf => {
+            use voxel_worldgen::mega::{mega_sdf, mega_sdf_with_ops};
+            const RADIUS: f32 = 0.5;
+            const EYE: f32 = 1.6;
+            let floor_spacing =
+                voxel_worldgen::program::lattice_y_spacing(&voxel_worldgen::program::program())
+                    .unwrap_or(44.0);
+
+            for mut t in &mut cameras {
+                // Collision mirrors the GPU world: planned ops around the
+                // player come from the same facade chunks are served from.
+                let local_ops = world.ops_in(
+                    t.translation - Vec3::splat(30.0),
+                    t.translation + Vec3::splat(30.0),
+                    0.0,
+                );
+                let sdf = |p: Vec3| mega_sdf_with_ops(p, &local_ops);
+                let grad = |p: Vec3| {
+                    let e = 0.1;
+                    Vec3::new(
+                        sdf(p + Vec3::X * e) - sdf(p - Vec3::X * e),
+                        sdf(p + Vec3::Y * e) - sdf(p - Vec3::Y * e),
+                        sdf(p + Vec3::Z * e) - sdf(p - Vec3::Z * e),
+                    )
+                    .normalize_or_zero()
+                };
+                // First tick: relocate onto solid floor (spawn cells can be
+                // holes).
+                if !*spawned {
+                    *spawned = true;
+                    'probe: for r in 0..40 {
+                        for (dx, dz) in [(1.0, 0.3), (-0.7, 1.0), (0.4, -1.0), (-1.0, -0.5)] {
+                            let p = t.translation
+                                + Vec3::new(dx * r as f32 * 4.0, 0.0, dz * r as f32 * 4.0);
+                            let floor = (p.y / floor_spacing).round() * floor_spacing;
+                            let foot = Vec3::new(p.x, floor, p.z);
+                            if mega_sdf(foot) < -1.0 {
+                                t.translation = Vec3::new(foot.x, floor + 1.5 + EYE, foot.z);
+                                break 'probe;
+                            }
+                        }
+                    }
+                }
+
+                // Clamped dt + substeps so hitches can't tunnel through
+                // 1.5 m floor slabs.
+                let dt = time.delta_secs().min(0.033);
+                *fall_speed = (*fall_speed - 22.0 * dt).max(-30.0);
+                let mut body = t.translation - Vec3::Y * EYE;
+                let mut remaining = *fall_speed * dt;
+                while remaining.abs() > 0.0 {
+                    let step = remaining.clamp(-0.4, 0.4);
+                    body.y += step;
+                    remaining -= step;
+                    for _ in 0..4 {
+                        let d = sdf(body);
+                        if d < RADIUS {
+                            let n = grad(body);
+                            body += n * (RADIUS - d);
+                            if n.y > 0.5 {
+                                *fall_speed = 0.0;
+                                remaining = 0.0;
+                            }
+                        }
+                    }
+                }
+                for _ in 0..4 {
+                    let d = sdf(body);
+                    if d < RADIUS {
+                        body += grad(body) * (RADIUS - d);
+                    }
+                }
+                t.translation = body + Vec3::Y * EYE;
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2372,124 +2492,5 @@ mod tests {
         let mega = LevelDef::from_json(&shipped("megastructure.json")).unwrap();
         let packed: Vec<_> = mega.generator.iter().map(GenOpDef::pack).collect();
         assert_eq!(packed, voxel_worldgen::program::mega_program());
-    }
-}
-
-/// Flies the camera forward when `VOXEL_AUTOPILOT` is set (m/s).
-fn autopilot(mut cameras: Query<&mut Transform, With<Camera3d>>, time: Res<Time>) {
-    let Ok(speed) = std::env::var("VOXEL_AUTOPILOT") else {
-        return;
-    };
-    let speed: f32 = speed.parse().unwrap_or(50.0);
-    let level_flight = std::env::var("VOXEL_AUTOPILOT_LEVEL").is_ok();
-    for mut transform in &mut cameras {
-        let mut dir = *transform.forward();
-        if level_flight {
-            dir.y = 0.0;
-            dir = dir.normalize_or_zero();
-        }
-        transform.translation += dir * speed * time.delta_secs();
-    }
-}
-
-/// `VOXEL_WALK=1`: on-foot mode. `walk: terrain` glues the camera to the
-/// generator's heightfield mirror; `walk: sdf` does gravity + capsule
-/// collision against the full SDF mirror (including planned ops).
-fn walk_mode(
-    level: Res<LevelDef>,
-    world: Res<WorldQuery>,
-    mut cameras: Query<&mut Transform, With<Camera3d>>,
-    time: Res<Time>,
-    mut fall_speed: Local<f32>,
-    mut spawned: Local<bool>,
-) {
-    if std::env::var("VOXEL_WALK").is_err() {
-        return;
-    }
-    match level.walk {
-        WalkDef::Terrain => {
-            for mut t in &mut cameras {
-                let h = voxel_worldgen::terrain_height(
-                    bevy::math::Vec2::new(t.translation.x, t.translation.z),
-                    1.0,
-                );
-                t.translation.y = h + 1.75;
-            }
-        }
-        WalkDef::Sdf => {
-            use voxel_worldgen::mega::{mega_sdf, mega_sdf_with_ops};
-            const RADIUS: f32 = 0.5;
-            const EYE: f32 = 1.6;
-            let floor_spacing =
-                voxel_worldgen::program::lattice_y_spacing(&voxel_worldgen::program::program())
-                    .unwrap_or(44.0);
-
-            for mut t in &mut cameras {
-                // Collision mirrors the GPU world: planned ops around the
-                // player come from the same facade chunks are served from.
-                let local_ops = world.ops_in(
-                    t.translation - Vec3::splat(30.0),
-                    t.translation + Vec3::splat(30.0),
-                    0.0,
-                );
-                let sdf = |p: Vec3| mega_sdf_with_ops(p, &local_ops);
-                let grad = |p: Vec3| {
-                    let e = 0.1;
-                    Vec3::new(
-                        sdf(p + Vec3::X * e) - sdf(p - Vec3::X * e),
-                        sdf(p + Vec3::Y * e) - sdf(p - Vec3::Y * e),
-                        sdf(p + Vec3::Z * e) - sdf(p - Vec3::Z * e),
-                    )
-                    .normalize_or_zero()
-                };
-                // First tick: relocate onto solid floor (spawn cells can be
-                // holes).
-                if !*spawned {
-                    *spawned = true;
-                    'probe: for r in 0..40 {
-                        for (dx, dz) in [(1.0, 0.3), (-0.7, 1.0), (0.4, -1.0), (-1.0, -0.5)] {
-                            let p = t.translation
-                                + Vec3::new(dx * r as f32 * 4.0, 0.0, dz * r as f32 * 4.0);
-                            let floor = (p.y / floor_spacing).round() * floor_spacing;
-                            let foot = Vec3::new(p.x, floor, p.z);
-                            if mega_sdf(foot) < -1.0 {
-                                t.translation = Vec3::new(foot.x, floor + 1.5 + EYE, foot.z);
-                                break 'probe;
-                            }
-                        }
-                    }
-                }
-
-                // Clamped dt + substeps so hitches can't tunnel through
-                // 1.5 m floor slabs.
-                let dt = time.delta_secs().min(0.033);
-                *fall_speed = (*fall_speed - 22.0 * dt).max(-30.0);
-                let mut body = t.translation - Vec3::Y * EYE;
-                let mut remaining = *fall_speed * dt;
-                while remaining.abs() > 0.0 {
-                    let step = remaining.clamp(-0.4, 0.4);
-                    body.y += step;
-                    remaining -= step;
-                    for _ in 0..4 {
-                        let d = sdf(body);
-                        if d < RADIUS {
-                            let n = grad(body);
-                            body += n * (RADIUS - d);
-                            if n.y > 0.5 {
-                                *fall_speed = 0.0;
-                                remaining = 0.0;
-                            }
-                        }
-                    }
-                }
-                for _ in 0..4 {
-                    let d = sdf(body);
-                    if d < RADIUS {
-                        body += grad(body) * (RADIUS - d);
-                    }
-                }
-                t.translation = body + Vec3::Y * EYE;
-            }
-        }
     }
 }

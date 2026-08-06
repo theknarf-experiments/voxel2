@@ -16,7 +16,7 @@ const WATER_TILE_M: f32 = 256.0;
 const WATER_RADIUS: i32 = 6;
 
 #[derive(Resource, Default)]
-pub struct WaterMeshTiles {
+pub struct RiverWaterTiles {
     tiles: HashMap<IVec2, Vec<RiverSegGpu>>,
 }
 
@@ -33,11 +33,11 @@ fn water_color(level: &LevelDef, id: u32) -> [f32; 4] {
     [0.16, 0.34, 0.44, 0.0]
 }
 
-pub fn stream_water_meshes(
+pub fn stream_river_water(
     probe: Res<crate::streaming::StreamProbe>,
     level: Res<LevelDef>,
     world: Res<WorldQuery>,
-    mut tiles: ResMut<WaterMeshTiles>,
+    mut tiles: ResMut<RiverWaterTiles>,
     mut rivers: ResMut<voxel_render::RiverWater>,
     cameras: Query<&Transform, (With<Camera3d>, Without<voxel_render::HelperCamera>)>,
 ) {

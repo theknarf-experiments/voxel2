@@ -114,6 +114,7 @@ struct FarForest {
     tiles: HashMap<IVec2, Option<Entity>>,
 }
 
+#[allow(clippy::too_many_arguments)]
 fn stream_far_forest(
     probe: Res<crate::streaming::StreamProbe>,
     mut commands: Commands,
@@ -379,7 +380,7 @@ fn tile_road_segments(
 fn on_road(segments: &[[Vec2; 2]], p: Vec2) -> bool {
     segments
         .iter()
-        .any(|[a, b]| voxel_worldgen::roads::dist_to_segment(p, *a, *b) < ROAD_CLEAR_M)
+        .any(|[a, b]| voxel_worldgen::path::dist_to_segment(p, *a, *b) < ROAD_CLEAR_M)
 }
 
 /// Soft altitude-band gate: 1 inside, fading linearly to 0 across
@@ -829,8 +830,6 @@ struct TreeInstance {
     pos: Vec3,
     /// Full placement rotation (align/tilt/yaw) for near meshes.
     rot: Quat,
-    /// Yaw alone for the crossed-quad impostors.
-    yaw: f32,
     scale: f32,
     species: usize,
 }
@@ -923,7 +922,6 @@ fn tile_trees(
         out.push(TreeInstance {
             pos: Vec3::new(x, y - sink, z),
             rot: placement_rotation(&trees.placement, xz, yaw, &mut rng),
-            yaw,
             scale,
             species,
         });

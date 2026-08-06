@@ -131,9 +131,25 @@ pub fn find_path(
     None
 }
 
+/// Distance from `p` to the segment `a`-`b` (prop clearance checks).
+pub fn dist_to_segment(p: Vec2, a: Vec2, b: Vec2) -> f32 {
+    let ab = b - a;
+    let t = ((p - a).dot(ab) / ab.length_squared().max(1e-12)).clamp(0.0, 1.0);
+    p.distance(a + ab * t)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dist_to_segment_basics() {
+        let a = Vec2::new(0.0, 0.0);
+        let b = Vec2::new(10.0, 0.0);
+        assert!((dist_to_segment(Vec2::new(5.0, 3.0), a, b) - 3.0).abs() < 1e-5);
+        assert!((dist_to_segment(Vec2::new(-4.0, 0.0), a, b) - 4.0).abs() < 1e-5);
+        assert!((dist_to_segment(Vec2::new(13.0, 4.0), a, b) - 5.0).abs() < 1e-5);
+    }
 
     #[test]
     fn flat_ground_is_nearly_straight() {

@@ -1,26 +1,12 @@
-//! Rivers: layered planning (LayerProcGen style). Springs are rare
-//! high-ground sites; each river is a deterministic steepest-descent walk
-//! over the coarse height field down to the sea (or a pit, where it ends
-//! in a pond). The course carves a bed and fills a water-material slab.
+//! River hydrology: the deterministic pond-and-spill descent walk the
+//! stack's `flow` layer kind runs from its spring sites.
 
-use glam::{IVec3, Vec2, Vec3};
-use voxel_core::csg::CsgOp;
-use voxel_layers::{Dep, IAabb, Layer, LayerCtx, LayerManager};
-use voxel_core::seed::{chunk_seed, Rng};
+use glam::Vec2;
 
-use crate::terrain_height;
-
-const CELL_M: i32 = 512;
-const SPRING_SEED: u64 = 0x51_BE_5;
-/// Coarse height sampling for the descent (matches roads' GeoGrid vs).
+/// Coarse height sampling for the descent.
 pub const FLOW_HEIGHT_VS: f32 = 8.0;
 /// Descent step (meters).
 pub const FLOW_STEP_M: f32 = 8.0;
-const MAX_STEPS: usize = 400;
-/// Conservative river reach for the cell scan.
-pub const REACH_M: f32 = (MAX_STEPS as f32 * FLOW_STEP_M) + 64.0;
-/// Water material id in the level's material table.
-pub const MAT_RIVER: u32 = 4;
 
 /// Parameters of the descent walk.
 pub struct FlowParams {
@@ -37,7 +23,7 @@ impl Default for FlowParams {
         Self {
             step_m: FLOW_STEP_M,
             stop_level: 0.4,
-            max_steps: MAX_STEPS,
+            max_steps: 400,
             max_spill_rise: 7.0,
         }
     }
@@ -87,9 +73,8 @@ pub fn flow_path(height: &dyn Fn(Vec2) -> f32, start: Vec2, params: &FlowParams)
         // Pond: bounded Dijkstra for the nearest node lower than the pond
         // entry, over lattice nodes no higher than floor + spill rise.
         let ceiling = h_here + params.max_spill_rise;
-        let mut open: std::collections::BinaryHeap<(
-            std::cmp::Reverse<(u32, (i32, i32))>,
-        )> = Default::default();
+        type Frontier = std::collections::BinaryHeap<(std::cmp::Reverse<(u32, (i32, i32))>,)>;
+        let mut open: Frontier = Default::default();
         let mut came: std::collections::HashMap<(i32, i32), (i32, i32)> = Default::default();
         came.insert(cur, cur);
         open.push((std::cmp::Reverse((0, cur)),));
@@ -136,252 +121,6 @@ pub fn flow_path(height: &dyn Fn(Vec2) -> f32, start: Vec2, params: &FlowParams)
         }
     }
     path
-}
-
-/// The spring of a cell, if any: rare, high, reasonably flat ground.
-pub fn spring(seed: u64, chance: f32, cx: i32, cz: i32) -> Option<Vec2> {
-    let mut rng = Rng::new(chunk_seed(SPRING_SEED ^ seed, 0x11, IVec3::new(cx, 0, cz)));
-    if rng.next_f32() > chance {
-        return None;
-    }
-    let x = cx as f32 * CELL_M as f32 + 48.0 + rng.next_f32() * (CELL_M as f32 - 96.0);
-    let z = cz as f32 * CELL_M as f32 + 48.0 + rng.next_f32() * (CELL_M as f32 - 96.0);
-    let p = Vec2::new(x, z);
-    let h = terrain_height(p, FLOW_HEIGHT_VS);
-    if !(60.0..400.0).contains(&h) {
-        return None;
-    }
-    Some(p)
-}
-
-/// Springs layer: one candidate site per 512 m cell.
-pub struct SpringsLayer {
-    pub seed: u64,
-    pub chance: f32,
-}
-
-pub struct SpringsChunk {
-    pub spring: Option<Vec2>,
-}
-
-impl Layer for SpringsLayer {
-    type Chunk = SpringsChunk;
-    const NAME: &'static str = "worldgen/springs";
-
-    fn chunk_extent(&self) -> IVec3 {
-        IVec3::new(CELL_M, 0, CELL_M)
-    }
-
-    fn generate(&self, _ctx: &LayerCtx<'_, Self>, coord: IVec3) -> SpringsChunk {
-        SpringsChunk {
-            spring: spring(self.seed, self.chance, coord.x, coord.z),
-        }
-    }
-}
-
-/// One river: waypoints from spring to mouth, widening downstream, with
-/// a monotonically non-increasing water line (running minimum of the
-/// terrain along the course — per-segment levels stair-step on slopes
-/// and read as floating slabs).
-#[derive(Clone, Debug, PartialEq)]
-pub struct River {
-    pub waypoints: Vec<Vec2>,
-    pub levels: Vec<f32>,
-}
-
-pub struct RiversChunk {
-    pub rivers: Vec<River>,
-}
-
-/// Rivers layer: each cell's spring (if any) produces its full course,
-/// owned by the spring's cell.
-pub struct RiversLayer;
-
-impl Layer for RiversLayer {
-    type Chunk = RiversChunk;
-    const NAME: &'static str = "worldgen/rivers";
-
-    fn chunk_extent(&self) -> IVec3 {
-        IVec3::new(CELL_M, 0, CELL_M)
-    }
-
-    fn dependencies(&self) -> Vec<Dep> {
-        vec![Dep::of::<SpringsLayer>(IVec3::ZERO)]
-    }
-
-    fn generate(&self, ctx: &LayerCtx<'_, Self>, _coord: IVec3) -> RiversChunk {
-        let own = ctx.chunk_bounds();
-        let view = ctx.get::<SpringsLayer>(own);
-        let mut rivers = Vec::new();
-        for (_, chunk) in view.iter() {
-            if let Some(start) = chunk.spring {
-                let waypoints = flow_path(
-                    &|p| terrain_height(p, FLOW_HEIGHT_VS),
-                    start,
-                    &FlowParams::default(),
-                );
-                if waypoints.len() >= 6 {
-                    let mut level = f32::MAX;
-                    let levels = waypoints
-                        .iter()
-                        .map(|p| {
-                            level = level.min(terrain_height(*p, FLOW_HEIGHT_VS) - 0.35);
-                            level
-                        })
-                        .collect();
-                    rivers.push(River { waypoints, levels });
-                }
-            }
-        }
-        RiversChunk { rivers }
-    }
-}
-
-/// Segment index: river segments bucketed by the cell that owns their
-/// midpoint. Rivers travel far from their spring cell (REACH_M), so
-/// querying RiversLayer directly forces a huge scan per request; the
-/// index pays that scan ONCE per cell at generation time (off the hot
-/// path) and makes every ops/clearance query local.
-pub struct RiverIndexLayer;
-
-pub struct RiverIndexChunk {
-    /// (segment, half width, water level at each end) owned by this cell
-    /// (midpoint rule).
-    pub segments: Vec<([Vec2; 2], f32, [f32; 2])>,
-}
-
-impl Layer for RiverIndexLayer {
-    type Chunk = RiverIndexChunk;
-    const NAME: &'static str = "worldgen/river-index";
-
-    fn chunk_extent(&self) -> IVec3 {
-        IVec3::new(CELL_M, 0, CELL_M)
-    }
-
-    fn dependencies(&self) -> Vec<Dep> {
-        vec![Dep::of::<RiversLayer>(IVec3::new(
-            REACH_M as i32,
-            0,
-            REACH_M as i32,
-        ))]
-    }
-
-    fn generate(&self, ctx: &LayerCtx<'_, Self>, _coord: IVec3) -> RiverIndexChunk {
-        let own = ctx.chunk_bounds();
-        let padded = own.inflate(IVec3::new(REACH_M as i32, 0, REACH_M as i32));
-        let view = ctx.get::<RiversLayer>(padded);
-        let in_own = |p: Vec2| {
-            p.x >= own.min.x as f32
-                && p.x < own.max.x as f32
-                && p.y >= own.min.z as f32
-                && p.y < own.max.z as f32
-        };
-        let mut segments = Vec::new();
-        for (_, chunk) in view.iter() {
-            for river in &chunk.rivers {
-                let n = river.waypoints.len();
-                for (i, seg) in river.waypoints.windows(2).enumerate() {
-                    if in_own((seg[0] + seg[1]) * 0.5) {
-                        let t = i as f32 / n as f32;
-                        segments.push((
-                            [seg[0], seg[1]],
-                            2.0 + 5.0 * t,
-                            [river.levels[i], river.levels[i + 1]],
-                        ));
-                    }
-                }
-            }
-        }
-        RiverIndexChunk { segments }
-    }
-}
-
-/// Longest possible indexed segment (spill splices step diagonally).
-const MAX_SEG_M: f32 = 16.0;
-
-pub fn planning_layers(world_seed: u64, chance: f32) -> LayerManager {
-    let mut mgr = LayerManager::new(world_seed);
-    mgr.register(SpringsLayer {
-        seed: world_seed,
-        chance,
-    });
-    mgr.register(RiversLayer);
-    mgr.register(RiverIndexLayer);
-    mgr
-}
-
-/// Bed + water ops for rivers overlapping `[min, max]` — served from the
-/// segment index, so the query is local.
-pub fn river_ops(mgr: &LayerManager, min: Vec3, max: Vec3) -> Vec<CsgOp> {
-    let pad = (MAX_SEG_M + 16.0) as i32;
-    let bounds = IAabb::new(
-        IVec3::new(min.x as i32 - pad, 0, min.z as i32 - pad),
-        IVec3::new(max.x as i32 + pad, 1, max.z as i32 + pad),
-    );
-    let mut out = Vec::new();
-    for (_, chunk) in mgr.get::<RiverIndexLayer>(bounds).iter() {
-        for ([a, b], half_w, levels) in &chunk.segments {
-            segment_ops(*a, *b, *half_w, *levels, &mut out);
-        }
-    }
-    out.retain(|op| op.touches(min, max));
-    out
-}
-
-fn segment_ops(a: Vec2, b: Vec2, half_w: f32, levels: [f32; 2], out: &mut Vec<CsgOp>) {
-    let len = a.distance(b);
-    if len < 0.01 {
-        return;
-    }
-    let dir = (b - a) / len;
-    let yaw = dir.to_angle();
-    // Short flow-aligned sub-boxes with interpolated (monotone) water
-    // levels: gentle slopes read as a continuous ribbon, steep ones as
-    // small rapids steps instead of floating slabs.
-    let steps = (len / 3.0).ceil().max(1.0) as i32;
-    let sub = len / steps as f32;
-    for i in 0..steps {
-        let t = (i as f32 + 0.5) / steps as f32;
-        let p = a + dir * (t * len);
-        let level = levels[0] + (levels[1] - levels[0]) * t;
-        // Carve the valley notch...
-        out.push(CsgOp::boxy(
-            Vec3::new(p.x, level + 0.9, p.y),
-            Vec3::new(sub * 0.7 + 0.8, 2.4, half_w + 1.4),
-            -yaw,
-            0,
-            true,
-        ));
-        // ...and lay the water ribbon just below its rim.
-        out.push(CsgOp::boxy(
-            Vec3::new(p.x, level - 0.8, p.y),
-            Vec3::new(sub * 0.7 + 0.6, 1.0, half_w),
-            -yaw,
-            MAT_RIVER,
-            false,
-        ));
-    }
-}
-
-/// River segments overlapping the box — spawner clearance, served from
-/// the local segment index.
-pub fn rivers_near(mgr: &LayerManager, min: Vec2, max: Vec2) -> Vec<[Vec2; 2]> {
-    let pad = (MAX_SEG_M + 16.0) as i32;
-    let bounds = IAabb::new(
-        IVec3::new(min.x as i32 - pad, 0, min.y as i32 - pad),
-        IVec3::new(max.x as i32 + pad, 1, max.y as i32 + pad),
-    );
-    let mut out = Vec::new();
-    for (_, chunk) in mgr.get::<RiverIndexLayer>(bounds).iter() {
-        for ([a, b], _, _) in &chunk.segments {
-            let lo = a.min(*b);
-            let hi = a.max(*b);
-            if lo.x <= max.x && hi.x >= min.x && lo.y <= max.y && hi.y >= min.y {
-                out.push([*a, *b]);
-            }
-        }
-    }
-    out
 }
 
 #[cfg(test)]
@@ -433,25 +172,5 @@ mod tests {
         let end = *path.last().unwrap();
         assert!(end.length() < 40.0, "river did not settle in the pit: {end:?}");
         assert!(path.len() < 100, "walk wandered instead of ending: {}", path.len());
-    }
-
-    #[test]
-    fn deterministic_and_culled() {
-        let mgr = planning_layers(0, 0.6);
-        let min = Vec3::new(-4096.0, -100.0, -4096.0);
-        let max = Vec3::new(4096.0, 600.0, 4096.0);
-        let a = river_ops(&mgr, min, max);
-        let mgr2 = planning_layers(0, 0.6);
-        let b = river_ops(&mgr2, min, max);
-        assert_eq!(a, b);
-        for op in &a {
-            assert!(op.touches(min, max));
-        }
-        // Sub-box query = filtered superset (chunks agree on each river).
-        let smin = Vec3::new(-1024.0, -100.0, -1024.0);
-        let smax = Vec3::new(1024.0, 600.0, 1024.0);
-        let sub = river_ops(&mgr, smin, smax);
-        let expect: Vec<_> = a.iter().filter(|op| op.touches(smin, smax)).copied().collect();
-        assert_eq!(sub, expect);
     }
 }

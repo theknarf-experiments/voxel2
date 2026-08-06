@@ -6,7 +6,7 @@ pub mod level;
 pub mod remote;
 pub mod streaming;
 pub mod vegetation;
-pub mod water_mesh;
+pub mod river_water;
 
 use bevy::prelude::*;
 

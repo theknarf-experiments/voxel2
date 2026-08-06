@@ -26,6 +26,9 @@ use voxel_core::csg::CsgOp;
 use voxel_core::ChunkKey;
 use voxel_render::{ChunkCommand, ChunkCommandQueue, ChunkReadyChannel, SharedRenderStats};
 
+/// (key, mask, hold, ops) rows queued for the chunk pipeline.
+type RequestList = Vec<(ChunkKey, u32, bool, Option<Arc<Vec<CsgOp>>>)>;
+
 /// Optional hook supplying planning-layer CSG ops for a requested chunk
 /// (already AABB-culled to the chunk). Installed by the app/worldgen.
 #[derive(Resource, Default)]
@@ -53,16 +56,6 @@ fn request(
         face_mask,
     });
 }
-
-/// Face directions in mask order (+x, -x, +y, -y, +z, -z).
-const FACE_DIRS: [IVec3; 6] = [
-    IVec3::new(1, 0, 0),
-    IVec3::new(-1, 0, 0),
-    IVec3::new(0, 1, 0),
-    IVec3::new(0, -1, 0),
-    IVec3::new(0, 0, 1),
-    IVec3::new(0, 0, -1),
-];
 
 /// The LOD field: does the field want this chunk refined? A pure function
 /// of (chunk, quantized camera anchor). Advisory only — it drives which
@@ -123,7 +116,7 @@ struct GenesisPlan {
     leaves: HashSet<ChunkKey>,
     sent_masks: HashMap<ChunkKey, u32>,
     waits: HashMap<ChunkKey, u32>,
-    to_request: Vec<(ChunkKey, u32, bool, Option<Arc<Vec<CsgOp>>>)>,
+    to_request: RequestList,
 }
 
 /// Simulate epoch refinement to its fixpoint on a scratch tree (pure,
@@ -254,7 +247,7 @@ struct Epoch {
     /// (key, mask, hold, ops) — hold marks in-place remeshes of shown
     /// chunks; ops are precomputed by the planning task so provider cost
     /// never lands on the main thread.
-    to_request: Vec<(ChunkKey, u32, bool, Option<Arc<Vec<CsgOp>>>)>,
+    to_request: RequestList,
 }
 
 /// Generation requests issued per frame while an epoch is in flight.
@@ -1055,7 +1048,10 @@ fn lod_tick(
     // Any mismatch is a crack on screen — log precisely which chunk.
     if std::env::var("VOXEL_VALIDATE_SEAMS").is_ok() {
         static FRAME: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
-        if FRAME.fetch_add(1, std::sync::atomic::Ordering::Relaxed) % 30 == 0 {
+        if FRAME
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            .is_multiple_of(30)
+        {
             // Ground truth: compare each DRAWN mesh's mask (exported by the
             // render world) against what the current shown configuration
             // demands. Any mismatch is a potential crack on screen.
@@ -1222,6 +1218,16 @@ fn hud_stats(
 
 #[cfg(test)]
 mod epoch_invariants {
+    /// Face directions in mask order (+x, -x, +y, -y, +z, -z).
+    const FACE_DIRS: [IVec3; 6] = [
+        IVec3::new(1, 0, 0),
+        IVec3::new(-1, 0, 0),
+        IVec3::new(0, 1, 0),
+        IVec3::new(0, -1, 0),
+        IVec3::new(0, 0, 1),
+        IVec3::new(0, 0, -1),
+    ];
+
     use super::*;
     use voxel_core::seed::Rng;
 

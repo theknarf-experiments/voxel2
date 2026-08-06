@@ -44,6 +44,7 @@ pub struct ScreenshotRequest(pub Vec<String>);
 /// mirror camera into an offscreen image, so it works even when the window
 /// is occluded (macOS gives occluded windows no drawable, which makes
 /// window screenshots capture black).
+#[allow(clippy::too_many_arguments)]
 fn auto_screenshot(
     mut commands: Commands,
     time: Res<Time>,
