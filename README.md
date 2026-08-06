@@ -38,8 +38,16 @@ engine features. Shading follows the same rule: a **material table**
 (parameterized `surface`, `zoned`, and `canopy` recipes) indexed by the
 material ids the ops emit, an **environment** block for lighting and
 haze, and data-driven spawners (trees/grass/boulders with placement
-rules, density fields, and biome gates). See `levels/*.json` and
-`voxel_engine::level::LevelDef`.
+rules, density fields, and biome gates). Even the structures the stack
+builds are data: a **structure** is weighted variants of parts, each
+placing a shape (box/cylinder/sphere, added or cut, optionally hollowed
+into a shell) at every position of an arrangement — `ring`, `scatter`,
+`chain`, or a single point — seated on the terrain or an interior floor,
+and optionally linked to the next position by a swept tunnel. Ruins
+(broken ring wall, tower stubs, rubble), dungeons (a descending room
+chain with corridors and a surface entrance), and the megastructure's
+habitation pockets are all written that way, with no engine code behind
+them. See `levels/*.json` and `voxel_engine::level::LevelDef`.
 
 **Live editing**: the level file is watched while running. Lighting,
 colors, shading, and camera tuning apply instantly; changes to the

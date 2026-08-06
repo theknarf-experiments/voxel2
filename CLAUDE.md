@@ -34,7 +34,9 @@ architecture. Design plan: `~/.claude/plans/binary-twirling-brooks.md`.
   world-specific shader, feature flag, or shading branch; extend the op
   set (voxel-core::worldop + both interpreters + GenOpDef — water is a
   meta op; vegetation is spawner data), the planning-stack vocabulary
-  (voxel_worldgen::stack + StackLayerDef + validate_stack), or the
+  (voxel_worldgen::stack + StackLayerDef + validate_stack), the
+  structure grammar (voxel_worldgen::structure + StructureDef — NEVER
+  add a hand-written recipe fn; a new structure is level JSON), or the
   material recipe kinds
   (voxel-render WorldMaterial ↔ MaterialDef::pack ↔ the WGSL
   MaterialTable — field-position layout twins) and express the world in

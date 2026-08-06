@@ -759,15 +759,16 @@ pub enum EmitKind {
     CourseWater { material: u32, width: [f32; 2] },
     /// Sphere-cut chains from a `worm` source (caves).
     WormCuts,
-    /// A named structure recipe at each site of a `scatter` source,
-    /// optionally dropping a marker of the given kind.
-    SiteRecipe {
-        recipe: String,
+    /// Build a structure (level data — see [`crate::structure`]) at each
+    /// site of a `scatter` source, optionally dropping a marker.
+    SiteStructure {
+        structure: std::sync::Arc<crate::structure::Structure>,
         marker: Option<String>,
     },
-    /// A named recipe at each site of a `scatter3` source (interiors).
-    SiteRecipe3 {
-        recipe: String,
+    /// The same at each site of a `scatter3` source (interiors), seated
+    /// on the site's own y rather than the terrain.
+    SiteStructure3 {
+        structure: std::sync::Arc<crate::structure::Structure>,
         marker: Option<String>,
     },
     /// Shell tubes with bored interiors along a `connect3` source —
@@ -905,7 +906,7 @@ impl Layer for EmitPatches {
                     }
                 }
             }
-            EmitKind::SiteRecipe3 { recipe, marker } => {
+            EmitKind::SiteStructure3 { structure, marker } => {
                 let in_own_y = |y: f32| y >= own.min.y as f32 && y < own.max.y as f32;
                 let view = ctx.get_named::<Scatter3Sites>(&self.cfg.source, padded);
                 for (_, c) in view.iter() {
@@ -919,7 +920,7 @@ impl Layer for EmitPatches {
                                 ^ ((site.x.to_bits() as u64) << 32 | site.z.to_bits() as u64)
                                 ^ (site.y.to_bits() as u64) << 16,
                         ));
-                        recipe3_ops(recipe, site, &mut rng, &mut out.ops);
+                        crate::structure::build(structure, site, &mut rng, &mut out.ops);
                         if let Some(kind) = marker {
                             out.markers.push(Marker {
                                 pos: site,
@@ -958,7 +959,7 @@ impl Layer for EmitPatches {
                     }
                 }
             }
-            EmitKind::SiteRecipe { recipe, marker } => {
+            EmitKind::SiteStructure { structure, marker } => {
                 for (_, c) in ctx.get_named::<ScatterSites>(&self.cfg.source, padded).iter() {
                     for &site in &c.sites {
                         if !in_own(site) {
@@ -970,7 +971,12 @@ impl Layer for EmitPatches {
                             ctx.seed()
                                 ^ ((site.x.to_bits() as u64) << 32 | site.y.to_bits() as u64),
                         ));
-                        recipe_ops(recipe, site, &mut rng, &mut out.ops);
+                        crate::structure::build(
+                            structure,
+                            Vec3::new(site.x, 0.0, site.y),
+                            &mut rng,
+                            &mut out.ops,
+                        );
                         if let Some(kind) = marker {
                             let y = terrain_height(site, 1.0);
                             out.markers.push(Marker {
@@ -983,31 +989,6 @@ impl Layer for EmitPatches {
             }
         }
         PatchChunk { patches: out }
-    }
-}
-
-/// Planar structure recipes the `site_recipe` emit accepts (level
-/// loaders validate against this before registration).
-pub const RECIPES: &[&str] = &["ruin", "dungeon"];
-/// Volumetric recipes the `site_recipe3` emit accepts.
-pub const RECIPES3: &[&str] = &["pocket"];
-
-/// Structure recipes by name. Unknown names panic: level JSON referencing
-/// a recipe that does not exist is an authoring error the level loader
-/// screens out before registration — reaching this is a bug.
-fn recipe_ops(recipe: &str, site: Vec2, rng: &mut voxel_core::seed::Rng, out: &mut Vec<CsgOp>) {
-    match recipe {
-        "ruin" => crate::ruins::ruin_recipe_ops(site, rng, out),
-        "dungeon" => crate::dungeon::dungeon_recipe_ops(site, rng, out),
-        other => panic!("unknown structure recipe {other:?}"),
-    }
-}
-
-/// Volumetric recipes (`scatter3` sites).
-fn recipe3_ops(recipe: &str, site: Vec3, rng: &mut voxel_core::seed::Rng, out: &mut Vec<CsgOp>) {
-    match recipe {
-        "pocket" => crate::mega::pocket_recipe_ops(site, rng, out),
-        other => panic!("unknown structure recipe {other:?}"),
     }
 }
 
@@ -1163,7 +1144,40 @@ pub fn sites_in(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::structure::{Anchor, Arrange, Extent, Part, Seat, Shape, Structure, Variant, Yaw};
     use voxel_layers::LayerManager;
+
+    /// A minimal structure for emit tests: one seated block per site.
+    fn test_structure(material: u32, cut: bool, seat: Seat) -> std::sync::Arc<Structure> {
+        std::sync::Arc::new(Structure {
+            size: [4.0, 6.0],
+            variants: vec![Variant {
+                weight: 1.0,
+                parts: vec![Part {
+                    arrange: Arrange::Scatter {
+                        count: [2, 4],
+                        radius_frac: [0.0, 1.0],
+                    },
+                    shape: Shape::Boxy {
+                        half: [
+                            Extent::Range([1.0, 2.0]),
+                            Extent::Range([1.0, 2.0]),
+                            Extent::Range([1.0, 2.0]),
+                        ],
+                    },
+                    material,
+                    cut,
+                    hollow: None,
+                    skip: 0.0,
+                    seat,
+                    anchor: Anchor::Base,
+                    y_offset: [-0.5, -0.5],
+                    yaw: Yaw::Random,
+                    link: None,
+                }],
+            }],
+        })
+    }
 
     fn bounds(r: i32) -> IAabb {
         IAabb::new(IVec3::new(-r, 0, -r), IVec3::new(r, 1, r))
@@ -1348,8 +1362,8 @@ mod tests {
                     cell_y_m: 0,
                     cfg: EmitCfg {
                         source: "sites:ruins".into(),
-                        kind: EmitKind::SiteRecipe {
-                            recipe: "ruin".into(),
+                        kind: EmitKind::SiteStructure {
+                            structure: test_structure(3, false, Seat::Terrain),
                             marker: Some("ruin".into()),
                         },
                         pad_m: 0.0,
@@ -1594,8 +1608,8 @@ mod tests {
                 cell_y_m: 132,
                 cfg: EmitCfg {
                     source: "sites:pockets".into(),
-                    kind: EmitKind::SiteRecipe3 {
-                        recipe: "pocket".into(),
+                    kind: EmitKind::SiteStructure3 {
+                        structure: test_structure(2, false, Seat::Site),
                         marker: Some("pocket".into()),
                     },
                     pad_m: 0.0,
@@ -1811,8 +1825,8 @@ mod tests {
                 cell_y_m: 132,
                 cfg: EmitCfg {
                     source: "sites:pockets".into(),
-                    kind: EmitKind::SiteRecipe3 {
-                        recipe: "pocket".into(),
+                    kind: EmitKind::SiteStructure3 {
+                        structure: test_structure(2, false, Seat::Site),
                         marker: Some("pocket".into()),
                     },
                     pad_m: 0.0,

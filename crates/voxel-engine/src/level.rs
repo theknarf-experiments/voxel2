@@ -689,6 +689,9 @@ pub struct LevelDef {
     /// The planning stack: generic layers composed into one LayerManager.
     #[serde(default)]
     pub stack: Vec<StackLayerDef>,
+    /// Named structures the stack's `site_structure` emits build.
+    #[serde(default)]
+    pub structures: std::collections::HashMap<String, StructureDef>,
 }
 
 /// When a generator op applies across the LOD range.
@@ -1042,6 +1045,256 @@ impl GenOpDef {
     }
 }
 
+/// A structure: what `site_structure` emits at each site. Authored as
+/// data — weighted variants of parts, each placing one shape at every
+/// position of an arrangement. See `voxel_worldgen::structure`.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct StructureDef {
+    /// Sampled once per site; arrangements scale their radius by it, so
+    /// a structure's parts agree with each other.
+    pub size: [f32; 2],
+    pub variants: Vec<VariantDef>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct VariantDef {
+    #[serde(default = "default_one")]
+    pub weight: f32,
+    pub parts: Vec<PartDef>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct PartDef {
+    pub arrange: ArrangeDef,
+    pub shape: ShapeDef,
+    #[serde(default = "d_op_material")]
+    pub material: u32,
+    #[serde(default)]
+    pub cut: bool,
+    /// Inner cut inset on every axis (hollow shells).
+    #[serde(default)]
+    pub hollow: Option<f32>,
+    /// Per-instance chance to emit nothing (collapsed pieces).
+    #[serde(default)]
+    pub skip: f32,
+    #[serde(default)]
+    pub seat: SeatDef,
+    #[serde(default)]
+    pub anchor: AnchorDef,
+    #[serde(default)]
+    pub y_offset: [f32; 2],
+    #[serde(default)]
+    pub yaw: YawDef,
+    /// Sweep a tunnel between consecutive instances.
+    #[serde(default)]
+    pub link: Option<LinkDef>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ArrangeDef {
+    Single,
+    Ring {
+        count: [u32; 2],
+        #[serde(default = "d_full_frac")]
+        radius_frac: [f32; 2],
+    },
+    Scatter {
+        count: [u32; 2],
+        #[serde(default = "d_full_frac")]
+        radius_frac: [f32; 2],
+    },
+    Chain {
+        count: [u32; 2],
+        step: [f32; 2],
+        #[serde(default = "d_turn")]
+        turn_deg: f32,
+        #[serde(default)]
+        descend: [f32; 2],
+        #[serde(default)]
+        orthogonal: bool,
+        #[serde(default = "d_full_frac")]
+        radius_frac: [f32; 2],
+        /// Start above ground so `link` carves an entrance.
+        #[serde(default)]
+        from_surface: bool,
+    },
+}
+
+/// A box half-extent: a range, or `"arc"` for the ring's tangential
+/// half-length (wall segments that meet without authored trigonometry).
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
+#[serde(untagged)]
+pub enum ExtentDef {
+    Range([f32; 2]),
+    Keyword(ExtentKeyword),
+}
+
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum ExtentKeyword {
+    Arc,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ShapeDef {
+    Boxy {
+        half: [ExtentDef; 3],
+    },
+    Cylinder {
+        radius: [f32; 2],
+        half_height: [f32; 2],
+    },
+    Sphere {
+        radius: [f32; 2],
+    },
+}
+
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum SeatDef {
+    /// The generator's heightfield (surface structures).
+    #[default]
+    Terrain,
+    /// The site's own y (interiors seated on a structural floor).
+    Site,
+}
+
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum AnchorDef {
+    /// The shape's base rests on the seat.
+    #[default]
+    Base,
+    /// The shape's center sits at the seat.
+    Center,
+}
+
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum YawDef {
+    #[default]
+    Zero,
+    Random,
+    /// Face along the arrangement (ring tangent, chain heading).
+    Tangent,
+}
+
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
+pub struct LinkDef {
+    pub half_w: f32,
+    pub half_h: f32,
+    #[serde(default = "d_link_step")]
+    pub step_m: f32,
+    #[serde(default)]
+    pub material: u32,
+    #[serde(default = "d_true")]
+    pub cut: bool,
+}
+
+fn d_full_frac() -> [f32; 2] {
+    [1.0, 1.0]
+}
+fn d_turn() -> f32 {
+    45.0
+}
+fn d_link_step() -> f32 {
+    3.0
+}
+
+impl StructureDef {
+    /// Pack into the runtime form the planning stack builds from.
+    pub fn pack(&self) -> voxel_worldgen::structure::Structure {
+        use voxel_worldgen::structure as rt;
+        rt::Structure {
+            size: self.size,
+            variants: self
+                .variants
+                .iter()
+                .map(|v| rt::Variant {
+                    weight: v.weight,
+                    parts: v.parts.iter().map(PartDef::pack).collect(),
+                })
+                .collect(),
+        }
+    }
+}
+
+impl PartDef {
+    fn pack(&self) -> voxel_worldgen::structure::Part {
+        use voxel_worldgen::structure as rt;
+        let extent = |e: &ExtentDef| match e {
+            ExtentDef::Range(r) => rt::Extent::Range(*r),
+            ExtentDef::Keyword(ExtentKeyword::Arc) => rt::Extent::Arc,
+        };
+        rt::Part {
+            arrange: match self.arrange.clone() {
+                ArrangeDef::Single => rt::Arrange::Single,
+                ArrangeDef::Ring { count, radius_frac } => rt::Arrange::Ring { count, radius_frac },
+                ArrangeDef::Scatter { count, radius_frac } => {
+                    rt::Arrange::Scatter { count, radius_frac }
+                }
+                ArrangeDef::Chain {
+                    count,
+                    step,
+                    turn_deg,
+                    descend,
+                    orthogonal,
+                    radius_frac,
+                    from_surface,
+                } => rt::Arrange::Chain {
+                    count,
+                    step,
+                    turn_deg,
+                    descend,
+                    orthogonal,
+                    radius_frac,
+                    from_surface,
+                },
+            },
+            shape: match &self.shape {
+                ShapeDef::Boxy { half } => rt::Shape::Boxy {
+                    half: [extent(&half[0]), extent(&half[1]), extent(&half[2])],
+                },
+                ShapeDef::Cylinder {
+                    radius,
+                    half_height,
+                } => rt::Shape::Cylinder {
+                    radius: *radius,
+                    half_height: *half_height,
+                },
+                ShapeDef::Sphere { radius } => rt::Shape::Sphere { radius: *radius },
+            },
+            material: self.material,
+            cut: self.cut,
+            hollow: self.hollow,
+            skip: self.skip,
+            seat: match self.seat {
+                SeatDef::Terrain => rt::Seat::Terrain,
+                SeatDef::Site => rt::Seat::Site,
+            },
+            anchor: match self.anchor {
+                AnchorDef::Base => rt::Anchor::Base,
+                AnchorDef::Center => rt::Anchor::Center,
+            },
+            y_offset: self.y_offset,
+            yaw: match self.yaw {
+                YawDef::Zero => rt::Yaw::Zero,
+                YawDef::Random => rt::Yaw::Random,
+                YawDef::Tangent => rt::Yaw::Tangent,
+            },
+            link: self.link.map(|l| rt::Link {
+                half_w: l.half_w,
+                half_h: l.half_h,
+                step_m: l.step_m,
+                material: l.material,
+                cut: l.cut,
+            }),
+        }
+    }
+}
+
 /// One layer of the level's planning stack — the generic vocabulary
 /// (scatter/connect/flow/worm/emit) every planned feature is expressed
 /// in. Layers register in author order into ONE LayerManager per level;
@@ -1183,15 +1436,16 @@ pub enum EmitDef {
     },
     /// Sphere-cut chains from a `worm` source (caves).
     WormCuts,
-    /// A named structure recipe per site, with an optional marker.
-    SiteRecipe {
-        recipe: String,
+    /// Build a named structure (from the level's `structures` table) at
+    /// each site, with an optional marker.
+    SiteStructure {
+        structure: String,
         #[serde(default)]
         marker: Option<String>,
     },
-    /// A named volumetric recipe per `scatter3` site.
-    SiteRecipe3 {
-        recipe: String,
+    /// The same at each `scatter3` site (interiors).
+    SiteStructure3 {
+        structure: String,
         #[serde(default)]
         marker: Option<String>,
     },
@@ -1284,8 +1538,20 @@ fn d_biome_cell() -> i32 {
 }
 
 impl EmitDef {
-    fn to_kind(&self) -> voxel_worldgen::stack::EmitKind {
+    fn to_kind(
+        &self,
+        structures: &std::collections::HashMap<String, StructureDef>,
+    ) -> voxel_worldgen::stack::EmitKind {
         use voxel_worldgen::stack::EmitKind;
+        // Structures are validated at load, so a miss here is a bug.
+        let build = |name: &str| {
+            std::sync::Arc::new(
+                structures
+                    .get(name)
+                    .expect("structure validated before registration")
+                    .pack(),
+            )
+        };
         match self.clone() {
             EmitDef::PathSlabs {
                 half_w,
@@ -1300,8 +1566,14 @@ impl EmitDef {
             },
             EmitDef::CourseWater { material, width } => EmitKind::CourseWater { material, width },
             EmitDef::WormCuts => EmitKind::WormCuts,
-            EmitDef::SiteRecipe { recipe, marker } => EmitKind::SiteRecipe { recipe, marker },
-            EmitDef::SiteRecipe3 { recipe, marker } => EmitKind::SiteRecipe3 { recipe, marker },
+            EmitDef::SiteStructure { structure, marker } => EmitKind::SiteStructure {
+                structure: build(&structure),
+                marker,
+            },
+            EmitDef::SiteStructure3 { structure, marker } => EmitKind::SiteStructure3 {
+                structure: build(&structure),
+                marker,
+            },
             EmitDef::Tubes {
                 material,
                 bore,
@@ -1337,7 +1609,7 @@ enum StackKind {
 /// plus spawner biome refs (which would otherwise degrade silently to
 /// full density on a typo).
 pub fn validate_level(level: &LevelDef) -> Result<(), String> {
-    validate_stack(&level.stack)?;
+    validate_stack(&level.stack, &level.structures)?;
     let biome_ref = |owner: &str, reference: &str| -> Result<(), String> {
         let Some((instance, biome)) = reference.rsplit_once(':') else {
             return Err(format!(
@@ -1373,8 +1645,37 @@ pub fn validate_level(level: &LevelDef) -> Result<(), String> {
     Ok(())
 }
 
-pub fn validate_stack(stack: &[StackLayerDef]) -> Result<(), String> {
-    use voxel_worldgen::stack::{RECIPES, RECIPES3};
+/// A referenced structure must exist and stay inside the element-padding
+/// contract the emit index rests on.
+fn check_structure(
+    structures: &std::collections::HashMap<String, StructureDef>,
+    owner: &str,
+    name: &str,
+) -> Result<(), String> {
+    let Some(def) = structures.get(name) else {
+        let known: Vec<&str> = structures.keys().map(String::as_str).collect();
+        return Err(format!(
+            "layer {owner:?}: unknown structure {name:?} (declared: {known:?})"
+        ));
+    };
+    if def.variants.is_empty() {
+        return Err(format!("structure {name:?} has no variants"));
+    }
+    let reach = def.pack().max_reach();
+    let limit = voxel_worldgen::stack::ELEM_PAD_M;
+    if reach > limit {
+        return Err(format!(
+            "structure {name:?} reaches {reach:.0} m from its site, past the {limit:.0} m \
+             element padding — queries farther than that would miss its geometry"
+        ));
+    }
+    Ok(())
+}
+
+pub fn validate_stack(
+    stack: &[StackLayerDef],
+    structures: &std::collections::HashMap<String, StructureDef>,
+) -> Result<(), String> {
     let mut declared: Vec<(&str, StackKind)> = Vec::new();
     let kind_of = |declared: &[(&str, StackKind)], source: &str| -> Option<StackKind> {
         declared
@@ -1445,20 +1746,12 @@ pub fn validate_stack(stack: &[StackLayerDef]) -> Result<(), String> {
                     EmitDef::PathSlabs { .. } => StackKind::Connect,
                     EmitDef::CourseWater { .. } => StackKind::Flow,
                     EmitDef::WormCuts => StackKind::Worm,
-                    EmitDef::SiteRecipe { recipe, .. } => {
-                        if !RECIPES.contains(&recipe.as_str()) {
-                            return Err(format!(
-                                "layer {name:?}: unknown recipe {recipe:?} (known: {RECIPES:?})"
-                            ));
-                        }
+                    EmitDef::SiteStructure { structure, .. } => {
+                        check_structure(structures, name, structure)?;
                         StackKind::Scatter
                     }
-                    EmitDef::SiteRecipe3 { recipe, .. } => {
-                        if !RECIPES3.contains(&recipe.as_str()) {
-                            return Err(format!(
-                                "layer {name:?}: unknown recipe {recipe:?} (known: {RECIPES3:?})"
-                            ));
-                        }
+                    EmitDef::SiteStructure3 { structure, .. } => {
+                        check_structure(structures, name, structure)?;
                         StackKind::Scatter3
                     }
                     EmitDef::Tubes { .. } => StackKind::Connect3,
@@ -1520,7 +1813,12 @@ impl StackLayerDef {
         ))
     }
 
-    fn register(&self, stack: &[StackLayerDef], mgr: &mut voxel_layers::LayerManager) {
+    fn register(
+        &self,
+        stack: &[StackLayerDef],
+        structures: &std::collections::HashMap<String, StructureDef>,
+        mgr: &mut voxel_layers::LayerManager,
+    ) {
         use voxel_worldgen::stack::*;
         match self.clone() {
             StackLayerDef::Biomes {
@@ -1661,7 +1959,7 @@ impl StackLayerDef {
                 EmitPatches {
                     cfg: EmitCfg {
                         source,
-                        kind: emit.to_kind(),
+                        kind: emit.to_kind(structures),
                         pad_m,
                         max_chunk_edge_m,
                     },
@@ -1929,7 +2227,7 @@ impl Emitter {
         let (water, clearance, markers) = match emit {
             EmitDef::CourseWater { .. } => (true, true, false),
             EmitDef::PathSlabs { clearance, .. } => (false, *clearance, false),
-            EmitDef::SiteRecipe { marker, .. } | EmitDef::SiteRecipe3 { marker, .. } => {
+            EmitDef::SiteStructure { marker, .. } | EmitDef::SiteStructure3 { marker, .. } => {
                 (false, false, marker.is_some())
             }
             EmitDef::WormCuts | EmitDef::Tubes { .. } => (false, false, false),
@@ -2155,7 +2453,7 @@ fn build_ops_provider(level: &LevelDef) -> (ChunkOpsProvider, WorldQuery, Planni
         let mut mgr = voxel_layers::LayerManager::new(level.seed);
         let mut emitters = Vec::new();
         for def in &level.stack {
-            def.register(&level.stack, &mut mgr);
+            def.register(&level.stack, &level.structures, &mut mgr);
             if let StackLayerDef::Emit {
                 name,
                 max_chunk_edge_m,
@@ -2674,17 +2972,17 @@ mod tests {
         let parse = |json: &str| -> Vec<StackLayerDef> { serde_json::from_str(json).unwrap() };
         // The shipped stacks validate.
         let planet = LevelDef::from_json(&shipped("planet.json")).unwrap();
-        validate_stack(&planet.stack).unwrap();
+        validate_stack(&planet.stack, &planet.structures).unwrap();
         let mega = LevelDef::from_json(&shipped("megastructure.json")).unwrap();
-        validate_stack(&mega.stack).unwrap();
+        validate_stack(&mega.stack, &mega.structures).unwrap();
 
         let cases: &[(&str, &str)] = &[
             // Unknown recipe name.
             (
                 r#"[{"kind":"scatter","name":"s","chance":1.0},
                     {"kind":"emit","name":"e","source":"s","pad_m":0.0,
-                     "emit":{"type":"site_recipe","recipe":"castle"}}]"#,
-                "unknown recipe",
+                     "emit":{"type":"site_structure","structure":"castle"}}]"#,
+                "unknown structure",
             ),
             // Biome ref to a missing layer.
             (
@@ -2722,12 +3020,12 @@ mod tests {
             (
                 r#"[{"kind":"scatter3","name":"s","chance":1.0},
                     {"kind":"emit","name":"e","source":"s","pad_m":0.0,
-                     "emit":{"type":"site_recipe3","recipe":"pocket"}}]"#,
+                     "emit":{"type":"site_structure3","structure":"ruin"}}]"#,
                 "cell_y_m",
             ),
         ];
         for (json, expect) in cases {
-            let err = validate_stack(&parse(json)).unwrap_err();
+            let err = validate_stack(&parse(json), &planet.structures).unwrap_err();
             assert!(
                 err.contains(expect),
                 "error {err:?} missing {expect:?} for {json}"

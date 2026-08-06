@@ -5,13 +5,11 @@
 //! `voxel-render/src/shaders/voxel_world_density.wgsl` — vegetation and
 //! gameplay place things on the surface the GPU generates.
 
-pub mod mega;
 pub mod program;
-pub mod dungeon;
 pub mod path;
 pub mod rivers;
 pub mod stack;
-pub mod ruins;
+pub mod structure;
 
 use glam::Vec2;
 
