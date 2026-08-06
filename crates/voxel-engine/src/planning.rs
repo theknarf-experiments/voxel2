@@ -78,6 +78,19 @@ pub trait WorldPlanner: Send + Sync + 'static {
 /// (authored placements, editor brushes).
 pub type OpsSource = Arc<dyn Fn(Vec3, Vec3) -> Vec<CsgOp> + Send + Sync>;
 
+/// How a host supplies its planning: given the level, the seed and the
+/// world's generator, build a planner. The engine calls this at startup
+/// and again on every hot reload that changes generation, so a host's
+/// layers rebuild with the world instead of going stale.
+///
+/// It is a factory rather than a value because the generator does not
+/// exist until the engine has read the level, and layers need it.
+pub type PlannerFactory = Arc<
+    dyn Fn(&crate::level::LevelDef, u64, &Arc<voxel_worldgen::Generator>) -> Option<Arc<dyn WorldPlanner>>
+        + Send
+        + Sync,
+>;
+
 /// The one facade over everything the world knows on the CPU: the
 /// generator (heights, fields, shadows) and the host's planning. Every
 /// consumer — the chunk ops provider, prop scattering, debug overlays,

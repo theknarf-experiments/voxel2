@@ -169,6 +169,9 @@ fn main() {
                 source: Some(path.into()),
                 hole_eval,
                 remote_port: None,
+                // This demo authors its layers as JSON; a game with
+                // hand-written layers passes its own factory here.
+                planner: Some(voxel_engine::level::stack_planner_factory()),
             },
         ))
         .add_systems(Startup, setup_scene)

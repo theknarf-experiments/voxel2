@@ -16,8 +16,8 @@ use voxel_core::worldop::*;
 use voxel_core::ChunkKey;
 
 use crate::planning::{
-    ops_prepare, ops_provider, Marker, OpsSource, PlanningLayers, RibbonSeg, WorldPlanner,
-    WorldQuery, OPS_HORIZON_EDGE_M,
+    ops_prepare, ops_provider, Marker, OpsSource, PlannerFactory, PlanningLayers, RibbonSeg,
+    WorldPlanner, WorldQuery, OPS_HORIZON_EDGE_M,
 };
 use crate::streaming::StreamingRebuild;
 use crate::{LodConfig, VoxelEnginePlugin};
@@ -1951,6 +1951,10 @@ pub struct LevelPlugin {
     pub hole_eval: bool,
     /// Start a Bevy Remote Protocol server on this port for tooling.
     pub remote_port: Option<u16>,
+    /// How this host builds its planning layers. `None` means the world
+    /// is pure generator program plus authored placements — no layers.
+    /// [`stack_planner_factory`] interprets the level's own `stack` block.
+    pub planner: Option<PlannerFactory>,
 }
 
 impl LevelPlugin {
@@ -1962,6 +1966,7 @@ impl LevelPlugin {
             source: None,
             hole_eval: false,
             remote_port: None,
+            planner: None,
         }
     }
 
@@ -1976,6 +1981,11 @@ impl LevelPlugin {
 #[derive(Resource, Clone, Copy, Debug)]
 pub struct WorldSeed(pub u64);
 
+/// The host's planner factory, kept so hot reload can rebuild the
+/// planning layers against the new level.
+#[derive(Resource, Clone, Default)]
+pub struct HostPlanner(pub Option<PlannerFactory>);
+
 /// Watch state for level hot-reload.
 #[derive(Resource)]
 struct LevelSource {
@@ -1989,7 +1999,8 @@ impl Plugin for LevelPlugin {
         let level = self.def.clone();
 
         app.add_message::<LevelReloaded>()
-            .insert_resource(WorldSeed(self.seed));
+            .insert_resource(WorldSeed(self.seed))
+            .insert_resource(HostPlanner(self.planner.clone()));
         if let Some(path) = &self.source {
             let mtime = std::fs::metadata(path).and_then(|m| m.modified()).ok();
             app.insert_resource(LevelSource {
@@ -2004,7 +2015,8 @@ impl Plugin for LevelPlugin {
         if let Err(e) = validate_level(&level) {
             panic!("level has invalid planning data: {e}");
         }
-        let world_query = build_ops_provider(&level, self.seed, &generator);
+        let world_query =
+            build_ops_provider(&level, self.seed, &generator, self.planner.as_ref());
         let planning_layers = PlanningLayers(world_query.layer_managers());
         app.insert_resource(program)
             .insert_resource(crate::planning::ops_prepare(&world_query))
@@ -2038,8 +2050,12 @@ const FACADE_Y_M: f32 = 2_560.0;
 /// The level stack as a [`WorldPlanner`]: one `LayerManager` holding every
 /// layer the level declared, plus the bookkeeping needed to answer a query
 /// without generating layers that cannot contribute to it.
+///
+/// This is *a* host's planner, not the engine's: it interprets the
+/// `stack`/`structures` blocks of a level file. A game with hand-written
+/// layers implements [`WorldPlanner`] itself and never touches this.
 #[derive(Clone, Default)]
-struct StackPlanner {
+pub struct StackPlanner {
     /// The level's planning stack (one manager for all layers).
     stack: Option<Arc<voxel_layers::LayerManager>>,
     /// Emit instances and what each one can produce.
@@ -2250,17 +2266,14 @@ impl WorldPlanner for StackPlanner {
     }
 }
 
-fn build_ops_provider(
-    level: &LevelDef,
-    seed: u64,
-    generator: &Arc<voxel_worldgen::Generator>,
-) -> WorldQuery {
-    let mut sources: Vec<OpsSource> = Vec::new();
-
-    // The planning stack: every layer into ONE manager, in author order.
-    let (stack, emitters) = if level.stack.is_empty() {
-        (None, Vec::new())
-    } else {
+impl StackPlanner {
+    /// Build the planner a level's `stack` block describes, or `None` if
+    /// it declares no layers.
+    pub fn new(level: &LevelDef, seed: u64, generator: &Arc<voxel_worldgen::Generator>) -> Option<Self> {
+        if level.stack.is_empty() {
+            return None;
+        }
+        // Every layer into ONE manager, in author order.
         let mut mgr = voxel_layers::LayerManager::with_context(seed, generator.clone());
         let mut emitters = Vec::new();
         for def in &level.stack {
@@ -2275,9 +2288,57 @@ fn build_ops_provider(
                 emitters.push(Emitter::new(name.clone(), *max_chunk_edge_m, emit));
             }
         }
-        (Some(Arc::new(mgr)), emitters)
-    };
+        let biome_tables = level
+            .stack
+            .iter()
+            .filter_map(|d| match d {
+                StackLayerDef::Biomes { name, table, .. } => Some((
+                    name.clone(),
+                    table.iter().map(|(n, _)| n.clone()).collect(),
+                )),
+                _ => None,
+            })
+            .collect();
+        // Streamer working set, derived from the streamers themselves:
+        // scattered props (the far ring dominates) and ribbon surfaces.
+        // Levels with neither skip the pass entirely.
+        let mut streamer_radius: Option<f32> = None;
+        let mut want = |reach: f32| {
+            streamer_radius = Some(streamer_radius.map_or(reach, |r: f32| r.max(reach)));
+        };
+        for def in &level.scatter {
+            want((def.radius_tiles + 2) as f32 * def.tile_m);
+        }
+        if let Some(reach) = level.prop_query_reach_m {
+            want(reach);
+        }
+        if emitters.iter().any(|e| e.ribbons) {
+            want(RIBBON_QUERY_REACH_M);
+        }
+        Some(Self {
+            stack: Some(Arc::new(mgr)),
+            emitters,
+            biome_tables,
+            streamer_radius,
+        })
+    }
+}
 
+/// The [`PlannerFactory`] for levels whose planning is the JSON `stack`
+/// block. A host with hand-written layers passes its own instead.
+pub fn stack_planner_factory() -> PlannerFactory {
+    Arc::new(|level, seed, generator| {
+        StackPlanner::new(level, seed, generator).map(|p| Arc::new(p) as Arc<dyn WorldPlanner>)
+    })
+}
+
+fn build_ops_provider(
+    level: &LevelDef,
+    seed: u64,
+    generator: &Arc<voxel_worldgen::Generator>,
+    planner: Option<&PlannerFactory>,
+) -> WorldQuery {
+    let mut sources: Vec<OpsSource> = Vec::new();
 
     // Authored placements: resolve prefab refs, bake world-space ops once
     // (translate + yaw + uniform scale; optional terrain seating), then
@@ -2328,50 +2389,9 @@ fn build_ops_provider(
         }));
     }
 
-    let biome_tables = level
-        .stack
-        .iter()
-        .filter_map(|d| match d {
-            StackLayerDef::Biomes { name, table, .. } => Some((
-                name.clone(),
-                table.iter().map(|(n, _)| n.clone()).collect(),
-            )),
-            _ => None,
-        })
-        .collect();
-    // Streamer working set, derived from the streamers themselves: props
-    // (far-forest ring dominates) and river water. Levels with neither
-    // skip the pass entirely.
-    let mut streamer_radius: Option<f32> = None;
-    let mut want = |reach: f32| {
-        streamer_radius = Some(streamer_radius.map_or(reach, |r: f32| r.max(reach)));
-    };
-    for def in &level.scatter {
-        want((def.radius_tiles + 2) as f32 * def.tile_m);
-    }
-    if let Some(reach) = level.prop_query_reach_m {
-        want(reach);
-    }
-    if level.stack.iter().any(|l| {
-        matches!(
-            l,
-            StackLayerDef::Emit {
-                emit: EmitDef::Ribbon { .. },
-                ..
-            }
-        )
-    }) {
-        want(RIBBON_QUERY_REACH_M);
-    }
-    let planner = StackPlanner {
-        stack,
-        emitters,
-        biome_tables,
-        streamer_radius,
-    };
     let mut world = WorldQuery::new(generator.clone());
-    if planner.stack.is_some() {
-        world = world.with_planner(Arc::new(planner));
+    if let Some(planner) = planner.and_then(|f| f(level, seed, generator)) {
+        world = world.with_planner(planner);
     }
     for source in sources {
         world = world.with_source(source);
@@ -2390,6 +2410,7 @@ fn reload_level(
     mut source: ResMut<LevelSource>,
     mut level: ResMut<LevelDef>,
     seed: Res<WorldSeed>,
+    planner: Res<HostPlanner>,
     mut lod: ResMut<LodConfig>,
     mut rebuild: ResMut<StreamingRebuild>,
     mut veg_rebuild: Option<ResMut<crate::scatter::ScatterRebuild>>,
@@ -2455,7 +2476,7 @@ fn reload_level(
         lod.max_level = new.lod.max_level;
         lod.top_radius = new.lod.top_radius;
         lod.top_y = new.lod.top_y;
-        let world_query = build_ops_provider(&new, seed.0, &generator);
+        let world_query = build_ops_provider(&new, seed.0, &generator, planner.0.as_ref());
         commands.insert_resource(ops_prepare(&world_query));
         commands.insert_resource(ops_provider(&world_query));
         commands.insert_resource(PlanningLayers(world_query.layer_managers()));
@@ -2594,7 +2615,7 @@ mod tests {
 
     fn seeded_world_for(def: &LevelDef, seed: u64) -> WorldQuery {
         let (_, generator) = apply_generator(def, seed);
-        build_ops_provider(def, seed, &generator)
+        build_ops_provider(def, seed, &generator, Some(&stack_planner_factory()))
     }
 
     /// The whole point of per-world generator state: two levels with
