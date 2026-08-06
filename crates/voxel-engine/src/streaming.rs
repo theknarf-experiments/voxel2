@@ -837,6 +837,12 @@ fn lod_tick(
         if let Some(epoch) = &tree.epoch {
             requested.extend(epoch.waits.keys().copied());
         }
+        // Mid-genesis rebuild: genesis chunks were requested but are in
+        // neither leaves nor an epoch — forgetting them leaks hidden
+        // render chunks (and their slab allocs) forever.
+        if let Some(plan) = &tree.genesis {
+            requested.extend(plan.waits.keys().copied());
+        }
         for key in requested {
             queue.push(ChunkCommand::Free(key));
         }
@@ -994,6 +1000,12 @@ fn lod_tick(
     if let Some(mut epoch) = tree.epoch.take() {
         let n = epoch.to_request.len().min(EPOCH_REQUEST_BUDGET);
         for (key, mask, hold, ops) in epoch.to_request.drain(..n) {
+            // A wait may only be satisfied by a report that ARRIVES after
+            // this request: a stale entry (held mesh cancelled by an
+            // earlier abort, or an old empty classification) would let
+            // the epoch commit against a mesh that no longer exists —
+            // permanent crack plus an orphaned held alloc.
+            tree.ready.remove(&key);
             tree.sent_masks.insert(key, mask);
             queue.push(ChunkCommand::Request {
                 key,
@@ -1026,7 +1038,10 @@ fn lod_tick(
                 if tree.leaves.contains(key) {
                     // In-place remesh: drop the held result (if any) and
                     // forget the sent mask so a later epoch re-requests it.
+                    // The ready entry goes too — the held mesh it reported
+                    // is being cancelled.
                     queue.push(ChunkCommand::CancelHold(*key));
+                    tree.ready.remove(key);
                     tree.sent_masks.remove(key);
                 } else {
                     // Hidden replacement chunk: free it outright.

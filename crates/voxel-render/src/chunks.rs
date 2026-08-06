@@ -495,6 +495,10 @@ struct RenderChunk {
     /// In-place regeneration (a neighbor's LOD changed): the old mesh keeps
     /// drawing until the replacement is ready, then swaps atomically.
     pending: Option<Pending>,
+    /// A Request superseded this chunk's in-flight regen: when that
+    /// regen lands, discard its result and regenerate with the stored
+    /// mask/ops (otherwise the requesting epoch waits forever).
+    requeue: bool,
 }
 
 enum Pending {
@@ -1011,23 +1015,24 @@ fn plan_frame(
                                 gen_mask: face_mask,
                                 drawn_mask: face_mask,
                                 pending: None,
+                                requeue: false,
                             },
                         );
                     }
                     Some(chunk) => match chunk.state {
-                        // Freed-while-in-flight chunk re-requested:
-                        // resurrect it, the pending readback completes it.
-                        ChunkState::Cancelled { slot } => {
-                            chunk.state = ChunkState::CountsInFlight { slot };
+                        // Freed-while-in-flight chunk re-requested. The
+                        // in-flight counts were produced under the OLD
+                        // mask; meshing them under any other mask breaks
+                        // the count/emit agreement (overflowing the slab
+                        // alloc). Leave the state Cancelled — the readback
+                        // discards the stale result — and mark a fresh
+                        // generation with the requested mask and ops.
+                        ChunkState::Cancelled { .. } => {
                             chunk.visible = false;
                             chunk.show_on_ready = show_on_ready;
                             chunk.hold = hold;
+                            chunk.ops = ops;
                             chunk.face_mask = face_mask;
-                            // The in-flight result was generated pre-free
-                            // with an unknown mask: report it as such and
-                            // regenerate with the requested mask after it
-                            // lands.
-                            chunk.gen_mask = STALE_MASK;
                             chunk.pending = Some(Pending::Queued);
                         }
                         // Not yet generating: the new mask/ops just apply.
@@ -1048,7 +1053,12 @@ fn plan_frame(
                                 Some(Pending::Held { alloc, .. }) => gpu.slab.free(alloc),
                                 Some(p @ (Pending::CountsInFlight { .. }
                                 | Pending::AwaitingAlloc { .. })) => {
+                                    // The in-flight regen carries the OLD
+                                    // mask; without a requeue its report
+                                    // never matches the new request and
+                                    // the epoch stalls to abort.
                                     chunk.pending = Some(p);
+                                    chunk.requeue = true;
                                 }
                                 _ => {}
                             }
@@ -1126,6 +1136,7 @@ fn plan_frame(
                             gen_mask: 0,
                             drawn_mask: STALE_MASK,
                             pending: None,
+                            requeue: false,
                         },
                     );
                 }
@@ -1180,12 +1191,32 @@ fn plan_frame(
                         indices: quads * 6,
                     });
                 }
+                // Superseded mid-flight: the result above belongs to the
+                // old request — drop it and regenerate with the stored
+                // mask/ops. (An AwaitingAlloc result still holds its
+                // arena slot; return it.)
+                if chunk.requeue {
+                    chunk.requeue = false;
+                    match chunk.pending.take() {
+                        Some(Pending::AwaitingAlloc { slot, .. }) => gpu.arena_free.push(slot),
+                        Some(Pending::HeldEmpty) | Some(Pending::Queued) | None => {}
+                        Some(other) => chunk.pending = Some(other),
+                    }
+                    chunk.pending = Some(Pending::Queued);
+                }
                 continue;
             }
             match chunk.state {
                 ChunkState::Cancelled { slot } => {
                     gpu.arena_free.push(slot);
-                    table.chunks.remove(key);
+                    if chunk.pending.take().is_some() {
+                        // Resurrected while these counts were in flight:
+                        // stale result discarded, generate fresh with the
+                        // requested mask/ops.
+                        chunk.state = ChunkState::QueuedGen;
+                    } else {
+                        table.chunks.remove(key);
+                    }
                 }
                 ChunkState::CountsInFlight { slot } => {
                     let max_verts = *crate::slab::CLASS_VERTS.last().unwrap();
@@ -1283,7 +1314,17 @@ fn plan_frame(
                     alloc,
                     index_count: indices,
                 });
-                let _ = ready_tx.0.send((key, chunk.gen_mask));
+                if chunk.requeue {
+                    // Superseded mid-flight: this held result carries the
+                    // old mask — discard it and regenerate.
+                    chunk.requeue = false;
+                    if let Some(Pending::Held { alloc, .. }) = chunk.pending.take() {
+                        gpu.slab.free(alloc);
+                    }
+                    chunk.pending = Some(Pending::Queued);
+                } else {
+                    let _ = ready_tx.0.send((key, chunk.gen_mask));
+                }
                 freed_slots.push(slot);
                 continue;
             }
@@ -1291,6 +1332,10 @@ fn plan_frame(
                 gpu.slab.free(old);
             }
             chunk.pending = None;
+            if chunk.requeue {
+                chunk.requeue = false;
+                chunk.pending = Some(Pending::Queued);
+            }
             let _ = ready_tx.0.send((key, chunk.gen_mask));
         } else {
             if chunk.show_on_ready {
