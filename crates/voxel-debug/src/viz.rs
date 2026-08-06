@@ -83,7 +83,7 @@ pub fn draw_debug_viz(
             gizmos.sphere(m.pos + Vec3::Y * 30.0, 2.0, color);
         }
         for seg in world.clearance_in(min, max) {
-            let h = |p: Vec2| voxel_worldgen::terrain_height(p, 1.0) + 1.0;
+            let h = |p: Vec2| world.generator().height(p, 1.0) + 1.0;
             gizmos.line(
                 Vec3::new(seg[0].x, h(seg[0]), seg[0].y),
                 Vec3::new(seg[1].x, h(seg[1]), seg[1].y),
@@ -116,7 +116,7 @@ pub fn draw_debug_viz(
                         continue;
                     };
                     let _ = (biome, table);
-                    let y = voxel_worldgen::terrain_height(p, 8.0) + 2.0;
+                    let y = world.generator().height(p, 8.0) + 2.0;
                     let color = Color::hsl(i as f32 * 137.5 % 360.0, 0.8, 0.5);
                     gizmos.line(
                         Vec3::new(p.x, y, p.y),

@@ -17,7 +17,7 @@ use glam::{Vec2, Vec3};
 use voxel_core::csg::CsgOp;
 use voxel_core::seed::Rng;
 
-use crate::terrain_height;
+use crate::Generator;
 
 /// Inclusive value range, sampled uniformly.
 pub type Range = [f32; 2];
@@ -187,14 +187,20 @@ struct Instance {
 
 /// Emit `structure` at `site` (planar callers pass the terrain site with
 /// any y; `Seat::Site` uses `site.y`, which interiors set to their floor).
-pub fn build(structure: &Structure, site: Vec3, rng: &mut Rng, out: &mut Vec<CsgOp>) {
+pub fn build(
+    structure: &Structure,
+    site: Vec3,
+    generator: &Generator,
+    rng: &mut Rng,
+    out: &mut Vec<CsgOp>,
+) {
     let Some(variant) = pick_variant(structure, rng) else {
         return;
     };
     let size = sample(rng, structure.size);
     for part in &variant.parts {
-        let instances = arrange(part, site, size, rng);
-        emit_part(part, &instances, rng, out);
+        let instances = arrange(part, site, size, generator, rng);
+        emit_part(part, &instances, generator, rng, out);
     }
 }
 
@@ -213,14 +219,20 @@ fn pick_variant<'a>(structure: &'a Structure, rng: &mut Rng) -> Option<&'a Varia
     structure.variants.last()
 }
 
-fn seat_y(part: &Part, site: Vec3, xz: Vec2) -> f32 {
+fn seat_y(part: &Part, site: Vec3, xz: Vec2, generator: &Generator) -> f32 {
     match part.seat {
-        Seat::Terrain => terrain_height(xz, 1.0),
+        Seat::Terrain => generator.height(xz, 1.0),
         Seat::Site => site.y,
     }
 }
 
-fn arrange(part: &Part, site: Vec3, size: f32, rng: &mut Rng) -> Vec<Instance> {
+fn arrange(
+    part: &Part,
+    site: Vec3,
+    size: f32,
+    generator: &Generator,
+    rng: &mut Rng,
+) -> Vec<Instance> {
     let site_xz = Vec2::new(site.x, site.z);
     let mut out = Vec::new();
     match &part.arrange {
@@ -309,7 +321,7 @@ fn arrange(part: &Part, site: Vec3, size: f32, rng: &mut Rng) -> Vec<Instance> {
                 // An entry point above the first instance; `link` carves
                 // the tunnel down to it.
                 let first = out[0].pos;
-                let surface = terrain_height(Vec2::new(first.x, first.z), 1.0);
+                let surface = generator.height(Vec2::new(first.x, first.z), 1.0);
                 let above = surface + 1.2 - (site.y + first.y);
                 out.insert(
                     0,
@@ -330,13 +342,19 @@ fn quantize_heading(heading: f32) -> f32 {
     (heading / quarter).round() * quarter
 }
 
-fn emit_part(part: &Part, instances: &[Instance], rng: &mut Rng, out: &mut Vec<CsgOp>) {
+fn emit_part(
+    part: &Part,
+    instances: &[Instance],
+    generator: &Generator,
+    rng: &mut Rng,
+    out: &mut Vec<CsgOp>,
+) {
     let mut placed: Vec<Vec3> = Vec::with_capacity(instances.len());
     for instance in instances {
         // The link needs every position, including skipped ones, or a
         // collapsed room would break the corridor chain.
         let xz = Vec2::new(instance.pos.x, instance.pos.z);
-        let site_y = seat_y(part, Vec3::new(xz.x, 0.0, xz.y), xz);
+        let site_y = seat_y(part, Vec3::new(xz.x, 0.0, xz.y), xz, generator);
         let yaw = match part.yaw {
             Yaw::Zero => 0.0,
             Yaw::Random => rng.next_f32() * std::f32::consts::TAU,
@@ -457,6 +475,14 @@ mod tests {
     use super::*;
     use voxel_core::seed::chunk_seed;
 
+    fn generator() -> Generator {
+        Generator::new(
+            crate::program::planet_program(),
+            0,
+            crate::program::DEFAULT_SUN_DIR,
+        )
+    }
+
     fn rng(salt: u64) -> Rng {
         Rng::new(chunk_seed(salt, 0x57, glam::IVec3::new(2, 0, 5)))
     }
@@ -524,7 +550,7 @@ mod tests {
         let build_once = |salt| {
             let mut r = rng(salt);
             let mut out = Vec::new();
-            build(&s, site, &mut r, &mut out);
+            build(&s, site, &generator(), &mut r, &mut out);
             out
         };
         let a = build_once(1);
@@ -541,7 +567,7 @@ mod tests {
                 p.distance(Vec2::new(site.x, site.z)) <= reach,
                 "op {p:?} beyond reach {reach}"
             );
-            let ground = terrain_height(p, 1.0);
+            let ground = generator().height(p, 1.0);
             assert!((op.center[1] - ground).abs() < 12.0, "op far from ground");
         }
     }
@@ -553,7 +579,7 @@ mod tests {
         s.variants[0].parts[0].skip = 0.0;
         let mut r = rng(3);
         let mut out = Vec::new();
-        build(&s, Vec3::ZERO, &mut r, &mut out);
+        build(&s, Vec3::ZERO, &generator(), &mut r, &mut out);
         // Consecutive wall segments touch: the gap between neighboring
         // centers is at most the sum of their arc half-lengths.
         let centers: Vec<Vec2> = out
@@ -571,7 +597,7 @@ mod tests {
         s.variants[0].parts[0].skip = 0.9;
         let mut r = rng(3);
         let mut thinned = Vec::new();
-        build(&s, Vec3::ZERO, &mut r, &mut thinned);
+        build(&s, Vec3::ZERO, &generator(), &mut r, &mut thinned);
         assert!(thinned.len() < out.len());
     }
 
@@ -621,7 +647,7 @@ mod tests {
         let site = Vec3::new(-26800.0, 0.0, -37900.0);
         let mut r = rng(11);
         let mut ops = Vec::new();
-        build(&s, site, &mut r, &mut ops);
+        build(&s, site, &generator(), &mut r, &mut ops);
         assert!(ops.len() > 8);
         for op in &ops {
             assert_eq!(op.kind & 1, 1, "dungeon part emitted solid");
@@ -646,7 +672,7 @@ mod tests {
         }
         assert!(joined.iter().all(|&j| j), "dungeon is disconnected");
         // The entrance breaks the surface.
-        let surface = terrain_height(Vec2::new(site.x, site.z), 1.0);
+        let surface = generator().height(Vec2::new(site.x, site.z), 1.0);
         assert!(
             ops.iter().any(|op| {
                 let (min, max) = op.aabb();
@@ -695,7 +721,7 @@ mod tests {
         for salt in 0..200 {
             let mut r = rng(salt);
             let mut out = Vec::new();
-            build(&s, Vec3::ZERO, &mut r, &mut out);
+            build(&s, Vec3::ZERO, &generator(), &mut r, &mut out);
             match out[0].material {
                 7 => common += 1,
                 8 => rare += 1,

@@ -217,11 +217,17 @@ fn viz(In(params): In<Option<Value>>, mut viz: ResMut<crate::viz::DebugViz>) -> 
 /// Scenic-spot scoring: local relief (how dramatically the terrain
 /// drops around the point) plus an altitude bonus — the "steep high
 /// terrain" heuristic the old offline scout binary used.
-fn scan_terrain(center: Vec2, radius: f32, step: f32, top: usize) -> Vec<(Vec3, f32, f32)> {
+fn scan_terrain(
+    generator: &voxel_worldgen::Generator,
+    center: Vec2,
+    radius: f32,
+    step: f32,
+    top: usize,
+) -> Vec<(Vec3, f32, f32)> {
     // Bound the grid so a wide scan cannot stall the main thread.
     let step = step.max(radius * 2.0 / 128.0).max(8.0);
     let n = (radius * 2.0 / step) as i32;
-    let height = |p: Vec2| voxel_worldgen::terrain_height(p, 8.0);
+    let height = |p: Vec2| generator.height(p, 8.0);
     let mut spots: Vec<(Vec3, f32, f32)> = Vec::new();
     for gz in 0..=n {
         for gx in 0..=n {
@@ -247,7 +253,7 @@ fn scan_terrain(center: Vec2, radius: f32, step: f32, top: usize) -> Vec<(Vec3, 
 /// `{"center": [x, z], "radius": r?, "step": s?, "top": n?}` — scan the
 /// terrain mirror for scenic spots (steep, high ground), ranked. The
 /// offline scout binary's job, minus the hand-copied level config.
-fn scan(In(params): In<Option<Value>>) -> BrpResult {
+fn scan(In(params): In<Option<Value>>, world: Res<voxel_engine::level::WorldQuery>) -> BrpResult {
     let params = params.ok_or_else(|| err("params required"))?;
     let c = f32s(&params, "center", 2)?;
     let r = radius(&params, 4_096.0);
@@ -257,7 +263,7 @@ fn scan(In(params): In<Option<Value>>) -> BrpResult {
         .and_then(Value::as_u64)
         .unwrap_or(10)
         .min(64) as usize;
-    let spots: Vec<Value> = scan_terrain(Vec2::new(c[0], c[1]), r, step, top)
+    let spots: Vec<Value> = scan_terrain(world.generator(), Vec2::new(c[0], c[1]), r, step, top)
         .iter()
         .map(|(pos, relief, score)| {
             json!({
@@ -291,16 +297,14 @@ mod tests {
 
     #[test]
     fn scan_ranks_bounded_spots_within_radius() {
-        // The scan reads the process-global program: hold the shared test
-        // lock and install the planet explicitly (other tests set mega).
-        // The generator program is process-global (a library-shaping wart
-        // tracked for the per-world-state slice); install the planet
-        // explicitly so this test does not depend on run order.
-        voxel_worldgen::program::set_program(voxel_worldgen::program::planet_program());
-        voxel_worldgen::program::set_seed(0);
+        let generator = voxel_worldgen::Generator::new(
+            voxel_worldgen::program::planet_program(),
+            0,
+            voxel_worldgen::program::DEFAULT_SUN_DIR,
+        );
         // Land region of the reference planet.
         let center = Vec2::new(-27000.0, -38000.0);
-        let spots = scan_terrain(center, 4096.0, 64.0, 10);
+        let spots = scan_terrain(&generator, center, 4096.0, 64.0, 10);
         assert!(!spots.is_empty() && spots.len() <= 10);
         for w in spots.windows(2) {
             assert!(w[0].2 >= w[1].2, "not sorted by score");
@@ -311,6 +315,6 @@ mod tests {
             assert!(*score >= *relief);
         }
         // Deterministic.
-        assert_eq!(spots, scan_terrain(center, 4096.0, 64.0, 10));
+        assert_eq!(spots, scan_terrain(&generator, center, 4096.0, 64.0, 10));
     }
 }

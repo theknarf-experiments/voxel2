@@ -1948,17 +1948,24 @@ pub fn eval_holes_mode() -> bool {
 pub(crate) static HOLE_EVAL: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 
-fn apply_generator(level: &LevelDef) -> voxel_render::WorldProgram {
+/// Build both twins of the level's generator: the GPU upload and the
+/// CPU-side [`voxel_worldgen::Generator`] every mirror samples.
+fn apply_generator(level: &LevelDef) -> (voxel_render::WorldProgram, Arc<voxel_worldgen::Generator>) {
     let ops: Vec<WorldOp> = level.generator.iter().map(GenOpDef::pack).collect();
     let sun = sun_dir(level);
-    voxel_worldgen::program::set_program(ops.clone());
-    voxel_worldgen::program::set_seed(level.seed as u32);
-    voxel_worldgen::program::set_sun_direction(sun);
-    voxel_render::WorldProgram {
-        ops: Arc::new(ops),
-        seed: level.seed as u32,
-        sun_dir: sun,
-    }
+    let generator = Arc::new(voxel_worldgen::Generator::new(
+        ops.clone(),
+        level.seed as u32,
+        sun,
+    ));
+    (
+        voxel_render::WorldProgram {
+            ops: Arc::new(ops),
+            seed: level.seed as u32,
+            sun_dir: sun,
+        },
+        generator,
+    )
 }
 
 /// The generator's water surface (its `water` op, if present).
@@ -2080,12 +2087,12 @@ impl Plugin for LevelPlugin {
             .add_systems(Update, reload_level);
         }
 
-        let program = apply_generator(&level);
+        let (program, generator) = apply_generator(&level);
         let water = water_surface(&program);
         if let Err(e) = validate_level(&level) {
             panic!("level {:?} has invalid planning data: {e}", level.name);
         }
-        let (ops_provider, world_query, planning_layers) = build_ops_provider(&level);
+        let (ops_provider, world_query, planning_layers) = build_ops_provider(&level, &generator);
         let prepare = ops_prepare(&world_query);
         app.insert_resource(program)
             .insert_resource(prepare)
@@ -2140,6 +2147,9 @@ pub struct WorldQuery {
     sources: Vec<OpsSource>,
     /// Biome layers: (instance name, ordered biome names).
     biome_tables: Vec<(String, Vec<String>)>,
+    /// This world's generator — every CPU-side sample goes through it,
+    /// so an app can host several worlds at once.
+    generator: Arc<voxel_worldgen::Generator>,
     /// Radius (m) the prop/water streamers query around the camera,
     /// `None` when the level has neither. They ignore the LOD gates, so
     /// they need their own ensure pass — a second top dependency with a
@@ -2193,6 +2203,12 @@ impl Emitter {
 }
 
 impl WorldQuery {
+    /// The world's generator: heights, slopes, fields, shadows, sea
+    /// level. Hosts sample the world through this.
+    pub fn generator(&self) -> &Arc<voxel_worldgen::Generator> {
+        &self.generator
+    }
+
     /// All ops overlapping the box, as served to a chunk of the given
     /// edge. Gated emitters drop out wholesale for coarse chunks — the
     /// gate is per chunk, never per op (a per-op gate desynchronizes
@@ -2392,7 +2408,10 @@ fn ops_prepare(world: &WorldQuery) -> crate::streaming::ChunkOpsPrepare {
     })))
 }
 
-fn build_ops_provider(level: &LevelDef) -> (ChunkOpsProvider, WorldQuery, PlanningLayers) {
+fn build_ops_provider(
+    level: &LevelDef,
+    generator: &Arc<voxel_worldgen::Generator>,
+) -> (ChunkOpsProvider, WorldQuery, PlanningLayers) {
     let mut sources: Vec<OpsSource> = Vec::new();
     let mut managers: Vec<Arc<voxel_layers::LayerManager>> = Vec::new();
 
@@ -2400,7 +2419,7 @@ fn build_ops_provider(level: &LevelDef) -> (ChunkOpsProvider, WorldQuery, Planni
     let (stack, emitters) = if level.stack.is_empty() {
         (None, Vec::new())
     } else {
-        let mut mgr = voxel_layers::LayerManager::new(level.seed);
+        let mut mgr = voxel_layers::LayerManager::with_context(level.seed, generator.clone());
         let mut emitters = Vec::new();
         for def in &level.stack {
             def.register(&level.stack, &level.structures, &mut mgr);
@@ -2438,8 +2457,7 @@ fn build_ops_provider(level: &LevelDef) -> (ChunkOpsProvider, WorldQuery, Planni
         };
         let mut pos = bevy::math::Vec3::from(p.position);
         if p.snap_to_terrain {
-            pos.y = voxel_worldgen::terrain_height(bevy::math::Vec2::new(pos.x, pos.z), 1.0)
-                + p.position[1];
+            pos.y = generator.height(bevy::math::Vec2::new(pos.x, pos.z), 1.0) + p.position[1];
         }
         let (sin, cos) = p.yaw_deg.to_radians().sin_cos();
         let rot = |v: bevy::math::Vec3| {
@@ -2513,6 +2531,7 @@ fn build_ops_provider(level: &LevelDef) -> (ChunkOpsProvider, WorldQuery, Planni
         emitters,
         sources,
         biome_tables,
+        generator: generator.clone(),
         streamer_radius,
     };
     if world.stack.is_none() && world.sources.is_empty() {
@@ -2628,8 +2647,10 @@ fn reload_level(
     let sun_changed = sun_dir(&new) != sun_dir(level.as_ref());
     let generator_changed =
         new.generator != level.generator || new.seed != level.seed || sun_changed;
+    // Rebuilt whether or not the program changed: the planning stack and
+    // the facade below need one either way.
+    let (program, generator) = apply_generator(&new);
     if generator_changed {
-        let program = apply_generator(&new);
         *water = water_surface(&program);
         commands.insert_resource(program);
     }
@@ -2645,7 +2666,7 @@ fn reload_level(
         lod.max_level = new.lod.max_level;
         lod.top_radius = new.lod.top_radius;
         lod.top_y = new.lod.top_y;
-        let (ops_provider, world_query, planning_layers) = build_ops_provider(&new);
+        let (ops_provider, world_query, planning_layers) = build_ops_provider(&new, &generator);
         commands.insert_resource(ops_prepare(&world_query));
         commands.insert_resource(ops_provider);
         commands.insert_resource(world_query);
@@ -2770,16 +2791,53 @@ mod tests {
         assert_eq!(back.grass, planet.grass);
     }
 
-    use crate::PROGRAM_LOCK;
+    /// Build a level's world facade the way the plugin does — every
+    /// piece of generator state hangs off the returned query.
+    fn world_for(def: &LevelDef) -> WorldQuery {
+        let (_, generator) = apply_generator(def);
+        build_ops_provider(def, &generator).1
+    }
+
+    /// The whole point of per-world generator state: two levels with
+    /// different programs and seeds, live in one process at the same
+    /// time, each sampling its own world.
+    #[test]
+    fn two_worlds_coexist_in_one_process() {
+        let planet = LevelDef::from_json(&shipped("planet.json")).unwrap();
+        let mut other = planet.clone();
+        other.seed = planet.seed ^ 0x5eed;
+        let a = world_for(&planet);
+        let b = world_for(&other);
+        let mega = LevelDef::from_json(&shipped("megastructure.json")).unwrap();
+        let m = world_for(&mega);
+
+        // Same query, three different worlds — interleaved, so a global
+        // "last one installed wins" would show up here.
+        let probes = [
+            bevy::math::Vec2::new(-27000.0, -38000.0),
+            bevy::math::Vec2::new(1200.0, -400.0),
+            bevy::math::Vec2::ZERO,
+        ];
+        for p in probes {
+            let (ha, hb) = (a.generator().height(p, 1.0), b.generator().height(p, 1.0));
+            assert_ne!(ha, hb, "reseeded world returned the same height at {p:?}");
+            // Re-sampling after touching the others must not drift.
+            assert_eq!(ha, a.generator().height(p, 1.0));
+            let _ = m.generator().height(p, 1.0);
+            assert_eq!(hb, b.generator().height(p, 1.0));
+        }
+        assert_eq!(a.generator().seed(), planet.seed as u32);
+        assert_eq!(b.generator().seed(), other.seed as u32);
+        // Mega has no height op at all; its water/height mirror stays inert
+        // while the planets keep working.
+        assert!(m.generator().water_level().is_none());
+        assert!(a.generator().water_level().is_some());
+    }
 
     #[test]
     fn mega_stack_serves_pockets_and_tubes_through_world_query() {
-        let _lock = PROGRAM_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let mega = LevelDef::from_json(&shipped("megastructure.json")).unwrap();
-        let packed: Vec<_> = mega.generator.iter().map(GenOpDef::pack).collect();
-        voxel_worldgen::program::set_program(packed);
-        voxel_worldgen::program::set_seed(mega.seed as u32);
-        let (_, world, _) = build_ops_provider(&mega);
+        let world = world_for(&mega);
         let min = Vec3::new(-1500.0, -260.0, -1500.0);
         let max = Vec3::new(1500.0, 260.0, 1500.0);
         let ops = world.ops_in(min, max, 12.8);
@@ -2887,12 +2945,8 @@ mod tests {
 
     #[test]
     fn planet_stack_serves_gated_ops_through_world_query() {
-        let _lock = PROGRAM_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let planet = LevelDef::from_json(&shipped("planet.json")).unwrap();
-        let packed: Vec<_> = planet.generator.iter().map(GenOpDef::pack).collect();
-        voxel_worldgen::program::set_program(packed);
-        voxel_worldgen::program::set_seed(planet.seed as u32);
-        let (_, world, _) = build_ops_provider(&planet);
+        let world = world_for(&planet);
         // A land region large enough to hold every feature kind.
         let min = Vec3::new(-31096.0, -200.0, -42096.0);
         let max = Vec3::new(-22904.0, 500.0, -33904.0);
@@ -2939,7 +2993,7 @@ mod tests {
         }
         assert!(dominant[0] && dominant[1], "biomes not regional: {dominant:?}");
         // Determinism across a fresh build.
-        let (_, world2, _) = build_ops_provider(&planet);
+        let world2 = world_for(&planet);
         assert_eq!(fine, world2.ops_in(min, max, 12.8));
     }
 

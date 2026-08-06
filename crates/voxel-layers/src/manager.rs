@@ -55,6 +55,10 @@ struct LayerEntry {
 /// regenerable, so the cache can be dropped at any time.
 pub struct LayerManager {
     world_seed: u64,
+    /// Per-world context handed to every layer's `generate` (the world's
+    /// generator, host data, …). Opaque here: this crate knows nothing
+    /// about what a world is.
+    context: Arc<dyn Any + Send + Sync>,
     layers: HashMap<LayerKey, LayerEntry>,
     /// Sharded so parallel ensure-load workers don't serialize on one
     /// lock: every generated chunk takes the lock once per dependency
@@ -90,8 +94,16 @@ thread_local! {
 
 impl LayerManager {
     pub fn new(world_seed: u64) -> Self {
+        Self::with_context(world_seed, Arc::new(()))
+    }
+
+    /// A manager whose layers can reach `context` through
+    /// [`LayerCtx::context`] — one value per world, so nothing needs a
+    /// global.
+    pub fn with_context(world_seed: u64, context: Arc<dyn Any + Send + Sync>) -> Self {
         Self {
             world_seed,
+            context,
             layers: HashMap::new(),
             cache: std::array::from_fn(|_| RwLock::new(HashMap::new())),
             read_generated: AtomicUsize::new(0),
@@ -534,6 +546,20 @@ impl<L: Layer> LayerCtx<'_, L> {
     /// Deterministic RNG for this chunk.
     pub fn rng(&self) -> Rng {
         Rng::new(self.seed())
+    }
+
+    /// The manager's per-world context, downcast to `C`.
+    ///
+    /// Panics if the manager was built without a context of this type —
+    /// an engine wiring error, not something level data can cause.
+    pub fn context<C: 'static>(&self) -> &C {
+        self.mgr.context.downcast_ref::<C>().unwrap_or_else(|| {
+            panic!(
+                "layer {:?} asked for a {} context, but the manager carries a different type",
+                L::NAME,
+                std::any::type_name::<C>()
+            )
+        })
     }
 
     /// World-space bounds of this chunk.

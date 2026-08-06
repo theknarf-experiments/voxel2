@@ -176,6 +176,7 @@ fn dress_scatter(
     mut commands: Commands,
     assets: Res<PropAssets>,
     table: Res<PropTable>,
+    query: Res<voxel_engine::level::WorldQuery>,
     new: Query<(Entity, &ScatterInstance, &Transform), Added<ScatterInstance>>,
 ) {
     for (entity, instance, transform) in &new {
@@ -203,7 +204,7 @@ fn dress_scatter(
             // It hangs off the instance so the engine's tile eviction
             // takes it with the tree, which means expressing a
             // world-space pose in the parent's LOCAL space.
-            let sun = voxel_worldgen::program::sun_direction();
+            let sun = query.generator().sun_direction();
             let sun_xz = Vec2::new(sun.x, sun.z).normalize_or(Vec2::X);
             let scale = instance.scale;
             let world = Transform::from_translation(
@@ -318,8 +319,8 @@ fn build_super_tile(
                 // Seat impostors on the band-limited height coarse LOD
                 // actually shows at that distance, or they float.
                 let mut pos = placement.position;
-                pos.y = voxel_worldgen::terrain_height(Vec2::new(pos.x, pos.z), 16.0) - 0.15;
-                let shade = 0.45 + 0.55 * voxel_worldgen::sun_shadow(pos);
+                pos.y = world.generator().height(Vec2::new(pos.x, pos.z), 16.0) - 0.15;
+                let shade = 0.45 + 0.55 * world.generator().sun_shadow(pos);
                 let Some(Some(imp)) = impostors.get(placement.variant as usize) else {
                     continue;
                 };

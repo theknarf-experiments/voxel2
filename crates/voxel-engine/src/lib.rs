@@ -51,8 +51,3 @@ impl Plugin for VoxelEnginePlugin {
         }
     }
 }
-
-/// Tests that install or read the process-global generator program must
-/// hold this lock (several test modules race otherwise).
-#[cfg(test)]
-pub(crate) static PROGRAM_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());

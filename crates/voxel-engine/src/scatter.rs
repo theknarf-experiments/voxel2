@@ -32,7 +32,6 @@ use std::sync::Arc;
 
 use bevy::prelude::*;
 use voxel_core::seed::{chunk_seed, Rng};
-use voxel_worldgen::{terrain_height, terrain_up};
 
 use crate::level::{ScatterDef, WorldQuery};
 
@@ -84,10 +83,6 @@ impl Plugin for ScatterPlugin {
 const SCATTER_SALT: u64 = 0x5CA7;
 const GRASS_SALT: u64 = 0x6A55;
 
-fn world_seed() -> u64 {
-    voxel_worldgen::program::seed() as u64
-}
-
 // --- gates ------------------------------------------------------------------
 
 /// Soft altitude-band gate: 1 inside, fading linearly to 0 across
@@ -100,9 +95,13 @@ fn altitude_gate(alt: [f32; 2], falloff: f32, y: f32) -> f32 {
 }
 
 /// Generator field-register density (see `WOP_FIELD`).
-fn field_gate(density: &Option<crate::level::FieldDensityDef>, xz: Vec2) -> f32 {
+fn field_gate(
+    generator: &voxel_worldgen::Generator,
+    density: &Option<crate::level::FieldDensityDef>,
+    xz: Vec2,
+) -> f32 {
     density.as_ref().map_or(1.0, |d| {
-        let f = voxel_worldgen::world_fields(xz)[(d.field as usize).min(3)];
+        let f = generator.fields(xz)[(d.field as usize).min(3)];
         (f * d.scale + d.offset).clamp(0.0, 1.0)
     })
 }
@@ -153,13 +152,14 @@ fn carved(cut_ops: &[voxel_core::csg::CsgOp], p: Vec3) -> bool {
 
 /// Align-to-normal, random tilt cone, then yaw.
 fn placement_rotation(
+    generator: &voxel_worldgen::Generator,
     rules: &crate::level::PlacementRulesDef,
     xz: Vec2,
     yaw: f32,
     rng: &mut Rng,
 ) -> Quat {
     let base = if rules.align == "normal" {
-        Quat::from_rotation_arc(Vec3::Y, voxel_worldgen::terrain_normal(xz, 4.0))
+        Quat::from_rotation_arc(Vec3::Y, generator.normal(xz, 4.0))
     } else {
         Quat::IDENTITY
     };
@@ -179,9 +179,10 @@ fn placement_rotation(
 /// seed and the tile coordinate, so any consumer (the entity streamer,
 /// a host's impostor batcher) sees exactly the same props.
 pub fn tile_placements(def: &ScatterDef, world: &WorldQuery, tile: IVec2) -> Vec<Placement> {
+    let generator = world.generator();
     let size = def.tile_m;
     let mut rng = Rng::new(chunk_seed(
-        world_seed(),
+        world.generator().seed() as u64,
         SCATTER_SALT ^ class_salt(&def.class),
         IVec3::new(tile.x, 0, tile.y),
     ));
@@ -194,7 +195,7 @@ pub fn tile_placements(def: &ScatterDef, world: &WorldQuery, tile: IVec2) -> Vec
         .patch
         .as_ref()
         .map(|p| {
-            voxel_worldgen::patch_density(
+            generator.patch_density(
                 origin + Vec2::splat(size * 0.5),
                 p.scale,
                 Vec2::from(p.offset),
@@ -208,7 +209,7 @@ pub fn tile_placements(def: &ScatterDef, world: &WorldQuery, tile: IVec2) -> Vec
     let mut out = Vec::new();
     for _ in 0..attempts {
         let xz = origin + Vec2::new(rng.next_f32(), rng.next_f32()) * size;
-        if rng.next_f32() > field_gate(&def.density, xz) * biome_gate(world, &def.biome, xz) {
+        if rng.next_f32() > field_gate(generator, &def.density, xz) * biome_gate(world, &def.biome, xz) {
             continue;
         }
         if def.clearance && on_clearance(&clearance, xz) {
@@ -216,7 +217,7 @@ pub fn tile_placements(def: &ScatterDef, world: &WorldQuery, tile: IVec2) -> Vec
         }
         // Seat on the band-limited surface the mid-LOD terrain shows
         // across the streaming radius (tiles appear at the rim).
-        let y = terrain_height(xz, def.detail_vs);
+        let y = generator.height(xz, def.detail_vs);
         if carved(&cut_ops, Vec3::new(xz.x, y, xz.y)) {
             continue;
         }
@@ -224,7 +225,7 @@ pub fn tile_placements(def: &ScatterDef, world: &WorldQuery, tile: IVec2) -> Vec
         if gate <= 0.0 || (gate < 1.0 && rng.next_f32() > gate) {
             continue;
         }
-        let up = terrain_up(xz, def.detail_vs);
+        let up = generator.up(xz, def.detail_vs);
         if up < def.min_up || up > def.placement.max_up || rng.next_f32() >= def.chance {
             continue;
         }
@@ -242,7 +243,7 @@ pub fn tile_placements(def: &ScatterDef, world: &WorldQuery, tile: IVec2) -> Vec
             .unwrap_or(def.sink_m + def.sink_scaled * scale);
         out.push(Placement {
             position: Vec3::new(xz.x, y - sink, xz.y),
-            rotation: placement_rotation(&def.placement, xz, yaw, &mut rng),
+            rotation: placement_rotation(generator, &def.placement, xz, yaw, &mut rng),
             scale,
             variant: variant as u32,
             seed: rng.next_u64(),
@@ -412,9 +413,10 @@ fn grass_tile(
     grass: &crate::level::GrassDef,
     world: &WorldQuery,
 ) -> Vec<voxel_render::GrassInstance> {
+    let generator = world.generator();
     let size = grass.tile_m;
     let mut rng = Rng::new(chunk_seed(
-        world_seed(),
+        world.generator().seed() as u64,
         SCATTER_SALT ^ GRASS_SALT,
         IVec3::new(tile.x, 1, tile.y),
     ));
@@ -427,15 +429,15 @@ fn grass_tile(
         if on_clearance(&clearance, xz) {
             continue;
         }
-        if rng.next_f32() > field_gate(&grass.density, xz) * biome_gate(world, &grass.biome, xz) {
+        if rng.next_f32() > field_gate(generator, &grass.density, xz) * biome_gate(world, &grass.biome, xz) {
             continue;
         }
-        let y = terrain_height(xz, 1.0);
+        let y = generator.height(xz, 1.0);
         let gate = altitude_gate(grass.altitude, grass.placement.altitude_falloff, y);
         if gate <= 0.0 || (gate < 1.0 && rng.next_f32() > gate) {
             continue;
         }
-        let up = terrain_up(xz, 1.0);
+        let up = generator.up(xz, 1.0);
         if up < grass.min_up || up > grass.placement.max_up {
             continue;
         }
@@ -443,7 +445,7 @@ fn grass_tile(
             continue;
         }
         // Top byte of the hash carries the baked sun-shadow factor.
-        let shadow = voxel_worldgen::sun_shadow(Vec3::new(xz.x, y, xz.y));
+        let shadow = generator.sun_shadow(Vec3::new(xz.x, y, xz.y));
         let hash = (rng.next_u64() as u32 & 0x00FF_FFFF) | (((shadow * 255.0) as u32) << 24);
         out.push(voxel_render::GrassInstance {
             pos: [xz.x, y - 0.03, xz.y],

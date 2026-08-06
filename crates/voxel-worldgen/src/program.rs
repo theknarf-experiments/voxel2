@@ -5,8 +5,6 @@
 //! planning, and the rendered world always agree. MUST stay bit-compatible
 //! with the WGSL.
 
-use std::cell::RefCell;
-use std::sync::{Arc, RwLock};
 
 use glam::{IVec2, IVec3, Vec2, Vec3};
 
@@ -20,14 +18,13 @@ fn round_half_up(x: f32) -> f32 {
 }
 use voxel_core::worldop::*;
 
-use crate::{fbm_mode, hash2};
 
-fn hash3(p: IVec3) -> f32 {
+fn hash3_seeded(seed: u32, p: IVec3) -> f32 {
     let mut h: u32 = (p.x as u32)
         .wrapping_mul(374_761_393)
         .wrapping_add((p.y as u32).wrapping_mul(668_265_263))
         .wrapping_add((p.z as u32).wrapping_mul(2_246_822_519))
-        .wrapping_add(seed().wrapping_mul(2_654_435_769));
+        .wrapping_add(seed.wrapping_mul(2_654_435_769));
     h = (h ^ (h >> 13)).wrapping_mul(1_274_126_177);
     h ^= h >> 16;
     (h & 0xFF_FFFF) as f32 / 16_777_216.0
@@ -39,12 +36,12 @@ fn sd_box(p: Vec3, b: Vec3) -> f32 {
 }
 
 /// Mirrors the WGSL `value_noise3` (quintic smoothstep).
-fn value_noise3(p: Vec3) -> f32 {
+fn value_noise3(seed: u32, p: Vec3) -> f32 {
     let i = p.floor();
     let f = p - i;
     let i = IVec3::new(i.x as i32, i.y as i32, i.z as i32);
     let u = f * f * f * (f * (f * 6.0 - 15.0) + 10.0);
-    let corner = |dx: i32, dy: i32, dz: i32| hash3(i + IVec3::new(dx, dy, dz));
+    let corner = |dx: i32, dy: i32, dz: i32| hash3_seeded(seed, i + IVec3::new(dx, dy, dz));
     let x00 = corner(0, 0, 0) + (corner(1, 0, 0) - corner(0, 0, 0)) * u.x;
     let x10 = corner(0, 1, 0) + (corner(1, 1, 0) - corner(0, 1, 0)) * u.x;
     let x01 = corner(0, 0, 1) + (corner(1, 0, 1) - corner(0, 0, 1)) * u.x;
@@ -56,7 +53,14 @@ fn value_noise3(p: Vec3) -> f32 {
 
 /// Anisotropic band-limited 3D FBM (~[-0.5, 0.5]); wavelength for the
 /// band fade uses the horizontal frequency. Mirrors the WGSL exactly.
-fn fbm3(p: Vec3, freq_xz: f32, freq_y: f32, octaves: i32, voxel_size: f32) -> f32 {
+fn fbm3_seeded(
+    seed: u32,
+    p: Vec3,
+    freq_xz: f32,
+    freq_y: f32,
+    octaves: i32,
+    voxel_size: f32,
+) -> f32 {
     let mut sum = 0.0;
     let mut amp = 0.5;
     let mut mul = 1.0;
@@ -64,7 +68,7 @@ fn fbm3(p: Vec3, freq_xz: f32, freq_y: f32, octaves: i32, voxel_size: f32) -> f3
         let fade = crate::band_fade(1.0 / (freq_xz * mul), voxel_size);
         sum += amp
             * fade
-            * (value_noise3(Vec3::new(
+            * (value_noise3(seed, Vec3::new(
                 p.x * freq_xz * mul,
                 p.y * freq_y * mul,
                 p.z * freq_xz * mul,
@@ -134,7 +138,7 @@ fn to_iv2(v: Vec2) -> IVec2 {
 // The generated arms keep one shape across Rust and WGSL; clippy's
 // pattern-collapse suggestions would fork the dialect per language.
 #[allow(clippy::collapsible_match, clippy::collapsible_if)]
-pub fn eval(ops: &[WorldOp], p: Vec3, vs: f32) -> (f32, u32) {
+pub fn eval(ops: &[WorldOp], seed: u32, p: Vec3, vs: f32) -> (f32, u32) {
     let coarse = vs >= WOP_COARSE_VOXEL_M;
     let mut h = 0.0f32;
     let mut d = BIG;
@@ -146,6 +150,12 @@ pub fn eval(ops: &[WorldOp], p: Vec3, vs: f32) -> (f32, u32) {
     let mut shaft = BIG;
     let mut warp = Vec2::ZERO;
     let pxz = Vec2::new(p.x, p.z);
+    // Seeded shims: the generated arms call these by plain name, so a
+    // world's seed reaches the noise without a global.
+    let hash2 = |q: IVec2| crate::hash2(seed, q);
+    let hash3 = |q: IVec3| hash3_seeded(seed, q);
+    let fbm3 = |q: Vec3, fx: f32, fy: f32, o: i32, s: f32| fbm3_seeded(seed, q, fx, fy, o, s);
+    let fbm_mode = |q: Vec2, sc: f32, o: i32, s: f32, m: u32| crate::fbm_mode(seed, q, sc, o, s, m);
 
     for op in ops {
         if coarse && op.flags & WOP_FLAG_FINE_ONLY != 0 {
@@ -165,13 +175,13 @@ pub fn eval(ops: &[WorldOp], p: Vec3, vs: f32) -> (f32, u32) {
 /// of its height ops only. Twin of the height-only loops in the mesh
 /// (shadow bake) and water (seabed) shaders.
 #[allow(clippy::collapsible_match, clippy::collapsible_if)]
-pub fn eval_height(ops: &[WorldOp], xz: Vec2, vs: f32) -> f32 {
+pub fn eval_height(ops: &[WorldOp], seed: u32, xz: Vec2, vs: f32) -> f32 {
     let mut h = 0.0;
     let mut warp = Vec2::ZERO;
     // Shell names for the generated height arms: the replay shaders call
     // their band-limited FBM without a vs argument.
     let pxz = xz;
-    let hfbm = |q: Vec2, s: f32, o: i32, m: u32| fbm_mode(q, s, o, vs, m);
+    let hfbm = |q: Vec2, s: f32, o: i32, m: u32| crate::fbm_mode(seed, q, s, o, vs, m);
     for op in ops {
         // Generated from voxel-core::opgen (height-only subset).
         include!(concat!(env!("OUT_DIR"), "/op_arms_height.rs"));
@@ -192,9 +202,10 @@ pub fn lattice_y_spacing(ops: &[WorldOp]) -> Option<f32> {
 /// world data (forest density, moisture, ...) consumed by spawners and
 /// gameplay queries; they never touch the SDF. Warp ops accumulated
 /// before a field op affect its sample, mirroring the height loop.
-pub fn eval_fields(ops: &[WorldOp], xz: Vec2, vs: f32) -> [f32; FIELD_SLOTS] {
+pub fn eval_fields(ops: &[WorldOp], seed: u32, xz: Vec2, vs: f32) -> [f32; FIELD_SLOTS] {
     let mut fields = [0.0f32; FIELD_SLOTS];
     let mut warp = Vec2::ZERO;
+    let fbm_mode = |q: Vec2, sc: f32, o: i32, s: f32, m: u32| crate::fbm_mode(seed, q, sc, o, s, m);
     for op in ops {
         match op.kind {
             WOP_WARP_XZ => {
@@ -234,79 +245,8 @@ pub fn water_level(ops: &[WorldOp]) -> Option<f32> {
 
 // --- the process-wide current program ----------------------------------------
 
-static PROGRAM: RwLock<Option<Arc<Vec<WorldOp>>>> = RwLock::new(None);
-static SEED: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
-static SUN: RwLock<glam::Vec3> = RwLock::new(DEFAULT_SUN_DIR);
-
 /// The engine-wide fallback sun direction (not normalized; twins normalize).
 pub const DEFAULT_SUN_DIR: glam::Vec3 = glam::Vec3::new(0.55, 0.5, 0.32);
-
-/// Bumped on every install so per-thread snapshots refresh.
-static PROGRAM_GEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-
-thread_local! {
-    /// Per-thread snapshot of the program. The CPU mirrors sample the
-    /// heightfield millions of times per planning pass; going through the
-    /// global `RwLock` + `Arc::clone` on every sample WRITES a shared
-    /// cache line, which made parallel generation slower than serial
-    /// (measured: 2.3 s at one thread, 5.5 s at seven). Reads here touch
-    /// only thread-local state plus one relaxed load of a read-mostly
-    /// counter.
-    static LOCAL_PROGRAM: RefCell<(u64, Option<Arc<Vec<WorldOp>>>)> =
-        const { RefCell::new((u64::MAX, None)) };
-}
-
-/// Install the level's generator program for the CPU mirrors
-/// ([`crate::terrain_height`], the planning layers, …).
-pub fn set_program(ops: Vec<WorldOp>) {
-    *PROGRAM.write().unwrap() = Some(Arc::new(ops));
-    PROGRAM_GEN.fetch_add(1, std::sync::atomic::Ordering::Release);
-}
-
-/// Run `f` against the current program without per-call synchronization.
-/// Prefer this over [`program`] on hot paths.
-pub fn with_program<R>(f: impl FnOnce(&[WorldOp]) -> R) -> R {
-    let generation = PROGRAM_GEN.load(std::sync::atomic::Ordering::Acquire);
-    LOCAL_PROGRAM.with(|cell| {
-        if cell.borrow().0 != generation {
-            let fresh = program();
-            *cell.borrow_mut() = (generation, Some(fresh));
-        }
-        let snapshot = cell.borrow();
-        f(snapshot.1.as_ref().expect("program snapshot"))
-    })
-}
-
-/// Install the level seed. Mixed into the generator hashes on both twins;
-/// seed 0 leaves them bit-identical to the unseeded formulas.
-pub fn set_seed(seed: u32) {
-    SEED.store(seed, std::sync::atomic::Ordering::Relaxed);
-}
-
-/// The installed level seed (0 until a level sets one).
-pub fn seed() -> u32 {
-    SEED.load(std::sync::atomic::Ordering::Relaxed)
-}
-
-/// Install the level's sun direction — the single source for the baked
-/// shadow march (CPU + GPU) and blob shadows.
-pub fn set_sun_direction(dir: glam::Vec3) {
-    *SUN.write().unwrap() = dir;
-}
-
-pub fn sun_direction() -> glam::Vec3 {
-    *SUN.read().unwrap()
-}
-
-/// The current program (defaults to [`planet_program`] until a level
-/// installs one — keeps standalone tools and tests working without a level).
-pub fn program() -> Arc<Vec<WorldOp>> {
-    if let Some(p) = PROGRAM.read().unwrap().as_ref() {
-        return p.clone();
-    }
-    let mut w = PROGRAM.write().unwrap();
-    w.get_or_insert_with(|| Arc::new(planet_program())).clone()
-}
 
 // --- reference programs (also the test oracles' subjects) --------------------
 
@@ -381,6 +321,7 @@ pub fn mega_program() -> Vec<WorldOp> {
 
 #[cfg(test)]
 mod tests {
+    use crate::fbm_mode;
     use super::*;
     use crate::fbm;
 
@@ -388,18 +329,19 @@ mod tests {
     fn planet_program_matches_legacy_terrain_height() {
         // Oracle: the pre-program formula, verbatim.
         let ops = planet_program();
+        let seed = 0u32;
         for i in 0..500 {
             let p = Vec2::new((i * 37) as f32 * 13.7, (i * 91) as f32 * -7.3);
             for vs in [1.0, 8.0, 64.0] {
-                let base = fbm(p, 0.00005, 3, vs) * 800.0
-                    + fbm(p + Vec2::new(510.0, -770.0), 0.0008, 5, vs) * 420.0
-                    + fbm(p + Vec2::new(1337.0, 55.0), 0.01, 5, vs) * 36.0;
+                let base = fbm(seed, p, 0.00005, 3, vs) * 800.0
+                    + fbm(seed, p + Vec2::new(510.0, -770.0), 0.0008, 5, vs) * 420.0
+                    + fbm(seed, p + Vec2::new(1337.0, 55.0), 0.01, 5, vs) * 36.0;
                 let stepped = base + 90.0 * smoothstep(180.0, 230.0, base);
-                let legacy = stepped + fbm(p + Vec2::new(37.0, 91.0), 0.06, 4, vs) * 5.0 - 8.0;
-                assert_eq!(eval_height(&ops, p, vs), legacy);
+                let legacy = stepped + fbm(seed, p + Vec2::new(37.0, 91.0), 0.06, 4, vs) * 5.0 - 8.0;
+                assert_eq!(eval_height(&ops, seed, p, vs), legacy);
                 // (h - 3) - h is not exactly -3 in f32; the height itself is
                 // bit-exact (asserted above), the SDF just subtracts it.
-                let (d, mat) = eval(&ops, glam::Vec3::new(p.x, legacy - 3.0, p.y), vs);
+                let (d, mat) = eval(&ops, seed, glam::Vec3::new(p.x, legacy - 3.0, p.y), vs);
                 assert!((d + 3.0).abs() < 1.0e-3, "d={d}");
                 assert_eq!(mat, 1);
             }
@@ -408,6 +350,7 @@ mod tests {
 
     #[test]
     fn fields_accumulate_and_respect_warp() {
+        let seed = 0u32;
         let mut f0 = WorldOp::new(WOP_FIELD);
         f0.p0 = [10.0, -5.0, 0.01, 2.0];
         f0.p1 = [3.0, 0.0, 0.0, 0.25];
@@ -425,17 +368,17 @@ mod tests {
         let vs = 4.0;
         // Warp placed after the first field op only affects later ones.
         let ops = [f0, warp, f0b, f2];
-        let got = eval_fields(&ops, p, vs);
+        let got = eval_fields(&ops, seed, p, vs);
 
         let q = p + Vec2::new(0.002 * 0.0 + 7.0, 13.0);
         let w = Vec2::new(
-            fbm_mode(q, 0.002, 2, vs, 0) * 40.0,
-            fbm_mode(q + Vec2::new(713.0, -337.0), 0.002, 2, vs, 0) * 40.0,
+            fbm_mode(seed, q, 0.002, 2, vs, 0) * 40.0,
+            fbm_mode(seed, q + Vec2::new(713.0, -337.0), 0.002, 2, vs, 0) * 40.0,
         );
         let want0 = 0.25
-            + fbm_mode(p + Vec2::new(10.0, -5.0), 0.01, 3, vs, 0) * 2.0
-            + fbm_mode(p + w, 0.05, 2, vs, 0) * 0.5;
-        let want2 = -0.1 + fbm_mode(p + w, 0.02, 2, vs, 0) * 1.0;
+            + fbm_mode(seed, p + Vec2::new(10.0, -5.0), 0.01, 3, vs, 0) * 2.0
+            + fbm_mode(seed, p + w, 0.05, 2, vs, 0) * 0.5;
+        let want2 = -0.1 + fbm_mode(seed, p + w, 0.02, 2, vs, 0) * 1.0;
         assert_eq!(got[0], want0);
         assert_eq!(got[1], 0.0);
         assert_eq!(got[2], want2);
@@ -444,13 +387,14 @@ mod tests {
 
     #[test]
     fn coarse_mega_is_solid_minus_shafts() {
+        let seed = 0u32;
         let ops = mega_program();
         for i in 0..300 {
             let p = Vec3::new(i as f32 * 17.3, (i % 11) as f32 * 9.0, i as f32 * -23.1);
-            let (coarse, _) = eval(&ops, p, 8.0);
+            let (coarse, _) = eval(&ops, seed, p, 8.0);
             // Away from shafts the coarse world is deeply solid; the fine
             // world is never *more* solid than a slab is thick.
-            let (fine, _) = eval(&ops, p, 1.0);
+            let (fine, _) = eval(&ops, seed, p, 1.0);
             assert!(coarse.is_finite() && fine.is_finite());
             if coarse > 1.0 {
                 // Inside a shaft: fine structure must be air there too
@@ -465,10 +409,11 @@ mod tests {
 
     #[test]
     fn programs_are_deterministic() {
+        let seed = 0u32;
         let ops = mega_program();
         for i in 0..200 {
             let p = Vec3::new(i as f32 * 13.7, (i % 7) as f32 * 11.0, i as f32 * -7.9);
-            assert_eq!(eval(&ops, p, 1.0), eval(&ops, p, 1.0));
+            assert_eq!(eval(&ops, seed, p, 1.0), eval(&ops, seed, p, 1.0));
         }
     }
 
@@ -480,6 +425,7 @@ mod tests {
 
     #[test]
     fn noise_modes_and_warp_change_heights_within_bounds() {
+        let seed = 0u32;
         let base = WorldOp::new(WOP_HEIGHT_FBM)
             .p0([0.0, 0.0, 0.001, 100.0])
             .p1([4.0, 0.0, 0.0, 0.0]);
@@ -491,10 +437,10 @@ mod tests {
         let mut differs = 0;
         for i in 0..200 {
             let p = Vec2::new(i as f32 * 137.0, i as f32 * -91.0);
-            let h0 = eval_height(&[base], p, 1.0);
-            let h1 = eval_height(&[ridged], p, 1.0);
-            let h2 = eval_height(&[billow], p, 1.0);
-            let hw = eval_height(&[warp, base], p, 1.0);
+            let h0 = eval_height(&[base], seed, p, 1.0);
+            let h1 = eval_height(&[ridged], seed, p, 1.0);
+            let h2 = eval_height(&[billow], seed, p, 1.0);
+            let hw = eval_height(&[warp, base], seed, p, 1.0);
             for h in [h0, h1, h2, hw] {
                 assert!(h.is_finite() && h.abs() <= 100.0, "h={h}");
             }
@@ -507,6 +453,7 @@ mod tests {
 
     #[test]
     fn fbm3_carve_makes_underground_air() {
+        let seed = 0u32;
         // Planet base + aggressive cave carve: some points well below the
         // surface must now be air, and the op must be deterministic.
         let mut ops = planet_program();
@@ -519,10 +466,10 @@ mod tests {
         let mut caves = 0;
         for i in 0..400 {
             let xz = Vec2::new(i as f32 * 61.0, i as f32 * -43.0);
-            let h = eval_height(&ops, xz, 1.0);
+            let h = eval_height(&ops, 0, xz, 1.0);
             let p = Vec3::new(xz.x, h - 12.0, xz.y);
-            let (d, _) = eval(&ops, p, 1.0);
-            assert_eq!(eval(&ops, p, 1.0), (d, eval(&ops, p, 1.0).1));
+            let (d, _) = eval(&ops, seed, p, 1.0);
+            assert_eq!(eval(&ops, seed, p, 1.0), (d, eval(&ops, seed, p, 1.0).1));
             if d > 0.5 {
                 caves += 1;
             }
@@ -532,6 +479,7 @@ mod tests {
 
     #[test]
     fn fbm3_union_makes_floating_solids() {
+        let seed = 0u32;
         // Pure 3D-noise world: solid regions exist above any surface.
         let ops = vec![WorldOp::new(WOP_FBM3)
             .material(2)
@@ -545,7 +493,7 @@ mod tests {
                 100.0 + (i % 13) as f32 * 30.0,
                 i as f32 * -37.0,
             );
-            let (d, mat) = eval(&ops, p, 1.0);
+            let (d, mat) = eval(&ops, seed, p, 1.0);
             if d < 0.0 {
                 solid += 1;
                 assert_eq!(mat, 2);

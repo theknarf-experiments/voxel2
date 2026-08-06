@@ -8,7 +8,7 @@ use glam::{IVec3, Vec2, Vec3};
 use voxel_core::csg::CsgOp;
 use voxel_layers::{IAabb, Layer, LayerCtx};
 
-use crate::{terrain_height, terrain_up};
+use crate::Generator;
 
 /// A water surface segment (river reach): endpoints, half width, and the
 /// (monotone) water level at each end.
@@ -117,6 +117,7 @@ impl Layer for ScatterSites {
     }
 
     fn generate(&self, ctx: &LayerCtx<'_, Self>, _coord: IVec3) -> SitesChunk {
+        let generator = ctx.context::<Generator>();
         let mut rng = ctx.rng();
         if rng.next_f32() > self.cfg.chance {
             return SitesChunk { sites: Vec::new() };
@@ -128,8 +129,8 @@ impl Layer for ScatterSites {
             b.min.x as f32 + m + rng.next_f32() * (cell - 2.0 * m),
             b.min.z as f32 + m + rng.next_f32() * (cell - 2.0 * m),
         );
-        let h = terrain_height(p, 8.0);
-        let up = terrain_up(p, 8.0);
+        let h = generator.height(p, 8.0);
+        let up = generator.up(p, 8.0);
         if !(self.cfg.altitude[0]..self.cfg.altitude[1]).contains(&h)
             || !(self.cfg.up[0]..=self.cfg.up[1]).contains(&up)
         {
@@ -507,6 +508,7 @@ impl Layer for ConnectPaths {
     }
 
     fn generate(&self, ctx: &LayerCtx<'_, Self>, _coord: IVec3) -> PathsChunk {
+        let generator = ctx.context::<Generator>();
         let own = ctx.chunk_bounds();
         let pad = (self.cfg.reach_m + self.cfg.corridor_m) as i32;
         let view = ctx.get_named::<ScatterSites>(&self.cfg.source, own.inflate(IVec3::new(pad, 0, pad)));
@@ -537,7 +539,7 @@ impl Layer for ConnectPaths {
                 ..Default::default()
             };
             let waypoints = crate::path::find_path(
-                &|p| terrain_height(p, 8.0),
+                &|p| generator.height(p, 8.0),
                 lo,
                 hi,
                 clo,
@@ -604,6 +606,7 @@ impl Layer for FlowCourses {
     }
 
     fn generate(&self, ctx: &LayerCtx<'_, Self>, _coord: IVec3) -> CoursesChunk {
+        let generator = ctx.context::<Generator>();
         let own = ctx.chunk_bounds();
         let view = ctx.get_named::<ScatterSites>(&self.cfg.source, own);
         // Own the spring, not the whole source chunk: with mismatched
@@ -626,7 +629,7 @@ impl Layer for FlowCourses {
                     ..Default::default()
                 };
                 let waypoints =
-                    crate::rivers::flow_path(&|p| terrain_height(p, 8.0), start, &params);
+                    crate::rivers::flow_path(&|p| generator.height(p, 8.0), start, &params);
                 if waypoints.len() < 6 {
                     continue;
                 }
@@ -634,7 +637,7 @@ impl Layer for FlowCourses {
                 let levels: Vec<f32> = waypoints
                     .iter()
                     .map(|p| {
-                        level = level.min(terrain_height(*p, 8.0) - 0.35);
+                        level = level.min(generator.height(*p, 8.0) - 0.35);
                         level
                     })
                     .collect();
@@ -691,6 +694,7 @@ impl Layer for WormBurrows {
     }
 
     fn generate(&self, ctx: &LayerCtx<'_, Self>, _coord: IVec3) -> WormsChunk {
+        let generator = ctx.context::<Generator>();
         let own = ctx.chunk_bounds();
         let view = ctx.get_named::<ScatterSites>(&self.cfg.source, own);
         let in_own = |p: Vec2| {
@@ -711,7 +715,7 @@ impl Layer for WormBurrows {
                     ctx.seed()
                         ^ ((mouth_xz.x.to_bits() as u64) << 32 | mouth_xz.y.to_bits() as u64),
                 ));
-                let ground = terrain_height(mouth_xz, 8.0);
+                let ground = generator.height(mouth_xz, 8.0);
                 let base_r =
                     self.cfg.radius[0] + rng.next_f32() * (self.cfg.radius[1] - self.cfg.radius[0]);
                 let mut yaw = rng.next_f32() * std::f32::consts::TAU;
@@ -725,7 +729,7 @@ impl Layer for WormBurrows {
                     pitch += (rng.next_f32() - 0.5) * 0.3 - pitch * 0.15;
                     pitch = pitch.clamp(-0.55, 0.25);
                     let ceiling =
-                        terrain_height(Vec2::new(pos.x, pos.z), 8.0) - r * self.cfg.burial_radii;
+                        generator.height(Vec2::new(pos.x, pos.z), 8.0) - r * self.cfg.burial_radii;
                     if pos.y > ceiling {
                         pitch = (pitch - 0.2).min(-0.35);
                     }
@@ -837,6 +841,7 @@ impl Layer for EmitPatches {
     }
 
     fn generate(&self, ctx: &LayerCtx<'_, Self>, _coord: IVec3) -> PatchChunk {
+        let generator = ctx.context::<Generator>();
         let own = ctx.chunk_bounds();
         let pad = self.cfg.pad_m as i32;
         let pad_y = if self.cell_y_m > 0 { pad } else { 0 };
@@ -862,7 +867,13 @@ impl Layer for EmitPatches {
                                 continue;
                             }
                             slab_segment_ops(
-                                seg[0], seg[1], *half_w, *thickness, *material, &mut out.ops,
+                                seg[0],
+                                seg[1],
+                                *half_w,
+                                *thickness,
+                                *material,
+                                generator,
+                                &mut out.ops,
                             );
                             if *clearance {
                                 out.clearance.push([seg[0], seg[1]]);
@@ -920,7 +931,7 @@ impl Layer for EmitPatches {
                                 ^ ((site.x.to_bits() as u64) << 32 | site.z.to_bits() as u64)
                                 ^ (site.y.to_bits() as u64) << 16,
                         ));
-                        crate::structure::build(structure, site, &mut rng, &mut out.ops);
+                        crate::structure::build(structure, site, generator, &mut rng, &mut out.ops);
                         if let Some(kind) = marker {
                             out.markers.push(Marker {
                                 pos: site,
@@ -974,11 +985,12 @@ impl Layer for EmitPatches {
                         crate::structure::build(
                             structure,
                             Vec3::new(site.x, 0.0, site.y),
+                            generator,
                             &mut rng,
                             &mut out.ops,
                         );
                         if let Some(kind) = marker {
-                            let y = terrain_height(site, 1.0);
+                            let y = generator.height(site, 1.0);
                             out.markers.push(Marker {
                                 pos: Vec3::new(site.x, y, site.y),
                                 kind: kind.clone(),
@@ -1017,12 +1029,14 @@ fn tube_segment_ops(a: Vec3, b: Vec3, material: u32, bore: f32, out: &mut Vec<Cs
 }
 
 /// Terrain-seated slab chain along one path segment (roads).
+#[allow(clippy::too_many_arguments)]
 fn slab_segment_ops(
     a: Vec2,
     b: Vec2,
     half_w: f32,
     thickness: f32,
     material: u32,
+    generator: &Generator,
     out: &mut Vec<CsgOp>,
 ) {
     let len = a.distance(b);
@@ -1034,7 +1048,7 @@ fn slab_segment_ops(
     for i in 0..steps {
         let t = (i as f32 + 0.5) / steps as f32;
         let p = a + dir * (t * len);
-        let y = terrain_height(p, 1.0);
+        let y = generator.height(p, 1.0);
         out.push(CsgOp::boxy(
             Vec3::new(p.x, y - 0.15, p.y),
             Vec3::new(half_w, thickness, half_w),
@@ -1144,6 +1158,29 @@ pub fn sites_in(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Test worlds carry their generator in the manager context, exactly
+    /// as the engine does — no globals involved.
+    fn test_manager(seed: u64) -> LayerManager {
+        LayerManager::with_context(
+            seed,
+            std::sync::Arc::new(Generator::new(
+                crate::program::planet_program(),
+                seed as u32,
+                crate::program::DEFAULT_SUN_DIR,
+            )),
+        )
+    }
+
+    /// The same world a `test_manager(seed)` generates for — assertions
+    /// must sample the world under test, not a differently-seeded one.
+    fn generator(seed: u32) -> Generator {
+        Generator::new(
+            crate::program::planet_program(),
+            seed,
+            crate::program::DEFAULT_SUN_DIR,
+        )
+    }
     use crate::structure::{Anchor, Arrange, Extent, Part, Seat, Shape, Structure, Variant, Yaw};
     use voxel_layers::LayerManager;
 
@@ -1196,7 +1233,7 @@ mod tests {
 
     #[test]
     fn scatter_instances_are_independent_and_deterministic() {
-        let mut mgr = LayerManager::new(3);
+        let mut mgr = test_manager(3);
         mgr.register_as(
             "sites:common",
             ScatterSites {
@@ -1219,7 +1256,7 @@ mod tests {
         let rare = sites_in(&mgr, "sites:rare", bounds(4096));
         assert!(common.len() > rare.len() * 3, "chance config ignored: {} vs {}", common.len(), rare.len());
 
-        let mut mgr2 = LayerManager::new(3);
+        let mut mgr2 = test_manager(3);
         mgr2.register_as(
             "sites:common",
             ScatterSites {
@@ -1234,7 +1271,7 @@ mod tests {
 
     #[test]
     fn connect_paths_join_sites_within_reach() {
-        let mut mgr = LayerManager::new(5);
+        let mut mgr = test_manager(5);
         mgr.register_as(
             "sites:towns",
             ScatterSites {
@@ -1276,7 +1313,7 @@ mod tests {
 
     #[test]
     fn flow_and_worm_kinds_generate_from_scatter_instances() {
-        let mut mgr = LayerManager::new(5);
+        let mut mgr = test_manager(5);
         mgr.register_as(
             "sites:springs",
             ScatterSites {
@@ -1344,7 +1381,7 @@ mod tests {
     #[test]
     fn emit_site_recipe_produces_ops_and_markers_at_sites() {
         let build = || {
-            let mut mgr = LayerManager::new(7);
+            let mut mgr = test_manager(7);
             mgr.register_as(
                 "sites:ruins",
                 ScatterSites {
@@ -1411,7 +1448,7 @@ mod tests {
 
     #[test]
     fn emit_path_slabs_seat_on_terrain_with_clearance() {
-        let mut mgr = LayerManager::new(5);
+        let mut mgr = test_manager(5);
         mgr.register_as(
             "sites:towns",
             ScatterSites {
@@ -1461,7 +1498,7 @@ mod tests {
         assert!(!patches.ops.is_empty(), "no road slabs");
         assert!(!patches.clearance.is_empty(), "no clearance segments");
         for op in &patches.ops {
-            let ground = terrain_height(Vec2::new(op.center[0], op.center[2]), 1.0);
+            let ground = generator(5).height(Vec2::new(op.center[0], op.center[2]), 1.0);
             assert!((op.center[1] - ground).abs() < 2.0, "slab far from ground");
         }
         // Sub-box query = filtered superset (locality contract).
@@ -1481,7 +1518,7 @@ mod tests {
 
     #[test]
     fn emit_course_water_and_worm_cuts() {
-        let mut mgr = LayerManager::new(5);
+        let mut mgr = test_manager(5);
         mgr.register_as(
             "sites:springs",
             ScatterSites {
@@ -1581,7 +1618,7 @@ mod tests {
 
     #[test]
     fn interior_stack_links_pockets_with_orthogonal_tubes() {
-        let mut mgr = LayerManager::new(9);
+        let mut mgr = test_manager(9);
         mgr.register_as(
             "sites:pockets",
             Scatter3Sites {
@@ -1679,7 +1716,7 @@ mod tests {
             "tubes need both shell adds and bore cuts"
         );
         // Determinism.
-        let mut mgr2 = LayerManager::new(9);
+        let mut mgr2 = test_manager(9);
         mgr2.register_as(
             "sites:pockets",
             Scatter3Sites {
@@ -1698,7 +1735,7 @@ mod tests {
 
     #[test]
     fn biome_weights_partition_and_blend() {
-        let mut mgr = LayerManager::new(11);
+        let mut mgr = test_manager(11);
         mgr.register_as(
             "biomes",
             BiomeField {
@@ -1734,7 +1771,7 @@ mod tests {
             );
         }
         // Determinism.
-        let mut mgr2 = LayerManager::new(11);
+        let mut mgr2 = test_manager(11);
         mgr2.register_as(
             "biomes",
             BiomeField {
@@ -1753,7 +1790,7 @@ mod tests {
 
     #[test]
     fn biome_gated_scatter_concentrates_in_its_biome() {
-        let mut mgr = LayerManager::new(11);
+        let mut mgr = test_manager(11);
         mgr.register_as(
             "biomes",
             BiomeField {
@@ -1798,7 +1835,7 @@ mod tests {
     /// cross, and floor-snapped sites must stay inside their owning cell.
     #[test]
     fn volumetric_emits_cover_all_y_rows_and_vertical_legs() {
-        let mut mgr = LayerManager::new(9);
+        let mut mgr = test_manager(9);
         mgr.register_as(
             "sites:pockets",
             Scatter3Sites {
@@ -1930,7 +1967,7 @@ mod tests {
 
     #[test]
     fn scatter_respects_terrain_filters() {
-        let mut mgr = LayerManager::new(3);
+        let mut mgr = test_manager(3);
         mgr.register_as(
             "sites:highland",
             ScatterSites {
@@ -1944,9 +1981,10 @@ mod tests {
         );
         let found = sites_in(&mgr, "sites:highland", land_bounds(6000));
         assert!(!found.is_empty(), "no highland sites on the land region");
+        let generator = generator(3);
         for p in found {
-            let h = terrain_height(p, 8.0);
-            let up = terrain_up(p, 8.0);
+            let h = generator.height(p, 8.0);
+            let up = generator.up(p, 8.0);
             assert!(h >= 120.0, "lowland site at {p:?} h={h}");
             assert!(up >= 0.8, "steep site at {p:?} up={up}");
         }
