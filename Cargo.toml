@@ -24,7 +24,6 @@ serde_json = "1"
 voxel-core = { path = "crates/voxel-core" }
 voxel-layers = { path = "crates/voxel-layers" }
 voxel-worldgen = { path = "crates/voxel-worldgen" }
-voxel-gpu = { path = "crates/voxel-gpu" }
 voxel-render = { path = "crates/voxel-render" }
 voxel-engine = { path = "crates/voxel-engine" }
 voxel-debug = { path = "crates/voxel-debug" }
