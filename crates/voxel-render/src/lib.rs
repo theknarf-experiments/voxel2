@@ -15,7 +15,7 @@ pub use chunks::{
     MAT_KIND_CANOPY, MAT_KIND_SURFACE, MAT_KIND_ZONED,
 };
 pub use grass::{GrassInstance, GrassInstances, GrassPlugin, GrassStyle};
-pub use material::{VoxelTerrainMaterial, VOXEL_TERRAIN_MATERIAL};
+pub use material::VoxelSurfaceMaterial;
 pub use water::{RiverSegGpu, RiverWater, WaterPlugin, WaterSurface};
 
 /// Marker for helper cameras (offscreen screenshot mirrors, etc.) that

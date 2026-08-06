@@ -1981,6 +1981,8 @@ fn material_table(level: &LevelDef) -> voxel_render::WorldMaterials {
 fn env_params(_level: &LevelDef) -> voxel_render::EnvParams {
     voxel_render::EnvParams {
         flags: Vec4::new(if eval_holes_mode() { 1.0 } else { 0.0 }, 0.0, 0.0, 0.0),
+        // Filled in the render world, where the slab slots are known.
+        ..default()
     }
 }
 

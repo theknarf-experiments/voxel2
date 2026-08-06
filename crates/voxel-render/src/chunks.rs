@@ -66,7 +66,7 @@ use bevy::{
 use voxel_core::csg::CsgOp;
 use voxel_core::ChunkKey;
 
-use crate::material::{VoxelTerrainMaterial, VOXEL_TERRAIN_MATERIAL};
+use crate::material::VoxelSurfaceMaterial;
 use crate::slab::{SlabAlloc, SlabAllocator};
 
 /// Density samples per axis: 33 corners + apron covering corners -2..=35
@@ -248,34 +248,14 @@ impl Default for WorldMaterial {
     }
 }
 
-/// Material ids addressable by generator ops (fits a uniform buffer).
+/// How many material ids a world can use. The cap is now the id → slab
+/// slot map the shader indirects through, not a GPU table.
 pub const MATERIAL_SLOTS: usize = 8;
 
 /// The level's material table, indexed by the material ids its generator
 /// ops emit. Extracted every frame so hot-reloads apply.
 #[derive(Resource, Clone, Default)]
 pub struct WorldMaterials(pub Vec<WorldMaterial>);
-
-#[derive(ShaderType, Clone)]
-pub struct GpuMaterialTable {
-    materials: [WorldMaterial; MATERIAL_SLOTS],
-}
-
-impl GpuMaterialTable {
-    pub fn from_slice(mats: &[WorldMaterial]) -> Self {
-        let mut materials = [WorldMaterial::default(); MATERIAL_SLOTS];
-        for (i, m) in mats.iter().take(MATERIAL_SLOTS).enumerate() {
-            materials[i] = *m;
-        }
-        Self { materials }
-    }
-}
-
-impl Default for GpuMaterialTable {
-    fn default() -> Self {
-        Self::from_slice(&[])
-    }
-}
 
 /// Per-view render flags the voxel shaders still need from the engine.
 /// Lighting and atmosphere are NOT here: voxel surfaces shade through
@@ -285,6 +265,9 @@ impl Default for GpuMaterialTable {
 pub struct EnvParams {
     /// x = coverage-eval mode (monotone geometry over a magenta clear).
     pub flags: Vec4,
+    /// Material id → slot in the bindless material slab, one id per
+    /// component. Filled in the render world, where the slots are known.
+    pub material_slots: [UVec4; 2],
 }
 
 /// The continuous LOD field the density band derives from: every chunk at
@@ -386,10 +369,11 @@ impl Plugin for VoxelChunksPlugin {
                 ExtractComponentPlugin::<VoxelTerrainMarker>::default(),
                 // Gives the terrain material the usual asset lifecycle:
                 // extraction, prepared bind groups, a bind group allocator.
-                MaterialPlugin::<VoxelTerrainMaterial>::default(),
+                MaterialPlugin::<VoxelSurfaceMaterial>::default(),
             ))
+            .init_resource::<TerrainMaterials>()
             .add_systems(Startup, spawn_terrain_marker)
-            .add_systems(Update, sync_terrain_material);
+            .add_systems(Update, sync_terrain_materials);
 
         let stats = app.world().resource::<SharedRenderStats>().clone();
 
@@ -417,9 +401,22 @@ impl Plugin for VoxelChunksPlugin {
                 RenderStartup,
                 init_chunk_resources.after(bevy::pbr::init_mesh_pipeline_view_layouts),
             )
+            .init_resource::<ExtractedTerrainMaterials>()
             .add_systems(
                 ExtractSchedule,
-                (extract_chunk_commands, extract_camera_pos, extract_program),
+                (
+                    extract_chunk_commands,
+                    extract_camera_pos,
+                    extract_program,
+                    extract_terrain_materials,
+                ),
+            )
+            // Slots must be resolved before `plan_frame` writes the uniform.
+            .add_systems(
+                Render,
+                resolve_material_slots
+                    .in_set(RenderSystems::Prepare)
+                    .before(plan_frame),
             )
             .add_systems(Render, plan_frame.in_set(RenderSystems::Prepare))
             .add_systems(
@@ -431,27 +428,43 @@ impl Plugin for VoxelChunksPlugin {
     }
 }
 
-/// Publish the level's recipes into the material asset. Updating the
-/// asset in place means a level reload re-shades without respawning.
-fn sync_terrain_material(
+/// The world's surface materials, one asset per material id. Held so the
+/// render world can look up which slab slot each id landed in.
+#[derive(Resource, Default, Clone)]
+pub struct TerrainMaterials(pub Vec<Handle<VoxelSurfaceMaterial>>);
+
+/// Publish the level's recipes as assets, one per id. Handles are reused
+/// across reloads so re-shading never respawns anything.
+fn sync_terrain_materials(
+    mut commands: Commands,
     recipes: Res<WorldMaterials>,
-    mut assets: ResMut<Assets<VoxelTerrainMaterial>>,
+    mut materials: ResMut<TerrainMaterials>,
+    mut assets: ResMut<Assets<VoxelSurfaceMaterial>>,
+    marker: Query<Entity, With<VoxelTerrainMarker>>,
 ) {
-    if !recipes.is_changed() && assets.contains(&VOXEL_TERRAIN_MATERIAL) {
+    if !recipes.is_changed() && materials.0.len() == recipes.0.len() {
         return;
     }
-    let _ = assets.insert(
-        &VOXEL_TERRAIN_MATERIAL,
-        VoxelTerrainMaterial::from_recipes(&recipes.0),
-    );
+    materials.0.resize_with(recipes.0.len(), || {
+        assets.add(VoxelSurfaceMaterial::default())
+    });
+    for (handle, recipe) in materials.0.iter().zip(&recipes.0) {
+        if let Some(mut material) = assets.get_mut(handle) {
+            material.recipe = *recipe;
+        }
+    }
+    // The marker's material only decides which slab the draw binds; every
+    // recipe of this world lives in that same slab.
+    if let (Ok(entity), Some(first)) = (marker.single(), materials.0.first()) {
+        commands
+            .entity(entity)
+            .insert(MeshMaterial3d(first.clone()));
+    }
 }
 
 fn spawn_terrain_marker(mut commands: Commands) {
     commands.spawn((
         VoxelTerrainMarker,
-        // What makes `SetMaterialBindGroup` find the material: Bevy
-        // extracts this from any visible entity, mesh or not.
-        MeshMaterial3d(VOXEL_TERRAIN_MATERIAL),
         Visibility::default(),
         Transform::default(),
         // Effectively infinite: chunk-level culling is a later milestone.
@@ -817,7 +830,7 @@ fn init_chunk_resources(
             chunk_layout.clone(),
             chunk_layout.clone(),
             // 3: the terrain material, exactly where Bevy puts materials.
-            VoxelTerrainMaterial::bind_group_layout_descriptor(&render_device),
+            VoxelSurfaceMaterial::bind_group_layout_descriptor(&render_device),
         ],
         vertex: VertexState {
             shader: draw_shader.clone(),
@@ -877,6 +890,36 @@ fn extract_chunk_commands(
     mut extracted: ResMut<ExtractedChunkCommands>,
 ) {
     extracted.0.append(&mut queue.inner.lock().unwrap());
+}
+
+/// Asset ids of the world's surface materials, in material-id order.
+#[derive(Resource, Default)]
+struct ExtractedTerrainMaterials(Vec<AssetId<VoxelSurfaceMaterial>>);
+
+fn extract_terrain_materials(
+    materials: Extract<Res<TerrainMaterials>>,
+    mut extracted: ResMut<ExtractedTerrainMaterials>,
+) {
+    extracted.0.clear();
+    extracted.0.extend(materials.0.iter().map(|h| h.id()));
+}
+
+/// Resolve material id → slab slot. Bindless packs every recipe into one
+/// slab, so the shader needs the slot to pick one per vertex; the mapping
+/// is only knowable here, after Bevy has prepared the materials.
+fn resolve_material_slots(
+    extracted: Res<ExtractedTerrainMaterials>,
+    prepared: Res<bevy::render::erased_render_asset::ErasedRenderAssets<bevy::pbr::PreparedMaterial>>,
+    mut env: ResMut<EnvParams>,
+) {
+    let mut slots = [UVec4::ZERO; 2];
+    for (id, asset_id) in extracted.0.iter().enumerate().take(MATERIAL_SLOTS) {
+        let Some(material) = prepared.get(*asset_id) else {
+            continue;
+        };
+        slots[id / 4][id % 4] = *material.binding.slot;
+    }
+    env.material_slots = slots;
 }
 
 fn extract_program(

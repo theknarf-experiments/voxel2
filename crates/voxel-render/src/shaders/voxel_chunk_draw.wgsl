@@ -42,14 +42,27 @@ struct WorldMaterial {
     p1: vec4<f32>,
     p2: vec4<f32>,
 }
-struct MaterialTable {
-    materials: array<WorldMaterial, 8>,
+// Bindless: every recipe of this world lives in one slab. The index table
+// maps a slab slot to the recipe's offset in the data array; `material` is
+// the field at bindless index 0, which is our `#[data(0, ...)]`.
+struct VoxelMaterialBindings {
+    material: u32,
 }
-@group(3) @binding(0) var<uniform> mats: MaterialTable;
+@group(3) @binding(0) var<storage> material_indices: array<VoxelMaterialBindings>;
+@group(3) @binding(1) var<storage> material_array: array<WorldMaterial>;
+
+/// The recipe a per-vertex material id selects, via the engine's
+/// id → slab-slot map.
+fn material_for(id: u32) -> WorldMaterial {
+    let i = min(id, 7u);
+    let slot = env.material_slots[i / 4u][i % 4u];
+    return material_array[material_indices[slot].material];
+}
 
 // Engine render flags. Lighting is Bevy's.
 struct EnvParams {
-    flags: vec4<f32>, // x = coverage-eval mode
+    flags: vec4<f32>,                    // x = coverage-eval mode
+    material_slots: array<vec4<u32>, 2>, // material id -> bindless slab slot
 }
 @group(2) @binding(1) var<uniform> env: EnvParams;
 
@@ -308,7 +321,7 @@ fn fragment(in: VsOut) -> @location(0) vec4<f32> {
         view.world_position.z + in.cam_rel.z,
     );
     let dist = length(in.cam_rel);
-    let m = mats.materials[min(in.material, 7u)];
+    let m = material_for(in.material);
 
     var base: vec3<f32>;
     var nl = n;
