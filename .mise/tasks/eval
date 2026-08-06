@@ -1,8 +1,9 @@
 #!/bin/bash
+#MISE description="Hole-coverage eval: fly the level, fail on any background pixel"
 # Coverage eval: fly through the world in VOXEL_EVAL_HOLES mode (magenta
 # background, monotone geometry, water off) and fail if ANY captured frame
 # contains a single background pixel — i.e. a hole in the world.
-# Usage: scripts/eval_holes.sh [level.json] [seconds]
+# Usage: mise run eval [level.json] [seconds]
 set -e
 LEVEL=${1:-levels/planet.json}
 SECS=${2:-60}
@@ -28,6 +29,6 @@ ERRS=$(grep -cE "Validation Error|panicked" "$OUT/run.log" || true)
 # `set -e` must not kill the script before the diagnostics print: a
 # hole failure still reports validation errors and the kept-frames path.
 HOLES=0
-python3 scripts/count_holes.py "$OUT"/frame_*.png || HOLES=$?
+python3 "${MISE_PROJECT_ROOT:-.}/.mise/count_holes.py" "$OUT"/frame_*.png || HOLES=$?
 echo "validation-errors: $ERRS"
 [ "$ERRS" = "0" ] && [ "$HOLES" = "0" ] && echo "EVAL PASS" || { echo "EVAL FAIL (frames kept in $OUT)"; exit 1; }

@@ -20,7 +20,3 @@ run = "cargo clippy --workspace --all-targets -- -D warnings"
 [tasks.test]
 description = "Run the workspace test suite"
 run = "cargo test --workspace"
-
-[tasks.eval]
-description = "Hole-coverage eval on the planet level (the render gate)"
-run = "bash scripts/eval_holes.sh levels/planet.json 24"

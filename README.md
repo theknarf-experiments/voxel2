@@ -58,7 +58,7 @@ speed. Env vars:
 | `VOXEL_WALK=1` | On-foot: heightfield glue or SDF collision (level's `walk` mode) |
 | `VOXEL_REMOTE=1` | BRP server for the `voxctl` CLI (teleport, planning queries, offscreen screenshots) |
 | `VOXEL_SCREENSHOT=path[,secs]` | Periodic offscreen frame dumps (works occluded) |
-| `VOXEL_EVAL_HOLES=1` | Coverage-eval rendering (used by `scripts/eval_holes.sh`) |
+| `VOXEL_EVAL_HOLES=1` | Coverage-eval rendering (used by `mise run eval`) |
 | `VOXEL_LOG_FPS=1` | fps/leaves/slab telemetry to the log |
 
 **Live tooling**: run with `VOXEL_REMOTE=1`, then drive the running game:
