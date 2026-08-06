@@ -37,10 +37,12 @@ pub fn pocket_recipe_ops(site: Vec3, rng: &mut Rng, out: &mut Vec<CsgOp>) {
     let roll = rng.next_f32();
 
     if roll < 0.12 {
-        // Light well: a square shaft cut through three levels.
+        // Light well: a square shaft cut through two levels. Its whole
+        // AABB must stay within stack::ELEM_PAD_M of the site — queries
+        // farther than that never see site-bucketed ops.
         out.push(CsgOp::boxy(
-            Vec3::new(x, floor_top + fs, z),
-            Vec3::new(2.4, fs * 1.6, 2.4),
+            Vec3::new(x, floor_top + fs * 0.65, z),
+            Vec3::new(2.4, fs * 0.7, 2.4),
             0.0,
             0,
             true,

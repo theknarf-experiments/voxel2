@@ -123,7 +123,7 @@ impl Layer for ScatterSites {
         }
         let b = ctx.chunk_bounds();
         let cell = self.cfg.cell_m as f32;
-        let m = self.cfg.margin_m.min(cell * 0.45);
+        let m = self.cfg.margin_m.clamp(0.0, cell * 0.45);
         let p = Vec2::new(
             b.min.x as f32 + m + rng.next_f32() * (cell - 2.0 * m),
             b.min.z as f32 + m + rng.next_f32() * (cell - 2.0 * m),
@@ -332,12 +332,18 @@ impl Layer for Scatter3Sites {
             return Sites3Chunk { sites: Vec::new() };
         }
         let b = ctx.chunk_bounds();
-        let m = self.cfg.margin_m.min(self.cfg.cell_m as f32 * 0.45);
+        let m = self.cfg.margin_m.clamp(0.0, self.cfg.cell_m as f32 * 0.45);
         let x = b.min.x as f32 + m + rng.next_f32() * (self.cfg.cell_m as f32 - 2.0 * m);
         let z = b.min.z as f32 + m + rng.next_f32() * (self.cfg.cell_m as f32 - 2.0 * m);
         let mut y = b.min.y as f32 + rng.next_f32() * self.cfg.cell_y_m as f32;
         if self.cfg.snap_y_m > 0.0 {
+            // Snap, then clamp INTO the half-open cell: rounding up to
+            // exactly max.y would strand the site outside its owner —
+            // emitted by nobody while connect layers still link to it.
             y = (y / self.cfg.snap_y_m).round() * self.cfg.snap_y_m;
+            let max_snapped =
+                ((b.max.y as f32 - 0.5) / self.cfg.snap_y_m).floor() * self.cfg.snap_y_m;
+            y = y.clamp(b.min.y as f32, max_snapped.max(b.min.y as f32));
         }
         if let Some(gate) = &self.cfg.biome {
             let pad = IVec3::new(BIOME_INFLUENCE_CELLS, 0, BIOME_INFLUENCE_CELLS);
@@ -538,7 +544,13 @@ impl Layer for ConnectPaths {
                 chi,
                 &params,
             )
-            .unwrap_or_else(|| vec![lo, hi]);
+            .unwrap_or_else(|| {
+                // Straight fallback, SUBDIVIDED: a single reach-length
+                // segment would put slabs ~350 m from its midpoint cell
+                // and break the ELEM_PAD_M query contract.
+                let n = (lo.distance(hi) / 16.0).ceil().max(1.0) as usize;
+                (0..=n).map(|i| lo.lerp(hi, i as f32 / n as f32)).collect()
+            });
             if !paths.contains(&waypoints) {
                 paths.push(waypoints);
             }
@@ -594,9 +606,20 @@ impl Layer for FlowCourses {
     fn generate(&self, ctx: &LayerCtx<'_, Self>, _coord: IVec3) -> CoursesChunk {
         let own = ctx.chunk_bounds();
         let view = ctx.get_named::<ScatterSites>(&self.cfg.source, own);
+        // Own the spring, not the whole source chunk: with mismatched
+        // cell sizes a straddled site would otherwise fork per consumer.
+        let in_own = |p: Vec2| {
+            p.x >= own.min.x as f32
+                && p.x < own.max.x as f32
+                && p.y >= own.min.z as f32
+                && p.y < own.max.z as f32
+        };
         let mut courses = Vec::new();
         for (_, chunk) in view.iter() {
             for &start in &chunk.sites {
+                if !in_own(start) {
+                    continue;
+                }
                 let params = crate::rivers::FlowParams {
                     max_steps: self.cfg.max_steps,
                     max_spill_rise: self.cfg.max_spill_rise,
@@ -670,10 +693,24 @@ impl Layer for WormBurrows {
     fn generate(&self, ctx: &LayerCtx<'_, Self>, _coord: IVec3) -> WormsChunk {
         let own = ctx.chunk_bounds();
         let view = ctx.get_named::<ScatterSites>(&self.cfg.source, own);
+        let in_own = |p: Vec2| {
+            p.x >= own.min.x as f32
+                && p.x < own.max.x as f32
+                && p.y >= own.min.z as f32
+                && p.y < own.max.z as f32
+        };
         let mut worms = Vec::new();
         for (_, chunk) in view.iter() {
             for &mouth_xz in &chunk.sites {
-                let mut rng = ctx.rng();
+                if !in_own(mouth_xz) {
+                    continue;
+                }
+                // Per-site stream (iteration-order independent; two
+                // mouths in one cell must not dig identical burrows).
+                let mut rng = voxel_core::seed::Rng::new(voxel_core::seed::splitmix64(
+                    ctx.seed()
+                        ^ ((mouth_xz.x.to_bits() as u64) << 32 | mouth_xz.y.to_bits() as u64),
+                ));
                 let ground = terrain_height(mouth_xz, 8.0);
                 let base_r =
                     self.cfg.radius[0] + rng.next_f32() * (self.cfg.radius[1] - self.cfg.radius[0]);
@@ -788,16 +825,21 @@ impl Layer for EmitPatches {
 
     fn dependencies(&self) -> Vec<voxel_layers::Dep> {
         let pad = self.cfg.pad_m as i32;
+        // Volumetric sources reach vertically too (a link's vertical leg
+        // spans rows far from the owning cell); planar emits keep y
+        // collapsed.
+        let pad_y = if self.cell_y_m > 0 { pad } else { 0 };
         vec![voxel_layers::Dep::named(
             &self.cfg.source,
-            IVec3::new(pad, 0, pad),
+            IVec3::new(pad, pad_y, pad),
         )]
     }
 
     fn generate(&self, ctx: &LayerCtx<'_, Self>, _coord: IVec3) -> PatchChunk {
         let own = ctx.chunk_bounds();
         let pad = self.cfg.pad_m as i32;
-        let padded = own.inflate(IVec3::new(pad, 0, pad));
+        let pad_y = if self.cell_y_m > 0 { pad } else { 0 };
+        let padded = own.inflate(IVec3::new(pad, pad_y, pad));
         let in_own = |p: Vec2| {
             p.x >= own.min.x as f32
                 && p.x < own.max.x as f32
@@ -1058,9 +1100,16 @@ pub fn patches_in(
     max: Vec3,
 ) -> PatchSet {
     let pad = ELEM_PAD_M as i32;
+    // Real y bounds (volumetric emits bucket per y-row; a planar emit's
+    // collapsed axis ignores them), padded like xz and clamped so a
+    // facade query with sentinel y (±1e9) cannot enumerate millions of
+    // rows — no world exceeds ±16 km vertically.
+    const Y_CLAMP_M: f32 = 16_000.0;
+    let y0 = min.y.max(-Y_CLAMP_M) as i32 - pad;
+    let y1 = max.y.min(Y_CLAMP_M) as i32 + pad;
     let bounds = IAabb::new(
-        IVec3::new(min.x as i32 - pad, 0, min.z as i32 - pad),
-        IVec3::new(max.x as i32 + pad, 1, max.z as i32 + pad),
+        IVec3::new(min.x as i32 - pad, y0, min.z as i32 - pad),
+        IVec3::new(max.x as i32 + pad, y1.max(y0 + 1), max.z as i32 + pad),
     );
     let seg_touches = |a: Vec2, b: Vec2, half_w: f32| {
         let lo = a.min(b) - Vec2::splat(half_w);
@@ -1085,7 +1134,13 @@ pub fn patches_in(
             }
         }
         for m in &c.patches.markers {
-            if m.pos.x >= min.x && m.pos.x <= max.x && m.pos.z >= min.z && m.pos.z <= max.z {
+            if m.pos.x >= min.x
+                && m.pos.x <= max.x
+                && m.pos.y >= min.y
+                && m.pos.y <= max.y
+                && m.pos.z >= min.z
+                && m.pos.z <= max.z
+            {
                 out.markers.push(m.clone());
             }
         }
@@ -1722,6 +1777,141 @@ mod tests {
         // E[w^2]/E[w] — clearly above the unconditioned 0.5 but well
         // short of 1 (that headroom IS the blending at borders).
         assert!(mean > 0.58, "gated sites not concentrated: mean w {mean}");
+    }
+
+    /// Regression for the audit's C1/C2/M2: volumetric emits must serve
+    /// every y row, vertical link legs must be emitted by the rows they
+    /// cross, and floor-snapped sites must stay inside their owning cell.
+    #[test]
+    fn volumetric_emits_cover_all_y_rows_and_vertical_legs() {
+        let mut mgr = LayerManager::new(9);
+        mgr.register_as(
+            "sites:pockets",
+            Scatter3Sites {
+                cfg: Scatter3Cfg {
+                    snap_y_m: 44.0,
+                    ..Default::default()
+                },
+            },
+        );
+        mgr.register_as(
+            "links",
+            Connect3Paths {
+                cfg: Connect3Cfg {
+                    source: "sites:pockets".into(),
+                    ..Default::default()
+                },
+                cell_m: 128,
+                cell_y_m: 132,
+            },
+        );
+        mgr.register_as(
+            "pockets",
+            EmitPatches {
+                cell_y_m: 132,
+                cfg: EmitCfg {
+                    source: "sites:pockets".into(),
+                    kind: EmitKind::SiteRecipe3 {
+                        recipe: "pocket".into(),
+                        marker: Some("pocket".into()),
+                    },
+                    pad_m: 0.0,
+                    max_chunk_edge_m: None,
+                },
+                cell_m: 128,
+            },
+        );
+        mgr.register_as(
+            "tubes",
+            EmitPatches {
+                cell_y_m: 132,
+                cfg: EmitCfg {
+                    source: "links".into(),
+                    kind: EmitKind::Tubes {
+                        material: 2,
+                        bore: 1.5,
+                        lift_m: 3.0,
+                    },
+                    pad_m: 464.0,
+                    max_chunk_edge_m: None,
+                },
+                cell_m: 128,
+            },
+        );
+
+        // Sites stay strictly inside their owning cell after snapping.
+        let b = IAabb::new(IVec3::new(-1024, -528, -1024), IVec3::new(1024, 528, 1024));
+        for (coord, c) in mgr.get_named::<Scatter3Sites>("sites:pockets", b).iter() {
+            for site in &c.sites {
+                let lo = coord.y * 132;
+                let hi = lo + 132;
+                assert!(
+                    site.y >= lo as f32 && site.y < hi as f32,
+                    "snapped site y {} outside its cell [{lo}, {hi})",
+                    site.y
+                );
+            }
+        }
+
+        // Markers surface from EVERY y row that has sites — including a
+        // facade-style sentinel-y query.
+        let all = patches_in(
+            &mgr,
+            "pockets",
+            Vec3::new(-1024.0, -1.0e9, -1024.0),
+            Vec3::new(1024.0, 1.0e9, 1024.0),
+        );
+        let mut rows: Vec<i32> = all
+            .markers
+            .iter()
+            .map(|m| (m.pos.y / 132.0).floor() as i32)
+            .collect();
+        rows.sort_unstable();
+        rows.dedup();
+        assert!(
+            rows.len() >= 3,
+            "markers confined to y rows {rows:?} — volumetric rows not served"
+        );
+        // A bounded-row query returns exactly that row's markers.
+        let row1 = patches_in(
+            &mgr,
+            "pockets",
+            Vec3::new(-1024.0, 132.0, -1024.0),
+            Vec3::new(1024.0, 264.0, 1024.0),
+        );
+        assert!(row1.markers.iter().all(|m| (132.0..=264.0).contains(&m.pos.y)));
+        assert!(
+            !row1.markers.is_empty(),
+            "no markers in y row 1 — either bad luck (seed change?) or rows unserved"
+        );
+
+        // Every vertical link leg is emitted by the rows it crosses: ops
+        // exist near the leg midpoint even when it is far from the link
+        // midpoint's owning row.
+        let mut vertical_checked = 0;
+        for (_, c) in mgr.get_named::<Connect3Paths>("links", b).iter() {
+            for path in &c.paths {
+                for seg in path.windows(2) {
+                    let d = seg[1] - seg[0];
+                    if d.y.abs() < 100.0 {
+                        continue;
+                    }
+                    let mid = (seg[0] + seg[1]) * 0.5 + Vec3::Y * 3.0;
+                    let near = patches_in(
+                        &mgr,
+                        "tubes",
+                        mid - Vec3::splat(20.0),
+                        mid + Vec3::splat(20.0),
+                    );
+                    assert!(
+                        !near.ops.is_empty(),
+                        "no tube ops near vertical leg midpoint {mid:?}"
+                    );
+                    vertical_checked += 1;
+                }
+            }
+        }
+        assert!(vertical_checked > 0, "no vertical legs found to check");
     }
 
     #[test]

@@ -1410,6 +1410,7 @@ pub fn validate_stack(stack: &[StackLayerDef]) -> Result<(), String> {
                 name,
                 source,
                 emit,
+                cell_y_m,
                 ..
             } => {
                 let expect = match emit {
@@ -1435,6 +1436,12 @@ pub fn validate_stack(stack: &[StackLayerDef]) -> Result<(), String> {
                     EmitDef::Tubes { .. } => StackKind::Connect3,
                 };
                 check_source(&declared, name, source, expect)?;
+                if matches!(expect, StackKind::Scatter3 | StackKind::Connect3) && *cell_y_m <= 0 {
+                    return Err(format!(
+                        "layer {name:?}: emit over a volumetric source needs cell_y_m > 0 \
+                         (a collapsed y axis spans unbounded rows)"
+                    ));
+                }
                 (name.as_str(), StackKind::Emit)
             }
         };
@@ -1875,6 +1882,11 @@ pub struct WorldQuery {
     biome_tables: Vec<(String, Vec<String>)>,
 }
 
+/// Vertical band xz-facade queries cover: enough for any current world
+/// (the deepest LOD tree spans ~±2.5 km), small enough that volumetric
+/// emit layers don't enumerate thousands of 132 m y-rows per query.
+const FACADE_Y_M: f32 = 2_560.0;
+
 impl WorldQuery {
     /// All ops overlapping the box, as served to a chunk of the given
     /// edge. Gated emitters drop out wholesale for coarse chunks — the
@@ -1907,8 +1919,8 @@ impl WorldQuery {
     /// Clearance segments (roadbeds, riverbeds) overlapping the xz box.
     pub fn clearance_in(&self, min: bevy::math::Vec2, max: bevy::math::Vec2) -> Vec<[bevy::math::Vec2; 2]> {
         let (min3, max3) = (
-            Vec3::new(min.x, -1.0e9, min.y),
-            Vec3::new(max.x, 1.0e9, max.y),
+            Vec3::new(min.x, -FACADE_Y_M, min.y),
+            Vec3::new(max.x, FACADE_Y_M, max.y),
         );
         let mut out = Vec::new();
         if let Some(mgr) = &self.stack {
@@ -1926,8 +1938,8 @@ impl WorldQuery {
         max: bevy::math::Vec2,
     ) -> Vec<voxel_worldgen::stack::WaterSeg> {
         let (min3, max3) = (
-            Vec3::new(min.x, -1.0e9, min.y),
-            Vec3::new(max.x, 1.0e9, max.y),
+            Vec3::new(min.x, -FACADE_Y_M, min.y),
+            Vec3::new(max.x, FACADE_Y_M, max.y),
         );
         let mut out = Vec::new();
         if let Some(mgr) = &self.stack {
@@ -1963,8 +1975,8 @@ impl WorldQuery {
         kind: Option<&str>,
     ) -> Vec<voxel_worldgen::stack::Marker> {
         let (min3, max3) = (
-            Vec3::new(min.x, -1.0e9, min.y),
-            Vec3::new(max.x, 1.0e9, max.y),
+            Vec3::new(min.x, -FACADE_Y_M, min.y),
+            Vec3::new(max.x, FACADE_Y_M, max.y),
         );
         let mut out = Vec::new();
         if let Some(mgr) = &self.stack {
@@ -2619,6 +2631,13 @@ mod tests {
             ),
             // Empty biome table.
             (r#"[{"kind":"biomes","name":"b","table":[]}]"#, "empty table"),
+            // Volumetric source with a collapsed emit y axis.
+            (
+                r#"[{"kind":"scatter3","name":"s","chance":1.0},
+                    {"kind":"emit","name":"e","source":"s","pad_m":0.0,
+                     "emit":{"type":"site_recipe3","recipe":"pocket"}}]"#,
+                "cell_y_m",
+            ),
         ];
         for (json, expect) in cases {
             let err = validate_stack(&parse(json)).unwrap_err();

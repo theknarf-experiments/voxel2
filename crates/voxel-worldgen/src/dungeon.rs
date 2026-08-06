@@ -67,6 +67,19 @@ pub fn dungeon_recipe_ops(site: Vec2, rng: &mut Rng, out: &mut Vec<CsgOp>) {
         let p = mouth.lerp(first, t);
         out.push(CsgOp::boxy(p, Vec3::new(2.2, 2.0, 2.2), 0.0, 0, true));
     }
+
+    // The query contract: every op's AABB must stay within
+    // stack::ELEM_PAD_M (64 m) of the site. Worst case today is ~62 m —
+    // catch any future size tweak that silently breaks it.
+    #[cfg(debug_assertions)]
+    for op in out.iter() {
+        let (lo, hi) = op.aabb();
+        let reach = (site.x - lo.x)
+            .max(hi.x - site.x)
+            .max(site.y - lo.z)
+            .max(hi.z - site.y);
+        debug_assert!(reach <= 64.0, "dungeon op reaches {reach:.1} m from site");
+    }
 }
 
 fn corridor(a: Vec3, b: Vec3, out: &mut Vec<CsgOp>) {
