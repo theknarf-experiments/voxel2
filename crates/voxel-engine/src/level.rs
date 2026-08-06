@@ -288,15 +288,6 @@ pub struct GrassDef {
     pub altitude: [f32; 2],
     #[serde(default = "d_grass_up")]
     pub min_up: f32,
-    /// Blade base colors, two hues mixed per instance.
-    #[serde(default = "d_grass_base")]
-    pub base: [[f32; 3]; 2],
-    /// Blade tip colors.
-    #[serde(default = "d_grass_tip")]
-    pub tip: [[f32; 3]; 2],
-    /// View-distance fade (start, end) in meters.
-    #[serde(default = "d_grass_fade")]
-    pub fade: [f32; 2],
     /// Density from a generator field register.
     #[serde(default)]
     pub density: Option<FieldDensityDef>,
@@ -320,15 +311,6 @@ fn d_grass_per_tile() -> u32 {
 }
 fn d_grass_up() -> f32 {
     0.8
-}
-fn d_grass_base() -> [[f32; 3]; 2] {
-    [[0.10, 0.22, 0.06], [0.16, 0.30, 0.09]]
-}
-fn d_grass_tip() -> [[f32; 3]; 2] {
-    [[0.35, 0.52, 0.16], [0.55, 0.62, 0.22]]
-}
-fn d_grass_fade() -> [f32; 2] {
-    [70.0, 110.0]
 }
 
 /// One material recipe, referenced by the material ids generator ops emit.
@@ -1969,20 +1951,6 @@ fn env_params(_level: &LevelDef) -> voxel_render::EnvParams {
     }
 }
 
-/// The grass shader's style block (colors/fade), from the grass spawner.
-fn grass_style(level: &LevelDef) -> voxel_render::GrassStyle {
-    let v = |c: [f32; 3]| Vec4::new(c[0], c[1], c[2], 0.0);
-    match level.grass.as_ref() {
-        Some(g) => voxel_render::GrassStyle {
-            base_a: v(g.base[0]),
-            base_b: v(g.base[1]),
-            tip_a: v(g.tip[0]),
-            tip_b: v(g.tip[1]),
-            fade: Vec4::new(g.fade[0], g.fade[1], 0.0, 0.0),
-        },
-        None => voxel_render::GrassStyle::default(),
-    }
-}
 
 /// Presents a [`LevelDef`]: generation, streaming, meshing, materials
 /// and the planning providers. Presentation the *host* owns — camera,
@@ -2073,7 +2041,6 @@ impl Plugin for LevelPlugin {
             .insert_resource(ops_provider)
             .insert_resource(world_query)
             .insert_resource(planning_layers)
-            .insert_resource(grass_style(&level))
             .insert_resource(level.clone())
             .add_plugins(VoxelEnginePlugin { vegetation: true })
             .add_systems(Update, roll_planning_caches)
@@ -2637,7 +2604,6 @@ fn reload_level(
         info!("level reload: generation changed — rebuilding world");
     }
     if regen || new.scatter != level.scatter || new.grass != level.grass {
-        commands.insert_resource(grass_style(&new));
         if let Some(veg) = veg_rebuild.as_mut() {
             veg.0 = true;
         }

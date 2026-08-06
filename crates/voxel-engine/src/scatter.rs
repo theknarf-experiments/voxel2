@@ -75,7 +75,6 @@ impl Plugin for ScatterPlugin {
         app.init_resource::<ScatterRebuild>()
             .init_resource::<ScatterTiles>()
             .init_resource::<GrassTiles>()
-            .add_plugins(voxel_render::GrassPlugin)
             .add_systems(Update, (rebuild_scatter, stream_scatter, stream_grass));
     }
 }
@@ -300,7 +299,7 @@ fn rebuild_scatter(
     mut rebuild: ResMut<ScatterRebuild>,
     mut tiles: ResMut<ScatterTiles>,
     mut grass: ResMut<GrassTiles>,
-    instances: Res<voxel_render::GrassInstances>,
+    instances: Res<voxel_render::ScatterPoints>,
 ) {
     if !rebuild.0 {
         return;
@@ -404,7 +403,7 @@ fn stream_scatter(
 
 #[derive(Resource, Default)]
 struct GrassTiles {
-    tiles: HashMap<IVec2, Vec<voxel_render::GrassInstance>>,
+    tiles: HashMap<IVec2, Vec<voxel_render::ScatterPoint>>,
     dirty: bool,
 }
 
@@ -412,7 +411,7 @@ fn grass_tile(
     tile: IVec2,
     grass: &crate::level::GrassDef,
     world: &WorldQuery,
-) -> Vec<voxel_render::GrassInstance> {
+) -> Vec<voxel_render::ScatterPoint> {
     let generator = world.generator();
     let size = grass.tile_m;
     let mut rng = Rng::new(chunk_seed(
@@ -447,7 +446,7 @@ fn grass_tile(
         // Top byte of the hash carries the baked sun-shadow factor.
         let shadow = generator.sun_shadow(Vec3::new(xz.x, y, xz.y));
         let hash = (rng.next_u64() as u32 & 0x00FF_FFFF) | (((shadow * 255.0) as u32) << 24);
-        out.push(voxel_render::GrassInstance {
+        out.push(voxel_render::ScatterPoint {
             pos: [xz.x, y - 0.03, xz.y],
             hash,
         });
@@ -460,7 +459,7 @@ fn stream_grass(
     world: Res<WorldQuery>,
     probe: Res<crate::streaming::StreamProbe>,
     mut tiles: ResMut<GrassTiles>,
-    instances: Res<voxel_render::GrassInstances>,
+    instances: Res<voxel_render::ScatterPoints>,
     sources: crate::StreamSourceQuery,
 ) {
     let (Some(level), Ok(source)) = (level, sources.single()) else {

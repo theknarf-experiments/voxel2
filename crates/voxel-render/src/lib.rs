@@ -3,7 +3,7 @@
 //! material shading.
 
 pub mod chunks;
-pub mod grass;
+pub mod scatter_points;
 pub mod material;
 /// Shared plumbing so a HOST can build a pipeline that shades like the
 /// terrain does (Bevy's view bind group, matching keys and shader defs).
@@ -16,7 +16,7 @@ pub use chunks::{
     VoxelChunksPlugin, WorldMaterial, WorldMaterials, WorldProgram, MATERIAL_SLOTS,
     MAT_KIND_CANOPY, MAT_KIND_SURFACE, MAT_KIND_ZONED,
 };
-pub use grass::{GrassInstance, GrassInstances, GrassPlugin, GrassStyle};
+pub use scatter_points::{ScatterPoint, ScatterPoints};
 pub use material::VoxelSurfaceMaterial;
 
 /// Marker for helper cameras (offscreen screenshot mirrors, etc.) that

@@ -3,7 +3,6 @@
 //! produced by the main world (vegetation streaming) and re-uploaded only
 //! when the tile set changes.
 
-use std::sync::Mutex;
 
 use bevy::{
     asset::{embedded_asset, load_embedded_asset},
@@ -44,35 +43,7 @@ use bevy::{
     },
 };
 use bytemuck::{Pod, Zeroable};
-
-/// One grass tuft instance.
-#[derive(Clone, Copy, Pod, Zeroable)]
-#[repr(C)]
-pub struct GrassInstance {
-    pub pos: [f32; 3],
-    pub hash: u32,
-}
-
-/// Main-world resource: the current instance set plus a dirty flag.
-/// Interior mutability so extraction (read-only) can clear the flag.
-#[derive(Resource, Default)]
-pub struct GrassInstances {
-    inner: Mutex<GrassShared>,
-}
-
-#[derive(Default)]
-struct GrassShared {
-    instances: Vec<GrassInstance>,
-    dirty: bool,
-}
-
-impl GrassInstances {
-    pub fn set(&self, instances: Vec<GrassInstance>) {
-        let mut inner = self.inner.lock().unwrap();
-        inner.instances = instances;
-        inner.dirty = true;
-    }
-}
+use voxel_render::{ScatterPoint, ScatterPoints};
 
 /// Marker entity anchoring the grass draw.
 #[derive(Clone, Component, ExtractComponent)]
@@ -84,9 +55,8 @@ pub struct GrassPlugin;
 
 impl Plugin for GrassPlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<GrassStyle>();
-        embedded_asset!(app, "shaders/voxel_grass.wgsl");
-        app.init_resource::<GrassInstances>()
+        embedded_asset!(app, "voxel_grass.wgsl");
+        app.init_resource::<ScatterPoints>()
             .add_plugins(ExtractComponentPlugin::<GrassMarker>::default())
             .add_systems(Startup, spawn_grass_marker);
 
@@ -106,7 +76,7 @@ impl Plugin for GrassPlugin {
             )
             .add_systems(
                 ExtractSchedule,
-                (extract_grass_instances, extract_grass_style),
+                extract_grass_instances,
             )
             .add_systems(
                 Render,
@@ -189,8 +159,9 @@ struct GrassPipeline {
 #[derive(Resource, Default)]
 struct GrassBindGroupRes(Option<BindGroup>);
 
-/// Grass look, from the level's grass spawner. Main-world resource,
-/// extracted every frame so hot-reloads apply.
+/// Blade look: two base hues and two tip hues mixed per point, plus the
+/// view-distance fade. Art direction, so the values are albedo (the sun
+/// is physical daylight) and they live here, not in the level file.
 #[derive(Resource, Clone, Copy)]
 pub struct GrassStyle {
     pub base_a: Vec4,
@@ -204,17 +175,13 @@ pub struct GrassStyle {
 impl Default for GrassStyle {
     fn default() -> Self {
         Self {
-            base_a: Vec4::new(0.10, 0.22, 0.06, 0.0),
-            base_b: Vec4::new(0.16, 0.30, 0.09, 0.0),
-            tip_a: Vec4::new(0.35, 0.52, 0.16, 0.0),
-            tip_b: Vec4::new(0.55, 0.62, 0.22, 0.0),
+            base_a: Vec4::new(0.0187, 0.0411, 0.0112, 0.0),
+            base_b: Vec4::new(0.0299, 0.056, 0.0168, 0.0),
+            tip_a: Vec4::new(0.0653, 0.0971, 0.0299, 0.0),
+            tip_b: Vec4::new(0.1027, 0.1157, 0.0411, 0.0),
             fade: Vec4::new(70.0, 110.0, 0.0, 0.0),
         }
     }
-}
-
-fn extract_grass_style(style: Extract<Res<GrassStyle>>, mut commands: Commands) {
-    commands.insert_resource(**style);
 }
 
 /// Level environment slice for the grass shader (sun + haze + style).
@@ -268,7 +235,7 @@ fn init_grass_pipeline(
         ),
     );
     let shader: Handle<Shader> =
-        load_embedded_asset!(asset_server.as_ref(), "shaders/voxel_grass.wgsl");
+        load_embedded_asset!(asset_server.as_ref(), "voxel_grass.wgsl");
     let base_descriptor = RenderPipelineDescriptor {
         label: Some("grass_draw".into()),
         // Groups 0/1 are replaced per key by the specializer.
@@ -294,7 +261,7 @@ fn init_grass_pipeline(
                     ],
                 },
                 VertexBufferLayout {
-                    array_stride: std::mem::size_of::<GrassInstance>() as u64,
+                    array_stride: std::mem::size_of::<ScatterPoint>() as u64,
                     step_mode: VertexStepMode::Instance,
                     attributes: vec![
                         VertexAttribute {
@@ -348,24 +315,22 @@ fn init_grass_pipeline(
 }
 
 fn extract_grass_instances(
-    instances: Extract<Res<GrassInstances>>,
+    instances: Extract<Res<ScatterPoints>>,
     mut buffers: ResMut<GrassBuffers>,
     render_device: Res<RenderDevice>,
 ) {
-    let mut inner = instances.inner.lock().unwrap();
-    if !inner.dirty {
+    let Some(points) = instances.take_if_dirty() else {
         return;
-    }
-    inner.dirty = false;
-    buffers.instance_count = inner.instances.len() as u32;
-    if inner.instances.is_empty() {
+    };
+    buffers.instance_count = points.len() as u32;
+    if points.is_empty() {
         buffers.instances = None;
         return;
     }
     buffers.instances = Some(
         render_device.create_buffer_with_data(&BufferInitDescriptor {
             label: Some("grass_instances"),
-            contents: bytemuck::cast_slice(&inner.instances),
+            contents: bytemuck::cast_slice(&points),
             usage: BufferUsages::VERTEX,
         }),
     );
@@ -388,7 +353,7 @@ impl Specializer<RenderPipeline> for GrassSpecializer {
         key: Self::Key,
         descriptor: &mut RenderPipelineDescriptor,
     ) -> Result<Canonical<Self::Key>, BevyError> {
-        crate::pbr_view::specialize_for_view(&self.view_layouts, key.0, descriptor);
+        voxel_render::pbr_view::specialize_for_view(&self.view_layouts, key.0, descriptor);
         Ok(key)
     }
 }
@@ -402,7 +367,7 @@ fn prepare_grass_bind_group(
     pipeline_cache: Res<PipelineCache>,
     render_device: Res<RenderDevice>,
     render_queue: Res<bevy::render::renderer::RenderQueue>,
-    env: Res<crate::chunks::EnvParams>,
+    env: Res<voxel_render::EnvParams>,
     style: Res<GrassStyle>,
     mut env_uniform: ResMut<GrassEnvUniform>,
     mut bind_group: ResMut<GrassBindGroupRes>,
@@ -434,7 +399,7 @@ fn queue_grass(
     pipeline: Option<ResMut<GrassPipeline>>,
     mut opaque_render_phases: ResMut<ViewBinnedRenderPhases<Opaque3d>>,
     opaque_draw_functions: Res<DrawFunctions<Opaque3d>>,
-    views: Query<crate::pbr_view::PbrViewQuery>,
+    views: Query<voxel_render::pbr_view::PbrViewQuery>,
     dirty_specializations: Res<DirtySpecializations>,
     mut pending_queues: ResMut<PendingGrassQueues>,
 ) {
@@ -454,7 +419,7 @@ fn queue_grass(
         distance_fog,
     ) in views.iter()
     {
-        let mesh_key = crate::pbr_view::view_key(
+        let mesh_key = voxel_render::pbr_view::view_key(
             view,
             camera,
             msaa,

@@ -19,10 +19,12 @@ use voxel_debug::{remote::VoxelRemotePlugin, viz::VoxelVizPlugin};
 use voxel_engine::level::LevelReloaded;
 use voxel_engine::{LevelDef, LevelPlugin, VoxelStreamSource};
 
+mod grass;
 mod props;
 mod ribbons;
 mod water;
 use props::PropsPlugin;
+use grass::GrassPlugin;
 use ribbons::RibbonsPlugin;
 use water::WaterPlugin;
 
@@ -157,6 +159,8 @@ fn main() {
             // Water is the demo's: generic ribbon data in, water look out.
             RibbonsPlugin,
             WaterPlugin,
+            // Ground cover: the engine scatters points, this draws blades.
+            GrassPlugin,
             LevelPlugin {
                 def: level,
                 // A game picks this at new-game time and restores it
