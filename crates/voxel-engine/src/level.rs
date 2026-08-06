@@ -570,11 +570,6 @@ pub struct LevelDef {
     /// look like (see [`crate::scatter::ScatterInstance`]).
     #[serde(default)]
     pub scatter: Vec<ScatterDef>,
-    /// How far the host queries planning data for its own prop
-    /// rendering (merged impostors and the like). The engine pre-warms
-    /// this radius so those queries never generate on the main thread.
-    #[serde(default)]
-    pub prop_query_reach_m: Option<f32>,
     /// The host's planning data, carried verbatim. Planning layers are
     /// the game's code, so the engine never looks inside this: it hands
     /// the block to the host's [`crate::planning::HostPlanning`] and

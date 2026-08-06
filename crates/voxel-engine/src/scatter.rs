@@ -17,7 +17,6 @@ use bevy::prelude::*;
 use voxel_core::seed::{chunk_seed, Rng};
 
 use crate::level::ScatterDef;
-use crate::planning::WorldQuery;
 
 /// What the engine attaches to every placed entity. The host reads it to
 /// decide what to attach in turn.
@@ -86,56 +85,13 @@ pub struct PlacementInputs<'a> {
     pub biome_weight: Box<dyn Fn(Vec2) -> f32 + 'a>,
 }
 
-impl<'a> PlacementInputs<'a> {
-    /// Gather from a world facade, for callers that have one.
-    pub fn from_world(world: &'a WorldQuery, def: &'a ScatterDef, tile: IVec2) -> Self {
-        let origin = tile.as_vec2() * def.tile_m;
-        Self {
-            generator: world.generator(),
-            clearance: tile_clearance(world, origin, def.tile_m),
-            cut_ops: tile_cut_ops(world, origin, def.tile_m),
-            biome_weight: Box::new(move |xz| biome_gate(world, &def.biome, xz)),
-        }
-    }
-}
-
-/// Blended weight of an `"instance:biome"` reference (1 when unset).
-fn biome_gate(world: &WorldQuery, reference: &Option<String>, xz: Vec2) -> f32 {
-    let Some(reference) = reference else {
-        return 1.0;
-    };
-    let Some((instance, biome)) = reference.rsplit_once(':') else {
-        return 1.0;
-    };
-    world
-        .biomes_at(instance, xz)
-        .iter()
-        .find_map(|(n, w)| (n == biome).then_some(*w))
-        .unwrap_or(1.0)
-}
-
 /// Clearance the planning stack reserved (path and ribbon beds).
 const CLEAR_M: f32 = 4.5;
-
-fn tile_clearance(world: &WorldQuery, origin: Vec2, size: f32) -> Vec<[Vec2; 2]> {
-    world.clearance_in(
-        origin - Vec2::splat(CLEAR_M),
-        origin + Vec2::splat(size + CLEAR_M),
-    )
-}
 
 fn on_clearance(segments: &[[Vec2; 2]], p: Vec2) -> bool {
     segments
         .iter()
         .any(|[a, b]| voxel_worldgen::path::dist_to_segment(p, *a, *b) < CLEAR_M)
-}
-
-/// Cut ops overlapping a tile (huge y span: cave mouths at any depth).
-fn tile_cut_ops(world: &WorldQuery, origin: Vec2, size: f32) -> Vec<voxel_core::csg::CsgOp> {
-    world.cuts_in(
-        Vec3::new(origin.x - 4.0, -10_000.0, origin.y - 4.0),
-        Vec3::new(origin.x + size + 4.0, 10_000.0, origin.y + size + 4.0),
-    )
 }
 
 /// Was the surface here carved away? Props must not float over a void.

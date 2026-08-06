@@ -26,6 +26,8 @@ pub struct WorldCtx {
     pub ribbons: Sink<RiverSegGpu>,
     /// Scatter population handles, taken once by the app.
     pub populations: Mutex<Option<crate::scatter::Populations>>,
+    /// Merged far-forest impostors, contributed per super-tile.
+    pub far_props: Sink<crate::props::FarProp>,
 }
 
 impl WorldCtx {
@@ -34,6 +36,7 @@ impl WorldCtx {
             generator,
             ribbons: Sink::default(),
             populations: Mutex::new(None),
+            far_props: Sink::default(),
         }
     }
 }

@@ -393,10 +393,10 @@ impl LayerGraph {
         let mut providers = Usage::default();
         if level > 0 {
             let pad = entry.level_pads[level as usize];
-            self.ensure(key, own.inflate(pad), level - 1, &mut providers);
+            self.ensure(key, dep_bounds(own, pad), level - 1, &mut providers);
         }
         for dep in &entry.deps[level as usize] {
-            self.ensure(dep.key, own.inflate(dep.padding), dep.level, &mut providers);
+            self.ensure(dep.key, dep_bounds(own, dep.padding), dep.level, &mut providers);
         }
 
         (entry.create)(self, slot, level);
@@ -710,6 +710,9 @@ impl<L: Layer> ChunkCtx<'_, L> {
                 )
             });
         let own = self.chunk_bounds();
+        // The read may span a collapsed axis freely — what is *ensured*
+        // on one is bounded (see `dep_bounds`), so asking beyond it shows
+        // up as a miss, which is the honest report.
         let allowed = own.inflate(dep.padding);
         assert!(
             allowed.contains(bounds),
@@ -747,6 +750,31 @@ impl<L: Layer> ChunkCtx<'_, L> {
         view.chunks.retain(|(coord, _)| *coord != self.coord);
         view
     }
+}
+
+/// The region a chunk may read from a dependency: its own bounds inflated
+/// by the declared padding — except on an axis where it is *collapsed*.
+///
+/// A planar layer in a 3D world spans all of y, so inflating would ask a
+/// volumetric dependency to exist at every height there has ever been. On
+/// a collapsed axis the padding is therefore read as an absolute band
+/// about the origin: a planar layer declaring 2560 m of y padding means
+/// "I read 2560 m above and below", which is the only thing it could
+/// sensibly mean.
+pub fn dep_bounds(own: IAabb, padding: IVec3) -> IAabb {
+    let mut bounds = own.inflate(padding);
+    let axis = |unbounded: bool, pad: i32, lo: &mut i32, hi: &mut i32| {
+        if unbounded {
+            *lo = -pad;
+            *hi = pad;
+        }
+    };
+    let (mut min, mut max) = (bounds.min, bounds.max);
+    axis(own.min.x == i32::MIN, padding.x, &mut min.x, &mut max.x);
+    axis(own.min.y == i32::MIN, padding.y, &mut min.y, &mut max.y);
+    axis(own.min.z == i32::MIN, padding.z, &mut min.z, &mut max.z);
+    bounds = IAabb::new(min, max);
+    bounds
 }
 
 /// Per-axis padding that would have covered `requested` from `own`, never

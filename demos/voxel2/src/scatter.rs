@@ -29,6 +29,11 @@ use crate::planning::world::{Sink, WorldCtx};
 /// cross into it, not just the ones that start in it.
 const GATE_PAD_M: i32 = 64;
 
+/// How far above and below a population looks for carved ground. Cave
+/// mouths reach the surface from a long way down, and this layer is planar
+/// so it has to say how deep it cares.
+const GATE_Y_M: i32 = 4096;
+
 /// One population. Registered once per class the level declares.
 pub struct ScatterPopulation {
     def: ScatterDef,
@@ -38,11 +43,12 @@ pub struct ScatterPopulation {
     biome: Option<(String, String, usize)>,
     /// That biome's position in its field's table, resolved once.
     biome_index: Option<usize>,
-    sink: Sink<Placement>,
 }
 
 #[derive(Default)]
-pub struct ScatterChunk;
+pub struct ScatterChunk {
+    pub placements: Vec<Placement>,
+}
 
 impl Layer for ScatterPopulation {
     type Chunk = ScatterChunk;
@@ -53,7 +59,7 @@ impl Layer for ScatterPopulation {
     }
 
     fn dependencies(&self, _level: u32) -> Vec<Dep> {
-        let pad = IVec3::new(GATE_PAD_M, 0, GATE_PAD_M);
+        let pad = IVec3::new(GATE_PAD_M, GATE_Y_M, GATE_PAD_M);
         let mut deps: Vec<Dep> = self
             .emit_sources
             .iter()
@@ -74,13 +80,13 @@ impl LayerChunk for ScatterChunk {
     fn create(&mut self, ctx: &ChunkCtx<'_, ScatterPopulation>, _level: u32) {
         let layer = ctx.layer();
         let own = ctx.chunk_bounds();
-        let pad = IVec3::new(GATE_PAD_M, 0, GATE_PAD_M);
+        let pad = IVec3::new(GATE_PAD_M, GATE_Y_M, GATE_PAD_M);
 
         // Everything the gates read, from declared dependencies only.
         let mut clearance = Vec::new();
         let mut cut_ops = Vec::new();
         for source in &layer.emit_sources {
-            ctx.get_named::<crate::planning::layers::EmitPatches>(source, own.inflate(pad))
+            ctx.get_named::<crate::planning::layers::EmitPatches>(source, voxel_layers::dep_bounds(own, pad))
                 .for_each(|_, chunk| {
                     clearance.extend(chunk.patches.clearance.iter().copied());
                     cut_ops.extend(chunk.patches.ops.iter().filter(|op| op.kind & 1 == 1).copied());
@@ -92,7 +98,7 @@ impl LayerChunk for ScatterChunk {
             let mut sites = Vec::new();
             ctx.get_named::<crate::planning::layers::BiomeField>(
                 instance,
-                own.inflate(IVec3::new(biome_pad, 0, biome_pad)),
+                voxel_layers::dep_bounds(own, IVec3::new(biome_pad, 0, biome_pad)),
             )
             .for_each(|_, c| sites.push((c.site, c.biome)));
             sites
@@ -117,12 +123,54 @@ impl LayerChunk for ScatterChunk {
             biome_weight: Box::new(biome_weight),
         };
         let tile = IVec2::new(ctx.coord().x, ctx.coord().z);
-        layer
-            .sink
-            .put(ctx.coord(), tile_placements(&layer.def, &inputs, tile));
+        self.placements = tile_placements(&layer.def, &inputs, tile);
     }
 
-    fn destroy(&mut self, ctx: &ChunkCtx<'_, ScatterPopulation>, _level: u32) {
+    fn destroy(&mut self, _ctx: &ChunkCtx<'_, ScatterPopulation>, _level: u32) {
+        self.placements = Vec::new();
+    }
+}
+
+/// What a population *draws*, separated from what it *is*.
+///
+/// Residency of the data and residency of the meshes are different
+/// questions: the far impostor ring reads tree placements kilometres out,
+/// and none of those should become near-mesh entities. Two layers, two top
+/// dependencies, and neither has to know why the other wants the data.
+pub struct ScatterDraw {
+    source: String,
+    tile_m: f32,
+    sink: Sink<Placement>,
+}
+
+#[derive(Default)]
+pub struct ScatterDrawChunk;
+
+impl Layer for ScatterDraw {
+    type Chunk = ScatterDrawChunk;
+    const NAME: &'static str = "scatter-draw";
+
+    fn chunk_extent(&self) -> IVec3 {
+        IVec3::new(self.tile_m as i32, 0, self.tile_m as i32)
+    }
+
+    fn dependencies(&self, _level: u32) -> Vec<Dep> {
+        vec![Dep::named(&self.source, IVec3::ZERO)]
+    }
+}
+
+impl LayerChunk for ScatterDrawChunk {
+    type Layer = ScatterDraw;
+
+    fn create(&mut self, ctx: &ChunkCtx<'_, ScatterDraw>, _level: u32) {
+        let layer = ctx.layer();
+        let mut placements = Vec::new();
+        ctx.get_named::<ScatterPopulation>(&layer.source, ctx.chunk_bounds())
+            .for_each(|_, chunk| placements.extend(chunk.placements.iter().cloned()));
+        layer.sink.put(ctx.coord(), placements);
+    }
+
+    fn destroy(&mut self, ctx: &ChunkCtx<'_, ScatterDraw>, _level: u32) {
         ctx.layer().sink.take(ctx.coord());
     }
 }
@@ -167,7 +215,6 @@ pub fn register(
             emit_sources: emit_sources.clone(),
             biome,
             biome_index,
-            sink: sink.clone(),
         };
         // The population's own radius, as declared in the level, becomes
         // the size of its top dependency — the one number that decides how
@@ -175,8 +222,17 @@ pub fn register(
         // pre-warm reach that all had to agree.
         let reach = (def.radius_tiles as f32 + 0.5) * def.tile_m;
         graph.register_as(&def.class, population);
+        let draw = format!("{}:draw", def.class);
+        graph.register_as(
+            &draw,
+            ScatterDraw {
+                source: def.class.clone(),
+                tile_m: def.tile_m,
+                sink: sink.clone(),
+            },
+        );
         tops.push(TopDep::at_level(
-            &def.class,
+            &draw,
             0,
             IVec3::new((2.0 * reach) as i32, 0, (2.0 * reach) as i32),
         ));

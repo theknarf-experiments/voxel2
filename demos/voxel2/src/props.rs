@@ -13,9 +13,11 @@ use std::collections::HashMap;
 use bevy::mesh::{Indices, PrimitiveTopology};
 use bevy::light::NotShadowCaster;
 use bevy::prelude::*;
-use voxel_engine::WorldQuery;
-use voxel_engine::scatter::{tile_placements, PlacementInputs, ScatterInstance};
-use voxel_engine::{LevelDef, VoxelStreamSource};
+use voxel_layers::{ChunkCtx, Dep, Layer, LayerChunk, LayerGraph, TopDep};
+
+use crate::planning::world::WorldCtx;
+use voxel_engine::scatter::ScatterInstance;
+use voxel_engine::VoxelStreamSource;
 
 /// Host-side appearance for one scatter class, indexed by the engine's
 /// variant number.
@@ -120,9 +122,11 @@ impl PropTable {
 
 /// Far-forest tuning — the host's rendering choice, not the engine's.
 const SUPER_M: f32 = 128.0;
-const SUPER_RADIUS: i32 = 24;
+/// How far the merged forest is visible. Formerly a tile radius plus a
+/// keep-radius plus a per-frame budget; now the size of one top
+/// dependency, and the tree placements underneath come with it.
+const SUPER_VIEW_M: f32 = 3072.0;
 const SUPER_HIDE_M: f32 = 320.0;
-const SUPER_BUDGET: usize = 8;
 /// The scatter class the far forest renders silhouettes for.
 const FOREST_CLASS: &str = "tree";
 
@@ -132,13 +136,12 @@ impl Plugin for PropsPlugin {
     fn build(&self, app: &mut App) {
         app.insert_resource(PropTable::planet())
             .init_resource::<PropAssets>()
-            .init_resource::<FarForest>()
             .add_systems(Startup, build_prop_assets)
             .add_systems(
                 Update,
                 (
                     dress_scatter,
-                    stream_far_forest,
+                    reconcile_far_forest,
                     far_forest_visibility,
                 ),
             );
@@ -298,59 +301,126 @@ fn dress_scatter(
 #[derive(Component)]
 struct FarForestTile;
 
-#[derive(Resource, Default)]
-struct FarForest {
-    tiles: HashMap<IVec2, Option<Entity>>,
+/// One impostor the far ring will draw: where it sits on the coarse
+/// surface, how big, and how the horizon shadow falls on it.
+#[derive(Clone)]
+pub struct FarProp {
+    pos: Vec3,
+    scale: f32,
+    variant: u32,
+    shade: f32,
 }
 
-#[allow(clippy::too_many_arguments)]
-fn stream_far_forest(
+/// Seats the forest's placements on the surface coarse LOD actually shows
+/// at that distance and samples the horizon shadow — the expensive part,
+/// which belongs off the main thread. Assembling the merged mesh from the
+/// result needs the impostor assets, so that stays in a system.
+pub struct FarForest {
+    source: String,
+}
+
+#[derive(Default)]
+pub struct FarForestChunk;
+
+impl Layer for FarForest {
+    type Chunk = FarForestChunk;
+    const NAME: &'static str = "far-forest";
+
+    fn chunk_extent(&self) -> IVec3 {
+        IVec3::new(SUPER_M as i32, 0, SUPER_M as i32)
+    }
+
+    fn dependencies(&self, _level: u32) -> Vec<Dep> {
+        vec![Dep::named(&self.source, IVec3::ZERO)]
+    }
+}
+
+impl LayerChunk for FarForestChunk {
+    type Layer = FarForest;
+
+    fn create(&mut self, ctx: &ChunkCtx<'_, FarForest>, _level: u32) {
+        let layer = ctx.layer();
+        let generator = &ctx.context::<WorldCtx>().generator;
+        let mut props = Vec::new();
+        ctx.get_named::<crate::scatter::ScatterPopulation>(&layer.source, ctx.chunk_bounds())
+            .for_each(|_, chunk| {
+                for placement in &chunk.placements {
+                    // Seat on the band-limited height coarse LOD shows at
+                    // that distance, or they float.
+                    let mut pos = placement.position;
+                    pos.y = generator.height(Vec2::new(pos.x, pos.z), 16.0) - 0.15;
+                    props.push(FarProp {
+                        pos,
+                        scale: placement.scale,
+                        variant: placement.variant,
+                        shade: 0.45 + 0.55 * generator.sun_shadow(pos),
+                    });
+                }
+            });
+        ctx.context::<WorldCtx>().far_props.put(ctx.coord(), props);
+    }
+
+    fn destroy(&mut self, ctx: &ChunkCtx<'_, FarForest>, _level: u32) {
+        ctx.context::<WorldCtx>().far_props.take(ctx.coord());
+    }
+}
+
+/// Register the far ring. Its top dependency is how far the forest is
+/// visible; the tree placements underneath it come along because this
+/// layer declares them, which is why nothing has to agree about reaches.
+pub fn register_far_forest(graph: &mut LayerGraph) -> Option<TopDep> {
+    if !graph.instances().iter().any(|n| n == FOREST_CLASS) {
+        return None; // a level with no forest gets no far ring
+    }
+    graph.register(FarForest {
+        source: FOREST_CLASS.to_string(),
+    });
+    Some(TopDep::at_level(
+        FarForest::NAME,
+        0,
+        IVec3::new((2.0 * SUPER_VIEW_M) as i32, 0, (2.0 * SUPER_VIEW_M) as i32),
+    ))
+}
+
+/// Build a merged mesh for every super-tile the layer published, and drop
+/// the ones it withdrew.
+fn reconcile_far_forest(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     assets: Res<PropAssets>,
-    level: Option<Res<LevelDef>>,
-    world: Res<WorldQuery>,
-    probe: Res<voxel_engine::streaming::StreamProbe>,
-    mut far: ResMut<FarForest>,
-    sources: Query<&GlobalTransform, With<VoxelStreamSource>>,
+    world: Option<Res<voxel_engine::WorldQuery>>,
+    mut spawned: Local<HashMap<IVec3, Option<Entity>>>,
+    mut seen: Local<u64>,
 ) {
-    let (Some(level), Ok(source)) = (level, sources.single()) else {
+    let Some(sink) = world
+        .as_ref()
+        .and_then(|w| w.host_ctx::<WorldCtx>())
+        .map(|c| c.far_props.clone())
+    else {
         return;
     };
-    if !probe.world_ready {
+    let sink = &sink;
+    let generation = sink.generation();
+    if generation == *seen {
         return;
     }
-    let Some(def) = level.scatter.iter().find(|d| d.class == FOREST_CLASS) else {
-        return;
-    };
-    let camera = source.translation();
-    let center = (Vec2::new(camera.x, camera.z) / SUPER_M).floor().as_ivec2();
-    let mut budget = SUPER_BUDGET;
-    'outer: for dz in -SUPER_RADIUS..=SUPER_RADIUS {
-        for dx in -SUPER_RADIUS..=SUPER_RADIUS {
-            let tile = center + IVec2::new(dx, dz);
-            if far.tiles.contains_key(&tile) {
-                continue;
-            }
-            let entity = build_super_tile(&mut commands, &mut meshes, &assets, def, &world, tile);
-            far.tiles.insert(tile, entity);
-            budget -= 1;
-            if budget == 0 {
-                break 'outer;
-            }
+    *seen = generation;
+    let live = sink.keys();
+    spawned.retain(|coord, entity| {
+        if live.contains(coord) {
+            return true;
         }
-    }
-    let keep = SUPER_RADIUS + 2;
-    let stale: Vec<IVec2> = far
-        .tiles
-        .keys()
-        .filter(|t| (**t - center).abs().max_element() > keep)
-        .copied()
-        .collect();
-    for tile in stale {
-        if let Some(Some(entity)) = far.tiles.remove(&tile) {
+        if let Some(entity) = entity.take() {
             commands.entity(entity).despawn();
         }
+        false
+    });
+    for coord in live {
+        if spawned.contains_key(&coord) {
+            continue;
+        }
+        let Some(props) = sink.get(coord) else { continue };
+        spawned.insert(coord, build_super_tile(&mut commands, &mut meshes, &assets, &props));
     }
 }
 
@@ -359,39 +429,25 @@ fn build_super_tile(
     commands: &mut Commands,
     meshes: &mut Assets<Mesh>,
     assets: &PropAssets,
-    def: &voxel_engine::level::ScatterDef,
-    world: &WorldQuery,
-    tile: IVec2,
+    props: &[FarProp],
 ) -> Option<Entity> {
-    let sub = (SUPER_M / def.tile_m) as i32;
     let impostors = assets.impostors.get(FOREST_CLASS)?;
     let mut b = MeshBuilder::default();
-    for dz in 0..sub {
-        for dx in 0..sub {
-            let detail = IVec2::new(tile.x * sub + dx, tile.y * sub + dz);
-            let inputs = PlacementInputs::from_world(world, def, detail);
-            for placement in tile_placements(def, &inputs, detail) {
-                // Seat impostors on the band-limited height coarse LOD
-                // actually shows at that distance, or they float.
-                let mut pos = placement.position;
-                pos.y = world.generator().height(Vec2::new(pos.x, pos.z), 16.0) - 0.15;
-                let shade = 0.45 + 0.55 * world.generator().sun_shadow(pos);
-                let Some(Some(imp)) = impostors.get(placement.variant as usize) else {
-                    continue;
-                };
-                let c = [
-                    imp.color[0] * shade,
-                    imp.color[1] * shade,
-                    imp.color[2] * shade,
-                    1.0,
-                ];
-                let (hw, h) = (imp.size[0] * placement.scale, imp.size[1] * placement.scale);
-                if imp.shape == ImpostorShape::Cone {
-                    b.cross_cone(pos, hw, h, c);
-                } else {
-                    b.cross_diamond(pos, hw, h, c);
-                }
-            }
+    for prop in props {
+        let Some(Some(imp)) = impostors.get(prop.variant as usize) else {
+            continue;
+        };
+        let c = [
+            imp.color[0] * prop.shade,
+            imp.color[1] * prop.shade,
+            imp.color[2] * prop.shade,
+            1.0,
+        ];
+        let (hw, h) = (imp.size[0] * prop.scale, imp.size[1] * prop.scale);
+        if imp.shape == ImpostorShape::Cone {
+            b.cross_cone(prop.pos, hw, h, c);
+        } else {
+            b.cross_diamond(prop.pos, hw, h, c);
         }
     }
     if b.positions.is_empty() {

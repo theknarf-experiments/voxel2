@@ -35,6 +35,10 @@ const RIBBON_VIEW_M: i32 = 3072;
 /// see its neighbours' emitters to catch the ones crossing into it.
 const RIBBON_PAD_M: i32 = 512;
 
+/// Vertical band a ribbon tile reads; ribbons sit on the surface, but the
+/// emit layers that carry them can be volumetric.
+const RIBBON_Y_M: i32 = 4096;
+
 /// Turns the emit layers' ribbon segments into water geometry.
 pub struct RibbonSurface {
     /// Emit instances that produce ribbons.
@@ -57,7 +61,7 @@ impl Layer for RibbonSurface {
     fn dependencies(&self, _level: u32) -> Vec<Dep> {
         self.sources
             .iter()
-            .map(|name| Dep::named(name, IVec3::new(RIBBON_PAD_M, 0, RIBBON_PAD_M)))
+            .map(|name| Dep::named(name, IVec3::new(RIBBON_PAD_M, RIBBON_Y_M, RIBBON_PAD_M)))
             .collect()
     }
 }
@@ -77,10 +81,10 @@ impl LayerChunk for RibbonSurfaceChunk {
     fn create(&mut self, ctx: &ChunkCtx<'_, RibbonSurface>, _level: u32) {
         let layer = ctx.layer();
         let own = ctx.chunk_bounds();
-        let pad = IVec3::new(RIBBON_PAD_M, 0, RIBBON_PAD_M);
+        let pad = IVec3::new(RIBBON_PAD_M, RIBBON_Y_M, RIBBON_PAD_M);
         let mut segs = Vec::new();
         for source in &layer.sources {
-            ctx.get_named::<crate::planning::layers::EmitPatches>(source, own.inflate(pad))
+            ctx.get_named::<crate::planning::layers::EmitPatches>(source, voxel_layers::dep_bounds(own, pad))
                 .for_each(|_, chunk| {
                     for s in &chunk.patches.ribbons {
                         segs.push(RiverSegGpu {

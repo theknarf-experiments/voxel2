@@ -206,24 +206,21 @@ impl WorldPlanner for StackPlanner {
     }
 }
 
-/// A consumer's stated reach is where it starts asking, not where its
-/// question ends: a tile 3.3 km out still spans a kilometre of its own,
-/// and a chunk's ops query covers the chunk plus its density apron.
-/// Residency has to hold the far side of the box, so every reach gets the
-/// largest query box any consumer issues added to it.
-///
-/// Empirical, and that is the smell: this demo's streamers do not declare
-/// what they actually ask for — `prop_query_reach_m` says 3.3 km while
-/// something issues a kilometre-wide box out at 5.8 km. The old cache hid
-/// it by generating on read. The real fix is for those streamers to become
-/// layers with declared padding, at which point this constant goes away.
-const QUERY_BOX_SLACK_M: f32 = 3072.0;
+/// The LOD field is evaluated at a camera anchor quantized to this, so a
+/// chunk can be up to this much further out than its nominal band.
+const ANCHOR_SLOP_M: f32 = 48.0;
 
-/// The largest chunk edge not exceeding `cap`. Chunk edges are
-/// `32 * 2^level`, so the ops horizon admits a specific edge, not the
-/// horizon value itself — and residency follows the edge.
+/// The largest chunk edge not exceeding `cap`.
+///
+/// A chunk is [`voxel_core::CHUNK_CELLS`] cells of [`voxel_core::BASE_VOXEL_M`]
+/// at level 0 and doubles per level, so the ops horizon admits a specific
+/// edge rather than the horizon value itself. Derived from the constants
+/// rather than written down: assuming 32 m here instead of 3.2 m
+/// under-sized every reach by a factor of ten, and an empirical slack was
+/// quietly covering for it.
 fn largest_leaf_edge(cap: f32) -> f32 {
-    let mut edge = 32.0f32;
+    let base = (voxel_core::CHUNK_CELLS as f64 * voxel_core::BASE_VOXEL_M) as f32;
+    let mut edge = base;
     while edge * 2.0 <= cap {
         edge *= 2.0;
     }
@@ -270,22 +267,6 @@ impl StackPlanner {
             })
             .collect();
 
-        // How far the host's own streamers query, ungated: scattered props
-        // (the far ring dominates) and ribbon surfaces.
-        let mut streamer_reach = 0.0f32;
-        for scatter in &level.scatter {
-            streamer_reach = streamer_reach.max((scatter.radius_tiles + 2) as f32 * scatter.tile_m);
-        }
-        if let Some(reach) = level.prop_query_reach_m {
-            streamer_reach = streamer_reach.max(reach);
-        }
-        // Ribbon surfaces used to be counted here, because a hand-rolled
-        // streamer read them at a radius nothing had declared. They are a
-        // layer now, so their reach is that layer's declared padding.
-
-        if std::env::var_os("VOXEL_LOG_LAYERS").is_some() {
-            info!("streamer reach {streamer_reach:.0} m");
-        }
         // One top dependency per emit layer, sized to the furthest thing
         // that can ask it for ops.
         //
@@ -294,50 +275,41 @@ impl StackPlanner {
         // queried from further than that. The carve-horizon gate stops
         // being a per-query filter and becomes a residency size — which is
         // the whole point of expressing this as a dependency graph.
-        let split_k = level.lod.split_k as f32;
+        let merge_k = level.lod.merge_k as f32;
         let mut deps = Vec::new();
         for e in &emitters {
-            // What the chunk streamer needs is exact. A leaf of edge E
-            // stays a leaf while the camera is within `split_k * 2E`, and
-            // its ops query covers the chunk plus the density apron and
-            // the element pad. So a carve-horizon gate is not a filter any
-            // more — it is a residency size, in every axis.
+            // What the chunk streamer needs is exact, once every term is
+            // accounted for. A leaf of edge E appears when its parent
+            // splits (`split_k * 2E`) and survives until the parent merges
+            // (`merge_k * 2E`) — the hysteresis gap is the bound that
+            // matters. Distance is measured to the chunk's near face, so
+            // its far face is another E out; the ops query then adds the
+            // density apron and the element pad, and the LOD field is
+            // evaluated at an anchor quantized to ANCHOR_SLOP_M.
+            //
+            // So a carve-horizon gate is not a query filter any more — it
+            // is a residency size, in every axis.
             let edge = largest_leaf_edge(e.gate.unwrap_or(OPS_HORIZON_EDGE_M));
-            let ops_reach = 2.0 * split_k * edge + edge + edge / 8.0 + layers::ELEM_PAD_M;
+            let ops_reach = 2.0 * merge_k * edge
+                + edge
+                + edge / 8.0
+                + layers::ELEM_PAD_M
+                + ANCHOR_SLOP_M;
 
-            // What the host's own streamers need is not: they ignore gates
-            // and ask in boxes of their own. Only levels that have them pay
-            // for them — and only in xz, since those queries are facades
-            // over a fixed vertical band.
-            let (xz, y) = if streamer_reach > 0.0 {
-                (
-                    ops_reach.max(streamer_reach + QUERY_BOX_SLACK_M + layers::ELEM_PAD_M),
-                    FACADE_Y_M,
-                )
-            } else {
-                (ops_reach, ops_reach)
-            };
+            // Nothing else needs sizing in here any more: every other
+            // consumer of these layers — ribbon surfaces, scatter
+            // populations, the far forest — declares a dependency and the
+            // graph takes the union.
             let size = bevy::math::IVec3::new(
-                (2.0 * xz) as i32,
-                (2.0 * y) as i32,
-                (2.0 * xz) as i32,
+                (2.0 * ops_reach) as i32,
+                (2.0 * ops_reach) as i32,
+                (2.0 * ops_reach) as i32,
             );
             if std::env::var_os("VOXEL_LOG_LAYERS").is_some() {
                 info!("top dep {:?}: size {size:?}", e.name);
             }
             deps.push(TopDep::at_level(&e.name, 0, size));
         }
-        // Biome gates are sampled directly by the host's spawners, over a
-        // wider window than any emitter covers.
-        let biome_reach = streamer_reach as i32 + layers::BIOME_INFLUENCE_CELLS;
-        for (name, _) in &biome_tables {
-            deps.push(TopDep::at_level(
-                name,
-                0,
-                bevy::math::IVec3::new(2 * biome_reach, 0, 2 * biome_reach),
-            ));
-        }
-
         // Presentation layers: this game's own, sitting on the emit
         // layers and turning what they plan into something it can draw.
         let ribbon_sources: Vec<String> = emitters
@@ -353,6 +325,7 @@ impl StackPlanner {
             crate::scatter::register(&mut graph, level, emit_names, &biome_tables);
         deps.extend(scatter_tops);
         *ctx.populations.lock().unwrap() = Some(populations);
+        deps.extend(crate::props::register_far_forest(&mut graph));
 
         let runtime = Arc::new(LayerRuntime::start(Arc::new(graph), deps));
         let tops = (0..runtime.tops()).map(|i| runtime.top(i)).collect();
