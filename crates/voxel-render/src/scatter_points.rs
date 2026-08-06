@@ -5,7 +5,8 @@
 //! geometry, colors, wind, fade — is the host's, so the pipeline that
 //! draws them lives in the app (see the demo's `grass.rs`).
 
-use std::sync::Mutex;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 
 use bevy::prelude::*;
 use bytemuck::{Pod, Zeroable};
@@ -28,30 +29,40 @@ pub struct ScatterPoints {
 
 #[derive(Default)]
 struct ScatterShared {
-    points: Vec<ScatterPoint>,
+    /// Keyed by the population's class name, which the level chose. The
+    /// engine never interprets it; the host draws the classes it knows.
+    classes: HashMap<Arc<str>, Vec<ScatterPoint>>,
     dirty: bool,
 }
 
 impl ScatterPoints {
-    /// Replace the whole set (the streamer rebuilds it wholesale).
-    pub fn set(&self, points: Vec<ScatterPoint>) {
+    /// Replace one class's points (the streamer rebuilds wholesale).
+    pub fn set_class(&self, class: &str, points: Vec<ScatterPoint>) {
         let mut inner = self.inner.lock().unwrap();
-        inner.points = points;
+        inner.classes.insert(Arc::from(class), points);
         inner.dirty = true;
     }
 
-    /// Take the set if it changed since the last call.
-    pub fn take_if_dirty(&self) -> Option<Vec<ScatterPoint>> {
+    /// Drop every class.
+    pub fn clear(&self) {
+        let mut inner = self.inner.lock().unwrap();
+        inner.classes.clear();
+        inner.dirty = true;
+    }
+
+    /// Take one class's points if anything changed since the last call.
+    /// The host asks for the classes it knows how to draw.
+    pub fn take_class_if_dirty(&self, class: &str) -> Option<Vec<ScatterPoint>> {
         let mut inner = self.inner.lock().unwrap();
         if !inner.dirty {
             return None;
         }
         inner.dirty = false;
-        Some(inner.points.clone())
+        Some(inner.classes.get(class).cloned().unwrap_or_default())
     }
 
     pub fn len(&self) -> usize {
-        self.inner.lock().unwrap().points.len()
+        self.inner.lock().unwrap().classes.values().map(Vec::len).sum()
     }
 
     pub fn is_empty(&self) -> bool {

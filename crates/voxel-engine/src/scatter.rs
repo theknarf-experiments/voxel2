@@ -74,13 +74,12 @@ impl Plugin for ScatterPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<ScatterRebuild>()
             .init_resource::<ScatterTiles>()
-            .init_resource::<GrassTiles>()
-            .add_systems(Update, (rebuild_scatter, stream_scatter, stream_grass));
+            .init_resource::<ScatterPointTiles>()
+            .add_systems(Update, (rebuild_scatter, stream_scatter));
     }
 }
 
 const SCATTER_SALT: u64 = 0x5CA7;
-const GRASS_SALT: u64 = 0x6A55;
 
 // --- gates ------------------------------------------------------------------
 
@@ -230,10 +229,16 @@ pub fn tile_placements(def: &ScatterDef, world: &WorldQuery, tile: IVec2) -> Vec
         }
         let yaw = rng.next_f32() * std::f32::consts::TAU;
         let roll = rng.next_f32();
-        let Some(variant) = pick_variant(def, y, roll) else {
-            continue;
+        // Point populations have no variants: a point is a position and a
+        // hash, so there is nothing to pick and nothing to scale.
+        let (variant, range) = if def.variants.is_empty() {
+            (0usize, [1.0, 1.0])
+        } else {
+            let Some(variant) = pick_variant(def, y, roll) else {
+                continue;
+            };
+            (variant, def.variants[variant].scale)
         };
-        let range = def.variants[variant].scale;
         let t = rng.next_f32().powf(def.scale_bias.max(0.01));
         let scale = range[0] + t * (range[1] - range[0]);
         let sink = def
@@ -288,6 +293,12 @@ fn class_salt(class: &str) -> u64 {
 
 // --- entity streaming -------------------------------------------------------
 
+/// Bulk placements per (class, tile), for populations that output points.
+#[derive(Resource, Default)]
+struct ScatterPointTiles {
+    tiles: HashMap<(usize, IVec2), Vec<Placement>>,
+}
+
 #[derive(Resource, Default)]
 struct ScatterTiles {
     /// (class index, tile) -> spawned entities.
@@ -298,8 +309,8 @@ fn rebuild_scatter(
     mut commands: Commands,
     mut rebuild: ResMut<ScatterRebuild>,
     mut tiles: ResMut<ScatterTiles>,
-    mut grass: ResMut<GrassTiles>,
-    instances: Res<voxel_render::ScatterPoints>,
+    mut point_tiles: ResMut<ScatterPointTiles>,
+    points: Res<voxel_render::ScatterPoints>,
 ) {
     if !rebuild.0 {
         return;
@@ -310,16 +321,19 @@ fn rebuild_scatter(
             commands.entity(entity).despawn();
         }
     }
-    grass.tiles.clear();
-    instances.set(Vec::new());
+    point_tiles.tiles.clear();
+    points.clear();
 }
 
+#[allow(clippy::too_many_arguments)]
 fn stream_scatter(
     mut commands: Commands,
     level: Option<Res<crate::LevelDef>>,
     world: Res<WorldQuery>,
     probe: Res<crate::streaming::StreamProbe>,
     mut tiles: ResMut<ScatterTiles>,
+    mut point_tiles: ResMut<ScatterPointTiles>,
+    points: Res<voxel_render::ScatterPoints>,
     sources: crate::StreamSourceQuery,
 ) {
     // Cold planning caches must never be generated on the main thread:
@@ -347,6 +361,31 @@ fn stream_scatter(
                     continue;
                 }
                 let class: Arc<str> = Arc::from(def.class.as_str());
+                if def.output == crate::level::ScatterOutput::Points {
+                    // Too dense for entities: the placements go into a
+                    // shared buffer under this population's class name and
+                    // the host draws them in bulk.
+                    point_tiles
+                        .tiles
+                        .insert((class_index, tile), tile_placements(def, &world, tile));
+                    let merged: Vec<voxel_render::ScatterPoint> = point_tiles
+                        .tiles
+                        .iter()
+                        .filter(|((i, _), _)| *i == class_index)
+                        .flat_map(|(_, ps)| ps.iter())
+                        .map(|p| voxel_render::ScatterPoint {
+                            pos: p.position.to_array(),
+                            hash: p.seed as u32,
+                        })
+                        .collect();
+                    points.set_class(&class, merged);
+                    tiles.tiles.insert((class_index, tile), Vec::new());
+                    budget -= 1;
+                    if budget == 0 {
+                        break 'tiles;
+                    }
+                    continue;
+                }
                 let entities: Vec<Entity> = tile_placements(def, &world, tile)
                     .into_iter()
                     .map(|p| {
@@ -389,140 +428,7 @@ fn stream_scatter(
                     commands.entity(entity).despawn();
                 }
             }
+            point_tiles.tiles.remove(&key);
         }
-    }
-}
-
-// --- grass ------------------------------------------------------------------
-//
-// Grass is too dense for one entity per blade (hundreds per tile), so it
-// keeps a dedicated instanced path: placements go straight into the GPU
-// instance buffer that `voxel_render`'s grass shader draws. Blades are
-// generated in the shader and colored from level data — no models here
-// either.
-
-#[derive(Resource, Default)]
-struct GrassTiles {
-    tiles: HashMap<IVec2, Vec<voxel_render::ScatterPoint>>,
-    dirty: bool,
-}
-
-fn grass_tile(
-    tile: IVec2,
-    grass: &crate::level::GrassDef,
-    world: &WorldQuery,
-) -> Vec<voxel_render::ScatterPoint> {
-    let generator = world.generator();
-    let size = grass.tile_m;
-    let mut rng = Rng::new(chunk_seed(
-        world.generator().seed() as u64,
-        SCATTER_SALT ^ GRASS_SALT,
-        IVec3::new(tile.x, 1, tile.y),
-    ));
-    let origin = tile.as_vec2() * size;
-    let cut_ops = tile_cut_ops(world, origin, size);
-    let clearance = tile_clearance(world, origin, size);
-    let mut out = Vec::new();
-    for _ in 0..grass.per_tile {
-        let xz = origin + Vec2::new(rng.next_f32(), rng.next_f32()) * size;
-        if on_clearance(&clearance, xz) {
-            continue;
-        }
-        if rng.next_f32() > field_gate(generator, &grass.density, xz) * biome_gate(world, &grass.biome, xz) {
-            continue;
-        }
-        let y = generator.height(xz, 1.0);
-        let gate = altitude_gate(grass.altitude, grass.placement.altitude_falloff, y);
-        if gate <= 0.0 || (gate < 1.0 && rng.next_f32() > gate) {
-            continue;
-        }
-        let up = generator.up(xz, 1.0);
-        if up < grass.min_up || up > grass.placement.max_up {
-            continue;
-        }
-        if carved(&cut_ops, Vec3::new(xz.x, y, xz.y)) {
-            continue;
-        }
-        // Top byte of the hash carries the baked sun-shadow factor.
-        let shadow = generator.sun_shadow(Vec3::new(xz.x, y, xz.y));
-        let hash = (rng.next_u64() as u32 & 0x00FF_FFFF) | (((shadow * 255.0) as u32) << 24);
-        out.push(voxel_render::ScatterPoint {
-            pos: [xz.x, y - 0.03, xz.y],
-            hash,
-        });
-    }
-    out
-}
-
-fn stream_grass(
-    level: Option<Res<crate::LevelDef>>,
-    world: Res<WorldQuery>,
-    probe: Res<crate::streaming::StreamProbe>,
-    mut tiles: ResMut<GrassTiles>,
-    instances: Res<voxel_render::ScatterPoints>,
-    sources: crate::StreamSourceQuery,
-) {
-    let (Some(level), Ok(source)) = (level, sources.single()) else {
-        return;
-    };
-    let (Some(grass), true) = (level.grass.as_ref(), probe.world_ready) else {
-        return;
-    };
-    let camera = source.translation();
-    let center = (Vec2::new(camera.x, camera.z) / grass.tile_m)
-        .floor()
-        .as_ivec2();
-    let radius = grass.radius_tiles;
-
-    let mut budget = 2;
-    'outer: for dz in -radius..=radius {
-        for dx in -radius..=radius {
-            let tile = center + IVec2::new(dx, dz);
-            if tiles.tiles.contains_key(&tile) {
-                continue;
-            }
-            let blades = grass_tile(tile, grass, &world);
-            tiles.tiles.insert(tile, blades);
-            tiles.dirty = true;
-            budget -= 1;
-            if budget == 0 {
-                break 'outer;
-            }
-        }
-    }
-    let keep = radius + 1;
-    let stale: Vec<IVec2> = tiles
-        .tiles
-        .keys()
-        .filter(|t| (**t - center).abs().max_element() > keep)
-        .copied()
-        .collect();
-    for tile in stale {
-        tiles.tiles.remove(&tile);
-        tiles.dirty = true;
-    }
-    if tiles.dirty {
-        tiles.dirty = false;
-        instances.set(tiles.tiles.values().flatten().copied().collect());
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn class_salts_are_distinct_and_stable() {
-        assert_ne!(class_salt("tree"), class_salt("boulder"));
-        assert_eq!(class_salt("tree"), class_salt("tree"));
-    }
-
-    #[test]
-    fn altitude_gate_fades_at_the_edges() {
-        assert_eq!(altitude_gate([10.0, 20.0], 0.0, 15.0), 1.0);
-        assert_eq!(altitude_gate([10.0, 20.0], 0.0, 25.0), 0.0);
-        // Soft edges ramp linearly across the falloff.
-        assert!((altitude_gate([10.0, 20.0], 4.0, 12.0) - 0.5).abs() < 1e-6);
-        assert!((altitude_gate([10.0, 20.0], 4.0, 18.0) - 0.5).abs() < 1e-6);
     }
 }

@@ -54,13 +54,31 @@ impl Default for EnvDef {
     }
 }
 
+/// How a population's placements reach the host.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ScatterOutput {
+    /// One entity per placement, carrying [`crate::scatter::ScatterInstance`].
+    #[default]
+    Entities,
+    /// Positions + hashes in a shared buffer, for populations too dense
+    /// for entities (ground cover, pebbles, sparks).
+    Points,
+}
+
 /// A scatter population: WHERE props go. What they look like is the
 /// host's business — the engine spawns entities carrying
 /// [`crate::scatter::ScatterInstance`] and the host dresses them.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct ScatterDef {
-    /// Host-facing name for this population ("tree", "boulder", …).
+    /// Host-facing name for this population. Any string: the engine never
+    /// interprets it, it only tags the placements so the host can decide
+    /// what a member of this population is.
     pub class: String,
+    /// What a placement becomes: an entity the host dresses, or a point
+    /// in a bulk buffer the host draws. Both are just placements.
+    #[serde(default)]
+    pub output: ScatterOutput,
     #[serde(default = "d_scatter_tile")]
     pub tile_m: f32,
     /// Streaming radius in tiles.
@@ -105,6 +123,9 @@ pub struct ScatterDef {
     pub scale_bias: f32,
     /// Weighted variants — species, size tiers, whatever the host maps
     /// them to. The engine only knows their index.
+    /// Entity-output variants. Point populations have none: a point is a
+    /// position and a hash, and the host decides what it draws there.
+    #[serde(default)]
     pub variants: Vec<ScatterVariantDef>,
 }
 
@@ -274,44 +295,7 @@ pub struct PatchDef {
     pub bias: f32,
 }
 
-/// The high-density instanced grass population. Blades are generated in
-/// the grass shader and colored from this data — hosts that want their
-/// own foliage use a [`ScatterDef`] class instead.
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
-pub struct GrassDef {
-    #[serde(default = "d_grass_tile")]
-    pub tile_m: f32,
-    #[serde(default = "d_grass_radius")]
-    pub radius_tiles: i32,
-    #[serde(default = "d_grass_per_tile")]
-    pub per_tile: u32,
-    pub altitude: [f32; 2],
-    #[serde(default = "d_grass_up")]
-    pub min_up: f32,
-    /// Density from a generator field register.
-    #[serde(default)]
-    pub density: Option<FieldDensityDef>,
-    /// Orientation + banding rules (align/tilt unused for grass).
-    #[serde(default)]
-    pub placement: PlacementRulesDef,
-    /// "instance:biome" — spawn probability scales with the biome's
-    /// blended weight (soft borders).
-    #[serde(default)]
-    pub biome: Option<String>,
-}
 
-fn d_grass_tile() -> f32 {
-    16.0
-}
-fn d_grass_radius() -> i32 {
-    7
-}
-fn d_grass_per_tile() -> u32 {
-    550
-}
-fn d_grass_up() -> f32 {
-    0.8
-}
 
 /// One material recipe, referenced by the material ids generator ops emit.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -582,9 +566,6 @@ pub struct LevelDef {
     /// look like (see [`crate::scatter::ScatterInstance`]).
     #[serde(default)]
     pub scatter: Vec<ScatterDef>,
-    /// The instanced grass population, if the level has one.
-    #[serde(default)]
-    pub grass: Option<GrassDef>,
     /// How far the host queries planning data for its own prop
     /// rendering (merged impostors and the like). The engine pre-warms
     /// this radius so those queries never generate on the main thread.
@@ -1537,13 +1518,8 @@ pub fn validate_level(level: &LevelDef) -> Result<(), String> {
         if let Some(reference) = &def.biome {
             biome_ref(&def.class, reference)?;
         }
-        if def.variants.is_empty() {
+        if def.output == ScatterOutput::Entities && def.variants.is_empty() {
             return Err(format!("scatter class {:?} has no variants", def.class));
-        }
-    }
-    if let Some(grass) = &level.grass {
-        if let Some(reference) = &grass.biome {
-            biome_ref("grass", reference)?;
         }
     }
     Ok(())
@@ -2439,9 +2415,6 @@ fn build_ops_provider(
     for def in &level.scatter {
         want((def.radius_tiles + 2) as f32 * def.tile_m);
     }
-    if let Some(grass) = &level.grass {
-        want((grass.radius_tiles + 2) as f32 * grass.tile_m);
-    }
     if let Some(reach) = level.prop_query_reach_m {
         want(reach);
     }
@@ -2603,7 +2576,7 @@ fn reload_level(
         rebuild.0 = true;
         info!("level reload: generation changed — rebuilding world");
     }
-    if regen || new.scatter != level.scatter || new.grass != level.grass {
+    if regen || new.scatter != level.scatter {
         if let Some(veg) = veg_rebuild.as_mut() {
             veg.0 = true;
         }
@@ -2668,10 +2641,15 @@ mod tests {
         // Scatter is placement-only: classes and variants, no models.
         assert_eq!(
             planet.scatter.iter().map(|s| s.class.as_str()).collect::<Vec<_>>(),
-            vec!["tree", "boulder"]
+            vec!["tree", "boulder", "groundcover"]
         );
         assert!(planet.scatter[0].variants.len() == 2);
-        assert!(planet.grass.is_some());
+        // Ground cover is just another scatter population that outputs
+        // points instead of entities.
+        assert!(planet
+            .scatter
+            .iter()
+            .any(|d| d.output == ScatterOutput::Points));
         // The planet's geometry comes from height ops; sea level is the
         // host's business and no longer part of the program.
         let packed: Vec<_> = planet.generator.iter().map(GenOpDef::pack).collect();
@@ -2699,7 +2677,7 @@ mod tests {
             assert!(mega_names.contains(&expect), "mega stack missing {expect}");
         }
         let packed: Vec<_> = mega.generator.iter().map(GenOpDef::pack).collect();
-        assert!(mega.scatter.is_empty() && mega.grass.is_none());
+        assert!(mega.scatter.is_empty());
         assert!(mega.materials.iter().any(|m| m.id() == 2));
         // Sunless interior: no height ops, so the horizon-shadow bake
         // self-disables and the sun direction is unused.
@@ -2719,7 +2697,6 @@ mod tests {
         assert_eq!(back.environment, planet.environment);
         assert_eq!(back.stack, planet.stack);
         assert_eq!(back.scatter, planet.scatter);
-        assert_eq!(back.grass, planet.grass);
     }
 
     /// Build a level's world facade the way the plugin does — every

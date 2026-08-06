@@ -667,13 +667,20 @@
           ]
         }
       ]
+    },
+    {
+      "class": "groundcover",
+      "output": "points",
+      "tile_m": 16.0,
+      "radius_tiles": 7,
+      "per_tile": 550,
+      "altitude": [
+        2.5,
+        300.0
+      ],
+      "min_up": 0.8,
+      "detail_vs": 1.0
     }
   ],
-  "grass": {
-    "altitude": [
-      2.5,
-      300.0
-    ]
-  },
   "prop_query_reach_m": 3328.0
 }

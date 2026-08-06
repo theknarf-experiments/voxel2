@@ -51,6 +51,10 @@ use voxel_render::{ScatterPoint, ScatterPoints};
 #[component(on_add = visibility::add_visibility_class::<GrassMarker>)]
 pub struct GrassMarker;
 
+/// The scatter population this demo draws as grass. Just a name the
+/// level and the demo agree on — the engine never sees it.
+pub const GROUND_COVER_CLASS: &str = "groundcover";
+
 pub struct GrassPlugin;
 
 impl Plugin for GrassPlugin {
@@ -319,7 +323,7 @@ fn extract_grass_instances(
     mut buffers: ResMut<GrassBuffers>,
     render_device: Res<RenderDevice>,
 ) {
-    let Some(points) = instances.take_if_dirty() else {
+    let Some(points) = instances.take_class_if_dirty(GROUND_COVER_CLASS) else {
         return;
     };
     buffers.instance_count = points.len() as u32;
