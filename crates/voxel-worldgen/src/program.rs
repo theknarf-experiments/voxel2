@@ -77,8 +77,62 @@ fn fbm3(p: Vec3, freq_xz: f32, freq_y: f32, octaves: i32, voxel_size: f32) -> f3
 const BIG: f32 = 1.0e6;
 const SOLID: f32 = -1.0e5;
 
+// --- shims for the generated arms (single-source dialect; see
+// voxel-core::opgen). Names mirror WGSL builtins / generated helpers.
+#[inline]
+fn abs(x: f32) -> f32 {
+    x.abs()
+}
+#[inline]
+fn max(a: f32, b: f32) -> f32 {
+    a.max(b)
+}
+#[inline]
+fn length(v: Vec2) -> f32 {
+    v.length()
+}
+#[inline]
+fn floor2(v: Vec2) -> Vec2 {
+    v.floor()
+}
+#[inline]
+fn v2(x: f32, y: f32) -> Vec2 {
+    Vec2::new(x, y)
+}
+#[inline]
+fn v3(x: f32, y: f32, z: f32) -> Vec3 {
+    Vec3::new(x, y, z)
+}
+#[inline]
+fn iv2(x: i32, y: i32) -> IVec2 {
+    IVec2::new(x, y)
+}
+#[inline]
+fn iv3(x: i32, y: i32, z: i32) -> IVec3 {
+    IVec3::new(x, y, z)
+}
+#[inline]
+fn to_i(x: f32) -> i32 {
+    x as i32
+}
+#[inline]
+fn to_u(x: f32) -> u32 {
+    x as u32
+}
+#[inline]
+fn to_v2(v: IVec2) -> Vec2 {
+    v.as_vec2()
+}
+#[inline]
+fn to_iv2(v: Vec2) -> IVec2 {
+    v.as_ivec2()
+}
+
 /// Signed distance (meters) and material of the program at `p`, evaluated
 /// at voxel size `vs` (1.0 = full detail).
+// The generated arms keep one shape across Rust and WGSL; clippy's
+// pattern-collapse suggestions would fork the dialect per language.
+#[allow(clippy::collapsible_match, clippy::collapsible_if)]
 pub fn eval(ops: &[WorldOp], p: Vec3, vs: f32) -> (f32, u32) {
     let coarse = vs >= WOP_COARSE_VOXEL_M;
     let mut h = 0.0f32;
@@ -99,140 +153,9 @@ pub fn eval(ops: &[WorldOp], p: Vec3, vs: f32) -> (f32, u32) {
         if !coarse && op.flags & WOP_FLAG_COARSE_ONLY != 0 {
             continue;
         }
-        match op.kind {
-            WOP_HEIGHT_FBM => {
-                h += fbm_mode(
-                    pxz + warp + Vec2::new(op.p0[0], op.p0[1]),
-                    op.p0[2],
-                    op.p1[0] as i32,
-                    vs,
-                    op.p1[1] as u32,
-                ) * op.p0[3];
-            }
-            WOP_HEIGHT_OFFSET => h += op.p0[0],
-            WOP_HEIGHT_STEP => h += op.p0[2] * smoothstep(op.p0[0], op.p0[1], h),
-            WOP_WARP_XZ => {
-                let q = pxz + Vec2::new(op.p0[2], op.p0[3]);
-                let oct = op.p1[0] as i32;
-                warp.x += fbm_mode(q, op.p0[0], oct, vs, 0) * op.p0[1];
-                warp.y += fbm_mode(q + Vec2::new(713.0, -337.0), op.p0[0], oct, vs, 0) * op.p0[1];
-            }
-            WOP_FBM3 => {
-                let q = p + Vec3::new(op.p1[0], op.p1[1], op.p1[2]);
-                let n = fbm3(q, op.p0[0], op.p0[1], op.p2[0] as i32, vs);
-                let sd = (op.p0[2] - n) * op.p0[3];
-                if op.p1[3] < 0.5 {
-                    if sd < d {
-                        d = sd;
-                        mat = op.material;
-                    }
-                } else {
-                    d = d.max(-sd);
-                }
-            }
-            WOP_HEIGHT_SURFACE => {
-                let nd = p.y - h;
-                if nd < d {
-                    d = nd;
-                    mat = op.material;
-                }
-            }
-            WOP_COARSE_SOLID if SOLID < d => {
-                d = SOLID;
-                mat = op.material;
-            }
-            WOP_LATTICE_Y => {
-                level = round_half_up(p.y / op.p0[0]);
-                fy = p.y - level * op.p0[0];
-            }
-            WOP_SLABS_Y => {
-                let nd = fy.abs() - op.p0[0];
-                if nd < d {
-                    d = nd;
-                    mat = op.material;
-                }
-            }
-            WOP_GRID_HOLES => {
-                let cell = op.p0[0];
-                let c = IVec2::new((p.x / cell).floor() as i32, (p.z / cell).floor() as i32);
-                if hash3(IVec3::new(c.x, level as i32, c.y)) < op.p0[1] {
-                    let oc = (Vec2::new(c.x as f32, c.y as f32) + 0.5) * cell;
-                    let cut = sd_box(
-                        Vec3::new(p.x - oc.x, fy, p.z - oc.y),
-                        Vec3::new(op.p1[0], op.p1[1], op.p1[2]),
-                    );
-                    d = d.max(-cut);
-                }
-            }
-            WOP_PILLARS_XZ => {
-                let sp = op.p0[0];
-                let c = IVec2::new(round_half_up(p.x / sp) as i32, round_half_up(p.z / sp) as i32);
-                let jit =
-                    Vec2::new(hash2(c) - 0.5, hash2(c + IVec2::new(311, 77)) - 0.5) * op.p0[1];
-                let q = pxz - Vec2::new(c.x as f32, c.y as f32) * sp - jit;
-                let girth = op.p0[2] + hash2(c + IVec2::new(9, -4)) * op.p0[3];
-                let nd = q.x.abs().max(q.y.abs()) - girth;
-                if nd < d {
-                    d = nd;
-                    mat = op.material;
-                }
-            }
-            WOP_WALLS => {
-                let sp = op.p0[0];
-                let along_z = op.p0[3] > 0.5;
-                let (a, b) = if along_z { (p.z, p.x) } else { (p.x, p.z) };
-                let wi = round_half_up(a / sp);
-                let w = a - wi * sp;
-                let gate = hash2(IVec2::new(wi as i32 + op.p1[0] as i32, level as i32));
-                if gate < op.p0[2] {
-                    let mut wall = w.abs() - op.p0[1];
-                    let dc = op.p1[1];
-                    let ci = round_half_up(b / dc);
-                    let cl = b - ci * dc;
-                    if hash3(IVec3::new(
-                        wi as i32,
-                        ci as i32,
-                        level as i32 + op.p1[3] as i32,
-                    )) < op.p1[2]
-                    {
-                        let doorway = sd_box(
-                            Vec3::new(w, fy + op.p2[3], cl),
-                            Vec3::new(op.p2[0], op.p2[1], op.p2[2]),
-                        );
-                        wall = wall.max(-doorway);
-                    }
-                    if wall < d {
-                        d = wall;
-                        mat = op.material;
-                    }
-                }
-            }
-            WOP_SHAFTS_XZ => {
-                let sp = op.p0[0];
-                let c = IVec2::new(round_half_up(p.x / sp) as i32, round_half_up(p.z / sp) as i32);
-                let jit = Vec2::new(
-                    hash2(c + IVec2::new(41, 13)) - 0.5,
-                    hash2(c + IVec2::new(-7, 99)) - 0.5,
-                ) * op.p0[1];
-                sxz = pxz - Vec2::new(c.x as f32, c.y as f32) * sp - jit;
-                sr = op.p0[2] + hash2(c) * op.p0[3];
-                shaft = sxz.length() - sr;
-            }
-            WOP_SHAFTS_CUT => d = d.max(-shaft),
-            WOP_BEAMS => {
-                let n = op.p0[0];
-                if (level - round_half_up(level / n) * n).abs() < 0.5 {
-                    let beam = (sxz.y.abs() - op.p0[1])
-                        .max((fy + op.p0[2]).abs() - op.p0[3])
-                        .max(sxz.length() - (sr + op.p1[0]));
-                    if beam < d {
-                        d = beam;
-                        mat = op.material;
-                    }
-                }
-            }
-            _ => {}
-        }
+        // Generated from voxel-core::opgen — the single source both
+        // interpreters share. Edit the op table, not this call site.
+        include!(concat!(env!("OUT_DIR"), "/op_arms_full.rs"));
     }
     (d, mat)
 }
@@ -240,30 +163,17 @@ pub fn eval(ops: &[WorldOp], p: Vec3, vs: f32) -> (f32, u32) {
 /// Height (meters) of the program's heightfield component at `xz` — the sum
 /// of its height ops only. Twin of the height-only loops in the mesh
 /// (shadow bake) and water (seabed) shaders.
+#[allow(clippy::collapsible_match, clippy::collapsible_if)]
 pub fn eval_height(ops: &[WorldOp], xz: Vec2, vs: f32) -> f32 {
     let mut h = 0.0;
     let mut warp = Vec2::ZERO;
+    // Shell names for the generated height arms: the replay shaders call
+    // their band-limited FBM without a vs argument.
+    let pxz = xz;
+    let hfbm = |q: Vec2, s: f32, o: i32, m: u32| fbm_mode(q, s, o, vs, m);
     for op in ops {
-        match op.kind {
-            WOP_HEIGHT_FBM => {
-                h += fbm_mode(
-                    xz + warp + Vec2::new(op.p0[0], op.p0[1]),
-                    op.p0[2],
-                    op.p1[0] as i32,
-                    vs,
-                    op.p1[1] as u32,
-                ) * op.p0[3];
-            }
-            WOP_HEIGHT_OFFSET => h += op.p0[0],
-            WOP_HEIGHT_STEP => h += op.p0[2] * smoothstep(op.p0[0], op.p0[1], h),
-            WOP_WARP_XZ => {
-                let q = xz + Vec2::new(op.p0[2], op.p0[3]);
-                let oct = op.p1[0] as i32;
-                warp.x += fbm_mode(q, op.p0[0], oct, vs, 0) * op.p0[1];
-                warp.y += fbm_mode(q + Vec2::new(713.0, -337.0), op.p0[0], oct, vs, 0) * op.p0[1];
-            }
-            _ => {}
-        }
+        // Generated from voxel-core::opgen (height-only subset).
+        include!(concat!(env!("OUT_DIR"), "/op_arms_height.rs"));
     }
     h
 }

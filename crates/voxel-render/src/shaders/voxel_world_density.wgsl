@@ -188,6 +188,18 @@ fn sd_box(p: vec3<f32>, b: vec3<f32>) -> f32 {
 
 // --- the interpreter ---------------------------------------------------------
 
+// GENOPS HELPERS BEGIN (generated from voxel-core::opgen — run `mise run genops` after editing the op table)
+fn v2(x: f32, y: f32) -> vec2<f32> { return vec2<f32>(x, y); }
+fn to_i(x: f32) -> i32 { return i32(x); }
+fn to_u(x: f32) -> u32 { return u32(x); }
+fn v3(x: f32, y: f32, z: f32) -> vec3<f32> { return vec3<f32>(x, y, z); }
+fn iv2(x: i32, y: i32) -> vec2<i32> { return vec2<i32>(x, y); }
+fn iv3(x: i32, y: i32, z: i32) -> vec3<i32> { return vec3<i32>(x, y, z); }
+fn to_v2(v: vec2<i32>) -> vec2<f32> { return vec2<f32>(v); }
+fn to_iv2(v: vec2<f32>) -> vec2<i32> { return vec2<i32>(v); }
+fn floor2(v: vec2<f32>) -> vec2<f32> { return floor(v); }
+// GENOPS HELPERS END
+
 struct WorldSample {
     d: f32,
     mat: u32,
@@ -211,108 +223,103 @@ fn eval_program(p: vec3<f32>, vs: f32) -> WorldSample {
         if (coarse && (op.head.y & 1u) != 0u) { continue; }
         if (!coarse && (op.head.y & 2u) != 0u) { continue; }
         switch op.head.x {
-            case 0u: { // height fbm band
-                h += fbm(pxz + warp + op.p0.xy, op.p0.z, i32(op.p1.x), vs, u32(op.p1.y)) * op.p0.w;
+// GENOPS ARMS BEGIN (generated from voxel-core::opgen — run `mise run genops` after editing the op table)
+            case 0u: { // WOP_HEIGHT_FBM
+                h += fbm(pxz + warp + op.p0.xy, op.p0.z, to_i(op.p1.x), vs, to_u(op.p1.y)) * op.p0.w;
             }
-            case 1u: { // height offset
+            case 1u: { // WOP_HEIGHT_OFFSET
                 h += op.p0.x;
             }
-            case 16u: { // cliff step: terrain crossing the band grows a wall
+            case 16u: { // WOP_HEIGHT_STEP
                 h += op.p0.z * smoothstep(op.p0.x, op.p0.y, h);
             }
-            case 14u: { // domain warp for later height ops
+            case 14u: { // WOP_WARP_XZ
                 let q = pxz + op.p0.zw;
-                let oct = i32(op.p1.x);
-                warp.x += fbm(q, op.p0.x, oct, vs, 0u) * op.p0.y;
-                warp.y += fbm(q + vec2<f32>(713.0, -337.0), op.p0.x, oct, vs, 0u) * op.p0.y;
+                let oct = to_i(op.p1.x);
+                warp.x += fbm(q, op.p0.x, oct, vs, 0) * op.p0.y;
+                warp.y += fbm(q + v2(713.0, -337.0), op.p0.x, oct, vs, 0) * op.p0.y;
             }
-            case 15u: { // 3D fbm solid: union or carve
+            case 15u: { // WOP_FBM3
                 let q = p + op.p1.xyz;
-                let n = fbm3(q, op.p0.x, op.p0.y, i32(op.p2.x), vs);
+                let n = fbm3(q, op.p0.x, op.p0.y, to_i(op.p2.x), vs);
                 let sd = (op.p0.z - n) * op.p0.w;
-                if (op.p1.w < 0.5) {
-                    if (sd < d) { d = sd; mat = op.head.z; }
+                if op.p1.w < 0.5 {
+                    if sd < d { d = sd; mat = op.head.z; }
                 } else {
                     d = max(d, -sd);
                 }
             }
-            case 2u: { // height surface
+            case 2u: { // WOP_HEIGHT_SURFACE
                 let nd = p.y - h;
-                if (nd < d) { d = nd; mat = op.head.z; }
+                if nd < d { d = nd; mat = op.head.z; }
             }
-            case 3u: { // coarse solid mass
-                if (SOLID < d) { d = SOLID; mat = op.head.z; }
+            case 3u: { // WOP_COARSE_SOLID
+                if SOLID < d { d = SOLID; mat = op.head.z; }
             }
-            case 4u: { // y lattice registers
+            case 4u: { // WOP_LATTICE_Y
                 level = round_half_up(p.y / op.p0.x);
                 fy = p.y - level * op.p0.x;
             }
-            case 5u: { // slabs on the lattice
+            case 5u: { // WOP_SLABS_Y
                 let nd = abs(fy) - op.p0.x;
-                if (nd < d) { d = nd; mat = op.head.z; }
+                if nd < d { d = nd; mat = op.head.z; }
             }
-            case 6u: { // hash-gated grid holes
+            case 6u: { // WOP_GRID_HOLES
                 let cell = op.p0.x;
-                let c = vec2<i32>(floor(pxz / cell));
-                if (hash3(vec3<i32>(c.x, i32(level), c.y)) < op.p0.y) {
-                    let oc = (vec2<f32>(c) + 0.5) * cell;
-                    let cut = sd_box(vec3<f32>(p.x - oc.x, fy, p.z - oc.y), op.p1.xyz);
+                let c = to_iv2(floor2(pxz / cell));
+                if hash3(iv3(c.x, to_i(level), c.y)) < op.p0.y {
+                    let oc = (to_v2(c) + 0.5) * cell;
+                    let cut = sd_box(v3(p.x - oc.x, fy, p.z - oc.y), op.p1.xyz);
                     d = max(d, -cut);
                 }
             }
-            case 7u: { // pillars
+            case 7u: { // WOP_PILLARS_XZ
                 let sp = op.p0.x;
-                let c = vec2<i32>(vec2<f32>(round_half_up(pxz.x / sp), round_half_up(pxz.y / sp)));
-                let jit = vec2<f32>(hash2(c) - 0.5, hash2(c + vec2<i32>(311, 77)) - 0.5) * op.p0.y;
-                let q = pxz - vec2<f32>(c) * sp - jit;
-                let girth = op.p0.z + hash2(c + vec2<i32>(9, -4)) * op.p0.w;
+                let c = iv2(to_i(round_half_up(pxz.x / sp)), to_i(round_half_up(pxz.y / sp)));
+                let jit = v2(hash2(c) - 0.5, hash2(c + iv2(311, 77)) - 0.5) * op.p0.y;
+                let q = pxz - to_v2(c) * sp - jit;
+                let girth = op.p0.z + hash2(c + iv2(9, -4)) * op.p0.w;
                 let nd = max(abs(q.x), abs(q.y)) - girth;
-                if (nd < d) { d = nd; mat = op.head.z; }
+                if nd < d { d = nd; mat = op.head.z; }
             }
-            case 8u: { // gated walls with doorways
+            case 8u: { // WOP_WALLS
                 let sp = op.p0.x;
-                let along_z = op.p0.w > 0.5;
                 var a = p.x;
                 var b = p.z;
-                if (along_z) { a = p.z; b = p.x; }
+                if op.p0.w > 0.5 { a = p.z; b = p.x; }
                 let wi = round_half_up(a / sp);
                 let w = a - wi * sp;
-                if (hash2(vec2<i32>(i32(wi) + i32(op.p1.x), i32(level))) < op.p0.z) {
+                if hash2(iv2(to_i(wi) + to_i(op.p1.x), to_i(level))) < op.p0.z {
                     var wall = abs(w) - op.p0.y;
                     let dc = op.p1.y;
                     let ci = round_half_up(b / dc);
                     let cl = b - ci * dc;
-                    if (hash3(vec3<i32>(i32(wi), i32(ci), i32(level) + i32(op.p1.w))) < op.p1.z) {
-                        let doorway = sd_box(vec3<f32>(w, fy + op.p2.w, cl), op.p2.xyz);
+                    if hash3(iv3(to_i(wi), to_i(ci), to_i(level) + to_i(op.p1.w))) < op.p1.z {
+                        let doorway = sd_box(v3(w, fy + op.p2.w, cl), op.p2.xyz);
                         wall = max(wall, -doorway);
                     }
-                    if (wall < d) { d = wall; mat = op.head.z; }
+                    if wall < d { d = wall; mat = op.head.z; }
                 }
             }
-            case 9u: { // shaft registers
+            case 9u: { // WOP_SHAFTS_XZ
                 let sp = op.p0.x;
-                let c = vec2<i32>(vec2<f32>(round_half_up(pxz.x / sp), round_half_up(pxz.y / sp)));
-                let jit = vec2<f32>(
-                    hash2(c + vec2<i32>(41, 13)) - 0.5,
-                    hash2(c + vec2<i32>(-7, 99)) - 0.5,
-                ) * op.p0.y;
-                sxz = pxz - vec2<f32>(c) * sp - jit;
+                let c = iv2(to_i(round_half_up(pxz.x / sp)), to_i(round_half_up(pxz.y / sp)));
+                let jit = v2(hash2(c + iv2(41, 13)) - 0.5, hash2(c + iv2(-7, 99)) - 0.5) * op.p0.y;
+                sxz = pxz - to_v2(c) * sp - jit;
                 sr = op.p0.z + hash2(c) * op.p0.w;
                 shaft = length(sxz) - sr;
             }
-            case 10u: { // carve shafts
+            case 10u: { // WOP_SHAFTS_CUT
                 d = max(d, -shaft);
             }
-            case 11u: { // catwalk beams
+            case 11u: { // WOP_BEAMS
                 let n = op.p0.x;
-                if (abs(level - round_half_up(level / n) * n) < 0.5) {
-                    let beam = max(
-                        max(abs(sxz.y) - op.p0.y, abs(fy + op.p0.z) - op.p0.w),
-                        length(sxz) - (sr + op.p1.x),
-                    );
-                    if (beam < d) { d = beam; mat = op.head.z; }
+                if abs(level - round_half_up(level / n) * n) < 0.5 {
+                    let beam = max(max(abs(sxz.y) - op.p0.y, abs(fy + op.p0.z) - op.p0.w), length(sxz) - (sr + op.p1.x));
+                    if beam < d { d = beam; mat = op.head.z; }
                 }
             }
+// GENOPS ARMS END
             default: {}
         }
     }

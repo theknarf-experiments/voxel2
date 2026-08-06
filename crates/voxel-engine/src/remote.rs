@@ -290,7 +290,12 @@ mod tests {
 
     #[test]
     fn scan_ranks_bounded_spots_within_radius() {
-        // Land region of the reference planet (default program).
+        // The scan reads the process-global program: hold the shared test
+        // lock and install the planet explicitly (other tests set mega).
+        let _lock = crate::PROGRAM_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        voxel_worldgen::program::set_program(voxel_worldgen::program::planet_program());
+        voxel_worldgen::program::set_seed(0);
+        // Land region of the reference planet.
         let center = Vec2::new(-27000.0, -38000.0);
         let spots = scan_terrain(center, 4096.0, 64.0, 10);
         assert!(!spots.is_empty() && spots.len() <= 10);

@@ -427,22 +427,42 @@ fn coarse_fbm(p: vec2<f32>, base_scale: f32, octaves: i32, mode: u32) -> f32 {
     return sum;
 }
 
+// GENOPS HELPERS BEGIN (generated from voxel-core::opgen — run `mise run genops` after editing the op table)
+fn v2(x: f32, y: f32) -> vec2<f32> { return vec2<f32>(x, y); }
+fn to_i(x: f32) -> i32 { return i32(x); }
+fn to_u(x: f32) -> u32 { return u32(x); }
+// GENOPS HELPERS END
+
+// The height replay's band-limited FBM (no vs — inherently coarse).
+fn hfbm(q: vec2<f32>, s: f32, o: i32, m: u32) -> f32 {
+    return coarse_fbm(q, s, o, m);
+}
+
 fn height_coarse(xz: vec2<f32>) -> f32 {
     var h = 0.0;
     var warp = vec2<f32>(0.0);
+    let pxz = xz;
     for (var i = 0u; i < prog.count.x; i++) {
         let op = prog.ops[i];
-        if (op.head.x == 0u) {
-            h += coarse_fbm(xz + warp + op.p0.xy, op.p0.z, i32(op.p1.x), u32(op.p1.y)) * op.p0.w;
-        } else if (op.head.x == 1u) {
-            h += op.p0.x;
-        } else if (op.head.x == 16u) {
-            h += op.p0.z * smoothstep(op.p0.x, op.p0.y, h);
-        } else if (op.head.x == 14u) {
-            let q = xz + op.p0.zw;
-            let oct = i32(op.p1.x);
-            warp.x += coarse_fbm(q, op.p0.x, oct, 0u) * op.p0.y;
-            warp.y += coarse_fbm(q + vec2<f32>(713.0, -337.0), op.p0.x, oct, 0u) * op.p0.y;
+        switch op.head.x {
+// GENOPS ARMS BEGIN (generated from voxel-core::opgen — run `mise run genops` after editing the op table)
+            case 0u: { // WOP_HEIGHT_FBM
+                h += hfbm(pxz + warp + op.p0.xy, op.p0.z, to_i(op.p1.x), to_u(op.p1.y)) * op.p0.w;
+            }
+            case 1u: { // WOP_HEIGHT_OFFSET
+                h += op.p0.x;
+            }
+            case 16u: { // WOP_HEIGHT_STEP
+                h += op.p0.z * smoothstep(op.p0.x, op.p0.y, h);
+            }
+            case 14u: { // WOP_WARP_XZ
+                let q = pxz + op.p0.zw;
+                let oct = to_i(op.p1.x);
+                warp.x += hfbm(q, op.p0.x, oct, 0) * op.p0.y;
+                warp.y += hfbm(q + v2(713.0, -337.0), op.p0.x, oct, 0) * op.p0.y;
+            }
+// GENOPS ARMS END
+            default {}
         }
     }
     return h;

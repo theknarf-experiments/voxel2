@@ -1832,7 +1832,7 @@ impl Plugin for LevelPlugin {
             panic!("level {:?} has invalid planning data: {e}", level.name);
         }
         let (ops_provider, world_query, planning_layers) = build_ops_provider(&level);
-        let warmup = planning_warmup(&world_query);
+        let warmup = planning_warmup(&level, &world_query);
         app.insert_resource(program)
             .insert_resource(warmup)
             .insert_resource(material_table(&level))
@@ -2021,7 +2021,15 @@ impl WorldQuery {
 /// inside the async genesis task (cold layer generation must never land
 /// on the main thread). Rebuilt on hot reload — a stale closure would
 /// warm the retired manager and pin its cache forever.
-fn planning_warmup(world: &WorldQuery) -> crate::streaming::PlanningWarmup {
+fn planning_warmup(level: &LevelDef, world: &WorldQuery) -> crate::streaming::PlanningWarmup {
+    // The warmup exists for the vegetation/water streamers' first
+    // main-thread ticks. A level without spawners never runs those
+    // queries — and warming a volumetric stack's full y-range (the
+    // megastructure) enumerates six figures of emit cells, stalling
+    // genesis for minutes. Skip it entirely.
+    if level.spawners.is_empty() {
+        return crate::streaming::PlanningWarmup(None);
+    }
     let world = world.clone();
     crate::streaming::PlanningWarmup(Some(std::sync::Arc::new(
         move |anchor: bevy::math::DVec3| {
@@ -2356,7 +2364,7 @@ fn reload_level(
         let (ops_provider, world_query, planning_layers) = build_ops_provider(&new);
         // The warmup must target the NEW manager; the old closure would
         // warm the retired one and pin its cache in memory forever.
-        commands.insert_resource(planning_warmup(&world_query));
+        commands.insert_resource(planning_warmup(&new, &world_query));
         commands.insert_resource(ops_provider);
         commands.insert_resource(world_query);
         commands.insert_resource(planning_layers);
@@ -2608,9 +2616,7 @@ mod tests {
         assert_eq!(back.camera.start, planet.camera.start);
     }
 
-    /// The generator program is process-global; stack tests that install
-    /// one must not interleave.
-    static PROGRAM_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    use crate::PROGRAM_LOCK;
 
     #[test]
     fn mega_stack_serves_pockets_and_tubes_through_world_query() {

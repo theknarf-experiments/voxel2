@@ -3,6 +3,7 @@
 //!
 //! This crate deliberately has no Bevy dependency.
 
+pub mod opgen;
 pub mod csg;
 pub mod key;
 pub mod morton;
