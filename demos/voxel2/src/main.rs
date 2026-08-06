@@ -45,6 +45,9 @@ struct Scene {
     /// Atmospheric haze. Voxel surfaces shade through Bevy's PBR, so this
     /// is an ordinary `DistanceFog` on the camera.
     fog: Option<DistanceFog>,
+    /// Sea level, if this world has an ocean. Host data: the engine
+    /// generates nothing against it.
+    sea_level: Option<f32>,
 }
 
 /// Which scene to dress a world with. Keying off the level file's name
@@ -63,6 +66,8 @@ fn scene_for(level_path: &std::path::Path) -> Scene {
             ambient_color: Color::srgb(0.6, 0.7, 0.9),
             ambient_brightness: 3_800.0,
             fog: None,
+            // A sunless interior: no sea.
+            sea_level: None,
         },
         _ => Scene {
             clear_color: Color::srgb(0.65, 0.77, 0.94),
@@ -79,6 +84,7 @@ fn scene_for(level_path: &std::path::Path) -> Scene {
                 directional_light_exponent: 4.0,
                 falloff: FogFalloff::Exponential { density: 6.0e-5 },
             }),
+            sea_level: Some(0.0),
         },
     }
 }
@@ -244,6 +250,11 @@ fn setup_scene(mut commands: Commands, scene: Res<HostScene>, level: Res<LevelDe
     if let Some(fog) = host.fog.clone() {
         camera.insert(fog);
     }
+    // Coverage eval renders geometry only, so the ocean is off then.
+    commands.insert_resource(water::WaterSurface {
+        enabled: host.sea_level.is_some() && std::env::var_os("VOXEL_EVAL_HOLES").is_none(),
+        level: host.sea_level.unwrap_or(0.0),
+    });
 }
 
 #[derive(Component)]

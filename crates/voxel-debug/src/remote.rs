@@ -142,7 +142,7 @@ fn teleport(In(params): In<Option<Value>>, mut cams: PlayerCamera<&mut Transform
 }
 
 /// `{"center": [x, z], "radius": r}` — planning ribbon segments near a
-/// point (find the rivers).
+/// point (find a level's ribbon surfaces).
 fn ribbons(In(params): In<Option<Value>>, world: Res<WorldQuery>) -> BrpResult {
     let params = params.ok_or_else(|| err("params required"))?;
     let c = f32s(&params, "center", 2)?;

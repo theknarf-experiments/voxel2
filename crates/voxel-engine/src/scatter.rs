@@ -25,7 +25,7 @@
 //! Placement is gated by the world the engine already knows: terrain
 //! height and slope, altitude bands with soft falloff, generator field
 //! registers, blended biome weights, coherent patch noise, planning
-//! clearance (roads, riverbeds) and carved ground (cave mouths).
+//! clearance (paths, ribbon beds) and carved ground (cave mouths).
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -121,7 +121,7 @@ fn biome_gate(world: &WorldQuery, reference: &Option<String>, xz: Vec2) -> f32 {
         .unwrap_or(1.0)
 }
 
-/// Clearance the planning stack reserved (roadbeds, riverbeds).
+/// Clearance the planning stack reserved (path and ribbon beds).
 const CLEAR_M: f32 = 4.5;
 
 fn tile_clearance(world: &WorldQuery, origin: Vec2, size: f32) -> Vec<[Vec2; 2]> {

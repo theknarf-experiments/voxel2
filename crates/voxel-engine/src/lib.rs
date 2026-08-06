@@ -8,7 +8,7 @@ pub mod scatter;
 use bevy::prelude::*;
 
 /// Tag the entity whose position drives streaming: chunk LOD, prop and
-/// water tiles, planning pre-generation. Usually the player or the
+/// ribbon tiles, planning pre-generation. Usually the player or the
 /// camera, but the engine never assumes which — a game owns its own
 /// scene. LayerProcGen calls this a generation source.
 ///

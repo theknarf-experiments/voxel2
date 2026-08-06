@@ -9,7 +9,6 @@ pub mod material;
 /// terrain does (Bevy's view bind group, matching keys and shader defs).
 pub mod pbr_view;
 pub mod slab;
-pub mod water;
 
 pub use chunks::{
     ChunkGpuResources, GpuWorldProgram,
@@ -19,7 +18,6 @@ pub use chunks::{
 };
 pub use grass::{GrassInstance, GrassInstances, GrassPlugin, GrassStyle};
 pub use material::VoxelSurfaceMaterial;
-pub use water::WaterSurface;
 
 /// Marker for helper cameras (offscreen screenshot mirrors, etc.) that
 /// gameplay/streaming systems must ignore when looking for "the player

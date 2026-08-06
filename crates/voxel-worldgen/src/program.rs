@@ -237,12 +237,6 @@ fn smoothstep(e0: f32, e1: f32, x: f32) -> f32 {
     t * t * (3.0 - 2.0 * t)
 }
 
-pub fn water_level(ops: &[WorldOp]) -> Option<f32> {
-    ops.iter()
-        .find(|op| op.kind == WOP_WATER)
-        .map(|op| op.p0[0])
-}
-
 // --- the process-wide current program ----------------------------------------
 
 /// The engine-wide fallback sun direction (not normalized; twins normalize).
@@ -270,7 +264,6 @@ pub fn planet_program() -> Vec<WorldOp> {
             .p0([-4200.0, 8800.0, 0.004, 1.6])
             .p1([3.0, 0.0, 0.0, 0.15]),
         WorldOp::new(WOP_HEIGHT_SURFACE).material(1),
-        WorldOp::new(WOP_WATER),
     ]
 }
 

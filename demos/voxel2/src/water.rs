@@ -6,12 +6,20 @@
 //! from replaying the world's height ops per fragment. Every constant
 //! here (wave sizes, tints, foam, roughness) is art direction.
 //!
-//! The engine supplies only *where* the water is (`WaterSurface`,
-//! `RiverWater`) and the pieces a host needs to shade like the terrain:
+//! The engine supplies only generic ribbon data and the pieces a host
+//! needs to shade like the terrain:
 //! `voxel_render::pbr_view` for Bevy's view bind group and the world
 //! program buffer for the shoreline.
 
-use voxel_render::WaterSurface;
+/// Where this game's sea is. Purely the host's business — the engine has
+/// no water concept, so nothing generates against it; it only decides
+/// where this pipeline draws its ocean plane and how deep the shoreline
+/// reads.
+#[derive(Resource, Clone, Copy, Default)]
+pub struct WaterSurface {
+    pub enabled: bool,
+    pub level: f32,
+}
 
 /// One ribbon segment as the water shader wants it (layout twins the
 /// WGSL `RiverSeg`). The engine hands out `RibbonSeg`s; turning them into

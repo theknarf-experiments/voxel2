@@ -78,10 +78,6 @@
     {
       "type": "height_surface",
       "material": 1
-    },
-    {
-      "type": "water",
-      "level": 0.0
     }
   ],
   "materials": [

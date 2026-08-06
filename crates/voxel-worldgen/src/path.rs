@@ -15,8 +15,10 @@ pub struct PathParams {
     /// Cost multiplier on squared slope (rise/run): higher = flatter
     /// paths with more detours.
     pub slope_penalty: f32,
-    /// Heights at or below this are heavily penalized (water).
-    pub water_level: f32,
+    /// Heights at or below this are heavily penalized, so routes avoid
+    /// low ground (a seabed, a flood plain). Not a water concept: the
+    /// caller decides what "low" means for its world.
+    pub low_ground_m: f32,
 }
 
 impl Default for PathParams {
@@ -24,7 +26,7 @@ impl Default for PathParams {
         Self {
             step_m: 8.0,
             slope_penalty: 60.0,
-            water_level: 0.5,
+            low_ground_m: 0.5,
         }
     }
 }
@@ -72,7 +74,7 @@ pub fn find_path(
         let rise = height(pt) - height(pf);
         let slope = rise / run;
         let mut c = run * (1.0 + params.slope_penalty * slope * slope);
-        if height(pt) <= params.water_level {
+        if height(pt) <= params.low_ground_m {
             c *= 25.0;
         }
         c

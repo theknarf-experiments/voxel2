@@ -146,10 +146,6 @@ impl Generator {
         program::lattice_y_spacing(&self.ops)
     }
 
-    /// Sea level, if the program declares water.
-    pub fn water_level(&self) -> Option<f32> {
-        program::water_level(&self.ops)
-    }
 
     /// Patch density in [0, 1]: slow spatial noise so scattered props
     /// come in coherent patches with clearings.

@@ -1,6 +1,6 @@
 //! Data-driven levels: a JSON `LevelDef` describes the world itself and
 //! nothing else — the *generator program* that is its geometry
-//! (including water/scatter meta ops), the material table those ops
+//! the material table those ops
 //! reference, the lighting/haze environment, LOD configuration, and the
 //! planning stack. Presentation belongs to the host, and the seed is a
 //! runtime input ([`LevelPlugin::seed`]), so a level editor edits
@@ -780,10 +780,6 @@ pub enum GenOpDef {
     ShaftsCut,
     /// Meta: the world has a water surface at this sea level (drives the
     /// ocean draw and shoreline; no SDF effect).
-    Water {
-        #[serde(default)]
-        level: f32,
-    },
     /// Catwalk beams bridging the shafts on every Nth lattice level.
     Beams {
         every: u32,
@@ -949,7 +945,6 @@ impl GenOpDef {
                 radius,
             } => WorldOp::new(WOP_SHAFTS_XZ).p0([spacing, jitter, radius[0], radius[1]]),
             GenOpDef::ShaftsCut => WorldOp::new(WOP_SHAFTS_CUT),
-            GenOpDef::Water { level } => WorldOp::new(WOP_WATER).p0([level, 0.0, 0.0, 0.0]),
             GenOpDef::Beams {
                 every,
                 half_width,
@@ -1951,25 +1946,6 @@ fn apply_generator(
     )
 }
 
-/// The generator's water surface (its `water` op, if present).
-fn water_surface(program: &voxel_render::WorldProgram) -> voxel_render::WaterSurface {
-    if eval_holes_mode() {
-        return voxel_render::WaterSurface {
-            enabled: false,
-            level: 0.0,
-        };
-    }
-    match voxel_worldgen::program::water_level(&program.ops) {
-        Some(level) => voxel_render::WaterSurface {
-            enabled: true,
-            level,
-        },
-        None => voxel_render::WaterSurface {
-            enabled: false,
-            level: 0.0,
-        },
-    }
-}
 
 /// Pack the level's material table, ordered by material id.
 fn material_table(level: &LevelDef) -> voxel_render::WorldMaterials {
@@ -2077,7 +2053,6 @@ impl Plugin for LevelPlugin {
         }
 
         let (program, generator) = apply_generator(&level, self.seed);
-        let water = water_surface(&program);
         if let Err(e) = validate_level(&level) {
             panic!("level has invalid planning data: {e}");
         }
@@ -2098,7 +2073,6 @@ impl Plugin for LevelPlugin {
             .insert_resource(ops_provider)
             .insert_resource(world_query)
             .insert_resource(planning_layers)
-            .insert_resource(water)
             .insert_resource(grass_style(&level))
             .insert_resource(level.clone())
             .add_plugins(VoxelEnginePlugin { vegetation: true })
@@ -2321,7 +2295,7 @@ impl WorldQuery {
         out
     }
 
-    /// Water-surface segments overlapping the xz box (river renderer).
+    /// Ribbon surface segments overlapping the xz box.
     pub fn ribbons_in(
         &self,
         min: bevy::math::Vec2,
@@ -2590,7 +2564,6 @@ fn reload_level(
     seed: Res<WorldSeed>,
     mut lod: ResMut<LodConfig>,
     mut rebuild: ResMut<StreamingRebuild>,
-    mut water: ResMut<voxel_render::WaterSurface>,
     mut veg_rebuild: Option<ResMut<crate::scatter::ScatterRebuild>>,
     mut reloaded: MessageWriter<LevelReloaded>,
 ) {
@@ -2640,7 +2613,6 @@ fn reload_level(
     // the facade below need one either way.
     let (program, generator) = apply_generator(&new, seed.0);
     if generator_changed {
-        *water = water_surface(&program);
         commands.insert_resource(program);
     }
     let regen = generator_changed
@@ -2734,9 +2706,10 @@ mod tests {
         );
         assert!(planet.scatter[0].variants.len() == 2);
         assert!(planet.grass.is_some());
-        // Water is a generator op; vegetation is spawner data.
+        // The planet's geometry comes from height ops; sea level is the
+        // host's business and no longer part of the program.
         let packed: Vec<_> = planet.generator.iter().map(GenOpDef::pack).collect();
-        assert_eq!(voxel_worldgen::program::water_level(&packed), Some(0.0));
+        assert!(packed.iter().any(|op| op.is_height_op()));
         // Materials cover the ids the generator emits.
         assert!(planet.materials.iter().any(|m| m.id() == 1));
         assert!(planet.materials.iter().any(|m| m.id() == 3));
@@ -2760,7 +2733,6 @@ mod tests {
             assert!(mega_names.contains(&expect), "mega stack missing {expect}");
         }
         let packed: Vec<_> = mega.generator.iter().map(GenOpDef::pack).collect();
-        assert_eq!(voxel_worldgen::program::water_level(&packed), None);
         assert!(mega.scatter.is_empty() && mega.grass.is_none());
         assert!(mega.materials.iter().any(|m| m.id() == 2));
         // Sunless interior: no height ops, so the horizon-shadow bake
@@ -2823,10 +2795,10 @@ mod tests {
         }
         assert_eq!(a.generator().seed(), 0);
         assert_eq!(b.generator().seed(), 0x5eed);
-        // Mega has no height op at all; its water/height mirror stays inert
+        // Mega has no height op at all; its height mirror stays inert
         // while the planets keep working.
-        assert!(m.generator().water_level().is_none());
-        assert!(a.generator().water_level().is_some());
+        assert_eq!(m.generator().height(probes[0], 1.0), 0.0);
+        assert_ne!(a.generator().height(probes[0], 1.0), 0.0);
     }
 
     #[test]

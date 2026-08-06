@@ -42,11 +42,10 @@ pub const WOP_SHAFTS_CUT: u32 = 10;
 /// Merge catwalk beams bridging the shafts along X on every Nth lattice
 /// level. `p0 = (every_n, half_width, y_offset, half_height)`, `p1.x = reach`.
 pub const WOP_BEAMS: u32 = 11;
-/// Meta op (no SDF effect): the world has a water surface. `p0.x = sea
-/// level (m)`. Drives the ocean draw and shoreline shading.
-pub const WOP_WATER: u32 = 12;
-// Kind 13 is retired (was the vegetation meta op; spawners are level
-// data now).
+// Kinds 12 and 13 are retired: 12 was a water meta op and 13 the
+// vegetation one. Neither belongs here — the engine has no water or
+// vegetation concept, only geometry ops. Sea level is a host constant
+// and spawners are level data.
 /// Domain-warp the XZ coordinate that later height ops sample.
 /// `p0 = (cycles_per_m, amplitude_m, offset_x, offset_z)`, `p1.x = octaves`.
 pub const WOP_WARP_XZ: u32 = 14;
@@ -141,7 +140,7 @@ impl WorldOp {
     }
 
     /// True for ops that only touch the height register (the height-only
-    /// interpreters in the mesh/water shaders evaluate exactly these).
+    /// interpreters in the height-replaying shaders evaluate exactly these).
     pub fn is_height_op(&self) -> bool {
         self.kind == WOP_HEIGHT_FBM
             || self.kind == WOP_HEIGHT_OFFSET

@@ -5,7 +5,7 @@
 //! - the CPU arms (`voxel-worldgen`'s build script → `include!` into
 //!   `program::eval` / `program::eval_height`), and
 //! - the GPU arms (`tools/genops` splices them between `GENOPS` markers
-//!   in the density / mesh / water shaders).
+//!   in the density / mesh shaders, and in any host shader that opts in).
 //!
 //! This kills the twin-drift class mechanically: an op edited or added
 //! here lands in all five interpreter sites at once. Guard tests in
