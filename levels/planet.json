@@ -15,11 +15,6 @@
     "brightness": 400.0
   },
   "sun": {
-    "direction": [
-      0.55,
-      0.5,
-      0.32
-    ],
     "illuminance": 25000.0
   },
   "lod": {
@@ -76,7 +71,12 @@
       0.2
     ],
     "ambient_strength": 0.3,
-    "ambient_exponent": 1.0
+    "ambient_exponent": 1.0,
+    "sun_direction": [
+      0.55,
+      0.5,
+      0.32
+    ]
   },
   "generator": [
     {
@@ -239,106 +239,6 @@
       ],
       "grain": 0.06,
       "detail_fade": 0.004
-    }
-  ],
-  "spawners": [
-    {
-      "type": "trees",
-      "max_per_tile": 18,
-      "altitude": [
-        3.0,
-        340.0
-      ],
-      "min_up": 0.86,
-      "species": [
-        {
-          "model": "broadleaf",
-          "weight": 0.55,
-          "altitude": [
-            3.0,
-            140.0
-          ],
-          "trunk": [
-            0.35,
-            0.24,
-            0.15
-          ],
-          "foliage": [
-            0.3,
-            0.44,
-            0.16
-          ],
-          "impostor": {
-            "shape": "diamond",
-            "color": [
-              0.16,
-              0.26,
-              0.08
-            ],
-            "size": [
-              2.3,
-              5.5
-            ]
-          }
-        },
-        {
-          "model": "conifer",
-          "weight": 0.45,
-          "altitude": [
-            3.0,
-            340.0
-          ],
-          "trunk": [
-            0.35,
-            0.24,
-            0.15
-          ],
-          "foliage": [
-            0.18,
-            0.38,
-            0.16
-          ],
-          "impostor": {
-            "shape": "cone",
-            "color": [
-              0.1,
-              0.22,
-              0.09
-            ],
-            "size": [
-              1.7,
-              6.5
-            ]
-          }
-        }
-      ],
-      "density": {
-        "field": 0
-      },
-      "placement": {
-        "tilt_deg": 4.0,
-        "altitude_falloff": 25.0
-      },
-      "biome": "biomes:forest"
-    },
-    {
-      "type": "grass",
-      "altitude": [
-        2.5,
-        300.0
-      ]
-    },
-    {
-      "type": "boulders",
-      "altitude": [
-        2.0,
-        800.0
-      ],
-      "placement": {
-        "align": "normal",
-        "tilt_deg": 8.0
-      },
-      "biome": "biomes:meadow"
     }
   ],
   "prefabs": {
@@ -763,6 +663,156 @@
             }
           ]
         }
+      ]
+    }
+  },
+  "scatter": [
+    {
+      "class": "tree",
+      "per_tile": 18,
+      "altitude": [
+        3.0,
+        340.0
+      ],
+      "min_up": 0.86,
+      "density": {
+        "field": 0
+      },
+      "biome": "biomes:forest",
+      "placement": {
+        "tilt_deg": 4.0,
+        "altitude_falloff": 25.0
+      },
+      "sink_m": 0.45,
+      "variants": [
+        {
+          "weight": 0.55,
+          "altitude": [
+            3.0,
+            140.0
+          ],
+          "scale": [
+            0.8,
+            1.7
+          ]
+        },
+        {
+          "weight": 0.45,
+          "altitude": [
+            3.0,
+            340.0
+          ],
+          "scale": [
+            0.8,
+            1.7
+          ]
+        }
+      ]
+    },
+    {
+      "class": "boulder",
+      "per_tile": 4,
+      "chance": 0.45,
+      "altitude": [
+        2.0,
+        800.0
+      ],
+      "min_up": 0.55,
+      "biome": "biomes:meadow",
+      "placement": {
+        "align": "normal",
+        "tilt_deg": 8.0
+      },
+      "sink_scaled": 0.2,
+      "scale_bias": 2.0,
+      "variants": [
+        {
+          "scale": [
+            0.4,
+            2.6
+          ]
+        }
+      ]
+    }
+  ],
+  "grass": {
+    "altitude": [
+      2.5,
+      300.0
+    ]
+  },
+  "prop_query_reach_m": 3328.0,
+  "props": {
+    "tree": {
+      "variants": [
+        {
+          "model": "broadleaf",
+          "trunk": [
+            0.35,
+            0.24,
+            0.15
+          ],
+          "foliage": [
+            0.3,
+            0.44,
+            0.16
+          ],
+          "impostor": {
+            "shape": "diamond",
+            "color": [
+              0.16,
+              0.26,
+              0.08
+            ],
+            "size": [
+              2.3,
+              5.5
+            ]
+          }
+        },
+        {
+          "model": "conifer",
+          "trunk": [
+            0.35,
+            0.24,
+            0.15
+          ],
+          "foliage": [
+            0.18,
+            0.38,
+            0.16
+          ],
+          "impostor": {
+            "shape": "cone",
+            "color": [
+              0.1,
+              0.22,
+              0.09
+            ],
+            "size": [
+              1.7,
+              6.5
+            ]
+          }
+        }
+      ],
+      "blob_shadow": true
+    },
+    "boulder": {
+      "variants": [
+        {
+          "model": "rock",
+          "foliage": [
+            0.44,
+            0.42,
+            0.4
+          ]
+        }
+      ],
+      "squash": [
+        1.0,
+        0.75,
+        1.0
       ]
     }
   }

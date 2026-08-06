@@ -26,26 +26,6 @@ pub struct LodDef {
     pub merge_k: f64,
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug)]
-pub struct SunDef {
-    pub direction: [f32; 3],
-    pub illuminance: f32,
-}
-
-#[derive(Serialize, Deserialize, Clone, Debug)]
-pub struct AmbientDef {
-    pub color: [f32; 3],
-    pub brightness: f32,
-}
-
-#[derive(Serialize, Deserialize, Clone, Debug)]
-pub struct CameraDef {
-    pub start: [f32; 3],
-    pub look: [f32; 3],
-    pub walk_speed: f32,
-    pub run_speed: f32,
-}
-
 
 /// Lighting + atmosphere for the chunk draw. Every field has the sun-lit
 /// outdoor default, so levels only state what differs.
@@ -58,6 +38,10 @@ pub struct EnvDef {
     /// Haze tint toward the sun direction (power 0 disables).
     pub haze_sun_tint: [f32; 3],
     pub haze_tint_power: f32,
+    /// Direction the sun comes FROM (not normalized; twins normalize).
+    /// Engine data: the mesh shader bakes horizon shadows along it.
+    #[serde(default = "d_sun_direction")]
+    pub sun_direction: [f32; 3],
     pub sun_color: [f32; 3],
     /// 0 = sunless interior (ambient only).
     pub sun_strength: f32,
@@ -68,6 +52,10 @@ pub struct EnvDef {
     pub ambient_exponent: f32,
 }
 
+fn d_sun_direction() -> [f32; 3] {
+    voxel_worldgen::program::DEFAULT_SUN_DIR.to_array()
+}
+
 impl Default for EnvDef {
     fn default() -> Self {
         Self {
@@ -75,6 +63,7 @@ impl Default for EnvDef {
             haze_density: 0.00006,
             haze_sun_tint: [0.92, 0.85, 0.72],
             haze_tint_power: 4.0,
+            sun_direction: d_sun_direction(),
             sun_color: [1.0, 0.96, 0.88],
             sun_strength: 0.85,
             ambient_sky: [0.55, 0.70, 0.95],
@@ -85,14 +74,86 @@ impl Default for EnvDef {
     }
 }
 
-/// A scattered-prop population rule — what grows/lies on the generator's
-/// heightfield surface. All rules and looks are level data.
+/// A scatter population: WHERE props go. What they look like is the
+/// host's business — the engine spawns entities carrying
+/// [`crate::scatter::ScatterInstance`] and the host dresses them.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum SpawnerDef {
-    Trees(TreesDef),
-    Grass(GrassDef),
-    Boulders(BouldersDef),
+pub struct ScatterDef {
+    /// Host-facing name for this population ("tree", "boulder", …).
+    pub class: String,
+    #[serde(default = "d_scatter_tile")]
+    pub tile_m: f32,
+    /// Streaming radius in tiles.
+    #[serde(default = "d_scatter_radius")]
+    pub radius_tiles: i32,
+    /// Placement attempts per tile at full patch density.
+    pub per_tile: u32,
+    /// Chance each surviving candidate is kept.
+    #[serde(default = "default_one")]
+    pub chance: f32,
+    /// Altitude band the class lives in.
+    pub altitude: [f32; 2],
+    /// Minimum surface up-ness (1 = flat).
+    #[serde(default)]
+    pub min_up: f32,
+    /// Voxel size the surface is sampled at: props seat on the LOD the
+    /// terrain actually shows across the streaming radius.
+    #[serde(default = "d_detail_vs")]
+    pub detail_vs: f32,
+    /// Coherent patch noise (stands with clearings).
+    #[serde(default)]
+    pub patch: Option<PatchDef>,
+    /// Density from a generator field register.
+    #[serde(default)]
+    pub density: Option<FieldDensityDef>,
+    /// `"instance:biome"` gate.
+    #[serde(default)]
+    pub biome: Option<String>,
+    /// Respect planning clearance (roadbeds, riverbeds).
+    #[serde(default = "d_true")]
+    pub clearance: bool,
+    /// Orientation and banding rules.
+    #[serde(default)]
+    pub placement: PlacementRulesDef,
+    /// Embed depth below the surface, absolute and scale-proportional.
+    #[serde(default)]
+    pub sink_m: f32,
+    #[serde(default)]
+    pub sink_scaled: f32,
+    /// Exponent on the scale sample: 1 uniform, >1 biases small.
+    #[serde(default = "default_one")]
+    pub scale_bias: f32,
+    /// Weighted variants — species, size tiers, whatever the host maps
+    /// them to. The engine only knows their index.
+    pub variants: Vec<ScatterVariantDef>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct ScatterVariantDef {
+    #[serde(default = "default_one")]
+    pub weight: f32,
+    /// Altitude band this variant is eligible in.
+    #[serde(default = "d_any_altitude")]
+    pub altitude: [f32; 2],
+    /// Uniform scale range.
+    #[serde(default = "d_unit_scale")]
+    pub scale: [f32; 2],
+}
+
+fn d_scatter_tile() -> f32 {
+    64.0
+}
+fn d_scatter_radius() -> i32 {
+    6
+}
+fn d_detail_vs() -> f32 {
+    4.0
+}
+fn d_any_altitude() -> [f32; 2] {
+    [f32::MIN, f32::MAX]
+}
+fn d_unit_scale() -> [f32; 2] {
+    [1.0, 1.0]
 }
 
 /// One authored CSG primitive in a prefab's local space.
@@ -233,63 +294,15 @@ pub struct PatchDef {
     pub bias: f32,
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
-pub struct TreesDef {
-    /// Placement attempts per 64 m tile at full patch density.
-    #[serde(default = "d_tree_attempts")]
-    pub max_per_tile: u32,
-    /// Altitude band trees grow in (meters).
-    pub altitude: [f32; 2],
-    /// Minimum surface up-ness (1 = flat).
-    #[serde(default = "d_tree_up")]
-    pub min_up: f32,
-    /// Density patchiness (None = uniform forests).
-    #[serde(default)]
-    pub patch: Option<PatchDef>,
-    /// Density from a generator field register.
-    #[serde(default)]
-    pub density: Option<FieldDensityDef>,
-    /// Orientation + banding rules.
-    #[serde(default)]
-    pub placement: PlacementRulesDef,
-    pub species: Vec<SpeciesDef>,
-    /// "instance:biome" — spawn probability scales with the biome's
-    /// blended weight (soft borders).
-    #[serde(default)]
-    pub biome: Option<String>,
-}
-
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
-pub struct SpeciesDef {
-    /// Procedural model: "conifer" (trunk + stacked cones) or "broadleaf"
-    /// (trunk + blob canopy).
-    pub model: String,
-    /// Selection weight among species whose altitude band contains the
-    /// candidate point.
-    #[serde(default = "default_one")]
-    pub weight: f32,
-    pub altitude: [f32; 2],
-    #[serde(default = "d_trunk_color")]
-    pub trunk: [f32; 3],
-    pub foliage: [f32; 3],
-    /// Uniform scale range.
-    #[serde(default = "d_tree_scale")]
-    pub scale: [f32; 2],
-    pub impostor: ImpostorDef,
-}
-
-/// Far-forest silhouette: crossed quads colored per species.
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
-pub struct ImpostorDef {
-    /// "cone" or "diamond".
-    pub shape: String,
-    pub color: [f32; 3],
-    /// (half width, height) before per-tree scale.
-    pub size: [f32; 2],
-}
-
+/// The high-density instanced grass population. Blades are generated in
+/// the grass shader and colored from this data — hosts that want their
+/// own foliage use a [`ScatterDef`] class instead.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct GrassDef {
+    #[serde(default = "d_grass_tile")]
+    pub tile_m: f32,
+    #[serde(default = "d_grass_radius")]
+    pub radius_tiles: i32,
     #[serde(default = "d_grass_per_tile")]
     pub per_tile: u32,
     pub altitude: [f32; 2],
@@ -316,44 +329,11 @@ pub struct GrassDef {
     pub biome: Option<String>,
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
-pub struct BouldersDef {
-    #[serde(default = "d_boulder_per_tile")]
-    pub per_tile: u32,
-    /// Chance each candidate is kept.
-    #[serde(default = "d_boulder_chance")]
-    pub chance: f32,
-    pub altitude: [f32; 2],
-    #[serde(default = "d_boulder_up")]
-    pub min_up: f32,
-    /// Scale range (quadratic bias toward small).
-    #[serde(default = "d_boulder_scale")]
-    pub scale: [f32; 2],
-    #[serde(default = "d_rock_color")]
-    pub color: [f32; 3],
-    /// Density from a generator field register.
-    #[serde(default)]
-    pub density: Option<FieldDensityDef>,
-    /// Orientation + banding rules.
-    #[serde(default)]
-    pub placement: PlacementRulesDef,
-    /// "instance:biome" — spawn probability scales with the biome's
-    /// blended weight (soft borders).
-    #[serde(default)]
-    pub biome: Option<String>,
+fn d_grass_tile() -> f32 {
+    16.0
 }
-
-fn d_tree_attempts() -> u32 {
-    18
-}
-fn d_tree_up() -> f32 {
-    0.86
-}
-fn d_trunk_color() -> [f32; 3] {
-    [0.35, 0.24, 0.15]
-}
-fn d_tree_scale() -> [f32; 2] {
-    [0.8, 1.7]
+fn d_grass_radius() -> i32 {
+    7
 }
 fn d_grass_per_tile() -> u32 {
     550
@@ -369,45 +349,6 @@ fn d_grass_tip() -> [[f32; 3]; 2] {
 }
 fn d_grass_fade() -> [f32; 2] {
     [70.0, 110.0]
-}
-fn d_boulder_per_tile() -> u32 {
-    4
-}
-fn d_boulder_chance() -> f32 {
-    0.45
-}
-fn d_boulder_up() -> f32 {
-    0.55
-}
-fn d_boulder_scale() -> [f32; 2] {
-    [0.4, 2.6]
-}
-fn d_rock_color() -> [f32; 3] {
-    [0.44, 0.42, 0.40]
-}
-
-impl LevelDef {
-    /// The first spawner of each kind, if configured.
-    pub fn trees(&self) -> Option<&TreesDef> {
-        self.spawners.iter().find_map(|s| match s {
-            SpawnerDef::Trees(t) => Some(t),
-            _ => None,
-        })
-    }
-
-    pub fn grass(&self) -> Option<&GrassDef> {
-        self.spawners.iter().find_map(|s| match s {
-            SpawnerDef::Grass(g) => Some(g),
-            _ => None,
-        })
-    }
-
-    pub fn boulders(&self) -> Option<&BouldersDef> {
-        self.spawners.iter().find_map(|s| match s {
-            SpawnerDef::Boulders(b) => Some(b),
-            _ => None,
-        })
-    }
 }
 
 /// One material recipe, referenced by the material ids generator ops emit.
@@ -663,14 +604,9 @@ pub struct LevelDef {
     pub name: String,
     #[serde(default)]
     pub seed: u64,
-    pub clear_color: [f32; 3],
-    pub ambient: AmbientDef,
-    #[serde(default)]
-    pub sun: Option<SunDef>,
     #[serde(default)]
     pub environment: EnvDef,
     pub lod: LodDef,
-    pub camera: CameraDef,
     /// The world's base geometry (and water/vegetation meta ops),
     /// interpreted in order.
     pub generator: Vec<GenOpDef>,
@@ -683,9 +619,18 @@ pub struct LevelDef {
     /// Hand-authored prefab instances in the world.
     #[serde(default)]
     pub placements: Vec<PlacementDef>,
-    /// Prop populations on the heightfield surface (trees/grass/boulders).
+    /// Prop populations: WHERE things go. The host decides what they
+    /// look like (see [`crate::scatter::ScatterInstance`]).
     #[serde(default)]
-    pub spawners: Vec<SpawnerDef>,
+    pub scatter: Vec<ScatterDef>,
+    /// The instanced grass population, if the level has one.
+    #[serde(default)]
+    pub grass: Option<GrassDef>,
+    /// How far the host queries planning data for its own prop
+    /// rendering (merged impostors and the like). The engine pre-warms
+    /// this radius so those queries never generate on the main thread.
+    #[serde(default)]
+    pub prop_query_reach_m: Option<f32>,
     /// The planning stack: generic layers composed into one LayerManager.
     #[serde(default)]
     pub stack: Vec<StackLayerDef>,
@@ -1632,14 +1577,17 @@ pub fn validate_level(level: &LevelDef) -> Result<(), String> {
             "spawner {owner}: biome layer {instance:?} not found in stack"
         ))
     };
-    for spawner in &level.spawners {
-        let (owner, biome) = match spawner {
-            SpawnerDef::Trees(t) => ("trees", &t.biome),
-            SpawnerDef::Grass(g) => ("grass", &g.biome),
-            SpawnerDef::Boulders(b) => ("boulders", &b.biome),
-        };
-        if let Some(reference) = biome {
-            biome_ref(owner, reference)?;
+    for def in &level.scatter {
+        if let Some(reference) = &def.biome {
+            biome_ref(&def.class, reference)?;
+        }
+        if def.variants.is_empty() {
+            return Err(format!("scatter class {:?} has no variants", def.class));
+        }
+    }
+    if let Some(grass) = &level.grass {
+        if let Some(reference) = &grass.biome {
+            biome_ref("grass", reference)?;
         }
     }
     Ok(())
@@ -1983,14 +1931,7 @@ impl LevelDef {
 /// The level's sun direction (its `sun` field, or the engine default when
 /// sunless — the shadow-bake direction must still be defined).
 fn sun_dir(level: &LevelDef) -> Vec3 {
-    level
-        .sun
-        .as_ref()
-        .map(|s| Vec3::from(s.direction))
-        .unwrap_or(Vec3::from(
-            voxel_worldgen::program::DEFAULT_SUN_DIR.to_array(),
-        ))
-        .normalize()
+    Vec3::from(level.environment.sun_direction).normalize_or(Vec3::Y)
 }
 
 /// Coverage-eval rendering: monotone-white geometry and no water, so a
@@ -2070,7 +2011,7 @@ fn env_params(level: &LevelDef) -> voxel_render::EnvParams {
 /// The grass shader's style block (colors/fade), from the grass spawner.
 fn grass_style(level: &LevelDef) -> voxel_render::GrassStyle {
     let v = |c: [f32; 3]| Vec4::new(c[0], c[1], c[2], 0.0);
-    match level.grass() {
+    match level.grass.as_ref() {
         Some(g) => voxel_render::GrassStyle {
             base_a: v(g.base[0]),
             base_b: v(g.base[1]),
@@ -2127,7 +2068,6 @@ struct LevelSource {
 impl Plugin for LevelPlugin {
     fn build(&self, app: &mut App) {
         let level = self.def.clone();
-        let c = level.clear_color;
 
         app.add_message::<LevelReloaded>();
         if let Some(path) = &self.source {
@@ -2151,11 +2091,6 @@ impl Plugin for LevelPlugin {
             .insert_resource(prepare)
             .insert_resource(material_table(&level))
             .insert_resource(env_params(&level))
-            .insert_resource(if eval_holes_mode() {
-                ClearColor(Color::srgb(1.0, 0.0, 1.0))
-            } else {
-                ClearColor(Color::srgb(c[0], c[1], c[2]))
-            })
             .insert_resource(LodConfig {
                 max_level: level.lod.max_level,
                 top_radius: level.lod.top_radius,
@@ -2553,8 +2488,14 @@ fn build_ops_provider(level: &LevelDef) -> (ChunkOpsProvider, WorldQuery, Planni
     let mut want = |reach: f32| {
         streamer_radius = Some(streamer_radius.map_or(reach, |r: f32| r.max(reach)));
     };
-    if !level.spawners.is_empty() {
-        want(crate::vegetation::QUERY_REACH_M);
+    for def in &level.scatter {
+        want((def.radius_tiles + 2) as f32 * def.tile_m);
+    }
+    if let Some(grass) = &level.grass {
+        want((grass.radius_tiles + 2) as f32 * grass.tile_m);
+    }
+    if let Some(reach) = level.prop_query_reach_m {
+        want(reach);
     }
     if level.stack.iter().any(|l| {
         matches!(
@@ -2641,7 +2582,7 @@ fn reload_level(
     mut lod: ResMut<LodConfig>,
     mut rebuild: ResMut<StreamingRebuild>,
     mut water: ResMut<voxel_render::WaterSurface>,
-    mut veg_rebuild: Option<ResMut<crate::vegetation::VegetationRebuild>>,
+    mut veg_rebuild: Option<ResMut<crate::scatter::ScatterRebuild>>,
     mut reloaded: MessageWriter<LevelReloaded>,
 ) {
     if !source.poll.tick(time.delta()).just_finished() {
@@ -2714,7 +2655,7 @@ fn reload_level(
         rebuild.0 = true;
         info!("level reload: generation changed — rebuilding world");
     }
-    if regen || new.spawners != level.spawners {
+    if regen || new.scatter != level.scatter || new.grass != level.grass {
         commands.insert_resource(grass_style(&new));
         if let Some(veg) = veg_rebuild.as_mut() {
             veg.0 = true;
@@ -2777,12 +2718,16 @@ mod tests {
         ] {
             assert!(names.contains(&expect), "stack missing {expect}");
         }
-        assert!(planet.sun.is_some());
+        // Scatter is placement-only: classes and variants, no models.
+        assert_eq!(
+            planet.scatter.iter().map(|s| s.class.as_str()).collect::<Vec<_>>(),
+            vec!["tree", "boulder"]
+        );
+        assert!(planet.scatter[0].variants.len() == 2);
+        assert!(planet.grass.is_some());
         // Water is a generator op; vegetation is spawner data.
         let packed: Vec<_> = planet.generator.iter().map(GenOpDef::pack).collect();
         assert_eq!(voxel_worldgen::program::water_level(&packed), Some(0.0));
-        assert!(planet.trees().is_some_and(|t| t.species.len() == 2));
-        assert!(planet.grass().is_some() && planet.boulders().is_some());
         // Materials cover the ids the generator emits.
         assert!(planet.materials.iter().any(|m| m.id() == 1));
         assert!(planet.materials.iter().any(|m| m.id() == 3));
@@ -2805,10 +2750,9 @@ mod tests {
         for expect in ["sites:pockets", "pockets", "links", "tubes"] {
             assert!(mega_names.contains(&expect), "mega stack missing {expect}");
         }
-        assert!(mega.sun.is_none());
         let packed: Vec<_> = mega.generator.iter().map(GenOpDef::pack).collect();
         assert_eq!(voxel_worldgen::program::water_level(&packed), None);
-        assert!(mega.spawners.is_empty());
+        assert!(mega.scatter.is_empty() && mega.grass.is_none());
         assert!(mega.materials.iter().any(|m| m.id() == 2));
         assert!(mega.environment.sun_strength == 0.0);
     }
@@ -2822,7 +2766,8 @@ mod tests {
         assert_eq!(back.materials, planet.materials);
         assert_eq!(back.environment, planet.environment);
         assert_eq!(back.stack, planet.stack);
-        assert_eq!(back.camera.start, planet.camera.start);
+        assert_eq!(back.scatter, planet.scatter);
+        assert_eq!(back.grass, planet.grass);
     }
 
     use crate::PROGRAM_LOCK;
@@ -2933,8 +2878,8 @@ mod tests {
     fn spawner_biome_refs_are_validated() {
         let mut planet = LevelDef::from_json(&shipped("planet.json")).unwrap();
         validate_level(&planet).unwrap();
-        if let Some(SpawnerDef::Trees(t)) = planet.spawners.first_mut() {
-            t.biome = Some("biomes:forrest".into());
+        if let Some(def) = planet.scatter.first_mut() {
+            def.biome = Some("biomes:forrest".into());
         }
         let err = validate_level(&planet).unwrap_err();
         assert!(err.contains("forrest"), "typo not caught: {err}");

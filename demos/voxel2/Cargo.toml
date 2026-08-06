@@ -8,3 +8,6 @@ license.workspace = true
 bevy.workspace = true
 voxel-debug.workspace = true
 voxel-engine.workspace = true
+voxel-worldgen.workspace = true
+serde.workspace = true
+serde_json.workspace = true

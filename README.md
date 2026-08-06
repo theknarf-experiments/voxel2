@@ -37,8 +37,12 @@ megastructure's habitation districts are all stack configurations, not
 engine features. Shading follows the same rule: a **material table**
 (parameterized `surface`, `zoned`, and `canopy` recipes) indexed by the
 material ids the ops emit, an **environment** block for lighting and
-haze, and data-driven spawners (trees/grass/boulders with placement
-rules, density fields, and biome gates). Even the structures the stack
+haze, and **scatter classes** — populations of props described only by
+where they go (density, altitude band, slope, patch noise, biome and
+field gates, clearance, weighted variants). The engine streams one
+entity per placement carrying a `ScatterInstance`; the host dresses
+those entities with its own models, materials and gameplay components,
+so no models live in the reusable crates. Even the structures the stack
 builds are data: a **structure** is weighted variants of parts, each
 placing a shape (box/cylinder/sphere, added or cut, optionally hollowed
 into a shell) at every position of an arrangement — `ring`, `scatter`,

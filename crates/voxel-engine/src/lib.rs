@@ -3,7 +3,7 @@
 
 pub mod level;
 pub mod streaming;
-pub mod vegetation;
+pub mod scatter;
 pub mod river_water;
 
 use bevy::prelude::*;
@@ -25,7 +25,7 @@ pub type StreamSourceQuery<'w, 's> = Query<'w, 's, &'static GlobalTransform, Wit
 
 pub use level::{LevelDef, LevelPlugin};
 pub use streaming::{LodConfig, VoxelStreamingPlugin};
-pub use vegetation::VegetationPlugin;
+pub use scatter::{Placement, ScatterInstance, ScatterPlugin};
 pub use voxel_core::ChunkKey;
 
 /// Everything needed for a streamed voxel world. The world itself is data:
@@ -44,10 +44,10 @@ impl Default for VoxelEnginePlugin {
 impl Plugin for VoxelEnginePlugin {
     fn build(&self, app: &mut App) {
         app.add_plugins((voxel_render::VoxelChunksPlugin, VoxelStreamingPlugin));
-        // Vegetation systems gate themselves on the level's feature toggle
-        // at runtime (so a hot-reload can switch worlds).
+        // Scatter streams the level's prop classes as entities the host
+        // dresses; a game that spawns its own props can turn it off.
         if self.vegetation {
-            app.add_plugins(VegetationPlugin);
+            app.add_plugins(ScatterPlugin);
         }
     }
 }
