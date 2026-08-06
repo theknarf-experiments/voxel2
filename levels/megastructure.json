@@ -229,7 +229,8 @@
         "type": "site_recipe3",
         "recipe": "pocket",
         "marker": "pocket"
-      }
+      },
+      "max_chunk_edge_m": 128.0
     },
     {
       "kind": "connect3",
@@ -244,7 +245,8 @@
       "pad_m": 464.0,
       "emit": {
         "type": "tubes"
-      }
+      },
+      "max_chunk_edge_m": 128.0
     }
   ]
 }
