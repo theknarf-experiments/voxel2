@@ -13,7 +13,7 @@ use std::collections::HashMap;
 use bevy::mesh::{Indices, PrimitiveTopology};
 use bevy::light::NotShadowCaster;
 use bevy::prelude::*;
-use voxel_engine::level::WorldQuery;
+use voxel_engine::WorldQuery;
 use voxel_engine::scatter::{tile_placements, ScatterInstance};
 use voxel_engine::{LevelDef, VoxelStreamSource};
 
@@ -230,7 +230,7 @@ fn dress_scatter(
     mut commands: Commands,
     assets: Res<PropAssets>,
     table: Res<PropTable>,
-    query: Res<voxel_engine::level::WorldQuery>,
+    query: Res<voxel_engine::WorldQuery>,
     new: Query<(Entity, &ScatterInstance, &Transform), Added<ScatterInstance>>,
 ) {
     for (entity, instance, transform) in &new {

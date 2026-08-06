@@ -9,7 +9,7 @@ use std::collections::HashMap;
 use bevy::prelude::*;
 use crate::water::{RiverSegGpu, RiverWater};
 
-use voxel_engine::level::{LevelDef, MaterialDef, WorldQuery};
+use voxel_engine::{level::{LevelDef, MaterialDef}, WorldQuery};
 
 /// Used when a ribbon's material id is not in the level table.
 const FALLBACK_TINT: [f32; 4] = [0.16, 0.34, 0.44, 0.0];

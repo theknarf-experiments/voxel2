@@ -828,7 +828,7 @@ fn lod_tick(
     queue: Res<ChunkCommandQueue>,
     ops_provider: Res<ChunkOpsProvider>,
     prepare: Res<ChunkOpsPrepare>,
-    layers: Res<crate::level::PlanningLayers>,
+    layers: Res<crate::planning::PlanningLayers>,
     mut rebuild: ResMut<StreamingRebuild>,
     ready_rx: Res<ChunkReadyChannel>,
     mut field: ResMut<voxel_render::FieldParams>,

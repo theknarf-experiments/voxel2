@@ -8,7 +8,7 @@ use bevy::prelude::*;
 use bevy::remote::{error_codes, http::RemoteHttpPlugin, BrpError, BrpResult, RemotePlugin};
 use serde_json::{json, Value};
 
-use voxel_engine::level::WorldQuery;
+use voxel_engine::WorldQuery;
 
 pub struct VoxelRemotePlugin {
     pub port: u16,
@@ -260,7 +260,7 @@ fn scan_terrain(
 /// `{"center": [x, z], "radius": r?, "step": s?, "top": n?}` — scan the
 /// terrain mirror for scenic spots (steep, high ground), ranked. The
 /// offline scout binary's job, minus the hand-copied level config.
-fn scan(In(params): In<Option<Value>>, world: Res<voxel_engine::level::WorldQuery>) -> BrpResult {
+fn scan(In(params): In<Option<Value>>, world: Res<voxel_engine::WorldQuery>) -> BrpResult {
     let params = params.ok_or_else(|| err("params required"))?;
     let c = f32s(&params, "center", 2)?;
     let r = radius(&params, 4_096.0);

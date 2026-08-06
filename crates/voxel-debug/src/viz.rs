@@ -8,7 +8,7 @@
 
 use bevy::prelude::*;
 
-use voxel_engine::level::WorldQuery;
+use voxel_engine::WorldQuery;
 
 #[derive(Resource, Default)]
 pub struct DebugViz {

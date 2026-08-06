@@ -10,54 +10,7 @@ use voxel_layers::{IAabb, Layer, LayerCtx};
 
 use crate::Generator;
 
-/// A flat ribbon segment along a path: endpoints, half width, and the
-/// surface height at each end. Nothing aquatic about it — a river, a
-/// canal, a lava flow or a conveyor are the same primitive with a
-/// different material.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct RibbonSeg {
-    pub a: Vec2,
-    pub b: Vec2,
-    pub half_w: f32,
-    pub levels: [f32; 2],
-    /// Level material id. The host decides what a ribbon of this material
-    /// looks like; the engine only says where it is.
-    pub material: u32,
-}
-
-/// A point of interest emitted by the stack (dungeon entrance, bridge,
-/// spawn anchor...). `kind` is a level-defined tag.
-#[derive(Clone, Debug, PartialEq)]
-pub struct Marker {
-    pub pos: Vec3,
-    pub kind: String,
-}
-
-/// What planning layers ultimately emit; the world-query facade serves
-/// these bucketed by index cells.
-#[derive(Clone, Debug, Default, PartialEq)]
-pub struct PatchSet {
-    pub ops: Vec<CsgOp>,
-    pub ribbons: Vec<RibbonSeg>,
-    pub clearance: Vec<[Vec2; 2]>,
-    pub markers: Vec<Marker>,
-}
-
-impl PatchSet {
-    pub fn is_empty(&self) -> bool {
-        self.ops.is_empty()
-            && self.ribbons.is_empty()
-            && self.clearance.is_empty()
-            && self.markers.is_empty()
-    }
-
-    pub fn extend(&mut self, other: PatchSet) {
-        self.ops.extend(other.ops);
-        self.ribbons.extend(other.ribbons);
-        self.clearance.extend(other.clearance);
-        self.markers.extend(other.markers);
-    }
-}
+pub use voxel_core::patch::{Marker, PatchSet, RibbonSeg};
 
 /// Configuration of a `scatter` stack layer: hash-gated candidate sites
 /// per cell, filtered by terrain.

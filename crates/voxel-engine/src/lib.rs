@@ -2,6 +2,7 @@
 //! budgets, edit application, and persistence.
 
 pub mod level;
+pub mod planning;
 pub mod streaming;
 pub mod scatter;
 
@@ -23,6 +24,7 @@ pub struct VoxelStreamSource;
 pub type StreamSourceQuery<'w, 's> = Query<'w, 's, &'static GlobalTransform, With<VoxelStreamSource>>;
 
 pub use level::{LevelDef, LevelPlugin};
+pub use planning::{Marker, PatchSet, PlanningLayers, RibbonSeg, WorldPlanner, WorldQuery};
 pub use streaming::{LodConfig, VoxelStreamingPlugin};
 pub use scatter::{Placement, ScatterInstance, ScatterPlugin};
 pub use voxel_core::ChunkKey;

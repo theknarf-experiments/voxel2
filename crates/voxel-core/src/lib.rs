@@ -7,6 +7,7 @@ pub mod opgen;
 pub mod csg;
 pub mod key;
 pub mod morton;
+pub mod patch;
 pub mod pos;
 pub mod seed;
 pub mod voxel;

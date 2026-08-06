@@ -15,7 +15,11 @@ use voxel_core::csg::CsgOp;
 use voxel_core::worldop::*;
 use voxel_core::ChunkKey;
 
-use crate::streaming::{ChunkOpsProvider, StreamingRebuild};
+use crate::planning::{
+    ops_prepare, ops_provider, Marker, OpsSource, PlanningLayers, RibbonSeg, WorldPlanner,
+    WorldQuery, OPS_HORIZON_EDGE_M,
+};
+use crate::streaming::StreamingRebuild;
 use crate::{LodConfig, VoxelEnginePlugin};
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -2000,11 +2004,11 @@ impl Plugin for LevelPlugin {
         if let Err(e) = validate_level(&level) {
             panic!("level has invalid planning data: {e}");
         }
-        let (ops_provider, world_query, planning_layers) =
-            build_ops_provider(&level, self.seed, &generator);
-        let prepare = ops_prepare(&world_query);
+        let world_query = build_ops_provider(&level, self.seed, &generator);
+        let planning_layers = PlanningLayers(world_query.layer_managers());
         app.insert_resource(program)
-            .insert_resource(prepare)
+            .insert_resource(crate::planning::ops_prepare(&world_query))
+            .insert_resource(crate::planning::ops_provider(&world_query))
             .insert_resource(material_table(&level))
             .insert_resource(env_params(&level))
             .insert_resource(LodConfig {
@@ -2014,13 +2018,11 @@ impl Plugin for LevelPlugin {
                 split_k: level.lod.split_k,
                 merge_k: level.lod.merge_k,
             })
-            .insert_resource(ops_provider)
             .insert_resource(world_query)
             .insert_resource(planning_layers)
             .insert_resource(level.clone())
             .add_plugins(VoxelEnginePlugin { vegetation: true })
-            .add_systems(Update, roll_planning_caches)
-            ;
+            .add_systems(Update, crate::planning::roll_planning_caches);
 
         if let Some(port) = self.remote_port {
             let _ = port; // BRP tooling lives in voxel-debug; see VoxelRemotePlugin
@@ -2028,50 +2030,28 @@ impl Plugin for LevelPlugin {
     }
 }
 
-/// A boxed source of planning ops for a world-space box.
-type OpsSource = Arc<dyn Fn(Vec3, Vec3) -> Vec<CsgOp> + Send + Sync>;
+/// Vertical band xz-facade queries cover: enough for any current world
+/// (the deepest LOD tree spans ~±2.5 km), small enough that volumetric
+/// emit layers don't enumerate thousands of 132 m y-rows per query.
+const FACADE_Y_M: f32 = 2_560.0;
 
-/// Layer managers backing the ops providers, exposed so the engine can
-/// roll their caches with the camera (they grow unboundedly otherwise).
-#[derive(Resource, Default, Clone)]
-pub struct PlanningLayers(pub Vec<Arc<voxel_layers::LayerManager>>);
-
-/// The one facade over everything planning produces: CSG ops (with each
-/// emitter's carve-horizon gate applied uniformly per chunk), cut ops
-/// for spawner ground checks, clearance segments keeping props off
-/// roadbeds and riverbeds, water-surface segments, and markers. This
-/// replaces the per-feature side channels the engine used to grow
-/// (SurfaceCutsQuery, RoadsQuery).
-#[derive(Resource, Clone, Default)]
-pub struct WorldQuery {
+/// The level stack as a [`WorldPlanner`]: one `LayerManager` holding every
+/// layer the level declared, plus the bookkeeping needed to answer a query
+/// without generating layers that cannot contribute to it.
+#[derive(Clone, Default)]
+struct StackPlanner {
     /// The level's planning stack (one manager for all layers).
     stack: Option<Arc<voxel_layers::LayerManager>>,
     /// Emit instances and what each one can produce.
     emitters: Vec<Emitter>,
-    /// Legacy op sources not yet in the stack (pockets, placements).
-    sources: Vec<OpsSource>,
     /// Biome layers: (instance name, ordered biome names).
     biome_tables: Vec<(String, Vec<String>)>,
-    /// This world's generator — every CPU-side sample goes through it,
-    /// so an app can host several worlds at once.
-    generator: Arc<voxel_worldgen::Generator>,
     /// Radius (m) the prop/ribbon streamers query around the camera,
     /// `None` when the level has neither. They ignore the LOD gates, so
     /// they need their own ensure pass — a second top dependency with a
     /// different size, in LayerProcGen terms.
     streamer_radius: Option<f32>,
 }
-
-/// The ops horizon: chunks coarser than this never receive planning ops
-/// at all (structures are subpixel there and haze covers the hard-cut
-/// ring). Shared by the chunk provider and the ensure-load pass so they
-/// agree on what the resident planning set must be.
-const OPS_HORIZON_EDGE_M: f32 = 1000.0;
-
-/// Vertical band xz-facade queries cover: enough for any current world
-/// (the deepest LOD tree spans ~±2.5 km), small enough that volumetric
-/// emit layers don't enumerate thousands of 132 m y-rows per query.
-const FACADE_Y_M: f32 = 2_560.0;
 
 /// One emit layer as the facade sees it. `produces` keeps a query from
 /// touching — and therefore GENERATING — layers that cannot answer it: a
@@ -2107,22 +2087,11 @@ impl Emitter {
     }
 }
 
-impl WorldQuery {
-    /// The world's generator: heights, slopes, fields, shadows, sea
-    /// level. Hosts sample the world through this.
-    pub fn generator(&self) -> &Arc<voxel_worldgen::Generator> {
-        &self.generator
-    }
-
-    /// All ops overlapping the box, as served to a chunk of the given
-    /// edge. Gated emitters drop out wholesale for coarse chunks — the
-    /// gate is per chunk, never per op (a per-op gate desynchronizes
-    /// neighboring LODs and cracks every seam).
-    pub fn ops_in(&self, min: Vec3, max: Vec3, chunk_edge_m: f32) -> Vec<CsgOp> {
+impl WorldPlanner for StackPlanner {
+    /// Gated emitters drop out wholesale for coarse chunks — the gate is
+    /// per chunk, never per op.
+    fn ops_in(&self, min: Vec3, max: Vec3, chunk_edge_m: f32) -> Vec<CsgOp> {
         let mut out = Vec::new();
-        for source in &self.sources {
-            out.extend(source(min, max));
-        }
         if let Some(mgr) = &self.stack {
             for e in &self.emitters {
                 if e.gate.is_none_or(|g| chunk_edge_m <= g) {
@@ -2138,13 +2107,10 @@ impl WorldQuery {
     /// of the chunks that will actually query it: chunks past the global
     /// ops horizon or past the emitter's carve-horizon gate are excluded,
     /// so the resident planning set matches what can render.
-    pub fn prepare(&self, keys: &[ChunkKey]) {
+    fn prepare(&self, keys: &[ChunkKey]) {
         let Some(mgr) = &self.stack else {
             return;
         };
-        if std::env::var_os("VOXEL_NO_PREPARE").is_some() {
-            return; // A/B kill switch: fall back to read-driven generation
-        }
         // Per chunk, the exact box its ops query will cover: the chunk,
         // the density apron the provider adds, and the element padding
         // patches_in applies. A hull around all of them would generate
@@ -2214,17 +2180,7 @@ impl WorldQuery {
         }
     }
 
-    /// Cut ops (carved voids) overlapping the box: spawners consult this
-    /// so props never seat on heightfield ground that a cave mouth or
-    /// doorway has carved away.
-    pub fn cuts_in(&self, min: Vec3, max: Vec3) -> Vec<CsgOp> {
-        let mut ops = self.ops_in(min, max, 0.0);
-        ops.retain(|op| op.kind & 1 == 1);
-        ops
-    }
-
-    /// Clearance segments (roadbeds, riverbeds) overlapping the xz box.
-    pub fn clearance_in(&self, min: bevy::math::Vec2, max: bevy::math::Vec2) -> Vec<[bevy::math::Vec2; 2]> {
+    fn clearance_in(&self, min: bevy::math::Vec2, max: bevy::math::Vec2) -> Vec<[bevy::math::Vec2; 2]> {
         let (min3, max3) = (
             Vec3::new(min.x, -FACADE_Y_M, min.y),
             Vec3::new(max.x, FACADE_Y_M, max.y),
@@ -2238,12 +2194,7 @@ impl WorldQuery {
         out
     }
 
-    /// Ribbon surface segments overlapping the xz box.
-    pub fn ribbons_in(
-        &self,
-        min: bevy::math::Vec2,
-        max: bevy::math::Vec2,
-    ) -> Vec<voxel_worldgen::stack::RibbonSeg> {
+    fn ribbons_in(&self, min: bevy::math::Vec2, max: bevy::math::Vec2) -> Vec<RibbonSeg> {
         let (min3, max3) = (
             Vec3::new(min.x, -FACADE_Y_M, min.y),
             Vec3::new(max.x, FACADE_Y_M, max.y),
@@ -2257,10 +2208,7 @@ impl WorldQuery {
         out
     }
 
-    /// Blended biome weights at a point: (biome name, weight) for the
-    /// named biome layer, from the level's stack. Empty if the layer is
-    /// not declared.
-    pub fn biomes_at(&self, instance: &str, p: bevy::math::Vec2) -> Vec<(String, f32)> {
+    fn biomes_at(&self, instance: &str, p: bevy::math::Vec2) -> Vec<(String, f32)> {
         let Some(mgr) = &self.stack else {
             return Vec::new();
         };
@@ -2273,14 +2221,12 @@ impl WorldQuery {
         table.iter().cloned().zip(w).collect()
     }
 
-    /// Markers overlapping the xz box, optionally of one kind (findable
-    /// content: dungeon entrances, points of interest).
-    pub fn markers_in(
+    fn markers_in(
         &self,
         min: bevy::math::Vec2,
         max: bevy::math::Vec2,
         kind: Option<&str>,
-    ) -> Vec<voxel_worldgen::stack::Marker> {
+    ) -> Vec<Marker> {
         let (min3, max3) = (
             Vec3::new(min.x, -FACADE_Y_M, min.y),
             Vec3::new(max.x, FACADE_Y_M, max.y),
@@ -2298,28 +2244,18 @@ impl WorldQuery {
         }
         out
     }
-}
 
-/// The engine's top dependency: pre-generate each emitter's planning
-/// closure over exactly the region the chunks in `keys` will query —
-/// gate-aware, so coarse chunks never drag fine-scale planning into
-/// existence. Runs in the async planning task; the per-chunk ops queries
-/// that follow are cache reads (`LayerManager::read_generated` reports
-/// any that are not).
-fn ops_prepare(world: &WorldQuery) -> crate::streaming::ChunkOpsPrepare {
-    let world = world.clone();
-    crate::streaming::ChunkOpsPrepare(Some(std::sync::Arc::new(move |keys: &[ChunkKey]| {
-        world.prepare(keys);
-    })))
+    fn layer_managers(&self) -> Vec<Arc<voxel_layers::LayerManager>> {
+        self.stack.iter().cloned().collect()
+    }
 }
 
 fn build_ops_provider(
     level: &LevelDef,
     seed: u64,
     generator: &Arc<voxel_worldgen::Generator>,
-) -> (ChunkOpsProvider, WorldQuery, PlanningLayers) {
+) -> WorldQuery {
     let mut sources: Vec<OpsSource> = Vec::new();
-    let mut managers: Vec<Arc<voxel_layers::LayerManager>> = Vec::new();
 
     // The planning stack: every layer into ONE manager, in author order.
     let (stack, emitters) = if level.stack.is_empty() {
@@ -2339,9 +2275,7 @@ fn build_ops_provider(
                 emitters.push(Emitter::new(name.clone(), *max_chunk_edge_m, emit));
             }
         }
-        let mgr = Arc::new(mgr);
-        managers.push(mgr.clone());
-        (Some(mgr), emitters)
+        (Some(Arc::new(mgr)), emitters)
     };
 
 
@@ -2429,66 +2363,20 @@ fn build_ops_provider(
     }) {
         want(RIBBON_QUERY_REACH_M);
     }
-    let world = WorldQuery {
+    let planner = StackPlanner {
         stack,
         emitters,
-        sources,
         biome_tables,
-        generator: generator.clone(),
         streamer_radius,
     };
-    if world.stack.is_none() && world.sources.is_empty() {
-        return (ChunkOpsProvider(None), world, PlanningLayers(managers));
+    let mut world = WorldQuery::new(generator.clone());
+    if planner.stack.is_some() {
+        world = world.with_planner(Arc::new(planner));
     }
-    let wq = world.clone();
-    let provider = ChunkOpsProvider(Some(Arc::new(move |key: ChunkKey| {
-        // Meter-scale features apply on every level whose chunks can show
-        // them at visible size: the ops horizon (where the SDF genuinely
-        // loses the ops — a hard-cut seam by doctrine) must sit far enough
-        // out that structures are subpixel and haze covers the ring.
-        if key.edge_m() as f32 > OPS_HORIZON_EDGE_M {
-            return Vec::new();
-        }
-        // Pad by the density apron: samples extend 2 voxels below and 3
-        // above the 32-cell core, so an op grazing only the apron still
-        // shapes this chunk's samples — culling it desynchronizes the
-        // seam with the neighbor that keeps it (visible slit through
-        // structures straddling a chunk boundary).
-        let pad = 4.0 * key.voxel_size_m() as f32;
-        let min = key.min_corner_m().as_vec3() - Vec3::splat(pad);
-        let max = key.min_corner_m().as_vec3() + Vec3::splat(key.edge_m() as f32 + pad);
-        wq.ops_in(min, max, key.edge_m() as f32)
-    })));
-    (provider, world, PlanningLayers(managers))
-}
-
-/// Rolling eviction for the planning-layer caches: every few seconds,
-/// drop cached layer chunks far outside the region any chunk request can
-/// reach (ops horizon + the widest layer padding). Everything is
-/// regenerable, so the only cost of evicting too eagerly is regeneration.
-fn roll_planning_caches(
-    layers: Res<PlanningLayers>,
-    time: Res<Time>,
-    mut last: Local<f32>,
-    sources: crate::StreamSourceQuery,
-) {
-    if time.elapsed_secs() - *last < 5.0 {
-        return;
+    for source in sources {
+        world = world.with_source(source);
     }
-    *last = time.elapsed_secs();
-    let Ok(source) = sources.single() else {
-        return; // no streaming source tagged yet
-    };
-    let camera = source.translation();
-    let p = camera;
-    const KEEP_M: i32 = 8_000;
-    let keep = voxel_layers::IAabb::new(
-        bevy::math::IVec3::new(p.x as i32 - KEEP_M, i32::MIN / 2, p.z as i32 - KEEP_M),
-        bevy::math::IVec3::new(p.x as i32 + KEEP_M, i32::MAX / 2, p.z as i32 + KEEP_M),
-    );
-    for mgr in &layers.0 {
-        mgr.evict_outside(keep);
-    }
+    world
 }
 
 /// Poll the level file; apply edits live. Presentation fields (colors,
@@ -2567,12 +2455,11 @@ fn reload_level(
         lod.max_level = new.lod.max_level;
         lod.top_radius = new.lod.top_radius;
         lod.top_y = new.lod.top_y;
-        let (ops_provider, world_query, planning_layers) =
-            build_ops_provider(&new, seed.0, &generator);
+        let world_query = build_ops_provider(&new, seed.0, &generator);
         commands.insert_resource(ops_prepare(&world_query));
-        commands.insert_resource(ops_provider);
+        commands.insert_resource(ops_provider(&world_query));
+        commands.insert_resource(PlanningLayers(world_query.layer_managers()));
         commands.insert_resource(world_query);
-        commands.insert_resource(planning_layers);
         rebuild.0 = true;
         info!("level reload: generation changed — rebuilding world");
     }
@@ -2707,7 +2594,7 @@ mod tests {
 
     fn seeded_world_for(def: &LevelDef, seed: u64) -> WorldQuery {
         let (_, generator) = apply_generator(def, seed);
-        build_ops_provider(def, seed, &generator).1
+        build_ops_provider(def, seed, &generator)
     }
 
     /// The whole point of per-world generator state: two levels with

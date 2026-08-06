@@ -33,7 +33,8 @@ use std::sync::Arc;
 use bevy::prelude::*;
 use voxel_core::seed::{chunk_seed, Rng};
 
-use crate::level::{ScatterDef, WorldQuery};
+use crate::level::ScatterDef;
+use crate::planning::WorldQuery;
 
 /// Ask the streamer to rebuild every tile (level reload, def change).
 #[derive(Resource, Default)]
