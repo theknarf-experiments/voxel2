@@ -8,7 +8,7 @@
 
 use bevy::prelude::*;
 
-use crate::level::WorldQuery;
+use voxel_engine::level::WorldQuery;
 
 #[derive(Resource, Default)]
 pub struct DebugViz {
@@ -42,15 +42,15 @@ const LAYER_VIZ_RADIUS_M: f32 = 512.0;
 pub fn draw_debug_viz(
     viz: Res<DebugViz>,
     world: Res<WorldQuery>,
-    level: Res<crate::level::LevelDef>,
+    level: Res<voxel_engine::level::LevelDef>,
     stats: Option<Res<voxel_render::SharedRenderStats>>,
-    cameras: Query<&Transform, (With<Camera3d>, Without<voxel_render::HelperCamera>)>,
+    sources: voxel_engine::StreamSourceQuery,
     mut gizmos: Gizmos,
 ) {
-    let Ok(camera) = cameras.single() else {
+    let Ok(source) = sources.single() else {
         return;
     };
-    let eye = camera.translation;
+    let eye = source.translation();
 
     if viz.chunks {
         if let Some(stats) = stats {
@@ -100,7 +100,7 @@ pub fn draw_debug_viz(
 
         // Biome sample grid: a stake per cell colored by dominant biome.
         for def in &level.stack {
-            let crate::level::StackLayerDef::Biomes { name, table, .. } = def else {
+            let voxel_engine::level::StackLayerDef::Biomes { name, table, .. } = def else {
                 continue;
             };
             let step = LAYER_VIZ_RADIUS_M / 8.0;
@@ -126,5 +126,16 @@ pub fn draw_debug_viz(
                 }
             }
         }
+    }
+}
+
+/// Debug overlays (F8 chunk boundaries, F9 planning layers). Separate
+/// from the engine: a game adds this only when it wants them.
+pub struct VoxelVizPlugin;
+
+impl Plugin for VoxelVizPlugin {
+    fn build(&self, app: &mut App) {
+        app.init_resource::<DebugViz>()
+            .add_systems(Update, (toggle_debug_viz, draw_debug_viz));
     }
 }

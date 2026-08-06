@@ -8,7 +8,7 @@ use bevy::prelude::*;
 use bevy::remote::{error_codes, http::RemoteHttpPlugin, BrpError, BrpResult, RemotePlugin};
 use serde_json::{json, Value};
 
-use crate::level::WorldQuery;
+use voxel_engine::level::WorldQuery;
 
 pub struct VoxelRemotePlugin {
     pub port: u16,
@@ -72,13 +72,13 @@ fn radius(params: &Value, default: f64) -> f32 {
 }
 
 type PlayerCamera<'w, 's, T> =
-    Query<'w, 's, T, (With<voxel_debug::FreeCamera>, With<Camera3d>)>;
+    Query<'w, 's, T, (With<crate::FreeCamera>, With<Camera3d>)>;
 
 fn status(
     In(_): In<Option<Value>>,
     cams: PlayerCamera<&Transform>,
     stats: Option<Res<voxel_render::SharedRenderStats>>,
-    probe: Option<Res<crate::streaming::StreamProbe>>,
+    probe: Option<Res<voxel_engine::streaming::StreamProbe>>,
 ) -> BrpResult {
     let t = cams.single().map_err(|_| err("no player camera"))?;
     let f = t.forward();
@@ -203,7 +203,7 @@ fn ops(In(params): In<Option<Value>>, world: Res<WorldQuery>) -> BrpResult {
 }
 
 /// `{"chunks": bool?, "layers": bool?}` — toggle the debug overlays.
-fn viz(In(params): In<Option<Value>>, mut viz: ResMut<crate::debug_viz::DebugViz>) -> BrpResult {
+fn viz(In(params): In<Option<Value>>, mut viz: ResMut<crate::viz::DebugViz>) -> BrpResult {
     let params = params.ok_or_else(|| err("params required"))?;
     if let Some(v) = params.get("chunks").and_then(Value::as_bool) {
         viz.chunks = v;
@@ -274,7 +274,7 @@ fn scan(In(params): In<Option<Value>>) -> BrpResult {
 /// offscreen mirror (works with an occluded window).
 fn screenshot(
     In(params): In<Option<Value>>,
-    mut requests: ResMut<voxel_debug::ScreenshotRequest>,
+    mut requests: ResMut<crate::ScreenshotRequest>,
 ) -> BrpResult {
     let params = params.ok_or_else(|| err("params required"))?;
     let path = params
@@ -293,7 +293,9 @@ mod tests {
     fn scan_ranks_bounded_spots_within_radius() {
         // The scan reads the process-global program: hold the shared test
         // lock and install the planet explicitly (other tests set mega).
-        let _lock = crate::PROGRAM_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // The generator program is process-global (a library-shaping wart
+        // tracked for the per-world-state slice); install the planet
+        // explicitly so this test does not depend on run order.
         voxel_worldgen::program::set_program(voxel_worldgen::program::planet_program());
         voxel_worldgen::program::set_seed(0);
         // Land region of the reference planet.

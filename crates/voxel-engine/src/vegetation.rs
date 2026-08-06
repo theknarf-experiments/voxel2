@@ -129,22 +129,22 @@ fn stream_far_forest(
     assets: Option<Res<TreeAssets>>,
     level: Res<crate::LevelDef>,
     world: Res<crate::level::WorldQuery>,
-    cameras: Query<&Transform, (With<Camera3d>, Without<voxel_render::HelperCamera>)>,
+    sources: crate::StreamSourceQuery,
 ) {
     // Cold planning caches must never be generated on the main
     // thread: wait for genesis (which pre-warms them) to commit.
     if !probe.world_ready {
         return;
     }
-    let (Some(assets), Ok(camera)) = (assets, cameras.single()) else {
+    let (Some(assets), Ok(camera)) = (assets, sources.single().map(|t| t.translation())) else {
         return;
     };
     let Some(trees) = level.trees() else {
         return;
     };
     let center = IVec2::new(
-        (camera.translation.x / SUPER_M).floor() as i32,
-        (camera.translation.z / SUPER_M).floor() as i32,
+        (camera.x / SUPER_M).floor() as i32,
+        (camera.z / SUPER_M).floor() as i32,
     );
 
     // Build missing super-tiles nearest-first, a few per frame.
@@ -237,12 +237,13 @@ fn build_super_tile(
 fn far_forest_visibility(
     mut tiles: Query<(&mut Visibility, &Mesh3d), With<FarForestTile>>,
     meshes: Res<Assets<Mesh>>,
-    cameras: Query<&Transform, (With<Camera3d>, Without<voxel_render::HelperCamera>)>,
+    sources: crate::StreamSourceQuery,
 ) {
-    let Ok(camera) = cameras.single() else {
-        return;
+    let Ok(source) = sources.single() else {
+        return; // no streaming source tagged yet
     };
-    let cam = Vec2::new(camera.translation.x, camera.translation.z);
+    let camera = source.translation();
+    let cam = Vec2::new(camera.x, camera.z);
     for (mut vis, mesh) in &mut tiles {
         // Cheap center estimate from the mesh's first vertex tile.
         let Some(mesh) = meshes.get(&mesh.0) else {
@@ -286,20 +287,20 @@ fn stream_grass(
     level: Res<crate::LevelDef>,
     world: Res<crate::level::WorldQuery>,
     time: Res<Time>,
-    cameras: Query<&Transform, (With<Camera3d>, Without<voxel_render::HelperCamera>)>,
+    sources: crate::StreamSourceQuery,
 ) {
     // Cold planning caches must never be generated on the main
     // thread: wait for genesis (which pre-warms them) to commit.
     if !probe.world_ready {
         return;
     }
-    let (Some(grass), Ok(camera)) = (level.grass(), cameras.single()) else {
+    let (Some(grass), Ok(camera)) = (level.grass(), sources.single().map(|t| t.translation())) else {
         return;
     };
     let t0 = std::time::Instant::now();
     let center = IVec2::new(
-        (camera.translation.x / GRASS_TILE_M).floor() as i32,
-        (camera.translation.z / GRASS_TILE_M).floor() as i32,
+        (camera.x / GRASS_TILE_M).floor() as i32,
+        (camera.z / GRASS_TILE_M).floor() as i32,
     );
 
     // One tile per frame: a tile costs hundreds of height evaluations and
@@ -773,20 +774,20 @@ fn stream_vegetation(
     assets: Option<Res<TreeAssets>>,
     level: Res<crate::LevelDef>,
     world: Res<crate::level::WorldQuery>,
-    cameras: Query<&Transform, (With<Camera3d>, Without<voxel_render::HelperCamera>)>,
+    sources: crate::StreamSourceQuery,
 ) {
     // Cold planning caches must never be generated on the main
     // thread: wait for genesis (which pre-warms them) to commit.
     if !probe.world_ready {
         return;
     }
-    let (Some(assets), Ok(camera)) = (assets, cameras.single()) else {
+    let (Some(assets), Ok(camera)) = (assets, sources.single().map(|t| t.translation())) else {
         return;
     };
     let t0 = std::time::Instant::now();
     let center = IVec2::new(
-        (camera.translation.x / TILE_M).floor() as i32,
-        (camera.translation.z / TILE_M).floor() as i32,
+        (camera.x / TILE_M).floor() as i32,
+        (camera.z / TILE_M).floor() as i32,
     );
 
     // Spawn new tiles in range, a few per frame (placement runs many

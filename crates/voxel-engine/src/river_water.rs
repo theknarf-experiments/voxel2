@@ -42,17 +42,18 @@ pub fn stream_river_water(
     world: Res<WorldQuery>,
     mut tiles: ResMut<RiverWaterTiles>,
     mut rivers: ResMut<voxel_render::RiverWater>,
-    cameras: Query<&Transform, (With<Camera3d>, Without<voxel_render::HelperCamera>)>,
+    sources: crate::StreamSourceQuery,
 ) {
     if eval_holes_mode() || !probe.world_ready {
         return;
     }
-    let Ok(camera) = cameras.single() else {
-        return;
+    let Ok(source) = sources.single() else {
+        return; // no streaming source tagged yet
     };
+    let camera = source.translation();
     let center = IVec2::new(
-        (camera.translation.x / WATER_TILE_M).floor() as i32,
-        (camera.translation.z / WATER_TILE_M).floor() as i32,
+        (camera.x / WATER_TILE_M).floor() as i32,
+        (camera.z / WATER_TILE_M).floor() as i32,
     );
     let mut changed = false;
     // A couple of tiles per tick keeps the query cost off any one frame.

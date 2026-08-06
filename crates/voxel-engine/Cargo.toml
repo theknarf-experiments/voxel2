@@ -9,7 +9,6 @@ voxel-core.workspace = true
 voxel-layers.workspace = true
 voxel-worldgen.workspace = true
 voxel-render.workspace = true
-voxel-debug.workspace = true
 bevy.workspace = true
 serde.workspace = true
 serde_json.workspace = true

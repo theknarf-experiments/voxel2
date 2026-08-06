@@ -8,6 +8,44 @@ use bevy::prelude::*;
 
 pub use bevy::camera_controller::free_camera::FreeCamera;
 
+pub mod remote;
+pub mod viz;
+
+/// HUD lines built from the engine's own telemetry (`StreamProbe`,
+/// `SharedRenderStats`) — the engine measures, this crate displays.
+fn engine_hud(
+    probe: Option<Res<voxel_engine::streaming::StreamProbe>>,
+    stats: Option<Res<voxel_render::SharedRenderStats>>,
+    mut hud: ResMut<DebugHudExtra>,
+) {
+    let Some(probe) = probe else { return };
+    if let Some(stats) = stats {
+        if let Ok(s) = stats.0.lock() {
+            hud.0.push(format!(
+                "chunks: {} tracked | {} meshed | {} drawn | {} culled | {} pending",
+                s.tracked, s.meshed, s.drawn, s.culled, s.awaiting
+            ));
+            let occ: Vec<String> = s
+                .slab_occupancy
+                .iter()
+                .map(|(free, total)| format!("{}/{}", total - free, total))
+                .collect();
+            hud.0.push(format!(
+                "arena free: {} | slab used: [{}]",
+                s.arena_free,
+                occ.join(", ")
+            ));
+        }
+    }
+    hud.0.push(format!(
+        "leaves: {} | planning cached reads: {}",
+        probe.leaves, probe.read_generated
+    ));
+}
+
+pub use remote::VoxelRemotePlugin;
+pub use viz::{DebugViz, VoxelVizPlugin};
+
 pub mod prelude {
     pub use crate::{DebugHudText, FreeCamera, VoxelDebugPlugin};
 }
@@ -23,7 +61,7 @@ impl Plugin for VoxelDebugPlugin {
         app.add_plugins((FreeCameraPlugin, FrameTimeDiagnosticsPlugin::default()))
             .add_systems(Startup, spawn_hud)
             .init_resource::<ScreenshotRequest>()
-            .add_systems(Update, (update_hud, auto_screenshot, dump_camera));
+            .add_systems(Update, (engine_hud, update_hud, auto_screenshot, dump_camera).chain());
     }
 }
 

@@ -1,14 +1,27 @@
 //! Engine glue: Bevy plugins for chunk streaming lifecycle, generation
 //! budgets, edit application, and persistence.
 
-pub mod debug_viz;
 pub mod level;
-pub mod remote;
 pub mod streaming;
 pub mod vegetation;
 pub mod river_water;
 
 use bevy::prelude::*;
+
+/// Tag the entity whose position drives streaming: chunk LOD, prop and
+/// water tiles, planning pre-generation. Usually the player or the
+/// camera, but the engine never assumes which — a game owns its own
+/// scene. LayerProcGen calls this a generation source.
+///
+/// ```ignore
+/// commands.spawn((Camera3d::default(), VoxelStreamSource));
+/// ```
+#[derive(Component, Debug, Clone, Copy, Default)]
+pub struct VoxelStreamSource;
+
+/// The streaming anchor's transform. Systems take this instead of
+/// querying for a camera.
+pub type StreamSourceQuery<'w, 's> = Query<'w, 's, &'static GlobalTransform, With<VoxelStreamSource>>;
 
 pub use level::{LevelDef, LevelPlugin};
 pub use streaming::{LodConfig, VoxelStreamingPlugin};

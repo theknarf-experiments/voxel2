@@ -1993,12 +1993,19 @@ fn sun_dir(level: &LevelDef) -> Vec3 {
         .normalize()
 }
 
-/// `VOXEL_EVAL_HOLES=1`: coverage-eval rendering — magenta background,
-/// monotone-white geometry, water off. A single background-colored pixel
-/// below the horizon means missing world coverage.
+/// Coverage-eval rendering: monotone-white geometry and no water, so a
+/// single background-colored pixel below the horizon means missing world
+/// coverage. Set from [`LevelPlugin::hole_eval`] — the engine itself
+/// reads no environment variables.
+#[derive(Resource, Default, Clone, Copy)]
+pub struct HoleEval(pub bool);
+
 pub fn eval_holes_mode() -> bool {
-    std::env::var("VOXEL_EVAL_HOLES").is_ok()
+    HOLE_EVAL.load(std::sync::atomic::Ordering::Relaxed)
 }
+
+pub(crate) static HOLE_EVAL: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
 
 fn apply_generator(level: &LevelDef) -> voxel_render::WorldProgram {
     let ops: Vec<WorldOp> = level.generator.iter().map(GenOpDef::pack).collect();
@@ -2082,7 +2089,31 @@ fn grass_style(level: &LevelDef) -> voxel_render::GrassStyle {
 /// changes rebuild the streamed world in place.
 pub struct LevelPlugin {
     pub def: LevelDef,
+    /// Watch this file and hot-reload the level from it.
     pub source: Option<std::path::PathBuf>,
+    /// Coverage-eval rendering (monotone geometry, water off) — a test
+    /// affordance the host opts into; the engine reads no environment.
+    pub hole_eval: bool,
+    /// Start a Bevy Remote Protocol server on this port for tooling.
+    pub remote_port: Option<u16>,
+}
+
+impl LevelPlugin {
+    /// Present `def` with default options.
+    pub fn new(def: LevelDef) -> Self {
+        Self {
+            def,
+            source: None,
+            hole_eval: false,
+            remote_port: None,
+        }
+    }
+
+    /// Hot-reload the level from the file it was loaded from.
+    pub fn watching(mut self, path: impl Into<std::path::PathBuf>) -> Self {
+        self.source = Some(path.into());
+        self
+    }
 }
 
 /// Watch state for level hot-reload.
@@ -2093,15 +2124,12 @@ struct LevelSource {
     poll: Timer,
 }
 
-/// Marker for the level's sun light (replaced on reload).
-#[derive(Component)]
-struct LevelSun;
-
 impl Plugin for LevelPlugin {
     fn build(&self, app: &mut App) {
         let level = self.def.clone();
         let c = level.clear_color;
 
+        app.add_message::<LevelReloaded>();
         if let Some(path) = &self.source {
             let mtime = std::fs::metadata(path).and_then(|m| m.modified()).ok();
             app.insert_resource(LevelSource {
@@ -2143,25 +2171,12 @@ impl Plugin for LevelPlugin {
             .insert_resource(level.clone())
             .add_plugins(VoxelEnginePlugin { vegetation: true })
             .add_plugins(voxel_render::WaterPlugin)
-            .add_systems(Startup, setup_level)
-            .add_systems(Update, autopilot)
             .add_systems(Update, roll_planning_caches)
             .init_resource::<crate::river_water::RiverWaterTiles>()
-            .add_systems(Update, crate::river_water::stream_river_water)
-            .init_resource::<crate::debug_viz::DebugViz>()
-            .add_systems(
-                Update,
-                (crate::debug_viz::toggle_debug_viz, crate::debug_viz::draw_debug_viz),
-            );
-        // Live tooling: VOXEL_REMOTE=1 (or a port) starts the BRP server
-        // the voxctl CLI talks to.
-        if let Ok(v) = std::env::var("VOXEL_REMOTE") {
-            // "1"/"true" enable the default port; a number >1024 sets it.
-            let port = match v.parse::<u16>() {
-                Ok(p) if p > 1024 => p,
-                _ => 15702,
-            };
-            app.add_plugins(crate::remote::VoxelRemotePlugin { port });
+            .add_systems(Update, crate::river_water::stream_river_water);
+
+        if let Some(port) = self.remote_port {
+            let _ = port; // BRP tooling lives in voxel-debug; see VoxelRemotePlugin
         }
     }
 }
@@ -2592,16 +2607,17 @@ fn roll_planning_caches(
     layers: Res<PlanningLayers>,
     time: Res<Time>,
     mut last: Local<f32>,
-    cameras: Query<&Transform, (With<Camera3d>, Without<voxel_render::HelperCamera>)>,
+    sources: crate::StreamSourceQuery,
 ) {
     if time.elapsed_secs() - *last < 5.0 {
         return;
     }
     *last = time.elapsed_secs();
-    let Ok(camera) = cameras.single() else {
-        return;
+    let Ok(source) = sources.single() else {
+        return; // no streaming source tagged yet
     };
-    let p = camera.translation;
+    let camera = source.translation();
+    let p = camera;
     const KEEP_M: i32 = 8_000;
     let keep = voxel_layers::IAabb::new(
         bevy::math::IVec3::new(p.x as i32 - KEEP_M, i32::MIN / 2, p.z as i32 - KEEP_M),
@@ -2610,55 +2626,6 @@ fn roll_planning_caches(
     for mgr in &layers.0 {
         mgr.evict_outside(keep);
     }
-}
-
-fn setup_level(mut commands: Commands, level: Res<LevelDef>) {
-    if let Some(sun) = &level.sun {
-        let dir = Vec3::from(sun.direction).normalize();
-        commands.spawn((
-            LevelSun,
-            DirectionalLight {
-                illuminance: sun.illuminance,
-                ..default()
-            },
-            Transform::from_translation(Vec3::ZERO).looking_to(-dir, Vec3::Y),
-        ));
-    }
-    let a = &level.ambient;
-    commands.insert_resource(GlobalAmbientLight {
-        color: Color::srgb(a.color[0], a.color[1], a.color[2]),
-        brightness: a.brightness,
-        ..default()
-    });
-
-    // Camera, with env overrides for repeatable testing.
-    let parse3 = |s: String| {
-        let v: Vec<f32> = s.split(',').filter_map(|p| p.trim().parse().ok()).collect();
-        (v.len() == 3).then(|| Vec3::new(v[0], v[1], v[2]))
-    };
-    let start = std::env::var("VOXEL_START")
-        .ok()
-        .and_then(parse3)
-        .unwrap_or(Vec3::from(level.camera.start));
-    let look = std::env::var("VOXEL_LOOK")
-        .ok()
-        .and_then(parse3)
-        .unwrap_or(Vec3::from(level.camera.look));
-    // Up reference must not be parallel to the view direction.
-    let up = if look.normalize_or_zero().dot(Vec3::Y).abs() > 0.9 {
-        Vec3::Z
-    } else {
-        Vec3::Y
-    };
-    commands.spawn((
-        Camera3d::default(),
-        Transform::from_translation(start).looking_at(start + look * 1000.0, up),
-        voxel_debug::FreeCamera {
-            walk_speed: level.camera.walk_speed,
-            run_speed: level.camera.run_speed,
-            ..default()
-        },
-    ));
 }
 
 /// Poll the level file; apply edits live. Presentation fields (colors,
@@ -2671,18 +2638,11 @@ fn reload_level(
     time: Res<Time>,
     mut source: ResMut<LevelSource>,
     mut level: ResMut<LevelDef>,
-    mut clear: ResMut<ClearColor>,
     mut lod: ResMut<LodConfig>,
     mut rebuild: ResMut<StreamingRebuild>,
     mut water: ResMut<voxel_render::WaterSurface>,
     mut veg_rebuild: Option<ResMut<crate::vegetation::VegetationRebuild>>,
-    mut cameras: Query<&mut voxel_debug::FreeCamera>,
-    mut camera_transforms: Query<
-        &mut Transform,
-        (With<Camera3d>, Without<voxel_render::HelperCamera>),
-    >,
-    mut windows: Query<&mut Window>,
-    suns: Query<Entity, With<LevelSun>>,
+    mut reloaded: MessageWriter<LevelReloaded>,
 ) {
     if !source.poll.tick(time.delta()).just_finished() {
         return;
@@ -2705,62 +2665,25 @@ fn reload_level(
             return;
         }
     };
-    // Authoring errors in the stack must never take down a live session:
-    // keep the running world and report, exactly like a parse error.
+    // Authoring errors must never take down a live session: keep the
+    // running world and report, exactly like a parse error.
     if let Err(e) = validate_level(&new) {
         warn!("level reload: invalid planning data — {e}");
         return;
     }
 
-    // Presentation: apply directly.
-    let c = new.clear_color;
-    clear.0 = if eval_holes_mode() {
-        Color::srgb(1.0, 0.0, 1.0)
-    } else {
-        Color::srgb(c[0], c[1], c[2])
-    };
-    let a = &new.ambient;
-    commands.insert_resource(GlobalAmbientLight {
-        color: Color::srgb(a.color[0], a.color[1], a.color[2]),
-        brightness: a.brightness,
-        ..default()
-    });
-    for sun in &suns {
-        commands.entity(sun).despawn();
-    }
-    if let Some(sun) = &new.sun {
-        let dir = Vec3::from(sun.direction).normalize();
-        commands.spawn((
-            LevelSun,
-            DirectionalLight {
-                illuminance: sun.illuminance,
-                ..default()
-            },
-            Transform::from_translation(Vec3::ZERO).looking_to(-dir, Vec3::Y),
-        ));
-    }
-    for mut cam in &mut cameras {
-        cam.walk_speed = new.camera.walk_speed;
-        cam.run_speed = new.camera.run_speed;
-    }
-    lod.split_k = new.lod.split_k;
-    lod.merge_k = new.lod.merge_k;
-    if new.name != level.name {
-        for mut window in &mut windows {
-            window.title = format!("voxel2 — {}", new.name);
-        }
-    }
+    // Engine-owned presentation: the material table and the chunk
+    // shader's environment uniform.
     if new.materials != level.materials {
         commands.insert_resource(material_table(&new));
     }
     if new.environment != level.environment {
         commands.insert_resource(env_params(&new));
     }
-    info!("level reload: presentation applied");
+    lod.split_k = new.lod.split_k;
+    lod.merge_k = new.lod.merge_k;
 
-    // Generation-affecting changes: rebuild the streamed world. Water and
-    // vegetation are generator ops, so their toggles ride along; the sun
-    // direction and seed live in the program header (baked shadows, hashes).
+    // Generation-affecting changes rebuild the streamed world.
     let sun_changed = sun_dir(&new) != sun_dir(level.as_ref());
     let generator_changed =
         new.generator != level.generator || new.seed != level.seed || sun_changed;
@@ -2771,6 +2694,7 @@ fn reload_level(
     }
     let regen = generator_changed
         || new.stack != level.stack
+        || new.structures != level.structures
         || new.placements != level.placements
         || new.prefabs != level.prefabs
         || new.lod.max_level != level.lod.max_level
@@ -2781,14 +2705,10 @@ fn reload_level(
         lod.top_radius = new.lod.top_radius;
         lod.top_y = new.lod.top_y;
         let (ops_provider, world_query, planning_layers) = build_ops_provider(&new);
-        // The warmup must target the NEW manager; the old closure would
-        // warm the retired one and pin its cache in memory forever.
         commands.insert_resource(ops_prepare(&world_query));
         commands.insert_resource(ops_provider);
         commands.insert_resource(world_query);
         commands.insert_resource(planning_layers);
-        // Streamed derivatives of the planning data are stale too: river
-        // tiles rebuild from scratch, vegetation re-streams.
         commands.insert_resource(crate::river_water::RiverWaterTiles::default());
         commands.insert_resource(voxel_render::RiverWater::default());
         rebuild.0 = true;
@@ -2800,47 +2720,23 @@ fn reload_level(
             veg.0 = true;
         }
     }
-    // A different camera start means a different place (typically a whole
-    // different level file): jump there.
-    if new.camera.start != level.camera.start || new.camera.look != level.camera.look {
-        let start = Vec3::from(new.camera.start);
-        let look = Vec3::from(new.camera.look);
-        let up = if look.normalize_or_zero().dot(Vec3::Y).abs() > 0.9 {
-            Vec3::Z
-        } else {
-            Vec3::Y
-        };
-        for mut t in &mut camera_transforms {
-            *t = Transform::from_translation(start).looking_at(start + look * 1000.0, up);
-        }
-    }
+
+    // The host owns the scene: it reads the new definition off this
+    // message and applies its own camera, lights and clear color.
+    let previous = level.clone();
     *level = new;
+    reloaded.write(LevelReloaded { previous });
 }
 
-
-/// Flies the camera forward when `VOXEL_AUTOPILOT` is set (m/s).
-fn autopilot(
-    mut cameras: Query<
-        &mut Transform,
-        (With<Camera3d>, Without<voxel_render::HelperCamera>),
-    >,
-    time: Res<Time>,
-) {
-    let Ok(speed) = std::env::var("VOXEL_AUTOPILOT") else {
-        return;
-    };
-    let speed: f32 = speed.parse().unwrap_or(50.0);
-    let level_flight = std::env::var("VOXEL_AUTOPILOT_LEVEL").is_ok();
-    for mut transform in &mut cameras {
-        let mut dir = *transform.forward();
-        if level_flight {
-            dir.y = 0.0;
-            dir = dir.normalize_or_zero();
-        }
-        transform.translation += dir * speed * time.delta_secs();
-    }
+/// Emitted after a hot reload so the host can re-apply whatever it owns
+/// (clear color, lights, camera, window title). The engine has already
+/// applied everything it owns.
+#[derive(Message, Debug, Clone)]
+pub struct LevelReloaded {
+    /// The definition that was replaced — compare fields to see what
+    /// changed. The new one is in the [`LevelDef`] resource.
+    pub previous: LevelDef,
 }
-
 
 #[cfg(test)]
 mod tests {

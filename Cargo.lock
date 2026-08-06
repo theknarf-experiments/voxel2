@@ -5276,7 +5276,12 @@ name = "voxel-debug"
 version = "0.1.0"
 dependencies = [
  "bevy",
+ "serde_json",
+ "voxel-core",
+ "voxel-engine",
+ "voxel-layers",
  "voxel-render",
+ "voxel-worldgen",
 ]
 
 [[package]]
@@ -5287,7 +5292,6 @@ dependencies = [
  "serde",
  "serde_json",
  "voxel-core",
- "voxel-debug",
  "voxel-layers",
  "voxel-render",
  "voxel-worldgen",
