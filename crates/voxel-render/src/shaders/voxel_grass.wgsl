@@ -3,24 +3,23 @@
 // rotates the tuft, scales it, applies wind sway, and fades it out with
 // distance. Camera-relative transform matches the chunk draw shader.
 
-#import bevy_render::view::View
-#import bevy_render::globals::Globals
+#import bevy_pbr::{
+    mesh_view_bindings::{view, globals},
+    mesh_types::MESH_FLAGS_SHADOW_RECEIVER_BIT,
+    pbr_types,
+    pbr_functions,
+}
 
-@group(0) @binding(0) var<uniform> view: View;
-@group(0) @binding(1) var<uniform> globals: Globals;
-
-// Level environment (sun + haze), matching the terrain shader.
+// Blade look only — light, shadows, fog and tonemapping are Bevy's.
 struct GrassEnv {
-    sun_dir: vec4<f32>,   // toward the sun | unused
-    haze: vec4<f32>,      // rgb | density
-    haze_tint: vec4<f32>, // rgb | power (0 = none)
+    flags: vec4<f32>,     // x = coverage-eval flag
     base_a: vec4<f32>,    // blade base hue A
     base_b: vec4<f32>,    // blade base hue B
     tip_a: vec4<f32>,     // blade tip hue A
     tip_b: vec4<f32>,     // blade tip hue B
     fade: vec4<f32>,      // fade start, fade end, -, -
 }
-@group(0) @binding(2) var<uniform> env: GrassEnv;
+@group(2) @binding(0) var<uniform> env: GrassEnv;
 
 struct VsIn {
     // Blade vertex (tuft-local).
@@ -87,18 +86,31 @@ fn vertex(in: VsIn) -> VsOut {
 
 @fragment
 fn fragment(in: VsOut) -> @location(0) vec4<f32> {
-    if (env.sun_dir.w > 0.5) {
+    if (env.flags.x > 0.5) {
         return vec4<f32>(1.0, 1.0, 1.0, 1.0);
     }
-    // Match the terrain's sun + haze so grass sits in the scene.
-    let sun_dir = normalize(env.sun_dir.xyz);
-    let lit = in.color * (0.55 + 0.45 * max(sun_dir.y, 0.0));
-    let dist = length(in.cam_rel);
-    let haze_amount = 1.0 - exp(-dist * env.haze.w);
-    var haze_color = env.haze.rgb;
-    if (env.haze_tint.w > 0.0) {
-        let sun_amount = pow(max(dot(normalize(in.cam_rel), sun_dir), 0.0), env.haze_tint.w);
-        haze_color = mix(haze_color, env.haze_tint.rgb, sun_amount);
-    }
-    return vec4<f32>(mix(lit, haze_color, haze_amount), 1.0);
+    let world = vec3<f32>(
+        view.world_position.x + in.cam_rel.x,
+        view.world_position.y + in.cam_rel.y,
+        view.world_position.z + in.cam_rel.z,
+    );
+    // Blades are thin crossed geometry with no meaningful surface normal:
+    // shade them off the up axis, which keeps a tuft evenly lit and lets
+    // the cascades darken grass standing in a tree's shadow.
+    let n = vec3<f32>(0.0, 1.0, 0.0);
+
+    var pbr_input = pbr_types::pbr_input_new();
+    pbr_input.material.base_color = vec4<f32>(in.color, 1.0);
+    pbr_input.material.perceptual_roughness = 1.0;
+    pbr_input.material.metallic = 0.0;
+    pbr_input.material.flags = pbr_types::STANDARD_MATERIAL_FLAGS_FOG_ENABLED_BIT;
+    pbr_input.frag_coord = in.clip;
+    pbr_input.world_position = vec4<f32>(world, 1.0);
+    pbr_input.world_normal = n;
+    pbr_input.N = n;
+    pbr_input.V = normalize(-in.cam_rel);
+    pbr_input.flags = MESH_FLAGS_SHADOW_RECEIVER_BIT;
+
+    let color = pbr_functions::apply_pbr_lighting(pbr_input);
+    return pbr_functions::main_pass_post_lighting_processing(pbr_input, color);
 }

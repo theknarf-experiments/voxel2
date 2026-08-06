@@ -4,6 +4,7 @@
 
 pub mod chunks;
 pub mod grass;
+pub(crate) mod pbr_view;
 pub mod slab;
 pub mod water;
 

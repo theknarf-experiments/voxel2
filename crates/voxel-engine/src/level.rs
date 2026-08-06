@@ -33,24 +33,13 @@ pub struct LodDef {
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 #[serde(default)]
 pub struct EnvDef {
-    /// Haze color; density is per meter (planet ~6e-5, interior ~3.5e-3).
-    pub haze_color: [f32; 3],
-    pub haze_density: f32,
-    /// Haze tint toward the sun direction (power 0 disables).
-    pub haze_sun_tint: [f32; 3],
-    pub haze_tint_power: f32,
     /// Direction the sun comes FROM (not normalized; twins normalize).
-    /// Engine data: the mesh shader bakes horizon shadows along it.
+    /// The only lighting value the engine owns: the mesh shader bakes
+    /// horizon shadows along it, so it must match the app's sun. Colors,
+    /// strengths, ambient and haze are the app's — voxel surfaces shade
+    /// through Bevy's PBR, so they come from its lights and `DistanceFog`.
     #[serde(default = "d_sun_direction")]
     pub sun_direction: [f32; 3],
-    pub sun_color: [f32; 3],
-    /// 0 = sunless interior (ambient only).
-    pub sun_strength: f32,
-    pub ambient_sky: [f32; 3],
-    pub ambient_ground: [f32; 3],
-    pub ambient_strength: f32,
-    /// Exponent on up-ness: 1 = hemispheric, 2 = top-lit interior.
-    pub ambient_exponent: f32,
 }
 
 fn d_sun_direction() -> [f32; 3] {
@@ -60,17 +49,7 @@ fn d_sun_direction() -> [f32; 3] {
 impl Default for EnvDef {
     fn default() -> Self {
         Self {
-            haze_color: [0.62, 0.72, 0.88],
-            haze_density: 0.00006,
-            haze_sun_tint: [0.92, 0.85, 0.72],
-            haze_tint_power: 4.0,
             sun_direction: d_sun_direction(),
-            sun_color: [1.0, 0.96, 0.88],
-            sun_strength: 0.85,
-            ambient_sky: [0.55, 0.70, 0.95],
-            ambient_ground: [0.25, 0.24, 0.20],
-            ambient_strength: 0.3,
-            ambient_exponent: 1.0,
         }
     }
 }
@@ -1999,16 +1978,9 @@ fn material_table(level: &LevelDef) -> voxel_render::WorldMaterials {
     voxel_render::WorldMaterials(table)
 }
 
-fn env_params(level: &LevelDef) -> voxel_render::EnvParams {
-    let e = &level.environment;
-    let v = |c: [f32; 3], w: f32| Vec4::new(c[0], c[1], c[2], w);
+fn env_params(_level: &LevelDef) -> voxel_render::EnvParams {
     voxel_render::EnvParams {
-        haze: v(e.haze_color, e.haze_density),
-        haze_tint: v(e.haze_sun_tint, e.haze_tint_power),
-        sun: v(e.sun_color, e.sun_strength),
-        sky: v(e.ambient_sky, e.ambient_strength),
-        ground: v(e.ambient_ground, e.ambient_exponent),
-        sun_dir: sun_dir(level).extend(if eval_holes_mode() { 1.0 } else { 0.0 }),
+        flags: Vec4::new(if eval_holes_mode() { 1.0 } else { 0.0 }, 0.0, 0.0, 0.0),
     }
 }
 
@@ -2786,7 +2758,12 @@ mod tests {
         assert_eq!(voxel_worldgen::program::water_level(&packed), None);
         assert!(mega.scatter.is_empty() && mega.grass.is_none());
         assert!(mega.materials.iter().any(|m| m.id() == 2));
-        assert!(mega.environment.sun_strength == 0.0);
+        // Sunless interior: no height ops, so the horizon-shadow bake
+        // self-disables and the sun direction is unused.
+        assert!(
+            !packed.iter().any(|op| op.is_height_op()),
+            "mega should have no height ops"
+        );
     }
 
     #[test]

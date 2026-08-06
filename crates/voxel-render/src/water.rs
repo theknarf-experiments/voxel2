@@ -14,11 +14,14 @@ use bevy::{
         query::ROQueryItem,
         system::{lifetimeless::SRes, SystemParamItem},
     },
+    pbr::{
+        MeshPipelineKey, MeshPipelineViewLayouts, SetMeshViewBindGroup,
+        SetMeshViewBindingArrayBindGroup,
+    },
     prelude::*,
     render::{
         camera::{DirtySpecializations, PendingQueues},
         extract_component::{ExtractComponent, ExtractComponentPlugin},
-        globals::{GlobalsBuffer, GlobalsUniform},
         mesh::allocator::MeshSlabs,
         render_phase::{
             AddRenderCommand, BinnedRenderPhaseType, DrawFunctions, InputUniformIndex, PhaseItem,
@@ -35,9 +38,6 @@ use bevy::{
             VertexState,
         },
         renderer::{RenderDevice, RenderQueue},
-        view::{
-            ExtractedView, RenderVisibleEntities, ViewUniform, ViewUniformOffset, ViewUniforms,
-        },
         Extract, Render, RenderApp, RenderStartup, RenderSystems,
     },
 };
@@ -48,9 +48,6 @@ const SEA_SNAP: f64 = 64.0;
 #[derive(ShaderType, Clone, Copy, Default)]
 struct WaterParams {
     origin: Vec4,
-    sky: Vec4,
-    haze: Vec4,
-    haze_tint: Vec4,
     /// x = ocean enabled (0/1), y = river segment count.
     counts: Vec4,
 }
@@ -139,7 +136,10 @@ impl Plugin for WaterPlugin {
             .init_resource::<WaterSurface>()
             .init_resource::<RiverWater>()
             .add_render_command::<Opaque3d, DrawWaterCommands>()
-            .add_systems(RenderStartup, init_water_pipeline)
+            .add_systems(
+                RenderStartup,
+                init_water_pipeline.after(bevy::pbr::init_mesh_pipeline_view_layouts),
+            )
             .add_systems(
                 ExtractSchedule,
                 (extract_water_camera, extract_water_surface),
@@ -190,14 +190,18 @@ fn extract_water_camera(
     }
 }
 
-fn init_water_pipeline(mut commands: Commands, asset_server: Res<AssetServer>) {
+fn init_water_pipeline(
+    mut commands: Commands,
+    view_layouts: Res<MeshPipelineViewLayouts>,
+    asset_server: Res<AssetServer>,
+) {
+    // Groups 0/1 are Bevy's view bind group (see `pbr_view`); ours sits in
+    // the per-mesh slot at 2.
     let layout = BindGroupLayoutDescriptor::new(
         "water_layout",
         &BindGroupLayoutEntries::sequential(
             ShaderStages::VERTEX_FRAGMENT,
             (
-                uniform_buffer::<ViewUniform>(true),
-                uniform_buffer::<GlobalsUniform>(false),
                 uniform_buffer::<WaterParams>(false),
                 // The level's generator program (shoreline height ops);
                 // shared with the chunk pipeline.
@@ -211,7 +215,8 @@ fn init_water_pipeline(mut commands: Commands, asset_server: Res<AssetServer>) {
         load_embedded_asset!(asset_server.as_ref(), "shaders/voxel_water.wgsl");
     let base_descriptor = RenderPipelineDescriptor {
         label: Some("water_draw".into()),
-        layout: vec![layout.clone()],
+        // Groups 0/1 are replaced per key by the specializer.
+        layout: vec![layout.clone(), layout.clone(), layout.clone()],
         vertex: VertexState {
             shader: shader.clone(),
             entry_point: Some("vertex".into()),
@@ -238,14 +243,21 @@ fn init_water_pipeline(mut commands: Commands, asset_server: Res<AssetServer>) {
     };
     commands.insert_resource(WaterPipeline {
         layout,
-        variants: Variants::new(WaterSpecializer, base_descriptor),
+        variants: Variants::new(
+            WaterSpecializer {
+                view_layouts: view_layouts.clone(),
+            },
+            base_descriptor,
+        ),
     });
 }
 
-struct WaterSpecializer;
+struct WaterSpecializer {
+    view_layouts: MeshPipelineViewLayouts,
+}
 
 #[derive(Copy, Clone, PartialEq, Eq, Hash, SpecializerKey)]
-struct WaterKey(Msaa);
+struct WaterKey(MeshPipelineKey);
 
 impl Specializer<RenderPipeline> for WaterSpecializer {
     type Key = WaterKey;
@@ -255,7 +267,7 @@ impl Specializer<RenderPipeline> for WaterSpecializer {
         key: Self::Key,
         descriptor: &mut RenderPipelineDescriptor,
     ) -> Result<Canonical<Self::Key>, BevyError> {
-        descriptor.multisample.count = key.0.samples();
+        crate::pbr_view::specialize_for_view(&self.view_layouts, key.0, descriptor);
         Ok(key)
     }
 }
@@ -265,13 +277,10 @@ struct PendingWaterQueues(PendingQueues);
 
 #[allow(clippy::too_many_arguments)]
 fn prepare_water_bind_group(
-    view_uniforms: Res<ViewUniforms>,
-    globals: Res<GlobalsBuffer>,
     pipeline: Option<Res<WaterPipeline>>,
     camera: Res<ExtractedWaterCamera>,
     surface: Res<WaterSurface>,
     rivers: Res<RiverWater>,
-    env: Res<crate::chunks::EnvParams>,
     gpu: Option<Res<crate::chunks::ChunkGpuResources>>,
     pipeline_cache: Res<PipelineCache>,
     render_device: Res<RenderDevice>,
@@ -279,11 +288,6 @@ fn prepare_water_bind_group(
     mut res: ResMut<WaterBindGroupRes>,
 ) {
     let Some(pipeline) = pipeline else {
-        return;
-    };
-    let (Some(view_binding), Some(globals_binding)) =
-        (view_uniforms.uniforms.binding(), globals.buffer.binding())
-    else {
         return;
     };
     // Upload river segments when the streamer's generation moves on.
@@ -314,9 +318,6 @@ fn prepare_water_bind_group(
     let oz = (camera.0.z as f64 / SEA_SNAP).floor() * SEA_SNAP;
     res.params.set(WaterParams {
         origin: Vec4::new(ox as f32, surface.level, oz as f32, 0.0),
-        sky: env.sky,
-        haze: env.haze,
-        haze_tint: env.haze_tint,
         counts: Vec4::new(
             if surface.enabled { 1.0 } else { 0.0 },
             seg_count as f32,
@@ -338,13 +339,7 @@ fn prepare_water_bind_group(
     res.bind_group = Some(render_device.create_bind_group(
         "water_bg",
         &pipeline_cache.get_bind_group_layout(&pipeline.layout),
-        &BindGroupEntries::sequential((
-            view_binding,
-            globals_binding,
-            params_binding,
-            program_binding,
-            river_binding,
-        )),
+        &BindGroupEntries::sequential((params_binding, program_binding, river_binding)),
     ));
 }
 
@@ -353,7 +348,7 @@ fn queue_water(
     pipeline: Option<ResMut<WaterPipeline>>,
     mut opaque_render_phases: ResMut<ViewBinnedRenderPhases<Opaque3d>>,
     opaque_draw_functions: Res<DrawFunctions<Opaque3d>>,
-    views: Query<(&ExtractedView, &RenderVisibleEntities, &Msaa)>,
+    views: Query<crate::pbr_view::PbrViewQuery>,
     dirty_specializations: Res<DirtySpecializations>,
     mut pending_queues: ResMut<PendingWaterQueues>,
 ) {
@@ -362,7 +357,26 @@ fn queue_water(
     };
     let draw_function = opaque_draw_functions.read().id::<DrawWaterCommands>();
 
-    for (view, view_visible_entities, msaa) in views.iter() {
+    for (
+        view,
+        camera,
+        view_visible_entities,
+        msaa,
+        tonemapping,
+        dither,
+        shadow_filter_method,
+        distance_fog,
+    ) in views.iter()
+    {
+        let mesh_key = crate::pbr_view::view_key(
+            view,
+            camera,
+            msaa,
+            tonemapping,
+            dither,
+            shadow_filter_method,
+            distance_fog,
+        );
         let Some(opaque_phase) = opaque_render_phases.get_mut(&view.retained_view_entity) else {
             continue;
         };
@@ -383,7 +397,7 @@ fn queue_water(
         ) {
             let Ok(pipeline_id) = pipeline
                 .variants
-                .specialize(&pipeline_cache, WaterKey(*msaa))
+                .specialize(&pipeline_cache, WaterKey(mesh_key))
             else {
                 continue;
             };
@@ -406,7 +420,12 @@ fn queue_water(
     }
 }
 
-type DrawWaterCommands = (SetItemPipeline, DrawWater);
+type DrawWaterCommands = (
+    SetItemPipeline,
+    SetMeshViewBindGroup<0>,
+    SetMeshViewBindingArrayBindGroup<1>,
+    DrawWater,
+);
 
 struct DrawWater;
 
@@ -415,12 +434,12 @@ where
     P: PhaseItem,
 {
     type Param = SRes<WaterBindGroupRes>;
-    type ViewQuery = &'static ViewUniformOffset;
+    type ViewQuery = ();
     type ItemQuery = ();
 
     fn render<'w>(
         _: &P,
-        view_offset: ROQueryItem<'w, '_, Self::ViewQuery>,
+        _: ROQueryItem<'w, '_, Self::ViewQuery>,
         _: Option<ROQueryItem<'w, '_, Self::ItemQuery>>,
         res: SystemParamItem<'w, '_, Self::Param>,
         pass: &mut TrackedRenderPass<'w>,
@@ -429,7 +448,7 @@ where
         let Some(bg) = &res.bind_group else {
             return RenderCommandResult::Skip;
         };
-        pass.set_bind_group(0, bg, &[view_offset.offset]);
+        pass.set_bind_group(2, bg, &[]);
         let cells = (GRID_N - 1) as u32;
         let river_indices = res.river_buffer.as_ref().map_or(0, |(_, _, n)| *n * 6);
         pass.draw(0..(cells * cells * 6 + river_indices), 0..1);

@@ -17,11 +17,14 @@ use bevy::{
         system::{lifetimeless::SRes, SystemParamItem},
     },
     mesh::VertexBufferLayout,
+    pbr::{
+        MeshPipelineKey, MeshPipelineViewLayouts, SetMeshViewBindGroup,
+        SetMeshViewBindingArrayBindGroup,
+    },
     prelude::*,
     render::{
         camera::{DirtySpecializations, PendingQueues},
         extract_component::{ExtractComponent, ExtractComponentPlugin},
-        globals::{GlobalsBuffer, GlobalsUniform},
         mesh::allocator::MeshSlabs,
         render_phase::{
             AddRenderCommand, BinnedRenderPhaseType, DrawFunctions, InputUniformIndex, PhaseItem,
@@ -37,9 +40,6 @@ use bevy::{
             VertexFormat, VertexState, VertexStepMode,
         },
         renderer::RenderDevice,
-        view::{
-            ExtractedView, RenderVisibleEntities, ViewUniform, ViewUniformOffset, ViewUniforms,
-        },
         Extract, Render, RenderApp, RenderStartup, RenderSystems,
     },
 };
@@ -100,7 +100,10 @@ impl Plugin for GrassPlugin {
             .init_resource::<GrassEnvUniform>()
             .init_resource::<GrassStyle>()
             .add_render_command::<Opaque3d, DrawGrassCommands>()
-            .add_systems(RenderStartup, init_grass_pipeline)
+            .add_systems(
+                RenderStartup,
+                init_grass_pipeline.after(bevy::pbr::init_mesh_pipeline_view_layouts),
+            )
             .add_systems(
                 ExtractSchedule,
                 (extract_grass_instances, extract_grass_style),
@@ -217,9 +220,8 @@ fn extract_grass_style(style: Extract<Res<GrassStyle>>, mut commands: Commands) 
 /// Level environment slice for the grass shader (sun + haze + style).
 #[derive(bevy::render::render_resource::ShaderType, Clone, Copy, Default)]
 struct GrassEnv {
-    sun_dir: Vec4,
-    haze: Vec4,
-    haze_tint: Vec4,
+    /// w = coverage-eval flag; lighting comes from Bevy.
+    flags: Vec4,
     base_a: Vec4,
     base_b: Vec4,
     tip_a: Vec4,
@@ -232,6 +234,7 @@ struct GrassEnvUniform(bevy::render::render_resource::UniformBuffer<GrassEnv>);
 
 fn init_grass_pipeline(
     mut commands: Commands,
+    view_layouts: Res<MeshPipelineViewLayouts>,
     render_device: Res<RenderDevice>,
     asset_server: Res<AssetServer>,
     mut buffers: ResMut<GrassBuffers>,
@@ -254,22 +257,22 @@ fn init_grass_pipeline(
     );
     buffers.tuft_index_count = indices.len() as u32;
 
+    // Groups 0/1 are Bevy's view bind group (see `pbr_view`); ours is the
+    // per-mesh slot at 2 and carries only look parameters — grass takes
+    // its light from the app's lights like any other surface.
     let layout = BindGroupLayoutDescriptor::new(
         "grass_layout",
         &BindGroupLayoutEntries::sequential(
             ShaderStages::VERTEX_FRAGMENT,
-            (
-                uniform_buffer::<ViewUniform>(true),
-                uniform_buffer::<GlobalsUniform>(false),
-                uniform_buffer::<GrassEnv>(false), // level sun + haze
-            ),
+            (uniform_buffer::<GrassEnv>(false),),
         ),
     );
     let shader: Handle<Shader> =
         load_embedded_asset!(asset_server.as_ref(), "shaders/voxel_grass.wgsl");
     let base_descriptor = RenderPipelineDescriptor {
         label: Some("grass_draw".into()),
-        layout: vec![layout.clone()],
+        // Groups 0/1 are replaced per key by the specializer.
+        layout: vec![layout.clone(), layout.clone(), layout.clone()],
         vertex: VertexState {
             shader: shader.clone(),
             entry_point: Some("vertex".into()),
@@ -335,7 +338,12 @@ fn init_grass_pipeline(
     };
     commands.insert_resource(GrassPipeline {
         layout,
-        variants: Variants::new(GrassSpecializer, base_descriptor),
+        variants: Variants::new(
+            GrassSpecializer {
+                view_layouts: view_layouts.clone(),
+            },
+            base_descriptor,
+        ),
     });
 }
 
@@ -365,10 +373,12 @@ fn extract_grass_instances(
 
 // --- drawing -----------------------------------------------------------------
 
-struct GrassSpecializer;
+struct GrassSpecializer {
+    view_layouts: MeshPipelineViewLayouts,
+}
 
 #[derive(Copy, Clone, PartialEq, Eq, Hash, SpecializerKey)]
-struct GrassKey(Msaa);
+struct GrassKey(MeshPipelineKey);
 
 impl Specializer<RenderPipeline> for GrassSpecializer {
     type Key = GrassKey;
@@ -378,7 +388,7 @@ impl Specializer<RenderPipeline> for GrassSpecializer {
         key: Self::Key,
         descriptor: &mut RenderPipelineDescriptor,
     ) -> Result<Canonical<Self::Key>, BevyError> {
-        descriptor.multisample.count = key.0.samples();
+        crate::pbr_view::specialize_for_view(&self.view_layouts, key.0, descriptor);
         Ok(key)
     }
 }
@@ -388,8 +398,6 @@ struct PendingGrassQueues(PendingQueues);
 
 #[allow(clippy::too_many_arguments)]
 fn prepare_grass_bind_group(
-    view_uniforms: Res<ViewUniforms>,
-    globals: Res<GlobalsBuffer>,
     pipeline: Option<Res<GrassPipeline>>,
     pipeline_cache: Res<PipelineCache>,
     render_device: Res<RenderDevice>,
@@ -403,9 +411,7 @@ fn prepare_grass_bind_group(
         return;
     };
     env_uniform.0.set(GrassEnv {
-        sun_dir: env.sun_dir,
-        haze: env.haze,
-        haze_tint: env.haze_tint,
+        flags: env.flags,
         base_a: style.base_a,
         base_b: style.base_b,
         tip_a: style.tip_a,
@@ -413,17 +419,13 @@ fn prepare_grass_bind_group(
         fade: style.fade,
     });
     env_uniform.0.write_buffer(&render_device, &render_queue);
-    let (Some(view_binding), Some(globals_binding), Some(env_binding)) = (
-        view_uniforms.uniforms.binding(),
-        globals.buffer.binding(),
-        env_uniform.0.binding(),
-    ) else {
+    let Some(env_binding) = env_uniform.0.binding() else {
         return;
     };
     bind_group.0 = Some(render_device.create_bind_group(
         "grass_bg",
         &pipeline_cache.get_bind_group_layout(&pipeline.layout),
-        &BindGroupEntries::sequential((view_binding, globals_binding, env_binding)),
+        &BindGroupEntries::sequential((env_binding,)),
     ));
 }
 
@@ -432,7 +434,7 @@ fn queue_grass(
     pipeline: Option<ResMut<GrassPipeline>>,
     mut opaque_render_phases: ResMut<ViewBinnedRenderPhases<Opaque3d>>,
     opaque_draw_functions: Res<DrawFunctions<Opaque3d>>,
-    views: Query<(&ExtractedView, &RenderVisibleEntities, &Msaa)>,
+    views: Query<crate::pbr_view::PbrViewQuery>,
     dirty_specializations: Res<DirtySpecializations>,
     mut pending_queues: ResMut<PendingGrassQueues>,
 ) {
@@ -441,7 +443,26 @@ fn queue_grass(
     };
     let draw_function = opaque_draw_functions.read().id::<DrawGrassCommands>();
 
-    for (view, view_visible_entities, msaa) in views.iter() {
+    for (
+        view,
+        camera,
+        view_visible_entities,
+        msaa,
+        tonemapping,
+        dither,
+        shadow_filter_method,
+        distance_fog,
+    ) in views.iter()
+    {
+        let mesh_key = crate::pbr_view::view_key(
+            view,
+            camera,
+            msaa,
+            tonemapping,
+            dither,
+            shadow_filter_method,
+            distance_fog,
+        );
         let Some(opaque_phase) = opaque_render_phases.get_mut(&view.retained_view_entity) else {
             continue;
         };
@@ -462,7 +483,7 @@ fn queue_grass(
         ) {
             let Ok(pipeline_id) = pipeline
                 .variants
-                .specialize(&pipeline_cache, GrassKey(*msaa))
+                .specialize(&pipeline_cache, GrassKey(mesh_key))
             else {
                 continue;
             };
@@ -485,7 +506,12 @@ fn queue_grass(
     }
 }
 
-type DrawGrassCommands = (SetItemPipeline, DrawGrass);
+type DrawGrassCommands = (
+    SetItemPipeline,
+    SetMeshViewBindGroup<0>,
+    SetMeshViewBindingArrayBindGroup<1>,
+    DrawGrass,
+);
 
 struct DrawGrass;
 
@@ -494,12 +520,12 @@ where
     P: PhaseItem,
 {
     type Param = (SRes<GrassBuffers>, SRes<GrassBindGroupRes>);
-    type ViewQuery = &'static ViewUniformOffset;
+    type ViewQuery = ();
     type ItemQuery = ();
 
     fn render<'w>(
         _: &P,
-        view_offset: ROQueryItem<'w, '_, Self::ViewQuery>,
+        _: ROQueryItem<'w, '_, Self::ViewQuery>,
         _: Option<ROQueryItem<'w, '_, Self::ItemQuery>>,
         (buffers, bind_group): SystemParamItem<'w, '_, Self::Param>,
         pass: &mut TrackedRenderPass<'w>,
@@ -518,7 +544,7 @@ where
         if buffers.instance_count == 0 {
             return RenderCommandResult::Success;
         }
-        pass.set_bind_group(0, bg, &[view_offset.offset]);
+        pass.set_bind_group(2, bg, &[]);
         pass.set_vertex_buffer(0, vb.slice(..));
         pass.set_vertex_buffer(1, inst.slice(..));
         pass.set_index_buffer(ib.slice(..), IndexFormat::Uint32);

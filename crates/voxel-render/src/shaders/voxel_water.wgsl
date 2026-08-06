@@ -4,24 +4,20 @@
 // terrain heightfield at the fragment — shallow tint and a foam band where
 // the seabed grazes sea level. Opaque; matches the terrain's sun and haze.
 
-#import bevy_render::view::View
-#import bevy_render::globals::Globals
-
-@group(0) @binding(0) var<uniform> view: View;
-@group(0) @binding(1) var<uniform> globals: Globals;
+#import bevy_pbr::{
+    mesh_view_bindings::{view, globals},
+    mesh_types::MESH_FLAGS_SHADOW_RECEIVER_BIT,
+    pbr_types,
+    pbr_functions,
+}
 
 struct WaterParams {
     // xz = grid origin (camera-snapped, world meters), y = sea level, w unused.
     origin: vec4<f32>,
-    // Level environment: ambient sky rgb (reflection tint) | unused.
-    sky: vec4<f32>,
-    // Haze rgb | density, and sun-direction tint rgb | power (0 = none).
-    haze: vec4<f32>,
-    haze_tint: vec4<f32>,
     // x = ocean enabled (0/1), y = river segment count, zw unused.
     counts: vec4<f32>,
 }
-@group(0) @binding(2) var<uniform> params: WaterParams;
+@group(2) @binding(0) var<uniform> params: WaterParams;
 
 // River water segments (planning-stack WaterSeg), sharing this pipeline
 // so rivers get the exact ocean shading: one water look per level.
@@ -30,7 +26,7 @@ struct RiverSeg {
     geo: vec4<f32>,    // half width | level at a | level at b | unused
     color: vec4<f32>,  // river tint rgb | unused
 }
-@group(0) @binding(4) var<storage, read> rivers: array<RiverSeg>;
+@group(2) @binding(2) var<storage, read> rivers: array<RiverSeg>;
 
 // Generator program (64 B ops, layout mirrors voxel-core WorldOp); the
 // shoreline reads the height ops. count = (total, height ops, -, -).
@@ -47,7 +43,7 @@ struct WorldProgram {
     field: vec4<f32>,  // max_vs | unused
     ops: array<WorldOp>,
 }
-@group(0) @binding(3) var<storage, read> prog: WorldProgram;
+@group(2) @binding(1) var<storage, read> prog: WorldProgram;
 
 const GRID_N: u32 = 192u;       // vertices per side
 const RANGE_M: f32 = 30000.0;   // farthest grid reach from center
@@ -282,7 +278,6 @@ fn fragment(in: VsOut) -> @location(0) vec4<f32> {
     var n = normalize(in.normal);
     let dist = length(in.cam_rel);
     let view_dir = normalize(-in.cam_rel);
-    let sun_dir = normalize(prog.sun.xyz);
 
     var water: vec3<f32>;
     if (in.river_color.w > 0.5) {
@@ -321,23 +316,28 @@ fn fragment(in: VsOut) -> @location(0) vec4<f32> {
         water = mix(water, vec3<f32>(0.85, 0.9, 0.9), clamp(foam_band, 0.0, 1.0) * 0.8);
     }
 
-    // Fresnel toward the sky, sun glint.
-    let fresnel = pow(1.0 - max(dot(n, view_dir), 0.0), 4.0);
-    let sky = params.sky.rgb;
-    var col = mix(water, sky, fresnel * 0.65);
-    let half_dir = normalize(sun_dir + view_dir);
-    let spec = pow(max(dot(n, half_dir), 0.0), 240.0) * 1.4;
-    col += vec3<f32>(1.0, 0.95, 0.85) * spec;
+    // Water is a smooth dielectric: hand the surface to Bevy's PBR and let
+    // it do fresnel, the sun's specular highlight, ambient/environment
+    // reflection, fog and tonemapping — the same treatment every other
+    // surface in the app gets.
+    var pbr_input = pbr_types::pbr_input_new();
+    pbr_input.material.base_color = vec4<f32>(water, 1.0);
+    pbr_input.material.perceptual_roughness = 0.08;
+    pbr_input.material.metallic = 0.0;
+    pbr_input.material.reflectance = vec3<f32>(0.35);
+    pbr_input.material.flags = pbr_types::STANDARD_MATERIAL_FLAGS_FOG_ENABLED_BIT;
+    pbr_input.frag_coord = in.clip;
+    pbr_input.world_position = vec4<f32>(
+        view.world_position.x + in.cam_rel.x,
+        view.world_position.y + in.cam_rel.y,
+        view.world_position.z + in.cam_rel.z,
+        1.0,
+    );
+    pbr_input.world_normal = n;
+    pbr_input.N = n;
+    pbr_input.V = view_dir;
+    pbr_input.flags = MESH_FLAGS_SHADOW_RECEIVER_BIT;
 
-    // Sun light + haze, matching the terrain shader.
-    let nd = max(dot(n, sun_dir), 0.0);
-    col *= 0.35 + 0.75 * nd;
-    let haze_amount = 1.0 - exp(-dist * params.haze.w);
-    var haze_color = params.haze.rgb;
-    if (params.haze_tint.w > 0.0) {
-        let sun_amount = pow(max(dot(-view_dir, sun_dir), 0.0), params.haze_tint.w);
-        haze_color = mix(haze_color, params.haze_tint.rgb, sun_amount);
-    }
-    col = mix(col, haze_color, haze_amount);
-    return vec4<f32>(col, 1.0);
+    let color = pbr_functions::apply_pbr_lighting(pbr_input);
+    return pbr_functions::main_pass_post_lighting_processing(pbr_input, color);
 }

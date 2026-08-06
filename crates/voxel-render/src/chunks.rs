@@ -32,16 +32,13 @@ use bevy::{
     },
     math::DVec3,
     mesh::VertexBufferLayout,
-    light::ShadowFilteringMethod,
     pbr::{
-        tonemapping_pipeline_key, MeshPipelineKey, MeshPipelineViewLayoutKey,
-        MeshPipelineViewLayouts, SetMeshViewBindGroup, SetMeshViewBindingArrayBindGroup,
+        MeshPipelineKey, MeshPipelineViewLayouts, SetMeshViewBindGroup,
+        SetMeshViewBindingArrayBindGroup,
     },
     prelude::*,
-    shader::ShaderDefVal,
-    core_pipeline::tonemapping::{DebandDither, Tonemapping},
     render::{
-        camera::{DirtySpecializations, ExtractedCamera, PendingQueues},
+        camera::{DirtySpecializations, PendingQueues},
         extract_component::{ExtractComponent, ExtractComponentPlugin},
         mesh::allocator::MeshSlabs,
         render_phase::{
@@ -61,7 +58,6 @@ use bevy::{
         },
         renderer::{RenderContext, RenderDevice, RenderGraph, RenderQueue},
 
-        view::{ExtractedView, RenderVisibleEntities},
         Extract, Render, RenderApp, RenderStartup, RenderSystems,
     },
 };
@@ -279,35 +275,14 @@ impl Default for GpuMaterialTable {
     }
 }
 
-/// Level lighting + atmosphere for the chunk draw — environment as data.
-#[derive(Resource, ShaderType, Clone, Copy)]
+/// Per-view render flags the voxel shaders still need from the engine.
+/// Lighting and atmosphere are NOT here: voxel surfaces shade through
+/// Bevy's PBR, so the app's lights, ambient and `DistanceFog` drive them
+/// like any other surface.
+#[derive(Resource, ShaderType, Clone, Copy, Default, Debug)]
 pub struct EnvParams {
-    /// Haze rgb | density (per meter).
-    pub haze: Vec4,
-    /// Sun-direction haze tint rgb | tint power (0 = untinted haze).
-    pub haze_tint: Vec4,
-    /// Sun rgb | strength (0 = sunless interior).
-    pub sun: Vec4,
-    /// Ambient sky rgb | ambient strength.
-    pub sky: Vec4,
-    /// Ambient ground rgb | up-ness exponent.
-    pub ground: Vec4,
-    /// Sun direction (world space, toward the sun) | unused.
-    pub sun_dir: Vec4,
-}
-
-impl Default for EnvParams {
-    fn default() -> Self {
-        // Sun-lit outdoors.
-        Self {
-            haze: Vec4::new(0.62, 0.72, 0.88, 0.00006),
-            haze_tint: Vec4::new(0.92, 0.85, 0.72, 4.0),
-            sun: Vec4::new(1.0, 0.96, 0.88, 0.85),
-            sky: Vec4::new(0.55, 0.70, 0.95, 0.3),
-            ground: Vec4::new(0.25, 0.24, 0.20, 1.0),
-            sun_dir: Vec4::new(0.55, 0.5, 0.32, 0.0),
-        }
-    }
+    /// x = coverage-eval mode (monotone geometry over a magenta clear).
+    pub flags: Vec4,
 }
 
 /// The continuous LOD field the density band derives from: every chunk at
@@ -803,7 +778,7 @@ fn init_chunk_resources(
             (
                 uniform_buffer::<ChunkDrawUniform>(true), // per-chunk offset
                 uniform_buffer::<GpuMaterialTable>(false), // material table
-                uniform_buffer::<EnvParams>(false),       // lighting/atmosphere
+                uniform_buffer::<EnvParams>(false),       // render flags
             ),
         ),
     );
@@ -1700,99 +1675,10 @@ impl Specializer<RenderPipeline> for VoxelChunksSpecializer {
         key: Self::Key,
         descriptor: &mut RenderPipelineDescriptor,
     ) -> Result<Canonical<Self::Key>, BevyError> {
-        let mesh_key = key.0;
-        descriptor.multisample.count = mesh_key.msaa_samples();
-
-        let view_layout = self
-            .view_layouts
-            .get_view_layout(MeshPipelineViewLayoutKey::from(mesh_key));
-        descriptor.layout[0] = view_layout.main_layout.clone();
-        descriptor.layout[1] = view_layout.binding_array_layout.clone();
-
-        let mut defs: Vec<ShaderDefVal> = vec![
-            // `bevy_pbr::pbr_functions` pulls in the material bindings even
-            // though we never sample them; the group index has to resolve.
-            ShaderDefVal::UInt("MATERIAL_BIND_GROUP".into(), 3),
-        ];
-        if mesh_key.msaa_samples() > 1 {
-            defs.push("MULTISAMPLED".into());
-        }
-        if mesh_key.contains(MeshPipelineKey::DISTANCE_FOG) {
-            defs.push("DISTANCE_FOG".into());
-        }
-        // Without a filter method `sample_shadow_map` returns 0 — every
-        // lit surface reads as fully shadowed.
-        let filter = mesh_key.intersection(MeshPipelineKey::SHADOW_FILTER_METHOD_RESERVED_BITS);
-        if filter == MeshPipelineKey::SHADOW_FILTER_METHOD_HARDWARE_2X2 {
-            defs.push("SHADOW_FILTER_METHOD_HARDWARE_2X2".into());
-        } else if filter == MeshPipelineKey::SHADOW_FILTER_METHOD_TEMPORAL {
-            defs.push("SHADOW_FILTER_METHOD_TEMPORAL".into());
-        } else {
-            defs.push("SHADOW_FILTER_METHOD_GAUSSIAN".into());
-        }
-        if mesh_key.contains(MeshPipelineKey::TONEMAP_IN_SHADER) {
-            defs.push("TONEMAP_IN_SHADER".into());
-            defs.push(ShaderDefVal::UInt(
-                "TONEMAPPING_LUT_TEXTURE_BINDING_INDEX".into(),
-                bevy::pbr::TONEMAPPING_LUT_TEXTURE_BINDING_INDEX,
-            ));
-            defs.push(ShaderDefVal::UInt(
-                "TONEMAPPING_LUT_SAMPLER_BINDING_INDEX".into(),
-                bevy::pbr::TONEMAPPING_LUT_SAMPLER_BINDING_INDEX,
-            ));
-            defs.push(tonemap_method_def(mesh_key));
-            if mesh_key.contains(MeshPipelineKey::DEBAND_DITHER) {
-                defs.push("DEBAND_DITHER".into());
-            }
-        }
-        descriptor.vertex.shader_defs = defs.clone();
-        if let Some(fragment) = descriptor.fragment.as_mut() {
-            fragment.shader_defs = defs;
-            if let Some(Some(target)) = fragment.targets.first_mut() {
-                target.format = mesh_key.target_format();
-            }
-        }
+        crate::pbr_view::specialize_for_view(&self.view_layouts, key.0, descriptor);
         Ok(key)
     }
 }
-
-/// The tonemapping method def matching the key's reserved bits — the LUT
-/// path in `main_pass_post_lighting_processing` switches on it.
-fn tonemap_method_def(key: MeshPipelineKey) -> ShaderDefVal {
-    let method = key.intersection(MeshPipelineKey::TONEMAP_METHOD_RESERVED_BITS);
-    if method == MeshPipelineKey::TONEMAP_METHOD_NONE {
-        "TONEMAP_METHOD_NONE".into()
-    } else if method == MeshPipelineKey::TONEMAP_METHOD_REINHARD {
-        "TONEMAP_METHOD_REINHARD".into()
-    } else if method == MeshPipelineKey::TONEMAP_METHOD_REINHARD_LUMINANCE {
-        "TONEMAP_METHOD_REINHARD_LUMINANCE".into()
-    } else if method == MeshPipelineKey::TONEMAP_METHOD_ACES_FITTED {
-        "TONEMAP_METHOD_ACES_FITTED".into()
-    } else if method == MeshPipelineKey::TONEMAP_METHOD_AGX {
-        "TONEMAP_METHOD_AGX".into()
-    } else if method == MeshPipelineKey::TONEMAP_METHOD_SOMEWHAT_BORING_DISPLAY_TRANSFORM {
-        "TONEMAP_METHOD_SOMEWHAT_BORING_DISPLAY_TRANSFORM".into()
-    } else if method == MeshPipelineKey::TONEMAP_METHOD_BLENDER_FILMIC {
-        "TONEMAP_METHOD_BLENDER_FILMIC".into()
-    } else if method == MeshPipelineKey::TONEMAP_METHOD_PBR_NEUTRAL {
-        "TONEMAP_METHOD_PBR_NEUTRAL".into()
-    } else {
-        "TONEMAP_METHOD_TONY_MC_MAPFACE".into()
-    }
-}
-
-/// Everything the pipeline key depends on, mirroring the inputs of Bevy's
-/// own mesh view key.
-type VoxelViewQuery = (
-    &'static ExtractedView,
-    Option<&'static ExtractedCamera>,
-    &'static RenderVisibleEntities,
-    &'static Msaa,
-    Option<&'static Tonemapping>,
-    Option<&'static DebandDither>,
-    Option<&'static ShadowFilteringMethod>,
-    Has<DistanceFog>,
-);
 
 #[derive(Default, Deref, DerefMut, Resource)]
 struct PendingVoxelQueues(PendingQueues);
@@ -1828,7 +1714,7 @@ fn queue_voxel_chunks(
     pipeline: Option<ResMut<ChunkDrawPipeline>>,
     mut opaque_render_phases: ResMut<ViewBinnedRenderPhases<Opaque3d>>,
     opaque_draw_functions: Res<DrawFunctions<Opaque3d>>,
-    views: Query<VoxelViewQuery>,
+    views: Query<crate::pbr_view::PbrViewQuery>,
     dirty_specializations: Res<DirtySpecializations>,
     mut pending_queues: ResMut<PendingVoxelQueues>,
 ) {
@@ -1855,33 +1741,15 @@ fn queue_voxel_chunks(
             continue;
         };
         let view_pending = pending_queues.prepare_for_new_frame(view.retained_view_entity);
-        // Mirrors Bevy's own view key so our pipeline and its mesh view
-        // bind group agree on layout, defs and target format.
-        let mut mesh_key = MeshPipelineKey::from_msaa_samples(msaa.samples())
-            | MeshPipelineKey::from_target_format(view.target_format);
-        if !camera.is_some_and(|camera| camera.hdr) {
-            if let Some(tonemapping) = tonemapping {
-                mesh_key |= MeshPipelineKey::TONEMAP_IN_SHADER;
-                mesh_key |= tonemapping_pipeline_key(*tonemapping);
-            }
-            if let Some(DebandDither::Enabled) = dither {
-                mesh_key |= MeshPipelineKey::DEBAND_DITHER;
-            }
-        }
-        if distance_fog {
-            mesh_key |= MeshPipelineKey::DISTANCE_FOG;
-        }
-        match shadow_filter_method.copied().unwrap_or_default() {
-            ShadowFilteringMethod::Hardware2x2 => {
-                mesh_key |= MeshPipelineKey::SHADOW_FILTER_METHOD_HARDWARE_2X2;
-            }
-            ShadowFilteringMethod::Gaussian => {
-                mesh_key |= MeshPipelineKey::SHADOW_FILTER_METHOD_GAUSSIAN;
-            }
-            ShadowFilteringMethod::Temporal => {
-                mesh_key |= MeshPipelineKey::SHADOW_FILTER_METHOD_TEMPORAL;
-            }
-        }
+        let mesh_key = crate::pbr_view::view_key(
+            view,
+            camera,
+            msaa,
+            tonemapping,
+            dither,
+            shadow_filter_method,
+            distance_fog,
+        );
 
         for &main_entity in
             dirty_specializations.iter_to_dequeue(view.retained_view_entity, visible)

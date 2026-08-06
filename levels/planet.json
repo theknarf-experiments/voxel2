@@ -10,36 +10,6 @@
     "merge_k": 3.0
   },
   "environment": {
-    "haze_color": [
-      0.62,
-      0.72,
-      0.88
-    ],
-    "haze_density": 6e-05,
-    "haze_sun_tint": [
-      0.92,
-      0.85,
-      0.72
-    ],
-    "haze_tint_power": 4.0,
-    "sun_color": [
-      1.0,
-      0.96,
-      0.88
-    ],
-    "sun_strength": 0.85,
-    "ambient_sky": [
-      0.55,
-      0.7,
-      0.95
-    ],
-    "ambient_ground": [
-      0.25,
-      0.24,
-      0.2
-    ],
-    "ambient_strength": 0.3,
-    "ambient_exponent": 1.0,
     "sun_direction": [
       0.55,
       0.5,

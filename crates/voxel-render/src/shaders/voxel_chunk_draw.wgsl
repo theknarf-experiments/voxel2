@@ -45,16 +45,9 @@ struct MaterialTable {
 }
 @group(2) @binding(1) var<uniform> mats: MaterialTable;
 
-// Shared with the grass/water pipelines, which still shade themselves.
-// The chunk pass reads only `sun_dir.w` (the coverage-eval flag) — its
-// lighting comes from Bevy.
+// Engine render flags. Lighting is Bevy's.
 struct EnvParams {
-    haze: vec4<f32>,      // rgb | density
-    haze_tint: vec4<f32>, // rgb | tint power (0 = untinted)
-    sun: vec4<f32>,       // rgb | strength
-    sky: vec4<f32>,       // ambient sky rgb | ambient strength
-    ground: vec4<f32>,    // ambient ground rgb | up exponent
-    sun_dir: vec4<f32>,   // toward the sun | unused
+    flags: vec4<f32>, // x = coverage-eval mode
 }
 @group(2) @binding(2) var<uniform> env: EnvParams;
 
@@ -296,7 +289,7 @@ fn canopy_material(m: WorldMaterial, world: vec3<f32>, n: vec3<f32>, dist: f32) 
 fn fragment(in: VsOut) -> @location(0) vec4<f32> {
     // Coverage-eval mode: monotone geometry against a magenta background,
     // tinted by LOD level so cracks identify the leaking seam pair.
-    if (env.sun_dir.w > 0.5) {
+    if (env.flags.x > 0.5) {
         if (in.material == 255u) {
             // Failed parity snap (thin feature) — debug-highlighted.
             return vec4<f32>(1.0, 0.0, 0.0, 1.0);
