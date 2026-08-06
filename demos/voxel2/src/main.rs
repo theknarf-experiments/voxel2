@@ -57,7 +57,7 @@ fn scene_for(level_path: &std::path::Path) -> Scene {
             // Interiors are lit by the level's own emissive materials.
             sun_illuminance: None,
             ambient_color: Color::srgb(0.6, 0.7, 0.9),
-            ambient_brightness: 700.0,
+            ambient_brightness: 3_800.0,
             fog: None,
         },
         _ => Scene {
@@ -66,12 +66,9 @@ fn scene_for(level_path: &std::path::Path) -> Scene {
             look: Vec3::new(0.4, -0.35, 0.4),
             walk_speed: 60.0,
             run_speed: 600.0,
-            // Low for daylight (Bevy's default exposure is EV100 9.7), because
-            // the level's material colors are authored as final look colors
-            // rather than physical albedo. Real albedos want ~15 000 lux.
-            sun_illuminance: Some(2_800.0),
+            sun_illuminance: Some(light_consts::lux::FULL_DAYLIGHT),
             ambient_color: Color::srgb(0.7, 0.8, 1.0),
-            ambient_brightness: 200.0,
+            ambient_brightness: 1_100.0,
             fog: Some(DistanceFog {
                 color: Color::srgb(0.62, 0.72, 0.88),
                 directional_light_color: Color::srgb(0.92, 0.85, 0.72),

@@ -287,13 +287,13 @@ fn fragment(in: VsOut) -> @location(0) vec4<f32> {
         let edge = abs(in.strip.x);
         let depth = (1.0 - edge) * in.strip.y * 1.4;
         let deep = in.river_color.rgb * 0.5;
-        let shallow = mix(in.river_color.rgb, vec3<f32>(0.45, 0.6, 0.6), 0.35);
+        let shallow = mix(in.river_color.rgb, vec3<f32>(0.084, 0.112, 0.112), 0.35);
         water = mix(shallow, deep, smoothstep(0.2, 2.6, depth));
 
         let drift = in.flow * globals.time * 1.6;
         let foam_noise = value_noise2((in.world_xz - drift) * 1.3);
         let foam_band = smoothstep(0.55, 0.95, edge) * (0.45 + 0.55 * foam_noise);
-        water = mix(water, vec3<f32>(0.85, 0.9, 0.9), clamp(foam_band, 0.0, 1.0) * 0.7);
+        water = mix(water, vec3<f32>(0.1587, 0.168, 0.168), clamp(foam_band, 0.0, 1.0) * 0.7);
 
         // Flow ripples: a scrolled noise gradient perturbs the normal
         // (4 taps — per-pixel noise budgets matter at fragment cost).
@@ -306,14 +306,14 @@ fn fragment(in: VsOut) -> @location(0) vec4<f32> {
         // Ocean: depth-based color from the seabed heightfield.
         let bed = seabed_height(in.world_xz);
         let depth = max(params.origin.y - bed, 0.0);
-        let deep = vec3<f32>(0.04, 0.13, 0.22);
-        let shallow = vec3<f32>(0.10, 0.34, 0.36);
+        let deep = vec3<f32>(0.0075, 0.0243, 0.0411);
+        let shallow = vec3<f32>(0.0187, 0.0635, 0.0672);
         water = mix(shallow, deep, smoothstep(1.5, 26.0, depth));
 
         // Foam where the seabed grazes sea level, animated by wave phase.
         let foam_noise = value_noise2(in.world_xz * 0.7 + globals.time * 0.35);
         let foam_band = smoothstep(2.2, 0.3, depth) * (0.55 + 0.45 * foam_noise);
-        water = mix(water, vec3<f32>(0.85, 0.9, 0.9), clamp(foam_band, 0.0, 1.0) * 0.8);
+        water = mix(water, vec3<f32>(0.1587, 0.168, 0.168), clamp(foam_band, 0.0, 1.0) * 0.8);
     }
 
     // Water is a smooth dielectric: hand the surface to Bevy's PBR and let

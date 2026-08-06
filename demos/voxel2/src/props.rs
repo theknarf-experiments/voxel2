@@ -69,7 +69,7 @@ pub struct PropTable(pub HashMap<String, PropClass>);
 impl PropTable {
     /// The planet demo's forest and boulders.
     fn planet() -> Self {
-        let bark = Color::srgb(0.35, 0.24, 0.15);
+        let bark = Color::srgb(0.1462, 0.0916, 0.0469);
         let mut classes = HashMap::new();
         classes.insert(
             "tree".to_string(),
@@ -78,7 +78,7 @@ impl PropTable {
                     PropVariant {
                         model: Model::Broadleaf,
                         trunk: bark,
-                        foliage: Color::srgb(0.3, 0.44, 0.16),
+                        foliage: Color::srgb(0.1214, 0.1910, 0.0518),
                         impostor: Some(Impostor {
                             shape: ImpostorShape::Diamond,
                             color: [0.16, 0.26, 0.08],
@@ -88,7 +88,7 @@ impl PropTable {
                     PropVariant {
                         model: Model::Conifer,
                         trunk: bark,
-                        foliage: Color::srgb(0.18, 0.38, 0.16),
+                        foliage: Color::srgb(0.0618, 0.1612, 0.0518),
                         impostor: Some(Impostor {
                             shape: ImpostorShape::Cone,
                             color: [0.1, 0.22, 0.09],
@@ -107,7 +107,7 @@ impl PropTable {
                 variants: vec![PropVariant {
                     model: Model::Rock,
                     trunk: bark,
-                    foliage: Color::srgb(0.44, 0.42, 0.4),
+                    foliage: Color::srgb(0.1910, 0.1810, 0.1711),
                     impostor: None,
                 }],
                 blob_shadow: false,
