@@ -109,9 +109,11 @@ pub(crate) fn specialize_for_view(
 /// bindings they touch depend on.
 fn shader_defs(key: MeshPipelineKey) -> Vec<ShaderDefVal> {
     let mut defs = vec![
-        // `bevy_pbr::pbr_functions` pulls in the material bindings even
-        // though we never sample them; the group index has to resolve.
-        ShaderDefVal::UInt("MATERIAL_BIND_GROUP".into(), 3),
+        // `bevy_pbr::pbr_functions` pulls in `pbr_bindings`, which declares
+        // a `StandardMaterial` at this group. We never sample it (so naga
+        // strips it), but it must not land on group 3, where our own
+        // material lives.
+        ShaderDefVal::UInt("MATERIAL_BIND_GROUP".into(), 9),
     ];
     if key.msaa_samples() > 1 {
         defs.push("MULTISAMPLED".into());

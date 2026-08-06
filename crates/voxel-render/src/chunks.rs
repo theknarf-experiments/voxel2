@@ -33,7 +33,7 @@ use bevy::{
     math::DVec3,
     mesh::VertexBufferLayout,
     pbr::{
-        MeshPipelineKey, MeshPipelineViewLayouts, SetMeshViewBindGroup,
+        MeshPipelineKey, MeshPipelineViewLayouts, SetMaterialBindGroup, SetMeshViewBindGroup,
         SetMeshViewBindingArrayBindGroup,
     },
     prelude::*,
@@ -49,7 +49,8 @@ use bevy::{
         render_resource::{
             binding_types::{storage_buffer_read_only_sized, storage_buffer_sized, uniform_buffer},
             BindGroup, BindGroupEntries, BindGroupLayoutDescriptor, BindGroupLayoutEntries, Buffer,
-            BufferDescriptor, BufferInitDescriptor, BufferUsages, CachedComputePipelineId,
+            AsBindGroup, BufferDescriptor, BufferInitDescriptor, BufferUsages,
+            CachedComputePipelineId,
             Canonical, ColorTargetState, ColorWrites, CompareFunction, ComputePassDescriptor,
             ComputePipelineDescriptor, DepthStencilState, DynamicUniformBuffer, FragmentState,
             IndexFormat, MapMode, PipelineCache, RenderPipeline, RenderPipelineDescriptor,
@@ -65,6 +66,7 @@ use bevy::{
 use voxel_core::csg::CsgOp;
 use voxel_core::ChunkKey;
 
+use crate::material::{VoxelTerrainMaterial, VOXEL_TERRAIN_MATERIAL};
 use crate::slab::{SlabAlloc, SlabAllocator};
 
 /// Density samples per axis: 33 corners + apron covering corners -2..=35
@@ -255,12 +257,12 @@ pub const MATERIAL_SLOTS: usize = 8;
 pub struct WorldMaterials(pub Vec<WorldMaterial>);
 
 #[derive(ShaderType, Clone)]
-pub(crate) struct GpuMaterialTable {
+pub struct GpuMaterialTable {
     materials: [WorldMaterial; MATERIAL_SLOTS],
 }
 
 impl GpuMaterialTable {
-    fn from_slice(mats: &[WorldMaterial]) -> Self {
+    pub fn from_slice(mats: &[WorldMaterial]) -> Self {
         let mut materials = [WorldMaterial::default(); MATERIAL_SLOTS];
         for (i, m) in mats.iter().take(MATERIAL_SLOTS).enumerate() {
             materials[i] = *m;
@@ -380,8 +382,14 @@ impl Plugin for VoxelChunksPlugin {
         app.init_resource::<ChunkCommandQueue>()
             .init_resource::<SharedRenderStats>()
             .insert_resource(ChunkReadyChannel { rx: ready_rx })
-            .add_plugins(ExtractComponentPlugin::<VoxelTerrainMarker>::default())
-            .add_systems(Startup, spawn_terrain_marker);
+            .add_plugins((
+                ExtractComponentPlugin::<VoxelTerrainMarker>::default(),
+                // Gives the terrain material the usual asset lifecycle:
+                // extraction, prepared bind groups, a bind group allocator.
+                MaterialPlugin::<VoxelTerrainMaterial>::default(),
+            ))
+            .add_systems(Startup, spawn_terrain_marker)
+            .add_systems(Update, sync_terrain_material);
 
         let stats = app.world().resource::<SharedRenderStats>().clone();
 
@@ -423,9 +431,27 @@ impl Plugin for VoxelChunksPlugin {
     }
 }
 
+/// Publish the level's recipes into the material asset. Updating the
+/// asset in place means a level reload re-shades without respawning.
+fn sync_terrain_material(
+    recipes: Res<WorldMaterials>,
+    mut assets: ResMut<Assets<VoxelTerrainMaterial>>,
+) {
+    if !recipes.is_changed() && assets.contains(&VOXEL_TERRAIN_MATERIAL) {
+        return;
+    }
+    let _ = assets.insert(
+        &VOXEL_TERRAIN_MATERIAL,
+        VoxelTerrainMaterial::from_recipes(&recipes.0),
+    );
+}
+
 fn spawn_terrain_marker(mut commands: Commands) {
     commands.spawn((
         VoxelTerrainMarker,
+        // What makes `SetMaterialBindGroup` find the material: Bevy
+        // extracts this from any visible entity, mesh or not.
+        MeshMaterial3d(VOXEL_TERRAIN_MATERIAL),
         Visibility::default(),
         Transform::default(),
         // Effectively infinite: chunk-level culling is a later milestone.
@@ -594,7 +620,6 @@ pub(crate) struct ChunkGpuResources {
     slab: SlabAllocator,
     gen_uniforms: DynamicUniformBuffer<ChunkParams>,
     pub(crate) program_buffer: StorageBuffer<GpuWorldProgram>,
-    materials_uniform: UniformBuffer<GpuMaterialTable>,
     env_uniform: UniformBuffer<EnvParams>,
     draw_uniforms: DynamicUniformBuffer<ChunkDrawUniform>,
     map_tx: crossbeam_channel::Sender<usize>,
@@ -696,7 +721,6 @@ fn init_chunk_resources(
         slab: SlabAllocator::new(),
         gen_uniforms: DynamicUniformBuffer::default(),
         program_buffer: StorageBuffer::default(),
-        materials_uniform: UniformBuffer::default(),
         env_uniform: UniformBuffer::default(),
         draw_uniforms: DynamicUniformBuffer::default(),
         map_tx,
@@ -777,7 +801,6 @@ fn init_chunk_resources(
             ShaderStages::VERTEX_FRAGMENT,
             (
                 uniform_buffer::<ChunkDrawUniform>(true), // per-chunk offset
-                uniform_buffer::<GpuMaterialTable>(false), // material table
                 uniform_buffer::<EnvParams>(false),       // render flags
             ),
         ),
@@ -789,9 +812,12 @@ fn init_chunk_resources(
         // Groups 0/1 are replaced per key by the specializer (the view
         // layout depends on msaa, fog and tonemapping).
         layout: vec![
+            // 0/1 replaced per key by the specializer (Bevy's view layouts).
             chunk_layout.clone(),
             chunk_layout.clone(),
             chunk_layout.clone(),
+            // 3: the terrain material, exactly where Bevy puts materials.
+            VoxelTerrainMaterial::bind_group_layout_descriptor(&render_device),
         ],
         vertex: VertexState {
             shader: draw_shader.clone(),
@@ -856,13 +882,11 @@ fn extract_chunk_commands(
 fn extract_program(
     program: Extract<Res<WorldProgram>>,
     field: Extract<Res<FieldParams>>,
-    materials: Extract<Res<WorldMaterials>>,
     env: Extract<Res<EnvParams>>,
     mut commands: Commands,
 ) {
     commands.insert_resource(program.clone());
     commands.insert_resource(**field);
-    commands.insert_resource(materials.clone());
     commands.insert_resource(**env);
 }
 
@@ -933,12 +957,7 @@ fn plan_frame(
     mut batches: ResMut<FrameBatches>,
     mut draw_list: ResMut<VoxelDrawList>,
     camera: Res<ExtractedCameraPos>,
-    (program, field, materials, env): (
-        Res<WorldProgram>,
-        Res<FieldParams>,
-        Res<WorldMaterials>,
-        Res<EnvParams>,
-    ),
+    (program, field, env): (Res<WorldProgram>, Res<FieldParams>, Res<EnvParams>),
     frustum: Res<ExtractedFrustum>,
     stats: Res<SharedRenderStats>,
     ready_tx: Res<ChunkReadySender>,
@@ -1477,10 +1496,6 @@ fn plan_frame(
         .set(GpuWorldProgram::from_program(&program, &field));
     gpu.program_buffer
         .write_buffer(&render_device, &render_queue);
-    gpu.materials_uniform
-        .set(GpuMaterialTable::from_slice(&materials.0));
-    gpu.materials_uniform
-        .write_buffer(&render_device, &render_queue);
     gpu.env_uniform.set(*env);
     gpu.env_uniform.write_buffer(&render_device, &render_queue);
 
@@ -1693,18 +1708,16 @@ fn prepare_view_bind_group(
     let (Some(pipeline), Some(gpu)) = (pipeline, gpu) else {
         return;
     };
-    let (Some(chunk_binding), Some(materials_binding), Some(env_binding)) = (
-        gpu.draw_uniforms.binding(),
-        gpu.materials_uniform.binding(),
-        gpu.env_uniform.binding(),
-    ) else {
+    let (Some(chunk_binding), Some(env_binding)) =
+        (gpu.draw_uniforms.binding(), gpu.env_uniform.binding())
+    else {
         bind_groups.chunk = None;
         return;
     };
     bind_groups.chunk = Some(render_device.create_bind_group(
         "voxel_chunks_chunk_bg",
         &pipeline_cache.get_bind_group_layout(&pipeline.chunk_layout),
-        &BindGroupEntries::sequential((chunk_binding, materials_binding, env_binding)),
+        &BindGroupEntries::sequential((chunk_binding, env_binding)),
     ));
 }
 
@@ -1789,6 +1802,7 @@ type DrawVoxelChunksCommands = (
     SetItemPipeline,
     SetMeshViewBindGroup<0>,
     SetMeshViewBindingArrayBindGroup<1>,
+    SetMaterialBindGroup<3>,
     DrawVoxelChunks,
 );
 

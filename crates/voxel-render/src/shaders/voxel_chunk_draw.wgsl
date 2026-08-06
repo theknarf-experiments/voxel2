@@ -27,6 +27,8 @@ struct ChunkDrawUniform {
 }
 @group(2) @binding(0) var<uniform> chunk: ChunkDrawUniform;
 
+// The terrain material at group 3 — the same group index Bevy binds a
+// `StandardMaterial` at, bound by the same `SetMaterialBindGroup`.
 // Material recipes (128 B each, layout mirrors voxel-render WorldMaterial).
 // head.x = kind: 0 = surface (base/grain/bands/grime/streaks/moss/emissive),
 // 1 = zoned altitude terrain.
@@ -43,13 +45,13 @@ struct WorldMaterial {
 struct MaterialTable {
     materials: array<WorldMaterial, 8>,
 }
-@group(2) @binding(1) var<uniform> mats: MaterialTable;
+@group(3) @binding(0) var<uniform> mats: MaterialTable;
 
 // Engine render flags. Lighting is Bevy's.
 struct EnvParams {
     flags: vec4<f32>, // x = coverage-eval mode
 }
-@group(2) @binding(2) var<uniform> env: EnvParams;
+@group(2) @binding(1) var<uniform> env: EnvParams;
 
 struct VsIn {
     // Quantized position: unorm16 x4 mapping [-8, 40] voxels (w unused).
