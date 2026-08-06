@@ -28,7 +28,8 @@ use bevy::{
         render_resource::{
             binding_types::{storage_buffer_read_only_sized, uniform_buffer},
             BindGroup, BindGroupEntries, BindGroupLayoutDescriptor, BindGroupLayoutEntries,
-            Canonical, ColorTargetState, ColorWrites, CompareFunction, DepthStencilState,
+            Buffer, BufferInitDescriptor, BufferUsages, Canonical, ColorTargetState,
+            ColorWrites, CompareFunction, DepthStencilState,
             FragmentState, PipelineCache, RenderPipeline, RenderPipelineDescriptor, ShaderStages,
             ShaderType, Specializer, SpecializerKey, TextureFormat, UniformBuffer, Variants,
             VertexState,
@@ -50,6 +51,29 @@ struct WaterParams {
     sky: Vec4,
     haze: Vec4,
     haze_tint: Vec4,
+    /// x = ocean enabled (0/1), y = river segment count.
+    counts: Vec4,
+}
+
+/// One river water segment for the GPU (layout twins the WGSL RiverSeg).
+#[derive(Clone, Copy, Default, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
+#[repr(C)]
+pub struct RiverSegGpu {
+    /// a.xz | b.xz (world meters).
+    pub ab: [f32; 4],
+    /// half width | level at a | level at b | unused.
+    pub geo: [f32; 4],
+    /// river tint rgb | unused.
+    pub color: [f32; 4],
+}
+
+/// River segments near the camera, maintained by the engine's streamer;
+/// drawn by the water pipeline so rivers share the ocean's shading.
+/// `generation` bumps on change so the render world re-uploads.
+#[derive(Resource, Clone, Default)]
+pub struct RiverWater {
+    pub segments: Vec<RiverSegGpu>,
+    pub generation: u64,
 }
 
 /// Marker entity anchoring the water draw.
@@ -68,13 +92,14 @@ pub struct WaterSurface {
 
 fn apply_water_toggle(
     surface: Res<WaterSurface>,
+    rivers: Res<RiverWater>,
     mut markers: Query<&mut Visibility, With<WaterMarker>>,
 ) {
-    if !surface.is_changed() {
-        return;
-    }
+    // The one water draw covers the ocean AND rivers: visible if either
+    // has something to show.
+    let show = surface.enabled || !rivers.segments.is_empty();
     for mut visibility in &mut markers {
-        *visibility = if surface.enabled {
+        *visibility = if show {
             Visibility::Visible
         } else {
             Visibility::Hidden
@@ -82,8 +107,15 @@ fn apply_water_toggle(
     }
 }
 
-fn extract_water_surface(surface: Extract<Res<WaterSurface>>, mut commands: Commands) {
+fn extract_water_surface(
+    surface: Extract<Res<WaterSurface>>,
+    rivers: Extract<Res<RiverWater>>,
+    mut commands: Commands,
+) {
     commands.insert_resource(**surface);
+    if rivers.is_changed() {
+        commands.insert_resource((**rivers).clone());
+    }
 }
 
 pub struct WaterPlugin;
@@ -92,6 +124,7 @@ impl Plugin for WaterPlugin {
     fn build(&self, app: &mut App) {
         embedded_asset!(app, "shaders/voxel_water.wgsl");
         app.init_resource::<WaterSurface>()
+            .init_resource::<RiverWater>()
             .add_plugins(ExtractComponentPlugin::<WaterMarker>::default())
             .add_systems(Startup, spawn_water_marker)
             .add_systems(Update, apply_water_toggle);
@@ -104,6 +137,7 @@ impl Plugin for WaterPlugin {
             .init_resource::<WaterBindGroupRes>()
             .init_resource::<ExtractedWaterCamera>()
             .init_resource::<WaterSurface>()
+            .init_resource::<RiverWater>()
             .add_render_command::<Opaque3d, DrawWaterCommands>()
             .add_systems(RenderStartup, init_water_pipeline)
             .add_systems(
@@ -140,6 +174,8 @@ struct WaterPipeline {
 struct WaterBindGroupRes {
     bind_group: Option<BindGroup>,
     params: UniformBuffer<WaterParams>,
+    /// Uploaded river segments (buffer, generation, count).
+    river_buffer: Option<(Buffer, u64, u32)>,
 }
 
 #[derive(Resource, Default)]
@@ -165,6 +201,8 @@ fn init_water_pipeline(mut commands: Commands, asset_server: Res<AssetServer>) {
                 uniform_buffer::<WaterParams>(false),
                 // The level's generator program (shoreline height ops);
                 // shared with the chunk pipeline.
+                storage_buffer_read_only_sized(false, None),
+                // River water segments (RiverSeg twin).
                 storage_buffer_read_only_sized(false, None),
             ),
         ),
@@ -232,6 +270,7 @@ fn prepare_water_bind_group(
     pipeline: Option<Res<WaterPipeline>>,
     camera: Res<ExtractedWaterCamera>,
     surface: Res<WaterSurface>,
+    rivers: Res<RiverWater>,
     env: Res<crate::chunks::EnvParams>,
     gpu: Option<Res<crate::chunks::ChunkGpuResources>>,
     pipeline_cache: Res<PipelineCache>,
@@ -247,6 +286,29 @@ fn prepare_water_bind_group(
     else {
         return;
     };
+    // Upload river segments when the streamer's generation moves on.
+    let rivers_changed = res
+        .river_buffer
+        .as_ref()
+        .is_none_or(|(_, generation, _)| *generation != rivers.generation);
+    if rivers_changed {
+        // A dummy zeroed segment keeps the binding valid when empty (the
+        // draw count is 0 then; nothing samples it).
+        let dummy = [RiverSegGpu::default()];
+        let contents: &[RiverSegGpu] = if rivers.segments.is_empty() {
+            &dummy
+        } else {
+            &rivers.segments
+        };
+        let buffer = render_device.create_buffer_with_data(&BufferInitDescriptor {
+            label: Some("water_river_segs"),
+            contents: bytemuck::cast_slice(contents),
+            usage: BufferUsages::STORAGE,
+        });
+        res.river_buffer = Some((buffer, rivers.generation, rivers.segments.len() as u32));
+    }
+    let seg_count = res.river_buffer.as_ref().map_or(0, |(_, _, n)| *n);
+
     // Snap the grid origin so vertices never swim as the camera moves.
     let ox = (camera.0.x as f64 / SEA_SNAP).floor() * SEA_SNAP;
     let oz = (camera.0.z as f64 / SEA_SNAP).floor() * SEA_SNAP;
@@ -255,14 +317,24 @@ fn prepare_water_bind_group(
         sky: env.sky,
         haze: env.haze,
         haze_tint: env.haze_tint,
+        counts: Vec4::new(
+            if surface.enabled { 1.0 } else { 0.0 },
+            seg_count as f32,
+            0.0,
+            0.0,
+        ),
     });
     res.params.write_buffer(&render_device, &render_queue);
     // The chunk pipeline owns and writes the program buffer each frame.
     let program_binding = gpu.as_ref().and_then(|g| g.program_buffer.binding());
-    let (Some(params_binding), Some(program_binding)) = (res.params.binding(), program_binding)
-    else {
+    let (Some(params_binding), Some(program_binding), Some((river_buffer, _, _))) = (
+        res.params.binding(),
+        program_binding,
+        res.river_buffer.as_ref(),
+    ) else {
         return;
     };
+    let river_binding = river_buffer.as_entire_buffer_binding();
     res.bind_group = Some(render_device.create_bind_group(
         "water_bg",
         &pipeline_cache.get_bind_group_layout(&pipeline.layout),
@@ -271,6 +343,7 @@ fn prepare_water_bind_group(
             globals_binding,
             params_binding,
             program_binding,
+            river_binding,
         )),
     ));
 }
@@ -352,12 +425,14 @@ where
         res: SystemParamItem<'w, '_, Self::Param>,
         pass: &mut TrackedRenderPass<'w>,
     ) -> RenderCommandResult {
-        let Some(bg) = &res.into_inner().bind_group else {
+        let res = res.into_inner();
+        let Some(bg) = &res.bind_group else {
             return RenderCommandResult::Skip;
         };
         pass.set_bind_group(0, bg, &[view_offset.offset]);
         let cells = (GRID_N - 1) as u32;
-        pass.draw(0..(cells * cells * 6), 0..1);
+        let river_indices = res.river_buffer.as_ref().map_or(0, |(_, _, n)| *n * 6);
+        pass.draw(0..(cells * cells * 6 + river_indices), 0..1);
         RenderCommandResult::Success
     }
 }

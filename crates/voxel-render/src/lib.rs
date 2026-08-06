@@ -13,7 +13,7 @@ pub use chunks::{
     MAT_KIND_CANOPY, MAT_KIND_SURFACE, MAT_KIND_ZONED,
 };
 pub use grass::{GrassInstance, GrassInstances, GrassPlugin, GrassStyle};
-pub use water::{WaterPlugin, WaterSurface};
+pub use water::{RiverSegGpu, RiverWater, WaterPlugin, WaterSurface};
 
 /// Marker for helper cameras (offscreen screenshot mirrors, etc.) that
 /// gameplay/streaming systems must ignore when looking for "the player

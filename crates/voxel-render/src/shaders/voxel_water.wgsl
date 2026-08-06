@@ -18,8 +18,19 @@ struct WaterParams {
     // Haze rgb | density, and sun-direction tint rgb | power (0 = none).
     haze: vec4<f32>,
     haze_tint: vec4<f32>,
+    // x = ocean enabled (0/1), y = river segment count, zw unused.
+    counts: vec4<f32>,
 }
 @group(0) @binding(2) var<uniform> params: WaterParams;
+
+// River water segments (planning-stack WaterSeg), sharing this pipeline
+// so rivers get the exact ocean shading: one water look per level.
+struct RiverSeg {
+    ab: vec4<f32>,     // a.xz | b.xz (world meters)
+    geo: vec4<f32>,    // half width | level at a | level at b | unused
+    color: vec4<f32>,  // river tint rgb | unused
+}
+@group(0) @binding(4) var<storage, read> rivers: array<RiverSeg>;
 
 // Generator program (64 B ops, layout mirrors voxel-core WorldOp); the
 // shoreline reads the height ops. count = (total, height ops, -, -).
@@ -47,6 +58,12 @@ struct VsOut {
     @location(0) world_xz: vec2<f32>,
     @location(1) cam_rel: vec3<f32>,
     @location(2) normal: vec3<f32>,
+    // River varyings (zero for the ocean): flow direction xz.
+    @location(3) flow: vec2<f32>,
+    // River tint rgb | river flag (0 = ocean fragment path).
+    @location(4) river_color: vec4<f32>,
+    // Across-strip coordinate [-1, 1] | half width | unused.
+    @location(5) strip: vec3<f32>,
 }
 
 // Three directional waves; returns (height, dh/dx, dh/dz).
@@ -74,10 +91,55 @@ fn waves(p: vec2<f32>, t: f32) -> vec3<f32> {
     return vec3<f32>(h, dx, dz);
 }
 
+fn project(world: vec3<f32>) -> vec4<f32> {
+    let cam_rel = world - view.world_position;
+    let view_space = (view.view_from_world * vec4<f32>(cam_rel, 0.0)).xyz;
+    return view.clip_from_view * vec4<f32>(view_space, 1.0);
+}
+
+// One widened quad per river segment: endpoints stretched 0.3 m along the
+// flow so consecutive segments never open a sliver, corners offset by the
+// half width across it, seated a hair under the emitted water line.
+fn river_vertex(rv: u32) -> VsOut {
+    let quad = rv / 6u;
+    let corner = rv % 6u;
+    let seg = rivers[quad];
+    let a = seg.ab.xy;
+    let b = seg.ab.zw;
+    let len = max(distance(a, b), 0.01);
+    let dir = (b - a) / len;
+    let perp = vec2<f32>(-dir.y, dir.x) * seg.geo.x;
+
+    // Same two-triangle corner pattern as the ocean grid.
+    var along = 0.0;
+    if (corner == 1u || corner == 2u || corner == 4u) { along = 1.0; }
+    var across = -1.0;
+    if (corner == 2u || corner == 4u || corner == 5u) { across = 1.0; }
+
+    let base = mix(a - dir * 0.3, b + dir * 0.3, along);
+    let world_xz = base + perp * across;
+    let level = mix(seg.geo.y, seg.geo.z, along);
+    let world = vec3<f32>(world_xz.x, level - 0.05, world_xz.y);
+
+    var out: VsOut;
+    out.clip = project(world);
+    out.world_xz = world_xz;
+    out.cam_rel = world - view.world_position;
+    out.normal = vec3<f32>(0.0, 1.0, 0.0);
+    out.flow = dir;
+    out.river_color = vec4<f32>(seg.color.rgb, 1.0);
+    out.strip = vec3<f32>(across, seg.geo.x, 0.0);
+    return out;
+}
+
 @vertex
 fn vertex(@builtin(vertex_index) vid: u32) -> VsOut {
     // Two triangles per cell, generated procedurally from the vertex index.
     let cells = GRID_N - 1u;
+    let ocean_count = cells * cells * 6u;
+    if (vid >= ocean_count) {
+        return river_vertex(vid - ocean_count);
+    }
     let quad = vid / 6u;
     let corner = vid % 6u;
     var cx = quad % cells;
@@ -105,9 +167,16 @@ fn vertex(@builtin(vertex_index) vid: u32) -> VsOut {
 
     var out: VsOut;
     out.clip = view.clip_from_view * vec4<f32>(view_space, 1.0);
+    // Ocean disabled: collapse the grid to a point (zero-area triangles).
+    if (params.counts.x < 0.5) {
+        out.clip = vec4<f32>(0.0, 0.0, 2.0, 1.0);
+    }
     out.world_xz = world_xz;
     out.cam_rel = cam_rel;
     out.normal = normalize(vec3<f32>(-w.y * disp_fade, 1.0, -w.z * disp_fade));
+    out.flow = vec2<f32>(0.0);
+    out.river_color = vec4<f32>(0.0);
+    out.strip = vec3<f32>(0.0);
     return out;
 }
 
@@ -190,22 +259,47 @@ fn seabed_height(xz: vec2<f32>) -> f32 {
 
 @fragment
 fn fragment(in: VsOut) -> @location(0) vec4<f32> {
-    let n = normalize(in.normal);
+    var n = normalize(in.normal);
     let dist = length(in.cam_rel);
     let view_dir = normalize(-in.cam_rel);
     let sun_dir = normalize(prog.sun.xyz);
 
-    // Depth-based color from the seabed heightfield below sea level.
-    let bed = seabed_height(in.world_xz);
-    let depth = max(params.origin.y - bed, 0.0);
-    let deep = vec3<f32>(0.04, 0.13, 0.22);
-    let shallow = vec3<f32>(0.10, 0.34, 0.36);
-    var water = mix(shallow, deep, smoothstep(1.5, 26.0, depth));
+    var water: vec3<f32>;
+    if (in.river_color.w > 0.5) {
+        // River: depth proxy from the across-strip coordinate (the carved
+        // bed is deepest mid-stream); foam hugs the banks, drifting
+        // downstream with the flow.
+        let edge = abs(in.strip.x);
+        let depth = (1.0 - edge) * in.strip.y * 1.4;
+        let deep = in.river_color.rgb * 0.5;
+        let shallow = mix(in.river_color.rgb, vec3<f32>(0.45, 0.6, 0.6), 0.35);
+        water = mix(shallow, deep, smoothstep(0.2, 2.6, depth));
 
-    // Foam where the seabed grazes sea level, animated by wave phase.
-    let foam_noise = value_noise2(in.world_xz * 0.7 + globals.time * 0.35);
-    let foam_band = smoothstep(2.2, 0.3, depth) * (0.55 + 0.45 * foam_noise);
-    water = mix(water, vec3<f32>(0.85, 0.9, 0.9), clamp(foam_band, 0.0, 1.0) * 0.8);
+        let drift = in.flow * globals.time * 1.6;
+        let foam_noise = value_noise2((in.world_xz - drift) * 1.3);
+        let foam_band = smoothstep(0.55, 0.95, edge) * (0.45 + 0.55 * foam_noise);
+        water = mix(water, vec3<f32>(0.85, 0.9, 0.9), clamp(foam_band, 0.0, 1.0) * 0.7);
+
+        // Flow ripples: a scrolled noise gradient perturbs the normal
+        // (4 taps — per-pixel noise budgets matter at fragment cost).
+        let rp = (in.world_xz - drift) * 0.9;
+        let e = 0.35;
+        let gx = value_noise2(rp + vec2<f32>(e, 0.0)) - value_noise2(rp - vec2<f32>(e, 0.0));
+        let gz = value_noise2(rp + vec2<f32>(0.0, e)) - value_noise2(rp - vec2<f32>(0.0, e));
+        n = normalize(vec3<f32>(-gx * 0.35, 1.0, -gz * 0.35));
+    } else {
+        // Ocean: depth-based color from the seabed heightfield.
+        let bed = seabed_height(in.world_xz);
+        let depth = max(params.origin.y - bed, 0.0);
+        let deep = vec3<f32>(0.04, 0.13, 0.22);
+        let shallow = vec3<f32>(0.10, 0.34, 0.36);
+        water = mix(shallow, deep, smoothstep(1.5, 26.0, depth));
+
+        // Foam where the seabed grazes sea level, animated by wave phase.
+        let foam_noise = value_noise2(in.world_xz * 0.7 + globals.time * 0.35);
+        let foam_band = smoothstep(2.2, 0.3, depth) * (0.55 + 0.45 * foam_noise);
+        water = mix(water, vec3<f32>(0.85, 0.9, 0.9), clamp(foam_band, 0.0, 1.0) * 0.8);
+    }
 
     // Fresnel toward the sky, sun glint.
     let fresnel = pow(1.0 - max(dot(n, view_dir), 0.0), 4.0);
