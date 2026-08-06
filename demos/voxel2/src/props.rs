@@ -14,7 +14,7 @@ use bevy::mesh::{Indices, PrimitiveTopology};
 use bevy::light::NotShadowCaster;
 use bevy::prelude::*;
 use voxel_engine::WorldQuery;
-use voxel_engine::scatter::{tile_placements, ScatterInstance};
+use voxel_engine::scatter::{tile_placements, PlacementInputs, ScatterInstance};
 use voxel_engine::{LevelDef, VoxelStreamSource};
 
 /// Host-side appearance for one scatter class, indexed by the engine's
@@ -369,7 +369,8 @@ fn build_super_tile(
     for dz in 0..sub {
         for dx in 0..sub {
             let detail = IVec2::new(tile.x * sub + dx, tile.y * sub + dz);
-            for placement in tile_placements(def, world, detail) {
+            let inputs = PlacementInputs::from_world(world, def, detail);
+            for placement in tile_placements(def, &inputs, detail) {
                 // Seat impostors on the band-limited height coarse LOD
                 // actually shows at that distance, or they float.
                 let mut pos = placement.position;

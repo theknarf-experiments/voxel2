@@ -28,29 +28,17 @@ pub use level::{LevelDef, LevelPlugin};
 pub use layers::{MainThreadBudget, MainThreadQueue, VoxelLayersPlugin};
 pub use planning::{Marker, PatchSet, PlanningStats, RibbonSeg, WorldPlanner, WorldQuery};
 pub use streaming::{LodConfig, VoxelStreamingPlugin};
-pub use scatter::{Placement, ScatterInstance, ScatterPlugin};
+pub use scatter::{Placement, PlacementInputs, ScatterInstance};
 pub use voxel_core::ChunkKey;
 
 /// Everything needed for a streamed voxel world. The world itself is data:
 /// a generator program in [`voxel_render::WorldProgram`], normally installed
 /// by a [`LevelPlugin`].
-pub struct VoxelEnginePlugin {
-    pub vegetation: bool,
-}
-
-impl Default for VoxelEnginePlugin {
-    fn default() -> Self {
-        Self { vegetation: true }
-    }
-}
+#[derive(Default)]
+pub struct VoxelEnginePlugin;
 
 impl Plugin for VoxelEnginePlugin {
     fn build(&self, app: &mut App) {
         app.add_plugins((voxel_render::VoxelChunksPlugin, VoxelStreamingPlugin));
-        // Scatter streams the level's prop classes as entities the host
-        // dresses; a game that spawns its own props can turn it off.
-        if self.vegetation {
-            app.add_plugins(ScatterPlugin);
-        }
     }
 }

@@ -1,33 +1,16 @@
 //! Scatter: deterministic placement of props on the generated surface.
 //!
 //! This module decides **where** things go and nothing about what they
-//! look like. For each class the level declares, the engine streams
-//! tiles around the [`crate::VoxelStreamSource`] and spawns one entity
-//! per placement carrying a [`Transform`] and a [`ScatterInstance`]; the
-//! host dresses those entities with its own models, materials, colliders
-//! and gameplay components:
-//!
-//! ```ignore
-//! fn dress(mut commands: Commands, new: Query<(Entity, &ScatterInstance), Added<ScatterInstance>>) {
-//!     for (entity, instance) in &new {
-//!         if &*instance.class == "tree" {
-//!             commands.entity(entity).insert(SceneRoot(my_tree.clone()));
-//!         }
-//!     }
-//! }
-//! ```
-//!
-//! Hosts that batch their own rendering (merged impostors, custom
-//! instancing) can skip the entities and call [`tile_placements`]
-//! directly — it is the same deterministic function the streamer uses,
-//! so near meshes and far impostors never disagree.
+//! look like, and nothing about when they exist. [`tile_placements`] is a
+//! pure function of a tile and its [`PlacementInputs`]: a game calls it
+//! from a layer, which is what decides residency, and dresses the results
+//! with its own models, materials, colliders and gameplay components.
 //!
 //! Placement is gated by the world the engine already knows: terrain
 //! height and slope, altitude bands with soft falloff, generator field
 //! registers, blended biome weights, coherent patch noise, planning
 //! clearance (paths, ribbon beds) and carved ground (cave mouths).
 
-use std::collections::HashMap;
 use std::sync::Arc;
 
 use bevy::prelude::*;
@@ -35,10 +18,6 @@ use voxel_core::seed::{chunk_seed, Rng};
 
 use crate::level::ScatterDef;
 use crate::planning::WorldQuery;
-
-/// Ask the streamer to rebuild every tile (level reload, def change).
-#[derive(Resource, Default)]
-pub struct ScatterRebuild(pub bool);
 
 /// What the engine attaches to every placed entity. The host reads it to
 /// decide what to attach in turn.
@@ -67,19 +46,6 @@ pub struct Placement {
     pub seed: u64,
 }
 
-/// Streams the level's scatter classes as entities. Add
-/// [`crate::VoxelStreamSource`] to whatever should pull them in.
-pub struct ScatterPlugin;
-
-impl Plugin for ScatterPlugin {
-    fn build(&self, app: &mut App) {
-        app.init_resource::<ScatterRebuild>()
-            .init_resource::<ScatterTiles>()
-            .init_resource::<ScatterPointTiles>()
-            .add_systems(Update, (rebuild_scatter, stream_scatter));
-    }
-}
-
 const SCATTER_SALT: u64 = 0x5CA7;
 
 // --- gates ------------------------------------------------------------------
@@ -103,6 +69,34 @@ fn field_gate(
         let f = generator.fields(xz)[(d.field as usize).min(3)];
         (f * d.scale + d.offset).clamp(0.0, 1.0)
     })
+}
+
+/// Everything placement reads from outside itself, gathered once per tile.
+///
+/// Explicit rather than a `WorldQuery` handle, because a layer must read
+/// through the dependencies it declared — it has no facade to consult, by
+/// design. The same inputs serve a caller that does have one.
+pub struct PlacementInputs<'a> {
+    pub generator: &'a voxel_worldgen::Generator,
+    /// Path and ribbon beds props must stay off.
+    pub clearance: Vec<[Vec2; 2]>,
+    /// Carved voids props must not float over.
+    pub cut_ops: Vec<voxel_core::csg::CsgOp>,
+    /// Blended weight of this population's biome reference at a point.
+    pub biome_weight: Box<dyn Fn(Vec2) -> f32 + 'a>,
+}
+
+impl<'a> PlacementInputs<'a> {
+    /// Gather from a world facade, for callers that have one.
+    pub fn from_world(world: &'a WorldQuery, def: &'a ScatterDef, tile: IVec2) -> Self {
+        let origin = tile.as_vec2() * def.tile_m;
+        Self {
+            generator: world.generator(),
+            clearance: tile_clearance(world, origin, def.tile_m),
+            cut_ops: tile_cut_ops(world, origin, def.tile_m),
+            biome_weight: Box::new(move |xz| biome_gate(world, &def.biome, xz)),
+        }
+    }
 }
 
 /// Blended weight of an `"instance:biome"` reference (1 when unset).
@@ -177,17 +171,17 @@ fn placement_rotation(
 /// Every placement of `def` in one tile — deterministic from the world
 /// seed and the tile coordinate, so any consumer (the entity streamer,
 /// a host's impostor batcher) sees exactly the same props.
-pub fn tile_placements(def: &ScatterDef, world: &WorldQuery, tile: IVec2) -> Vec<Placement> {
-    let generator = world.generator();
+pub fn tile_placements(def: &ScatterDef, inputs: &PlacementInputs<'_>, tile: IVec2) -> Vec<Placement> {
+    let generator = inputs.generator;
     let size = def.tile_m;
     let mut rng = Rng::new(chunk_seed(
-        world.generator().seed() as u64,
+        generator.seed() as u64,
         SCATTER_SALT ^ class_salt(&def.class),
         IVec3::new(tile.x, 0, tile.y),
     ));
     let origin = tile.as_vec2() * size;
-    let cut_ops = tile_cut_ops(world, origin, size);
-    let clearance = tile_clearance(world, origin, size);
+    let cut_ops = &inputs.cut_ops;
+    let clearance = &inputs.clearance;
 
     // Coherent patch noise: woods come in stands with clearings between.
     let density = def
@@ -208,16 +202,16 @@ pub fn tile_placements(def: &ScatterDef, world: &WorldQuery, tile: IVec2) -> Vec
     let mut out = Vec::new();
     for _ in 0..attempts {
         let xz = origin + Vec2::new(rng.next_f32(), rng.next_f32()) * size;
-        if rng.next_f32() > field_gate(generator, &def.density, xz) * biome_gate(world, &def.biome, xz) {
+        if rng.next_f32() > field_gate(generator, &def.density, xz) * (inputs.biome_weight)(xz) {
             continue;
         }
-        if def.clearance && on_clearance(&clearance, xz) {
+        if def.clearance && on_clearance(clearance, xz) {
             continue;
         }
         // Seat on the band-limited surface the mid-LOD terrain shows
         // across the streaming radius (tiles appear at the rim).
         let y = generator.height(xz, def.detail_vs);
-        if carved(&cut_ops, Vec3::new(xz.x, y, xz.y)) {
+        if carved(cut_ops, Vec3::new(xz.x, y, xz.y)) {
             continue;
         }
         let gate = altitude_gate(def.altitude, def.placement.altitude_falloff, y);
@@ -290,146 +284,4 @@ fn class_salt(class: &str) -> u64 {
         h = (h ^ b as u64).wrapping_mul(0x1000_0000_01B3);
     }
     h
-}
-
-// --- entity streaming -------------------------------------------------------
-
-/// Bulk placements per (class, tile), for populations that output points.
-#[derive(Resource, Default)]
-struct ScatterPointTiles {
-    tiles: HashMap<(usize, IVec2), Vec<Placement>>,
-}
-
-#[derive(Resource, Default)]
-struct ScatterTiles {
-    /// (class index, tile) -> spawned entities.
-    tiles: HashMap<(usize, IVec2), Vec<Entity>>,
-}
-
-fn rebuild_scatter(
-    mut commands: Commands,
-    mut rebuild: ResMut<ScatterRebuild>,
-    mut tiles: ResMut<ScatterTiles>,
-    mut point_tiles: ResMut<ScatterPointTiles>,
-    points: Res<voxel_render::ScatterPoints>,
-) {
-    if !rebuild.0 {
-        return;
-    }
-    rebuild.0 = false;
-    for (_, entities) in tiles.tiles.drain() {
-        for entity in entities {
-            commands.entity(entity).despawn();
-        }
-    }
-    point_tiles.tiles.clear();
-    points.clear();
-}
-
-#[allow(clippy::too_many_arguments)]
-fn stream_scatter(
-    mut commands: Commands,
-    level: Option<Res<crate::LevelDef>>,
-    world: Res<WorldQuery>,
-    probe: Res<crate::streaming::StreamProbe>,
-    mut tiles: ResMut<ScatterTiles>,
-    mut point_tiles: ResMut<ScatterPointTiles>,
-    points: Res<voxel_render::ScatterPoints>,
-    sources: crate::StreamSourceQuery,
-) {
-    // Cold planning caches must never be generated on the main thread:
-    // wait for genesis (which pre-warms them) to commit.
-    let (Some(level), Ok(source)) = (level, sources.single()) else {
-        return;
-    };
-    if !probe.world_ready || level.scatter.is_empty() {
-        return;
-    }
-    let camera = source.translation();
-
-    // A couple of tiles per class per tick keeps placement cost off any
-    // single frame.
-    let mut budget = 2;
-    for (class_index, def) in level.scatter.iter().enumerate() {
-        let center = (Vec2::new(camera.x, camera.z) / def.tile_m)
-            .floor()
-            .as_ivec2();
-        let radius = def.radius_tiles;
-        'tiles: for dz in -radius..=radius {
-            for dx in -radius..=radius {
-                let tile = center + IVec2::new(dx, dz);
-                if tiles.tiles.contains_key(&(class_index, tile)) {
-                    continue;
-                }
-                let class: Arc<str> = Arc::from(def.class.as_str());
-                if def.output == crate::level::ScatterOutput::Points {
-                    // Too dense for entities: the placements go into a
-                    // shared buffer under this population's class name and
-                    // the host draws them in bulk.
-                    point_tiles
-                        .tiles
-                        .insert((class_index, tile), tile_placements(def, &world, tile));
-                    let merged: Vec<voxel_render::ScatterPoint> = point_tiles
-                        .tiles
-                        .iter()
-                        .filter(|((i, _), _)| *i == class_index)
-                        .flat_map(|(_, ps)| ps.iter())
-                        .map(|p| voxel_render::ScatterPoint {
-                            pos: p.position.to_array(),
-                            hash: p.seed as u32,
-                        })
-                        .collect();
-                    points.set_class(&class, merged);
-                    tiles.tiles.insert((class_index, tile), Vec::new());
-                    budget -= 1;
-                    if budget == 0 {
-                        break 'tiles;
-                    }
-                    continue;
-                }
-                let entities: Vec<Entity> = tile_placements(def, &world, tile)
-                    .into_iter()
-                    .map(|p| {
-                        commands
-                            .spawn((
-                                Transform::from_translation(p.position)
-                                    .with_rotation(p.rotation)
-                                    .with_scale(Vec3::splat(p.scale)),
-                                Visibility::default(),
-                                ScatterInstance {
-                                    class: class.clone(),
-                                    variant: p.variant,
-                                    scale: p.scale,
-                                    seed: p.seed,
-                                },
-                            ))
-                            .id()
-                    })
-                    .collect();
-                tiles.tiles.insert((class_index, tile), entities);
-                budget -= 1;
-                if budget == 0 {
-                    break 'tiles;
-                }
-            }
-        }
-        // Evict with hysteresis so edge tiles don't thrash.
-        let keep = radius + 1;
-        let stale: Vec<(usize, IVec2)> = tiles
-            .tiles
-            .keys()
-            .filter(|(i, tile)| {
-                *i == class_index && (*tile - center).abs().max_element() > keep
-            })
-            .copied()
-            .collect();
-        for key in stale {
-            if let Some(entities) = tiles.tiles.remove(&key) {
-                for entity in entities {
-                    commands.entity(entity).despawn();
-                }
-            }
-            point_tiles.tiles.remove(&key);
-        }
-    }
 }

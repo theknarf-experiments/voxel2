@@ -348,6 +348,11 @@ impl StackPlanner {
         if let Some(top) = crate::ribbons::register(&mut graph, level, ribbon_sources) {
             deps.push(top);
         }
+        let emit_names: Vec<String> = emitters.iter().map(|e| e.name.clone()).collect();
+        let (scatter_tops, populations) =
+            crate::scatter::register(&mut graph, level, emit_names, &biome_tables);
+        deps.extend(scatter_tops);
+        *ctx.populations.lock().unwrap() = Some(populations);
 
         let runtime = Arc::new(LayerRuntime::start(Arc::new(graph), deps));
         let tops = (0..runtime.tops()).map(|i| runtime.top(i)).collect();

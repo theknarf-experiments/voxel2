@@ -21,6 +21,7 @@ use voxel_engine::{LevelDef, LevelPlugin, VoxelStreamSource};
 
 mod grass;
 mod planning;
+mod scatter;
 mod props;
 mod ribbons;
 mod water;
@@ -157,6 +158,7 @@ fn main() {
             VoxelDebugPlugin,
             VoxelVizPlugin,
             PropsPlugin,
+            scatter::ScatterPlugin,
             // Water is the demo's: generic ribbon data in, water look out.
             RibbonsPlugin,
             WaterPlugin,

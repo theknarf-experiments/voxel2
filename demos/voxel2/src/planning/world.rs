@@ -24,6 +24,8 @@ pub struct WorldCtx {
     pub generator: Arc<voxel_worldgen::Generator>,
     /// Ribbon surface geometry, contributed per chunk.
     pub ribbons: Sink<RiverSegGpu>,
+    /// Scatter population handles, taken once by the app.
+    pub populations: Mutex<Option<crate::scatter::Populations>>,
 }
 
 impl WorldCtx {
@@ -31,6 +33,7 @@ impl WorldCtx {
         Self {
             generator,
             ribbons: Sink::default(),
+            populations: Mutex::new(None),
         }
     }
 }
@@ -86,6 +89,17 @@ impl<T: Clone> Sink<T> {
 
     pub fn generation(&self) -> u64 {
         self.inner.lock().unwrap().generation
+    }
+
+    /// Coordinates with a contribution — what an entity population diffs
+    /// its spawned set against.
+    pub fn keys(&self) -> std::collections::HashSet<IVec3> {
+        self.inner.lock().unwrap().parts.keys().copied().collect()
+    }
+
+    /// One chunk's contribution.
+    pub fn get(&self, coord: IVec3) -> Option<Vec<T>> {
+        self.inner.lock().unwrap().parts.get(&coord).cloned()
     }
 
     /// Everything currently published, flattened.

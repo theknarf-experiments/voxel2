@@ -1111,7 +1111,7 @@ impl Plugin for LevelPlugin {
             })
             .insert_resource(world_query)
             .insert_resource(level.clone())
-            .add_plugins(VoxelEnginePlugin { vegetation: true })
+            .add_plugins(VoxelEnginePlugin)
             .add_systems(Update, crate::planning::follow_stream_source);
 
         if let Some(port) = self.remote_port {
@@ -1201,7 +1201,6 @@ fn reload_level(
     planner: Res<HostPlanner>,
     mut lod: ResMut<LodConfig>,
     mut rebuild: ResMut<StreamingRebuild>,
-    mut veg_rebuild: Option<ResMut<crate::scatter::ScatterRebuild>>,
     mut reloaded: MessageWriter<LevelReloaded>,
 ) {
     if !source.poll.tick(time.delta()).just_finished() {
@@ -1270,11 +1269,6 @@ fn reload_level(
         commands.insert_resource(world_query);
         rebuild.0 = true;
         info!("level reload: generation changed — rebuilding world");
-    }
-    if regen || new.scatter != level.scatter {
-        if let Some(veg) = veg_rebuild.as_mut() {
-            veg.0 = true;
-        }
     }
 
     // The host owns the scene: it reads the new definition off this
