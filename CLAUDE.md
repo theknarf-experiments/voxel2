@@ -21,8 +21,13 @@ architecture. Design plan: `~/.claude/plans/binary-twirling-brooks.md`.
   toggle chunk/layer debug overlays.
 - Zero `Validation Error` lines in the log is part of "verified".
 - Kill running app processes before spawning another and after each
-  capture. An fps reading taken while anything else compiles is
-  contention, not a measurement.
+  capture.
+- **fps is only meaningful in the foreground, settled, with nothing else
+  compiling.** The display is 120 Hz and vsync caps there, so anything
+  above ~120 means the window was backgrounded and no shaders ran — a
+  measurement of nothing. Below it, a reading can still be contention
+  from a concurrent build (too low) or a pre-settle transient (too high).
+  Sample 3-4 times over 60+ s and compare like with like.
 
 ## Invariants that bite
 
