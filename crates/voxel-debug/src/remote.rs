@@ -79,12 +79,19 @@ fn status(
     cams: PlayerCamera<&Transform>,
     stats: Option<Res<voxel_render::SharedRenderStats>>,
     probe: Option<Res<voxel_engine::streaming::StreamProbe>>,
+    diagnostics: Res<bevy::diagnostic::DiagnosticsStore>,
 ) -> BrpResult {
     let t = cams.single().map_err(|_| err("no player camera"))?;
     let f = t.forward();
+    // Smoothed frame rate: the shipped floor is 100 fps, and shading
+    // changes are exactly the kind that quietly cost it.
+    let fps = diagnostics
+        .get(&bevy::diagnostic::FrameTimeDiagnosticsPlugin::FPS)
+        .and_then(|d| d.smoothed());
     let mut out = json!({
         "pos": [t.translation.x, t.translation.y, t.translation.z],
         "look": [f.x, f.y, f.z],
+        "fps": fps,
     });
     if let Some(p) = probe {
         out["stream"] = json!({
