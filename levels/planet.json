@@ -1,6 +1,6 @@
 {
   "lod": {
-    "max_level": 11,
+    "max_level": 14,
     "top_radius": 3,
     "top_y": [
       -1,
@@ -454,13 +454,14 @@
         "name": "highways",
         "source": "paths:highways",
         "cell_m": 4096,
-        "max_chunk_edge_m": 1000.0,
+        "max_chunk_edge_m": 60.0,
         "pad_m": 9216.0,
         "emit": {
           "type": "path_slabs",
           "half_w": 24.0,
           "thickness": 4.0
-        }
+        },
+        "keep_m": 44000.0
       },
       {
         "kind": "scatter",

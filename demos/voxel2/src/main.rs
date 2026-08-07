@@ -86,7 +86,7 @@ fn scene_for(level_path: &std::path::Path) -> Scene {
                 color: Color::srgb(0.62, 0.72, 0.88),
                 directional_light_color: Color::srgb(0.92, 0.85, 0.72),
                 directional_light_exponent: 4.0,
-                falloff: FogFalloff::Exponential { density: 6.0e-5 },
+                falloff: FogFalloff::Exponential { density: 6.0e-6 },
             }),
             sea_level: Some(0.0),
         },

@@ -54,6 +54,9 @@ pub struct StackPlanner {
     emitters: Vec<Emitter>,
     /// Biome layers: (instance name, ordered biome names).
     biome_tables: Vec<(String, Vec<String>)>,
+    /// A real camera position has been published at least once. Before
+    /// that the graph is idle only because nothing has been asked of it.
+    focused: Arc<std::sync::atomic::AtomicBool>,
 }
 
 /// One emit layer as the facade sees it. `produces` keeps a query from
@@ -65,13 +68,15 @@ struct Emitter {
     name: String,
     /// Carve-horizon gate in chunk-edge meters.
     gate: Option<f32>,
+    /// Residency this layer's data is held to regardless of the gate.
+    keep_m: Option<f32>,
     ribbons: bool,
     clearance: bool,
     markers: bool,
 }
 
 impl Emitter {
-    fn new(name: String, gate: Option<f32>, emit: &EmitDef) -> Self {
+    fn new(name: String, gate: Option<f32>, keep_m: Option<f32>, emit: &EmitDef) -> Self {
         let (ribbons, clearance, markers) = match emit {
             EmitDef::Ribbon { .. } => (true, true, false),
             EmitDef::PathSlabs { clearance, .. } => (false, *clearance, false),
@@ -82,6 +87,7 @@ impl Emitter {
         };
         Self {
             name,
+            keep_m,
             gate,
             ribbons,
             clearance,
@@ -183,6 +189,7 @@ impl WorldPlanner for StackPlanner {
         for top in &self.tops {
             top.set_focus(focus);
         }
+        self.focused.store(true, std::sync::atomic::Ordering::Release);
     }
 
     fn host_ctx(&self) -> Option<&(dyn std::any::Any + Send + Sync)> {
@@ -191,10 +198,21 @@ impl WorldPlanner for StackPlanner {
             .map(|c| c.as_ref() as &(dyn std::any::Any + Send + Sync))
     }
 
+    /// Block until planning reflects a REAL camera position.
+    ///
+    /// "Idle" alone is true before anything has been asked for, which is
+    /// the state the graph is in for the first frames — so a chunk
+    /// generated in that window would wait for nothing, read an empty
+    /// graph, and bake itself featureless. It presents as a burst of
+    /// `reads_missed` at startup and nowhere else, and only sometimes,
+    /// because it is a race between the first published camera position
+    /// and the first chunk.
     fn wait_idle(&self) {
-        if let Some(rt) = &self.stack {
-            rt.wait_idle();
+        let Some(rt) = &self.stack else { return };
+        while !self.focused.load(std::sync::atomic::Ordering::Acquire) {
+            std::thread::sleep(std::time::Duration::from_millis(1));
         }
+        rt.wait_idle();
     }
 
     fn reads_missed(&self) -> usize {
@@ -254,11 +272,17 @@ impl StackPlanner {
             if let StackLayerDef::Emit {
                 name,
                 max_chunk_edge_m,
+                keep_m,
                 emit,
                 ..
             } = layer
             {
-                emitters.push(Emitter::new(name.clone(), *max_chunk_edge_m, emit));
+                emitters.push(Emitter::new(
+                    name.clone(),
+                    *max_chunk_edge_m,
+                    *keep_m,
+                    emit,
+                ));
             }
         }
         let biome_tables: Vec<(String, Vec<String>)> = def
@@ -304,16 +328,20 @@ impl StackPlanner {
                 + edge / 8.0
                 + layers::ELEM_PAD_M
                 + ANCHOR_SLOP_M;
+            // What the CARVE needs, or what a reader of the data needs,
+            // whichever is further. They are different questions: carving
+            // stops paying once a chunk's voxels dwarf the feature, while
+            // a map or a coarse representation still wants to know where
+            // the feature is. Sizing residency from the gate alone would
+            // make "on the map at 40 km" cost a carve op per chunk out to
+            // 40 km — measured at 132 -> 360 ops per chunk when tried.
+            let reach = ops_reach.max(e.keep_m.unwrap_or(0.0));
 
             // Nothing else needs sizing in here any more: every other
             // consumer of these layers — ribbon surfaces, scatter
             // populations, the far forest — declares a dependency and the
             // graph takes the union.
-            let size = bevy::math::IVec3::new(
-                (2.0 * ops_reach) as i32,
-                (2.0 * ops_reach) as i32,
-                (2.0 * ops_reach) as i32,
-            );
+            let size = bevy::math::IVec3::splat((2.0 * reach) as i32);
             if std::env::var_os("VOXEL_LOG_LAYERS").is_some() {
                 info!("top dep {:?}: size {size:?}", e.name);
             }
@@ -344,6 +372,7 @@ impl StackPlanner {
             tops,
             emitters,
             biome_tables,
+            focused: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         })
     }
 }

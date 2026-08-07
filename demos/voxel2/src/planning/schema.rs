@@ -408,6 +408,18 @@ pub enum StackLayerDef {
         /// fine (edge meters). Uniform per chunk, never per op.
         #[serde(default)]
         max_chunk_edge_m: Option<f32>,
+        /// Keep this layer's data resident out to this radius (meters),
+        /// whether or not its ops are served there.
+        ///
+        /// The gate above is about CARVING, and carving stops being worth
+        /// anything once a chunk's voxels are bigger than the feature. The
+        /// data is a different question: a map, an overlay, or a coarse
+        /// representation reads where a road IS without wanting geometry
+        /// cut for it. Sizing residency from the carve gate conflates the
+        /// two and makes "visible on the map at 40 km" cost a carve op per
+        /// chunk out to 40 km.
+        #[serde(default)]
+        keep_m: Option<f32>,
         emit: EmitDef,
     },
 }
@@ -957,8 +969,10 @@ impl StackLayerDef {
                 cell_y_m,
                 pad_m,
                 // The carve-horizon gate is applied per chunk by the
-                // planner facade, never inside the layer.
+                // planner facade, never inside the layer; `keep_m` sizes
+                // the top dependency, which the planner also owns.
                 max_chunk_edge_m: _,
+                keep_m: _,
                 emit,
             } => mgr.register_as(
                 &name,
