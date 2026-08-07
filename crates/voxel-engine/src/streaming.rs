@@ -37,10 +37,14 @@ pub struct LodConfig {
     pub top_radius: i32,
     /// Vertical range of top-level chunks (inclusive).
     pub top_y: (i32, i32),
-    /// Split when camera distance < split_k × edge.
+    /// Split when camera distance < split_k × edge. The one constant the
+    /// field is made of.
     pub split_k: f64,
-    /// Merge when camera distance > merge_k × parent edge. Must exceed
-    /// `split_k` for hysteresis.
+    /// Historically: merge when camera distance > merge_k × parent edge.
+    /// Nothing reads it any more — a chunk merges where its parent stops
+    /// splitting, and the hysteresis is the sticky anchor, not a second
+    /// constant. Kept because it is still level data, and because the
+    /// residency measurement uses it to reproduce the sizing it rejected.
     pub merge_k: f64,
 }
 
