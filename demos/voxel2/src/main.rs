@@ -269,16 +269,6 @@ fn setup_scene(mut commands: Commands, scene: Res<HostScene>, level: Res<LevelDe
             ..default()
         },
     ));
-    // Bevy defaults to 4x. On a tile GPU with a fragment shader this
-    // heavy that is a third of the frame — measured 20.7 / 14.4 / 10.8 ms
-    // at 4x / 2x / off on the same view — so it is worth being able to
-    // pick, rather than inheriting silently.
-    match std::env::var("VOXEL_MSAA").as_deref() {
-        Ok("0") => { camera.insert(bevy::render::view::Msaa::Off); }
-        Ok("2") => { camera.insert(bevy::render::view::Msaa::Sample2); }
-        Ok("4") => { camera.insert(bevy::render::view::Msaa::Sample4); }
-        _ => {}
-    }
     if let Some(fog) = host.fog.clone() {
         camera.insert(fog);
     }

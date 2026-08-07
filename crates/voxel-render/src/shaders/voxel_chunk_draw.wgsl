@@ -124,179 +124,55 @@ fn hash3(p: vec3<i32>) -> f32 {
     return f32(h & 0xFFFFFFu) / 16777216.0;
 }
 
-fn noise3(p: vec3<f32>) -> f32 {
-    let i = vec3<i32>(floor(p));
-    let f = fract(p);
-    let u = f * f * (3.0 - 2.0 * f);
-    return mix(
-        mix(
-            mix(hash3(i), hash3(i + vec3(1, 0, 0)), u.x),
-            mix(hash3(i + vec3(0, 1, 0)), hash3(i + vec3(1, 1, 0)), u.x),
-            u.y,
-        ),
-        mix(
-            mix(hash3(i + vec3(0, 0, 1)), hash3(i + vec3(1, 0, 1)), u.x),
-            mix(hash3(i + vec3(0, 1, 1)), hash3(i + vec3(1, 1, 1)), u.x),
-            u.y,
-        ),
-        u.z,
-    );
-}
-
-fn fbm3(p: vec3<f32>) -> f32 {
-    var sum = 0.0;
-    var amp = 0.5;
-    var q = p;
-    for (var i = 0; i < 3; i++) {
-        sum += amp * noise3(q);
-        amp *= 0.5;
-        q *= 2.17;
-    }
-    return sum; // ~[0, 1]
-}
-
-
-// Uniform-base surface: grain, pour/mortar bands, grime, drip streaks,
-// moss in upward crevices. Returns albedo; emissive is added after
-// lighting.
-fn surface_albedo(m: WorldMaterial, world: vec3<f32>, n: vec3<f32>, dist: f32) -> vec3<f32> {
-    let detail_fade = exp(-dist * m.p2.z);
-    var grain = 0.5;
-    if (detail_fade > 0.02) {
-        grain = mix(0.5, fbm3(world * 0.9), detail_fade);
-    }
-    let stains = fbm3(world * 0.035);
-    var base = m.c0.rgb;
-    if (m.p0.y > 0.0) {
-        let band = fract(world.y * m.p0.x + stains * m.p1.x);
-        base *= (1.0 - m.p0.y) + m.p0.y * smoothstep(m.p0.z, m.p0.w, band);
-    }
-    base *= 0.75 + m.c0.w * grain;
-    // Grime patches darken toward the tint.
-    base = mix(base, base * m.c1.rgb, smoothstep(0.55, 0.85, stains) * m.c1.w);
-    // Vertical drip streaks on walls.
-    if (m.p1.y > 0.0) {
-        let wallness = 1.0 - abs(n.y);
-        let streak = fbm3(vec3<f32>(world.x * 0.6, world.y * 0.03, world.z * 0.6));
-        base *= 1.0 - wallness * smoothstep(0.6, 0.9, streak) * m.p1.y;
-    }
-    // Moss in upward crevices.
-    if (m.c2.w > 0.0) {
-        let macro_var = fbm3(world * 0.012);
-        let moss = smoothstep(0.6, 0.9, macro_var) * smoothstep(0.5, 0.9, n.y) * m.c2.w;
-        base = mix(base, m.c2.rgb, moss);
-    }
-    return base;
-}
-
-// Altitude-zoned natural terrain: low/mid/high/peak colors with noisy
-// borders, slope override to the high (rock) color.
-fn zoned_albedo(m: WorldMaterial, world: vec3<f32>, n: vec3<f32>, dist: f32) -> vec3<f32> {
-    let detail_fade = exp(-dist * m.p2.w);
-    var detail = 0.5;
-    if (detail_fade > 0.02) {
-        detail = mix(0.5, fbm3(world * 0.35), detail_fade);
-    }
-    let macro_var = fbm3(world * 0.012);
-
-    var low = m.c0.rgb * (0.85 + 0.3 * detail);
-    var mid = mix(m.c1.rgb, m.p0.rgb, macro_var);
-    mid *= 0.8 + 0.45 * detail;
-    let band = fract(world.y * 0.06 + macro_var * 2.0);
-    var high = mix(m.c2.rgb, m.p1.rgb, smoothstep(0.2, 0.8, band));
-    high *= 0.8 + 0.4 * detail;
-    var peak = m.c3.rgb * (0.9 + 0.2 * detail);
-
-    let border = (macro_var - 0.5) * m.c3.w;
-    var base = mix(low, mid, smoothstep(m.c0.w + border * 0.05, m.c0.w + m.p0.w + border * 0.05, world.y));
-    base = mix(base, high, smoothstep(m.c1.w + border, m.c1.w + m.p1.w + border, world.y));
-    base = mix(base, peak, smoothstep(m.c2.w + border, m.c2.w + m.p2.x + border, world.y));
-    let steep = smoothstep(m.p2.y, m.p2.z, n.y); // 1 on cliffs
-    return mix(base, high, steep);
-}
-
-// Two-octave fbm — the canopy runs per terrain pixel, so its noise
-// budget is tight (the full material was measured at half the frame).
-fn fbm3_2(p: vec3<f32>) -> f32 {
-    return 0.5 * noise3(p) + 0.25 * noise3(p * 2.17);
-}
-
-// 4-tap tetrahedral gradient of ONE value-noise octave: bump direction
-// only needs the dominant frequency, and this is the cheapest stable
-// estimate (iq uses the same trick for tree normals).
-fn noise3_grad(p: vec3<f32>, eps: f32) -> vec3<f32> {
-    let e1 = vec3<f32>(1.0, -1.0, -1.0);
-    let e2 = vec3<f32>(-1.0, -1.0, 1.0);
-    let e3 = vec3<f32>(-1.0, 1.0, -1.0);
-    let e4 = vec3<f32>(1.0, 1.0, 1.0);
-    return (e1 * noise3(p + eps * e1) + e2 * noise3(p + eps * e2)
-        + e3 * noise3(p + eps * e3) + e4 * noise3(p + eps * e4))
-        / (4.0 * eps);
-}
-
 struct MatSample {
     albedo: vec3<f32>,
     normal: vec3<f32>,
     ao: f32,
 }
 
-// Forested zoned terrain (after iq's Rainforest): the canopy is crown
-// noise — two-tone green mixed by crown height, normals perturbed by the
-// crown gradient so the sun lights individual crowns, AO from crown depth.
-// Rock gets steepness-proportional anisotropic bumps (y squashed 5x →
-// horizontal strata), moss on flat tops, and an implicit snowcap above
-// the rock zone.
-// Layout: c0 canopy_dark | canopy start; c1 canopy_lit | rock start;
-// c2 rock | rock width; c3 patch (dry/brown) | border; p0 low | canopy
-// width; p1 (crown scale, crown relief, strata scale, strata relief);
-// p2 (steep hi, steep lo, detail fade, patch amount).
+// --- material recipes --------------------------------------------------------
+//
+// These are evaluated PER PIXEL, so they are flat lookups and nothing
+// else. They used to synthesize their detail procedurally — around
+// thirteen 3D value-noise evaluations per fragment across the canopy
+// path alone (two `fbm3_2`, two `noise3_grad`, one `noise3`, plus the
+// grain/stain/streak/moss fields on the surface path). That is a texture
+// fetch's worth of information computed from scratch for every pixel of
+// every frame, and it cost roughly a third of the frame to produce
+// mottling nobody wanted.
+//
+// Detail belongs in a texture (one fetch, mip-mapped, filtered, and
+// cheaper at distance instead of more expensive). Until there is one,
+// the recipes select their own colours by the two things that carry real
+// information about the surface — how high it is and how steep it is.
+
+fn surface_albedo(m: WorldMaterial, world: vec3<f32>, n: vec3<f32>, dist: f32) -> vec3<f32> {
+    return m.c0.rgb;
+}
+
+/// Altitude-zoned natural terrain: low/mid/high/peak, slope overriding to
+/// the high (rock) colour.
+fn zoned_albedo(m: WorldMaterial, world: vec3<f32>, n: vec3<f32>, dist: f32) -> vec3<f32> {
+    var base = mix(m.c0.rgb, m.c1.rgb, smoothstep(m.c0.w, m.c0.w + m.p0.w, world.y));
+    base = mix(base, m.c2.rgb, smoothstep(m.c1.w, m.c1.w + m.p1.w, world.y));
+    base = mix(base, m.c3.rgb, smoothstep(m.c2.w, m.c2.w + m.p2.x, world.y));
+    // 1 on cliffs (the edges are inverted on purpose: n.y falls as it steepens).
+    return mix(base, m.c2.rgb, smoothstep(m.p2.y, m.p2.z, n.y));
+}
+
 fn canopy_material(m: WorldMaterial, world: vec3<f32>, n: vec3<f32>, dist: f32) -> MatSample {
-    let fade = exp(-dist * m.p2.z);
-    // One shared macro field drives the zone border AND the dry patches.
-    let macro_var = fbm3_2(world * 0.012);
-    let border = (macro_var - 0.5) * m.c3.w;
-
-    let veg_edge = smoothstep(m.c0.w + border * 0.05, m.c0.w + m.p0.w + border * 0.05, world.y);
-    let rockness_alt = smoothstep(m.c1.w + border, m.c1.w + m.c2.w + border, world.y);
-    let steep = smoothstep(m.p2.x, m.p2.y, n.y);
-    let rockness = max(rockness_alt, steep);
-    let veg = veg_edge * (1.0 - rockness);
-
-    // --- canopy: crowns as noise ------------------------------------------
-    let crown_p = world * m.p1.x;
-    let crown = fbm3_2(crown_p);
-    var nn = n;
-    let crelief = m.p1.y * veg * mix(0.4, 1.0, fade);
-    if (crelief > 0.01) {
-        nn = normalize(n + crelief * noise3_grad(crown_p, 0.3));
-    }
-    var ccol = mix(m.c0.rgb, m.c1.rgb, smoothstep(0.25, 0.7, crown));
-    // Dry/brown patches on gentle ground, iq-style. (`patch` is a
-    // reserved WGSL word, like `meta`.)
-    let dry = smoothstep(0.62, 0.8, macro_var) * m.p2.w * smoothstep(0.5, 0.85, n.y);
-    ccol = mix(ccol, m.c3.rgb, dry);
-    // Crown-depth occlusion: canopy hollows swallow light.
-    let cao = 0.4 + 0.6 * smoothstep(0.12, 0.7, crown);
-
-    // --- rock: anisotropic strata bumps -----------------------------------
-    let strata_p = world * vec3<f32>(m.p1.z, m.p1.z * 0.2, m.p1.z);
-    var rn = n;
-    let srelief = m.p1.w * rockness * (1.0 - abs(n.y) * 0.6) * mix(0.5, 1.0, fade);
-    if (srelief > 0.01) {
-        rn = normalize(n + srelief * noise3_grad(strata_p, 0.3));
-    }
-    var rcol = m.c2.rgb * (0.75 + 0.5 * mix(0.5, noise3(world * 0.9), fade));
-    // Moss creeps onto flat rock shelves.
-    rcol = mix(rcol, m.c0.rgb, 0.45 * smoothstep(0.7, 0.92, rn.y) * (1.0 - rockness_alt));
-    // Implicit snowcap well above the rock line.
-    let snow = smoothstep(m.c1.w + 2.5 * m.c2.w + border, m.c1.w + 3.5 * m.c2.w + border, world.y)
-        * smoothstep(0.35, 0.65, rn.y);
-    rcol = mix(rcol, vec3<f32>(0.85, 0.88, 0.95), snow);
-
+    let veg_edge = smoothstep(m.c0.w, m.c0.w + m.p0.w, world.y);
+    let rockness = max(
+        smoothstep(m.c1.w, m.c1.w + m.c2.w, world.y),
+        smoothstep(m.p2.x, m.p2.y, n.y),
+    );
+    // The canopy's two greens averaged: the crown noise that used to pick
+    // between them per pixel is gone.
+    let canopy = mix(m.c0.rgb, m.c1.rgb, 0.5);
     var out: MatSample;
-    out.albedo = mix(mix(m.p0.rgb, ccol, veg_edge), rcol, rockness);
-    out.normal = normalize(mix(mix(n, nn, veg), rn, rockness));
-    out.ao = mix(1.0, cao, veg);
+    out.albedo = mix(mix(m.p0.rgb, canopy, veg_edge), m.c2.rgb, rockness);
+    out.normal = n;
+    out.ao = 1.0;
     return out;
 }
 
