@@ -542,7 +542,8 @@ impl Plugin for VoxelChunksPlugin {
 
         let (ready_tx, ready_rx) = crossbeam_channel::unbounded();
         app.init_resource::<WorldPrograms>()
-            .init_resource::<CameraWorld>();
+            .init_resource::<CameraWorld>()
+            .init_resource::<WorldClips>();
         app.init_resource::<FieldParams>();
         app.init_resource::<SurfaceMap>();
         app.init_resource::<WorldMaterials>();
@@ -570,6 +571,8 @@ impl Plugin for VoxelChunksPlugin {
         render_app
             .init_resource::<WorldPrograms>()
             .init_resource::<CameraWorld>()
+            .init_resource::<WorldClips>()
+            .init_resource::<WorldViews>()
             .init_resource::<FieldParams>()
             .init_resource::<SurfaceMap>()
             .init_resource::<WorldMaterials>()
@@ -677,6 +680,25 @@ struct ExtractedChunkCommands(Vec<ChunkCommand>);
 
 #[derive(Resource, Default)]
 struct ExtractedCameraPos(DVec3);
+
+/// Where each world is being looked at FROM, and through what frustum.
+///
+/// Per world, not global: a portal renders a second world from a
+/// different eye in the same frame, and chunk offsets are camera-relative
+/// (for precision at planet scale) while culling is per frustum. Sharing
+/// one camera's values across both views draws the far world at the near
+/// eye's offsets — off screen — and culls it against the wrong frustum.
+///
+/// One entry per world holds only while a world is shown by at most one
+/// view, which is true of a portal. Recursion would need one per view.
+type WorldView = Option<(DVec3, Option<Frustum>)>;
+
+/// Cameras, with the world each one looks at.
+type WorldViewQuery<'w, 's> =
+    Query<'w, 's, (&'static GlobalTransform, &'static Frustum, Option<&'static ViewWorld>), With<Camera3d>>;
+
+#[derive(Resource, Default)]
+struct WorldViews(Vec<WorldView>);
 
 #[derive(Resource, Default)]
 struct ExtractedFrustum(Option<Frustum>);
@@ -806,9 +828,32 @@ struct ChunkParams {
 }
 
 #[derive(ShaderType, Clone, Copy)]
+/// Per-chunk draw data. Entries are dynamic-offset allocated and so
+/// already padded to the device's uniform alignment (256 B on Metal),
+/// which is why the clip planes ride here for free rather than needing a
+/// per-view bind group.
 struct ChunkDrawUniform {
     offset: Vec4,
+    /// x = how many of `clip` are active.
+    clip_count: Vec4,
+    /// World-space half-spaces this chunk is clipped to; a fragment
+    /// survives where `dot(n, p) + d >= 0` for all of them. This is how a
+    /// portal masks the far world to its own opening — see [`WorldClips`].
+    clip: [Vec4; MAX_CLIP_PLANES],
 }
+
+/// Four sides of the pyramid from the eye through the portal, plus the
+/// portal's own plane.
+pub const MAX_CLIP_PLANES: usize = 5;
+
+/// Clip planes applied to a world's chunks, in THAT world's coordinates.
+///
+/// A portal is a hole: the far world must appear only within the opening,
+/// and only beyond it. Bevy's depth texture is `Depth32Float` with no
+/// stencil aspect, so the mask cannot be a stencil; for a convex opening,
+/// clipping against the pyramid's side planes is exactly equivalent.
+#[derive(Resource, Default, Clone)]
+pub struct WorldClips(pub Vec<Vec<Vec4>>);
 
 enum StagingState {
     Free,
@@ -1158,6 +1203,7 @@ fn resolve_material_slots(
 
 fn extract_program(
     programs: Extract<Res<WorldPrograms>>,
+    clips: Extract<Res<WorldClips>>,
     camera_world: Extract<Res<CameraWorld>>,
     field: Extract<Res<FieldParams>>,
     env: Extract<Res<EnvParams>>,
@@ -1165,6 +1211,7 @@ fn extract_program(
     mut commands: Commands,
 ) {
     commands.insert_resource(WorldPrograms(programs.0.clone()));
+    commands.insert_resource((**clips).clone());
     commands.insert_resource(**camera_world);
     commands.insert_resource(**field);
     commands.insert_resource(**env);
@@ -1174,6 +1221,7 @@ fn extract_program(
 
 fn extract_camera_pos(
     cameras: Extract<Query<(&GlobalTransform, &Frustum), crate::PlayerCameraFilter>>,
+    worlds: Extract<WorldViewQuery>,
     mut commands: Commands,
 ) {
     let (pos, frustum) = cameras
@@ -1183,6 +1231,15 @@ fn extract_camera_pos(
         .unwrap_or_default();
     commands.insert_resource(ExtractedCameraPos(pos));
     commands.insert_resource(ExtractedFrustum(frustum));
+    let mut per_world = vec![None; MAX_WORLDS];
+    for (transform, frustum, world) in worlds.iter() {
+        let id = usize::from(world.map_or(0, |w| w.0));
+        if let Some(slot) = per_world.get_mut(id) {
+            // First view of a world wins; there is only ever one today.
+            slot.get_or_insert((transform.translation().as_dvec3(), Some(*frustum)));
+        }
+    }
+    commands.insert_resource(WorldViews(per_world));
 }
 
 // --- planning (Prepare) ------------------------------------------------------
@@ -1239,6 +1296,8 @@ fn plan_frame(
     mut batches: ResMut<FrameBatches>,
     mut draw_lists: ResMut<VoxelDrawLists>,
     camera: Res<ExtractedCameraPos>,
+    // Grouped: Bevy caps a system at 16 parameters.
+    (world_views, clips): (Res<WorldViews>, Res<WorldClips>),
     (programs, field, env): (Res<WorldPrograms>, Res<FieldParams>, Res<EnvParams>),
     surface_map: Res<SurfaceMap>,
     frustum: Res<ExtractedFrustum>,
@@ -1741,7 +1800,13 @@ fn plan_frame(
         if !chunk.visible {
             continue;
         }
-        if let Some(f) = &frustum.0 {
+        // The eye and frustum of whoever is looking at THIS world.
+        let (eye, view_frustum) = world_views
+            .0
+            .get(usize::from(key.world))
+            .and_then(|v| v.as_ref())
+            .map_or((camera.0, frustum.0), |(p, f)| (*p, *f));
+        if let Some(f) = &view_frustum {
             // World-space AABB, inflated by the skirt depth. f32 is fine at
             // current view ranges; camera-relative culling comes with M6.
             let half = key.edge_m() * 0.5 + key.voxel_size_m() * 6.0;
@@ -1760,7 +1825,15 @@ fn plan_frame(
                 continue;
             }
         }
-        let rel = key.min_corner_m() - camera.0;
+        let rel = key.min_corner_m() - eye;
+        // The clip belongs to the WORLD, not the chunk: a world seen
+        // through a portal is masked to the opening wherever it is drawn.
+        let planes = clips.0.get(usize::from(key.world));
+        let mut clip = [Vec4::ZERO; MAX_CLIP_PLANES];
+        let count = planes.map_or(0, |p| p.len().min(MAX_CLIP_PLANES));
+        if let Some(planes) = planes {
+            clip[..count].copy_from_slice(&planes[..count]);
+        }
         let offset = gpu.draw_uniforms.push(&ChunkDrawUniform {
             offset: Vec4::new(
                 rel.x as f32,
@@ -1768,6 +1841,8 @@ fn plan_frame(
                 rel.z as f32,
                 key.voxel_size_m() as f32,
             ),
+            clip_count: Vec4::new(count as f32, 0.0, 0.0, 0.0),
+            clip,
         });
         draw_lists.0[usize::from(key.world)].push(DrawEntry {
             uniform_offset: offset,

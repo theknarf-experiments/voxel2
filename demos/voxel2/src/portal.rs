@@ -29,7 +29,7 @@ pub struct PortalPlugin;
 impl Plugin for PortalPlugin {
     fn build(&self, app: &mut App) {
         app.add_systems(Startup, register_far_world)
-            .add_systems(Update, follow_camera_world);
+            .add_systems(Update, (spawn_portal, follow_camera_world, drive_portal).chain());
     }
 }
 
@@ -127,5 +127,189 @@ fn follow_camera_world(
                 commands.entity(entity).insert(want.clone());
             }
         }
+    }
+}
+
+/// A rectangular opening between two worlds.
+///
+/// `near`/`far` place the SAME opening in each world. Looking through it
+/// from the near side shows the far world as if the two spaces were
+/// joined along the rectangle, which is what "seamless" means here: the
+/// far view is the near view moved by `far * near⁻¹`.
+#[derive(Component, Clone, Copy)]
+pub struct Portal {
+    pub near: Transform,
+    pub far: Transform,
+    pub near_world: u8,
+    pub far_world: u8,
+    /// Half width and half height of the opening, in metres.
+    pub half: Vec2,
+}
+
+impl Portal {
+    /// The opening's four corners, in the given placement.
+    fn corners(at: &Transform, half: Vec2) -> [Vec3; 4] {
+        let x = at.rotation * Vec3::X * half.x;
+        let y = at.rotation * Vec3::Y * half.y;
+        [
+            at.translation - x - y,
+            at.translation + x - y,
+            at.translation + x + y,
+            at.translation - x + y,
+        ]
+    }
+}
+
+/// Near-side views: every camera that is not itself a portal camera.
+type NearViews<'w, 's> = Query<
+    'w,
+    's,
+    (
+        Entity,
+        &'static GlobalTransform,
+        &'static Camera,
+        Option<&'static bevy::camera::RenderTarget>,
+    ),
+    (With<Camera3d>, Without<PortalCamera>),
+>;
+
+/// Marks a camera that renders the far side FOR a particular near-side
+/// camera.
+///
+/// One per view, not one per portal: the window and the offscreen mirror
+/// `voxctl shot` renders through are different views of the same near
+/// world, and each needs its own paired far view aimed through the same
+/// opening into the same target. A single portal camera pointed at the
+/// window is invisible to every screenshot, which is a memorable way to
+/// spend an afternoon.
+#[derive(Component)]
+pub struct PortalCamera(pub Entity);
+
+/// Place the opening in front of the camera, once, and give it a camera
+/// of its own.
+///
+/// Positioned from where the camera ACTUALLY is rather than from the
+/// level's declared start, so `VOXEL_START` still puts you in front of it.
+fn spawn_portal(
+    mut commands: Commands,
+    far: Option<Res<FarLevel>>,
+    camera: Query<&GlobalTransform, With<crate::FreeCamera>>,
+    existing: Query<(), With<Portal>>,
+) {
+    if far.is_none() || !existing.is_empty() {
+        return;
+    }
+    let Ok(eye) = camera.single() else {
+        return;
+    };
+    let forward = eye.forward().as_vec3();
+    let at = eye.translation() + forward * 14.0;
+    let near = Transform::from_translation(at).looking_to(-forward, Vec3::Y);
+    commands.spawn(Portal {
+        near,
+        // Room to stand inside the megastructure.
+        far: Transform::from_translation(Vec3::new(0.0, 40.0, 0.0)),
+        near_world: 0,
+        far_world: 1,
+        half: Vec2::new(4.0, 3.0),
+    });
+    info!("portal opened at {at:?}");
+}
+
+/// Pair every near-side view with a far-side one, aim it, and hand the
+/// far world its mask.
+///
+/// The far view is the near view moved by the pairing, so the two line up
+/// at the opening by construction rather than by tuning.
+fn drive_portal(
+    mut commands: Commands,
+    portals: Query<&Portal>,
+    sources: NearViews,
+    mut portal_cams: Query<(Entity, &PortalCamera, &mut Transform, &mut Camera)>,
+    mut clips: ResMut<voxel_render::WorldClips>,
+    camera_world: Res<voxel_render::CameraWorld>,
+) {
+    clips.0.clear();
+    clips.0.resize(voxel_render::MAX_WORLDS, Vec::new());
+    let Ok(portal) = portals.single() else {
+        return;
+    };
+    let showing = if camera_world.0 == portal.near_world {
+        portal.far_world
+    } else {
+        portal.near_world
+    };
+    let (from, to) = if camera_world.0 == portal.near_world {
+        (portal.near, portal.far)
+    } else {
+        (portal.far, portal.near)
+    };
+    let motion =
+        Transform::from_matrix(Mat4::from(to.compute_affine() * from.compute_affine().inverse()));
+
+    for (source, eye, camera, target) in &sources {
+        let existing = portal_cams
+            .iter_mut()
+            .find(|(_, paired, _, _)| paired.0 == source);
+        let placement = Transform::from_matrix(motion.to_matrix() * eye.to_matrix());
+        match existing {
+            Some((entity, _, mut transform, mut cam)) => {
+                *transform = placement;
+                // Just after the view it pairs, into the same target.
+                cam.order = camera.order + 1;
+                let mut cmd = commands.entity(entity);
+                cmd.insert(voxel_render::ViewWorld(showing))
+                    .insert(RenderLayers::layer(usize::from(showing)));
+                if let Some(target) = target {
+                    cmd.insert(target.clone());
+                }
+            }
+            None => {
+                let mut spawned = commands.spawn((
+                    PortalCamera(source),
+                    Camera3d::default(),
+                    Camera {
+                        order: camera.order + 1,
+                        // Keep what the near view already drew: the far
+                        // world appears INTO it.
+                        clear_color: bevy::camera::ClearColorConfig::None,
+                        ..default()
+                    },
+                    placement,
+                    voxel_render::ViewWorld(showing),
+                    RenderLayers::layer(usize::from(showing)),
+                ));
+                if let Some(target) = target {
+                    spawned.insert(target.clone());
+                }
+            }
+        }
+    }
+
+    // The mask, in the FAR world's coordinates: the pyramid from the
+    // (moved) eye through the (far) opening, plus the opening's own plane
+    // so nothing between it and the eye leaks in.
+    let Some((_, eye, _, _)) = sources.iter().next() else {
+        return;
+    };
+    let far_eye = motion.transform_point(eye.translation());
+    let corners = Portal::corners(&to, portal.half);
+    let mut planes = Vec::with_capacity(voxel_render::MAX_CLIP_PLANES);
+    for i in 0..4 {
+        let a = corners[i];
+        let b = corners[(i + 1) % 4];
+        let mut n = (a - far_eye).cross(b - far_eye).normalize_or_zero();
+        if n.dot(corners[(i + 2) % 4] - a) < 0.0 {
+            n = -n;
+        }
+        planes.push(n.extend(-n.dot(a)));
+    }
+    let mut ahead = to.rotation * Vec3::Z;
+    if ahead.dot(to.translation - far_eye) < 0.0 {
+        ahead = -ahead;
+    }
+    planes.push(ahead.extend(-ahead.dot(to.translation)));
+    if std::env::var_os("PORTAL_NOCLIP").is_none() {
+        clips.0[usize::from(showing)] = planes;
     }
 }

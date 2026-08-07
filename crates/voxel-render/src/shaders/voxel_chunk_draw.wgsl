@@ -24,6 +24,12 @@
 struct ChunkDrawUniform {
     // xyz = chunk minimum corner relative to the camera (m), w = voxel size.
     offset: vec4<f32>,
+    // x = number of active clip planes.
+    clip_count: vec4<f32>,
+    // World-space half-spaces; a fragment survives where it is inside all
+    // of them. A portal masks the far world with the pyramid from the eye
+    // through its opening, plus the opening's own plane.
+    clip: array<vec4<f32>, 5>,
 }
 @group(2) @binding(0) var<uniform> chunk: ChunkDrawUniform;
 
@@ -196,6 +202,17 @@ fn fragment(in: VsOut) -> @location(0) vec4<f32> {
         view.world_position.y + in.cam_rel.y,
         view.world_position.z + in.cam_rel.z,
     );
+    // A world seen through a portal exists only inside the opening. The
+    // planes are the pyramid from the eye through it, plus the opening's
+    // own plane, so this is the stencil we cannot have — exact, because
+    // the opening is convex.
+    let clips = u32(chunk.clip_count.x);
+    for (var i = 0u; i < clips; i++) {
+        let plane = chunk.clip[i];
+        if (dot(plane.xyz, world) + plane.w < 0.0) {
+            discard;
+        }
+    }
     let dist = length(in.cam_rel);
     let m = material_for(in.material);
 
