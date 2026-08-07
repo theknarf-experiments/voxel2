@@ -1092,6 +1092,67 @@ fn log_fps(
     }
 }
 
+/// Does the CLAMPED field split this chunk? A pure function of (chunk,
+/// anchor), and the closed form of what the epoch machine reaches by
+/// iterating a fixpoint over a shown set.
+///
+/// The field's own rule allows two shown leaves to touch across a corner
+/// with two levels between them, which a seam cannot bridge; the machine
+/// splits the coarser side until nothing does. Written as a fixpoint that
+/// is a property of a whole configuration — which is exactly why it cannot
+/// be a residency rule, since residency has to be decidable one chunk at a
+/// time. Written this way it is decidable: descend the touching part of
+/// each neighbor's subtree and ask how fine the field wants it. Only
+/// touching subtrees are visited, so the walk is a handful of nodes per
+/// level, not a subtree.
+fn split_clamped(config: &LodConfig, anchor: DVec3, key: ChunkKey) -> bool {
+    if split_wanted(config, anchor, key) {
+        return true;
+    }
+    if key.level < 2 {
+        return false; // nothing can be two levels finer than level 1
+    }
+    for dz in -1..=1 {
+        for dy in -1..=1 {
+            for dx in -1..=1 {
+                if dx == 0 && dy == 0 && dz == 0 {
+                    continue;
+                }
+                let n = ChunkKey::new(key.level, key.pos + IVec3::new(dx, dy, dz));
+                if field_wants_touching_finer(config, anchor, n, key, key.level - 1) {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
+/// Does the field want a leaf strictly finer than `min_level` inside
+/// `region`, touching `target`? Twin of `PostState::has_touching_finer_than`
+/// against the field rather than against a shown set.
+fn field_wants_touching_finer(
+    config: &LodConfig,
+    anchor: DVec3,
+    region: ChunkKey,
+    target: ChunkKey,
+    min_level: u8,
+) -> bool {
+    if !boxes_touch(region, target) {
+        return false;
+    }
+    if !split_wanted(config, anchor, region) {
+        return region.level < min_level;
+    }
+    if region.level == 0 {
+        return false;
+    }
+    region
+        .children()
+        .iter()
+        .any(|c| field_wants_touching_finer(config, anchor, *c, target, min_level))
+}
+
 /// Where a LOD level is resident, as a predicate on one chunk: the level
 /// could be the finest covering it — its own split radius does not swallow
 /// it, and its parent's does.
@@ -1116,6 +1177,15 @@ pub fn resident_at(config: &LodConfig, anchor: DVec3, key: ChunkKey) -> bool {
     let parent_split = key.level >= config.max_level
         || aabb_distance(anchor, parent) < config.split_k * parent.edge_m();
     !split_here && parent_split
+}
+
+/// [`resident_at`], against the clamped field: a chunk is resident when it
+/// is not split and its parent is. Exact — no conservative widening — so
+/// it holds precisely the shown set, which is what the closed-form clamp
+/// buys.
+pub fn resident_clamped(config: &LodConfig, anchor: DVec3, key: ChunkKey) -> bool {
+    !split_clamped(config, anchor, key)
+        && (key.level >= config.max_level || split_clamped(config, anchor, key.parent()))
 }
 
 /// Distance from `p` to the farthest corner of a chunk's box.
@@ -1191,6 +1261,28 @@ mod residency_shape {
                 for x in lo.x as i32..hi.x as i32 {
                     let key = ChunkKey::new(level, IVec3::new(x, y, z));
                     if resident_at(config, anchor, key) {
+                        out.insert(key);
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    fn resident_level_clamped(config: &LodConfig, anchor: DVec3, level: u8) -> HashSet<ChunkKey> {
+        if level == config.max_level {
+            return top_ring(config, anchor);
+        }
+        let edge = ChunkKey::new(level, IVec3::ZERO).edge_m();
+        let reach = resident_reach(config, level);
+        let lo = ((anchor - DVec3::splat(reach)) / edge).floor();
+        let hi = ((anchor + DVec3::splat(reach)) / edge).ceil();
+        let mut out = HashSet::new();
+        for z in lo.z as i32..hi.z as i32 {
+            for y in lo.y as i32..hi.y as i32 {
+                for x in lo.x as i32..hi.x as i32 {
+                    let key = ChunkKey::new(level, IVec3::new(x, y, z));
+                    if resident_clamped(config, anchor, key) {
                         out.insert(key);
                     }
                 }
@@ -1276,24 +1368,77 @@ mod residency_shape {
         }
     }
 
-    /// Every chunk the epoch machine draws today is resident under the
-    /// predicate — except the ones the +-1 clamp force-split, which the
-    /// predicate cannot see because it looks at one chunk at a time.
-    ///
-    /// This is the gap the conversion has to close: a chunk shown two
-    /// levels from its neighbour is a pinhole, so the clamp has to be part
-    /// of the residency rule, not a fixpoint run afterwards.
+    /// The closed-form clamped field IS the configuration the epoch
+    /// machine converges to by iterating a fixpoint. Descending with
+    /// `split_clamped` from the top ring reproduces `plan_genesis`'s leaf
+    /// set exactly — which is what lets residency be decided one chunk at
+    /// a time.
     #[test]
-    fn the_clamp_is_what_the_predicate_still_misses() {
-        let config = mega();
-        let anchor = DVec3::new(-27570.0, 80.0, -36770.0);
-        let drawn = plan_genesis(&config, anchor, None).leaves;
-        let (_, missed) = measure(&config, anchor, resident_level, &drawn);
-        assert!(
-            missed > 0 && missed < drawn.len() / 100,
-            "clamp gap moved: {missed} of {} shown chunks not resident",
-            drawn.len(),
-        );
+    fn the_closed_form_clamp_reproduces_the_fixpoint() {
+        for (name, config) in [("planet", planet()), ("mega", mega())] {
+            for anchor in [
+                DVec3::new(-27570.0, 80.0, -36770.0),
+                DVec3::new(1234.0, 600.0, -800.0),
+                DVec3::new(0.0, 0.0, 0.0),
+            ] {
+                let expect = plan_genesis(&config, anchor, None).leaves;
+                let mut got: HashSet<ChunkKey> = HashSet::new();
+                fn descend(
+                    config: &LodConfig,
+                    anchor: DVec3,
+                    k: ChunkKey,
+                    out: &mut HashSet<ChunkKey>,
+                ) {
+                    if split_clamped(config, anchor, k) {
+                        for c in k.children() {
+                            descend(config, anchor, c, out);
+                        }
+                    } else {
+                        out.insert(k);
+                    }
+                }
+                for top in top_ring(&config, anchor) {
+                    descend(&config, anchor, top, &mut got);
+                }
+                let extra: Vec<&ChunkKey> = got.difference(&expect).take(3).collect();
+                let short: Vec<&ChunkKey> = expect.difference(&got).take(3).collect();
+                assert_eq!(
+                    got.len(),
+                    expect.len(),
+                    "{name} @{:?}: closed form has {} leaves, fixpoint {} — extra {extra:?}, \
+                     missing {short:?}",
+                    anchor.as_ivec3(),
+                    got.len(),
+                    expect.len(),
+                );
+                assert_eq!(got, expect, "{name} @{:?}", anchor.as_ivec3());
+            }
+        }
+    }
+
+    /// Residency under the clamped predicate covers every chunk the epoch
+    /// machine draws — the gap the plain field predicate leaves — and
+    /// still costs a fraction of what a box costs.
+    #[test]
+    fn the_clamped_predicate_covers_what_the_field_alone_misses() {
+        for (name, config) in [("planet", planet()), ("mega", mega())] {
+            for anchor in [
+                DVec3::new(-27570.0, 80.0, -36770.0),
+                DVec3::new(1234.0, 600.0, -800.0),
+            ] {
+                let drawn = plan_genesis(&config, anchor, None).leaves;
+                let (resident, missed) =
+                    measure(&config, anchor, resident_level_clamped, &drawn);
+                println!(
+                    "{name} @{:?}: drawn {} — clamped field {resident} ({:.2}x, {missed} missed)",
+                    anchor.as_ivec3(),
+                    drawn.len(),
+                    resident as f64 / drawn.len() as f64,
+                );
+                assert_eq!(missed, 0, "{name}: shown chunks outside residency");
+                assert!((resident as f64) < 1.3 * drawn.len() as f64, "{name}: {resident}");
+            }
+        }
     }
 }
 
