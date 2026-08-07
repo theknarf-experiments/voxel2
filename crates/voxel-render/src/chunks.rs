@@ -136,6 +136,45 @@ impl ChunkCommandQueue {
     }
 }
 
+/// Waiters for a chunk becoming drawable, keyed by chunk.
+///
+/// The epoch machine polls readiness as a batch, which suits a planner
+/// deciding what to swap. A layer that *owns* a chunk needs the opposite:
+/// to ask for one and block until it exists, because `create` is where a
+/// chunk's resources are acquired. Both read the same notifications, so
+/// there is exactly one drain and it fans out to whoever is waiting.
+#[derive(Resource, Default, Clone)]
+pub struct ChunkWaiters(Arc<Mutex<HashMap<ChunkKey, Vec<crossbeam_channel::Sender<u32>>>>>);
+
+impl ChunkWaiters {
+    /// A receiver that fires when `key` next becomes drawable, with the
+    /// seam mask its mesh was built with.
+    pub fn wait_for(&self, key: ChunkKey) -> crossbeam_channel::Receiver<u32> {
+        let (tx, rx) = crossbeam_channel::bounded(1);
+        self.0.lock().unwrap().entry(key).or_default().push(tx);
+        rx
+    }
+
+    /// Called by whoever drains the ready channel.
+    pub fn notify(&self, key: ChunkKey, mask: u32) {
+        if let Some(waiters) = self.0.lock().unwrap().remove(&key) {
+            for tx in waiters {
+                let _ = tx.send(mask);
+            }
+        }
+    }
+
+    /// Give up on a chunk that will never arrive (its request was
+    /// cancelled), so a blocked create cannot wait forever.
+    pub fn abandon(&self, key: ChunkKey) {
+        self.0.lock().unwrap().remove(&key);
+    }
+
+    pub fn pending(&self) -> usize {
+        self.0.lock().unwrap().len()
+    }
+}
+
 /// Render→main notifications: a requested chunk became drawable (meshed) or
 /// was classified empty. The LOD controller uses these for
 /// ready-before-swap.
@@ -370,6 +409,7 @@ impl Plugin for VoxelChunksPlugin {
         app.init_resource::<ChunkCommandQueue>()
             .init_resource::<SharedRenderStats>()
             .insert_resource(ChunkReadyChannel { rx: ready_rx })
+            .init_resource::<ChunkWaiters>()
             .add_plugins((
                 ExtractComponentPlugin::<VoxelTerrainMarker>::default(),
                 // Gives the terrain material the usual asset lifecycle:

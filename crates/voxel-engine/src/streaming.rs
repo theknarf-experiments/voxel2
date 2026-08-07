@@ -803,6 +803,7 @@ fn lod_tick(
     world: Res<crate::planning::WorldQuery>,
     mut rebuild: ResMut<StreamingRebuild>,
     ready_rx: Res<ChunkReadyChannel>,
+    waiters: Res<voxel_render::ChunkWaiters>,
     mut field: ResMut<voxel_render::FieldParams>,
     stats: Res<SharedRenderStats>,
     mut probe: ResMut<StreamProbe>,
@@ -855,8 +856,12 @@ fn lod_tick(
     }
 
     // 1. Absorb readiness notifications.
+    // The single drain, fanned out: the epoch machine takes readiness as
+    // a batch to decide swaps, and anything waiting on one chunk gets
+    // woken here too.
     for (key, mask) in ready_rx.rx.try_iter() {
         tree.ready.insert(key, mask);
+        waiters.notify(key, mask);
     }
 
     // 1b. Cold start: an empty tree bootstraps through genesis — the
