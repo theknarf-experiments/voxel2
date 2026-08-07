@@ -56,12 +56,22 @@ struct WorldOp {
     p1: vec4<f32>,
     p2: vec4<f32>,
 }
+// One world's slice: count = (op offset, op count, height ops, seed).
+struct WorldHeader {
+    count: vec4<u32>,
+    sun: vec4<f32>,
+}
 struct WorldProgram {
-    count: vec4<u32>,  // total ops, height ops, seed, unused
-    sun: vec4<f32>,    // sun direction | unused
     anchor: vec4<f32>, // LOD field anchor | dist_scale
     field: vec4<f32>,  // max_vs | unused
+    worlds: array<WorldHeader, 4>,
     ops: array<WorldOp>,
+}
+
+/// This chunk's world slice. Every loaded world's ops share one buffer,
+/// so a dispatch can mix chunks from different worlds.
+fn world_header() -> WorldHeader {
+    return prog.worlds[u32(params.origin_voxels.w)];
 }
 @group(0) @binding(3) var<storage, read> prog: WorldProgram;
 
@@ -99,7 +109,7 @@ fn round_half_up(x: f32) -> f32 {
 
 fn hash2(p: vec2<i32>) -> f32 {
     var h: u32 = u32(p.x) * 374761393u + u32(p.y) * 668265263u
-        + prog.count.z * 2654435769u;
+        + world_header().count.w * 2654435769u;
     h = (h ^ (h >> 13u)) * 1274126177u;
     h = h ^ (h >> 16u);
     return f32(h & 0xFFFFFFu) / 16777216.0;
@@ -107,7 +117,7 @@ fn hash2(p: vec2<i32>) -> f32 {
 
 fn hash3(p: vec3<i32>) -> f32 {
     var h: u32 = u32(p.x) * 374761393u + u32(p.y) * 668265263u + u32(p.z) * 2246822519u
-        + prog.count.z * 2654435769u;
+        + world_header().count.w * 2654435769u;
     h = (h ^ (h >> 13u)) * 1274126177u;
     h = h ^ (h >> 16u);
     return f32(h & 0xFFFFFFu) / 16777216.0;
@@ -218,8 +228,9 @@ fn eval_program(p: vec3<f32>, vs: f32) -> WorldSample {
     var warp = vec2<f32>(0.0);
     let pxz = p.xz;
 
-    for (var i = 0u; i < prog.count.x; i++) {
-        let op = prog.ops[i];
+    let w = world_header();
+    for (var i = 0u; i < w.count.y; i++) {
+        let op = prog.ops[w.count.x + i];
         if (coarse && (op.head.y & 1u) != 0u) { continue; }
         if (!coarse && (op.head.y & 2u) != 0u) { continue; }
         switch op.head.x {

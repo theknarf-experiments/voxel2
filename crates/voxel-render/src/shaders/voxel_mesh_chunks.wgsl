@@ -38,7 +38,7 @@ const POS_RANGE: f32 = 48.0;
 struct ChunkParams {
     // xyz = chunk minimum corner in world meters, w = voxel size in meters.
     origin: vec4<f32>,
-    // Layout twin of the density shader's integer origin (unused here).
+    // Layout twin of the density shader's integer origin; w = world.
     origin_voxels: vec4<i32>,
     slot: u32,
     base_vertex: u32,
@@ -72,14 +72,24 @@ struct WorldOp {
     p1: vec4<f32>,
     p2: vec4<f32>,
 }
+// One world's slice: count = (op offset, op count, height ops, seed).
+// Layout twin of `GpuWorldProgram` and the density shader.
+struct WorldHeader {
+    count: vec4<u32>,
+    sun: vec4<f32>,
+}
 struct WorldProgram {
-    count: vec4<u32>,  // total ops, height ops, seed, unused
-    sun: vec4<f32>,    // sun direction | unused
     anchor: vec4<f32>, // LOD field anchor | dist_scale
     field: vec4<f32>,  // max_vs | unused
+    worlds: array<WorldHeader, 4>,
     ops: array<WorldOp>,
 }
 @group(0) @binding(6) var<storage, read> prog: WorldProgram;
+
+/// This chunk's world slice — see the density shader.
+fn world_header() -> WorldHeader {
+    return prog.worlds[u32(params.origin_voxels.w)];
+}
 
 // Surface material map: a header, then one byte per texel, four per
 // word, row-major. Size 0 = nothing painted. Layout twin of
@@ -426,7 +436,7 @@ fn sn_vertices(@builtin(global_invocation_id) id: vec3<u32>) {
 
 fn shash2(p: vec2<i32>) -> f32 {
     var h: u32 = u32(p.x) * 374761393u + u32(p.y) * 668265263u
-        + prog.count.z * 2654435769u;
+        + world_header().count.w * 2654435769u;
     h = (h ^ (h >> 13u)) * 1274126177u;
     h = h ^ (h >> 16u);
     return f32(h & 0xFFFFFFu) / 16777216.0;
@@ -493,8 +503,9 @@ fn height_coarse(xz: vec2<f32>) -> f32 {
     var h = 0.0;
     var warp = vec2<f32>(0.0);
     let pxz = xz;
-    for (var i = 0u; i < prog.count.x; i++) {
-        let op = prog.ops[i];
+    let w = world_header();
+    for (var i = 0u; i < w.count.y; i++) {
+        let op = prog.ops[w.count.x + i];
         switch op.head.x {
 // GENOPS ARMS BEGIN (generated from voxel-core::opgen — run `mise run genops` after editing the op table)
             case 0u: { // WOP_HEIGHT_FBM
@@ -521,10 +532,11 @@ fn height_coarse(xz: vec2<f32>) -> f32 {
 
 fn baked_sun_shadow(world: vec3<f32>) -> f32 {
     // Heightfield-free programs (pure structures) have no horizon to march.
-    if (prog.count.y == 0u) {
+    let wh = world_header();
+    if (wh.count.z == 0u) {
         return 1.0;
     }
-    let sun_dir = normalize(prog.sun.xyz);
+    let sun_dir = normalize(wh.sun.xyz);
     var occ = 0.0;
     var t = 8.0;
     for (var i = 0; i < 9; i++) {

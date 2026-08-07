@@ -36,11 +36,17 @@ struct WorldOp {
     p1: vec4<f32>,
     p2: vec4<f32>,
 }
+// Layout twin of `GpuWorldProgram`. Water belongs to ONE world (the host
+// spawns a surface per world), so it reads that world's slice; today the
+// host only builds water for world 0.
+struct WorldHeader {
+    count: vec4<u32>,
+    sun: vec4<f32>,
+}
 struct WorldProgram {
-    count: vec4<u32>,  // total ops, height ops, seed, unused
-    sun: vec4<f32>,    // sun direction | unused
-    anchor: vec4<f32>, // LOD field anchor | dist_scale
-    field: vec4<f32>,  // max_vs | unused
+    anchor: vec4<f32>,
+    field: vec4<f32>,
+    worlds: array<WorldHeader, 4>,
     ops: array<WorldOp>,
 }
 @group(2) @binding(1) var<storage, read> prog: WorldProgram;
@@ -178,7 +184,7 @@ fn vertex(@builtin(vertex_index) vid: u32) -> VsOut {
 }
 fn hash2(p: vec2<i32>) -> f32 {
     var h: u32 = u32(p.x) * 374761393u + u32(p.y) * 668265263u
-        + prog.count.z * 2654435769u;
+        + prog.worlds[0].count.w * 2654435769u;
     h = (h ^ (h >> 13u)) * 1274126177u;
     h = h ^ (h >> 16u);
     return f32(h & 0xFFFFFFu) / 16777216.0;
@@ -245,8 +251,8 @@ fn seabed_height(xz: vec2<f32>) -> f32 {
     var h = 0.0;
     var warp = vec2<f32>(0.0);
     let pxz = xz;
-    for (var i = 0u; i < prog.count.x; i++) {
-        let op = prog.ops[i];
+    for (var i = 0u; i < prog.worlds[0].count.y; i++) {
+        let op = prog.ops[prog.worlds[0].count.x + i];
         switch op.head.x {
 // GENOPS ARMS BEGIN (generated from voxel-core::opgen — run `mise run genops` after editing the op table)
             case 0u: { // WOP_HEIGHT_FBM

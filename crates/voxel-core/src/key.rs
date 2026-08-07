@@ -6,6 +6,15 @@ use serde::{Deserialize, Serialize};
 
 use crate::{BASE_VOXEL_M, CHUNK_CELLS};
 
+/// Which world a chunk belongs to. Worlds are numbered by the order the
+/// host registers them; 0 is the one a single-level app has.
+///
+/// It rides in the key rather than beside it because the key is what
+/// every map, channel and command is keyed by — two worlds have chunks at
+/// the same level and coordinate, and anything that forgets to carry the
+/// world would silently hand one world's mesh to the other.
+pub type WorldId = u8;
+
 /// Address of a chunk in the LOD octree.
 ///
 /// `level` 0 is the finest LOD (voxel = [`BASE_VOXEL_M`]); each level doubles
@@ -15,12 +24,29 @@ use crate::{BASE_VOXEL_M, CHUNK_CELLS};
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
 pub struct ChunkKey {
     pub level: u8,
+    /// Free of charge: `level` already leaves three bytes of padding.
+    #[serde(default)]
+    pub world: WorldId,
     pub pos: IVec3,
 }
 
 impl ChunkKey {
+    /// A chunk of world 0 — what a single-level app has.
     pub const fn new(level: u8, pos: IVec3) -> Self {
-        Self { level, pos }
+        Self {
+            level,
+            world: 0,
+            pos,
+        }
+    }
+
+    pub const fn in_world(world: WorldId, level: u8, pos: IVec3) -> Self {
+        Self { level, world, pos }
+    }
+
+    /// The same chunk address in another world.
+    pub const fn with_world(self, world: WorldId) -> Self {
+        Self { world, ..self }
     }
 
     /// Voxel edge length in meters at this key's LOD.
@@ -47,7 +73,8 @@ impl ChunkKey {
     pub fn parent(&self) -> ChunkKey {
         // Arithmetic shift right floors toward negative infinity, which is the
         // correct containment rule for negative chunk coordinates.
-        ChunkKey::new(
+        ChunkKey::in_world(
+            self.world,
             self.level + 1,
             IVec3::new(self.pos.x >> 1, self.pos.y >> 1, self.pos.z >> 1),
         )
@@ -59,7 +86,7 @@ impl ChunkKey {
         let base = self.pos * 2;
         core::array::from_fn(|i| {
             let offset = IVec3::new(i as i32 & 1, (i as i32 >> 1) & 1, (i as i32 >> 2) & 1);
-            ChunkKey::new(self.level - 1, base + offset)
+            ChunkKey::in_world(self.world, self.level - 1, base + offset)
         })
     }
 
@@ -74,6 +101,20 @@ impl ChunkKey {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A derived key stays in its own world. `parent()` and `children()`
+    /// build a new key, and building it through the world-0 constructor
+    /// would hand one world's neighbourhood to another — silently, since
+    /// both worlds have a chunk at that level and coordinate.
+    #[test]
+    fn derived_keys_keep_their_world() {
+        let key = ChunkKey::in_world(3, 5, IVec3::new(-3, 7, -1));
+        assert_eq!(key.parent().world, 3);
+        assert!(key.children().iter().all(|c| c.world == 3));
+        assert_eq!(key.parent().children()[0].world, 3);
+        // And world is part of identity: same address, different world.
+        assert_ne!(key, key.with_world(0));
+    }
 
     #[test]
     fn parent_contains_children() {

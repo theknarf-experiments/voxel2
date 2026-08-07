@@ -445,41 +445,63 @@ pub(crate) struct GpuWorldOp {
     p2: Vec4,
 }
 
-/// The program as bound in shaders.
-/// `count = (total, height ops, seed, -)`, `sun = direction | unused`.
-#[derive(ShaderType, Clone, Default)]
-pub struct GpuWorldProgram {
+/// How many worlds one program buffer can describe. Fixed because
+/// `encase` allows a single runtime-sized array per struct, and that one
+/// is the ops.
+pub const MAX_WORLDS: usize = 4;
+
+/// One world's slice of the shared program buffer.
+/// `count = (op offset, op count, height ops, seed)`.
+#[derive(ShaderType, Clone, Copy, Default)]
+pub struct GpuWorldHeader {
     count: UVec4,
     sun: Vec4,
+}
+
+/// Every loaded world's program, in ONE buffer.
+///
+/// Worlds are concatenated and addressed by a per-world (offset, count),
+/// which is the same shape the CSG ops already use: a chunk carries a
+/// range rather than the pipeline carrying a world. That is what lets one
+/// density dispatch serve chunks of different worlds in the same frame,
+/// and it is why the portal can show two levels at once without a second
+/// set of GPU resources.
+#[derive(ShaderType, Clone, Default)]
+pub struct GpuWorldProgram {
     /// xyz = field anchor, w = dist_scale; field.x = max_vs.
     anchor: Vec4,
     field: Vec4,
+    worlds: [GpuWorldHeader; MAX_WORLDS],
     #[shader(size(runtime))]
     ops: Vec<GpuWorldOp>,
 }
 
 impl GpuWorldProgram {
-    fn from_program(program: &WorldProgram, field: &FieldParams) -> Self {
-        let ops = &program.ops;
-        let height_ops = ops.iter().filter(|op| op.is_height_op()).count() as u32;
-        let mut gpu_ops: Vec<GpuWorldOp> = ops
-            .iter()
-            .map(|op| GpuWorldOp {
+    fn from_programs(programs: &[WorldProgram], field: &FieldParams) -> Self {
+        let mut gpu_ops: Vec<GpuWorldOp> = Vec::new();
+        let mut worlds = [GpuWorldHeader::default(); MAX_WORLDS];
+        for (world, program) in programs.iter().take(MAX_WORLDS).enumerate() {
+            let offset = gpu_ops.len() as u32;
+            let height_ops = program.ops.iter().filter(|op| op.is_height_op()).count() as u32;
+            gpu_ops.extend(program.ops.iter().map(|op| GpuWorldOp {
                 meta: UVec4::new(op.kind, op.flags, op.material, 0),
                 p0: Vec4::from_array(op.p0),
                 p1: Vec4::from_array(op.p1),
                 p2: Vec4::from_array(op.p2),
-            })
-            .collect();
+            }));
+            worlds[world] = GpuWorldHeader {
+                count: UVec4::new(offset, program.ops.len() as u32, height_ops, program.seed),
+                sun: program.sun_dir.extend(0.0),
+            };
+        }
         // Runtime-sized arrays must not be empty.
         if gpu_ops.is_empty() {
             gpu_ops.push(GpuWorldOp::default());
         }
         Self {
-            count: UVec4::new(ops.len() as u32, height_ops, program.seed, 0),
-            sun: program.sun_dir.extend(0.0),
             anchor: field.anchor.extend(field.dist_scale),
             field: Vec4::new(field.max_vs, 0.0, 0.0, 0.0),
+            worlds,
             ops: gpu_ops,
         }
     }
@@ -725,7 +747,8 @@ struct VoxelDrawList(Vec<DrawEntry>);
 struct ChunkParams {
     origin: Vec4,
     /// Chunk minimum corner in integer world-voxel units at this chunk's
-    /// own scale (pos × 32), w unused. Density sample positions derive
+    /// own scale (pos × 32); w = which WORLD's program to interpret, an
+    /// index into the program buffer's per-world headers. Density sample positions derive
     /// from these EXACT integers so two chunks sharing a world sample
     /// compute a bit-identical position — `origin + idx × vs` rounds
     /// differently per chunk whenever the voxel size is not an exact
@@ -1138,7 +1161,7 @@ fn make_params(
             origin.z as f32,
             key.voxel_size_m() as f32,
         ),
-        origin_voxels: (key.pos * 32).extend(0),
+        origin_voxels: (key.pos * 32).extend(i32::from(key.world)),
         slot,
         base_vertex: alloc.map_or(0, |a| a.base_vertex),
         first_index: alloc.map_or(0, |a| a.first_index),
@@ -1716,7 +1739,7 @@ fn plan_frame(
     gpu.draw_uniforms
         .write_buffer(&render_device, &render_queue);
     gpu.program_buffer
-        .set(GpuWorldProgram::from_program(&program, &field));
+        .set(GpuWorldProgram::from_programs(std::slice::from_ref(&*program), &field));
     gpu.program_buffer
         .write_buffer(&render_device, &render_queue);
     gpu.env_uniform.set(*env);
