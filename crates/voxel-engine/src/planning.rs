@@ -314,6 +314,14 @@ pub fn ops_provider(world: &WorldQuery) -> crate::chunkgen::ChunkOpsProvider {
     }
     let world = world.clone();
     crate::chunkgen::ChunkOpsProvider(Some(Arc::new(move |key: ChunkKey| {
+        // Past the ops horizon `chunk_ops` returns nothing whatever
+        // planning says, so waiting for residency is waiting to be told
+        // the answer is empty — and on a cold start that wait IS the cold
+        // start. The coarse levels are most of the world's area, so they
+        // can be streaming while the planners are still running.
+        if key.edge_m() as f32 > OPS_HORIZON_EDGE_M {
+            return Vec::new();
+        }
         world.wait_idle();
         world.chunk_ops(key)
     })))

@@ -76,13 +76,20 @@ const CELLS: u32 = 32;
 /// Compressed vertex: 12 bytes (unorm16 pos ×4 incl. pad, snorm16 oct normal).
 const VERTEX_BYTES: u64 = 12;
 
-const ARENA_SLOTS: u32 = 256;
-const COUNTS_SLOTS: u32 = 256;
-// Sized for throughput ~2k chunks/s at 120 fps while keeping each frame's
-// GPU batch small enough not to blow a ~8 ms vsync slot (spiky batches
-// read as missed-vsync 17 ms frames even when average load is fine).
-const GEN_BUDGET: usize = 160;
-const MESH_BUDGET: usize = 160;
+// Depth of the pipeline, in chunks. Doubling these used to make a cold
+// start WORSE, because the streamer fed the pipeline a level at a time
+// and drained it before refilling: extra slots only sat empty for longer.
+// Once the LOD pass stopped waiting per level and kept the queue full,
+// the same doubling started paying (`gen_starved` 35 -> 15). The cost is
+// GPU memory — the density and cell arenas are sized from ARENA_SLOTS, so
+// this is ~96 MB more.
+const ARENA_SLOTS: u32 = 512;
+const COUNTS_SLOTS: u32 = 512;
+// Per frame, keeping each frame's GPU batch small enough not to blow a
+// ~8 ms vsync slot (spiky batches read as missed-vsync 17 ms frames even
+// when average load is fine).
+const GEN_BUDGET: usize = 320;
+const MESH_BUDGET: usize = 320;
 const STAGING_BUFFERS: usize = 3;
 
 // --- main-world <-> render-world plumbing ------------------------------------

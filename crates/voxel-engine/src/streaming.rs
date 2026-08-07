@@ -329,10 +329,73 @@ pub fn can_hold_surface(generator: &voxel_worldgen::Generator, key: ChunkKey) ->
     let apron = 4.0 * key.voxel_size_m() as f32;
     let min = key.min_corner_m().as_vec3() - Vec3::splat(apron);
     let max = min + Vec3::splat(key.edge_m() as f32 + 2.0 * apron);
-    // No bound means the program can put solid anywhere: keep the chunk.
-    generator
-        .range(min, max, key.voxel_size_m() as f32)
-        .is_none_or(|sdf| sdf.straddles_zero())
+    uniform_sign(generator, min, max, key.voxel_size_m() as f32, PRUNE_SPLITS).is_none()
+}
+
+/// How many times [`can_hold_surface`] may halve a box it cannot decide.
+///
+/// A bound loosens with the size of the box it covers, so a box that
+/// cannot be decided whole can often be decided in pieces — this is the
+/// interval-arithmetic half of the same argument the LOD field makes about
+/// detail. Three levels is 8³ = 512 evaluations in the worst case, against
+/// ONE 38³ density pass and a GPU round trip if the answer is wrong, so
+/// the trade is lopsided by orders of magnitude and the cost only lands on
+/// chunks that were marginal in the first place.
+const PRUNE_SPLITS: u32 = 3;
+
+/// `Some(true)` if the box is entirely solid, `Some(false)` if entirely
+/// air, `None` if a surface could cross it.
+///
+/// Sub-boxes TILE the parent exactly, so "every piece is air" is a proof
+/// that the whole is air. Pieces that disagree prove the opposite — a
+/// surface lies between them — and one undecided piece is enough to give
+/// up on the whole box.
+fn uniform_sign(
+    generator: &voxel_worldgen::Generator,
+    min: Vec3,
+    max: Vec3,
+    voxel_size: f32,
+    splits: u32,
+) -> Option<bool> {
+    // No bound at all means the program can put solid anywhere: subdividing
+    // an unbounded op only asks the same unanswerable question 8 times.
+    let sdf = generator.range(min, max, voxel_size)?;
+    if sdf.is_positive() {
+        return Some(false);
+    }
+    if sdf.is_negative() {
+        return Some(true);
+    }
+    if splits == 0 {
+        return None;
+    }
+    let mid = (min + max) * 0.5;
+    let mut solid: Option<bool> = None;
+    for octant in 0..8u32 {
+        let axis = |bit: u32, lo: f32, mid: f32, hi: f32| {
+            if octant & (1 << bit) == 0 {
+                (lo, mid)
+            } else {
+                (mid, hi)
+            }
+        };
+        let (x0, x1) = axis(0, min.x, mid.x, max.x);
+        let (y0, y1) = axis(1, min.y, mid.y, max.y);
+        let (z0, z1) = axis(2, min.z, mid.z, max.z);
+        let piece = uniform_sign(
+            generator,
+            Vec3::new(x0, y0, z0),
+            Vec3::new(x1, y1, z1),
+            voxel_size,
+            splits - 1,
+        )?;
+        match solid {
+            None => solid = Some(piece),
+            Some(seen) if seen == piece => {}
+            _ => return None,
+        }
+    }
+    solid
 }
 
 /// How far out a level's chunks can still be resident, in meters — the box

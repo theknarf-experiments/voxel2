@@ -134,9 +134,16 @@ impl LayerGraph {
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or_else(|| {
-                // Leave cores for the render and main threads: this runs
-                // while the app is drawing.
-                std::thread::available_parallelism().map_or(2, |n| (n.get() / 2).clamp(1, 6))
+                // OVERSUBSCRIBED on purpose, and measured: a layer thread
+                // spends most of its life blocked — on a nested ensure, on
+                // a level lock, on a dependency that is still being built
+                // — so a count sized to "cores minus what the renderer
+                // needs" leaves the graph idle while the cores it was
+                // protecting have nothing to run either. Halving cores for
+                // safety cost 3x the planning time on a cold start
+                // (1.45 s against 0.50 s at 16 on ten cores); past this it
+                // stops paying (24 measured no better).
+                std::thread::available_parallelism().map_or(4, |n| (n.get() * 2).clamp(4, 16))
             });
         Self {
             world_seed,

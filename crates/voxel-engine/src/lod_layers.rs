@@ -54,10 +54,16 @@ use crate::streaming::{
 /// and present as a frozen world.
 const CREATE_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// Layer-thread workers. Each one spends its time waiting on the GPU
-/// rather than computing, so this is a count of chunks in flight, not of
-/// cores in use — sized to keep the pipeline's per-frame budget fed.
-const LOD_WORKERS: usize = 256;
+/// Layer-thread workers.
+///
+/// This used to be a count of chunks IN FLIGHT, because `create` blocked
+/// on the GPU round trip and a thread was the only way to have another
+/// chunk outstanding. It no longer waits — the pass waits, once — so what
+/// is left in a create is CPU: resolving ops and deciding whether the
+/// generator can put a surface in the box. That wants cores, not
+/// hundreds of threads, and 256 of them competing for ten cores measured
+/// slightly WORSE than 32 as well as burying the machine.
+const LOD_WORKERS: usize = 32;
 
 /// Instance name of a level's layer.
 fn instance(level: u8) -> String {
@@ -130,6 +136,10 @@ struct LodState {
     shown: HashMap<ChunkKey, ShownChunk>,
     /// Chunks this pass has built and not yet revealed.
     pending: Vec<ChunkKey>,
+    /// Builds this pass has asked for and not yet waited on, and what each
+    /// becomes once it arrives. A `create` only ASKS — see `settle_builds`.
+    asked: crate::chunkgen::ChunkBatch,
+    building: HashMap<ChunkKey, ShownChunk>,
 }
 
 /// One LOD level.
@@ -171,27 +181,27 @@ impl LayerChunk for LodChunk {
             return;
         }
         let mask = seam_mask_at(&shared.config, shared.anchor.load().as_dvec3(), key);
-        // Hidden until the pass swaps: shown the moment it is drawable, a
-        // new chunk would be drawn against neighbors whose masks this pass
-        // has not refreshed yet — a hairline along the boundary it just
-        // moved.
-        let mut batch = shared.chunks.batch();
-        batch.add(key, mask, false, ops.clone());
-        // The chunk is owned either way — `destroy` still has to free it —
-        // but a stalled chunk is NOT recorded as carrying its mask, or the
-        // refresh scan would see it as already correct and never retry it,
-        // turning a transient slab stall into a permanent crack.
-        self.key = Some(key);
-        if batch.wait(CREATE_TIMEOUT).stalled.is_empty() {
+        // ASK, do not wait. Waiting here made the round trip the unit of
+        // work: the framework runs a level's creates in a pool and joins
+        // it, so every level drained the pipeline to empty and refilled it
+        // — measured as `awaiting` swinging 200 -> 0 fifteen times a pass,
+        // one GPU round trip of idle GPU each. The pass already has a
+        // single moment where everything it built is revealed together, so
+        // that is where the waiting belongs.
+        //
+        // Hidden until then: shown the moment it is drawable, a new chunk
+        // would be drawn against neighbors whose masks this pass has not
+        // refreshed yet — a hairline along the boundary it just moved.
+        {
             let mut state = shared.state.lock().unwrap();
-            state.shown.insert(key, ShownChunk { mask, ops });
-            state.pending.push(key);
-        } else {
-            let n = shared.stalled.fetch_add(1, Ordering::Relaxed);
-            if n < 8 {
-                warn!("lod: {key:?} never became drawable — slabs are full");
-            }
+            state
+                .asked
+                .add(&shared.chunks, key, mask, false, ops.clone());
+            state.building.insert(key, ShownChunk { mask, ops });
         }
+        // Owned from here on, whether or not it arrives: `destroy` still
+        // has to free it.
+        self.key = Some(key);
     }
 
     fn destroy(&mut self, ctx: &ChunkCtx<'_, VoxelLod>, _level: u32) {
@@ -234,7 +244,11 @@ impl LodLayers {
         });
         let mut graph = LayerGraph::new(0).with_threads(LOD_WORKERS);
         let mut tops = Vec::new();
-        for level in 0..=config.max_level {
+        // Coarsest FIRST. Tops are ensured one after another, so whichever
+        // is processed first decides what the pipeline chews on while
+        // planning is still running — and the coarse levels are exactly
+        // the ones that need no planning at all.
+        for level in (0..=config.max_level).rev() {
             graph.register_as(
                 &instance(level),
                 VoxelLod {
@@ -273,6 +287,7 @@ impl LodLayers {
         let between: voxel_layers::BetweenPasses = {
             let shared = shared.clone();
             Arc::new(move |_| {
+                settle_builds(&shared);
                 refresh_masks(&shared);
                 // One reveal per pass: everything this pass generated
                 // becomes visible together, with every mask already
@@ -351,6 +366,47 @@ impl LodLayers {
 /// Instead the pipeline regenerates in place while the old mesh keeps
 /// drawing, and every rebuilt mesh is HELD until all of them are ready.
 /// Half a swapped set is a crack, so the set swaps together.
+/// Wait for everything this pass asked for, once.
+///
+/// A stalled chunk is NOT recorded as carrying its mask, or the refresh
+/// scan would see it as already correct and never retry it, turning a
+/// transient slab stall into a permanent crack.
+fn settle_builds(shared: &LodShared) {
+    // The lock is NOT held across the wait: this runs between ensure and
+    // release, but a create racing in from a nested ensure still has to be
+    // able to record itself.
+    let (mut asked, building) = {
+        let mut state = shared.state.lock().unwrap();
+        (
+            std::mem::take(&mut state.asked),
+            std::mem::take(&mut state.building),
+        )
+    };
+    if asked.is_empty() {
+        return;
+    }
+    let outcome = asked.wait(CREATE_TIMEOUT);
+    let mut state = shared.state.lock().unwrap();
+    for key in outcome.built {
+        if let Some(shown) = building.get(&key) {
+            state.shown.insert(key, shown.clone());
+            state.pending.push(key);
+        }
+    }
+    drop(state);
+    if !outcome.stalled.is_empty() {
+        let n = shared
+            .stalled
+            .fetch_add(outcome.stalled.len(), Ordering::Relaxed);
+        if n < 8 {
+            warn!(
+                "lod: {} chunks never became drawable — slabs are full",
+                outcome.stalled.len()
+            );
+        }
+    }
+}
+
 fn refresh_masks(shared: &LodShared) {
     let at = shared.anchor.load().as_dvec3();
     let stale: Vec<(ChunkKey, ShownChunk)> = {
@@ -378,9 +434,9 @@ fn refresh_masks(shared: &LodShared) {
     if stale.is_empty() {
         return;
     }
-    let mut batch = shared.chunks.batch();
+    let mut batch = crate::chunkgen::ChunkBatch::default();
     for (key, want) in &stale {
-        batch.add(*key, want.mask, true, want.ops.clone());
+        batch.add(&shared.chunks, *key, want.mask, true, want.ops.clone());
     }
     // The lock is NOT held across the wait: a create finishing meanwhile
     // has to be able to record itself.

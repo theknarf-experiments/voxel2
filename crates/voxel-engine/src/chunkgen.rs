@@ -89,14 +89,6 @@ impl ChunkGen {
 
     // --- lifecycle ---------------------------------------------------------
 
-    /// A set of chunks to build together. See [`ChunkBatch`].
-    pub fn batch(&self) -> ChunkBatch<'_> {
-        ChunkBatch {
-            chunks: self,
-            waits: Vec::new(),
-        }
-    }
-
     /// Generate `key` with `face_mask`. `show_on_ready` draws it the moment
     /// it is drawable; otherwise it waits for [`Self::commit`]. `hold`
     /// marks an in-place remesh of an already-shown chunk: the old mesh
@@ -139,8 +131,12 @@ impl ChunkGen {
 /// here also makes the one ordering rule impossible to get wrong: the
 /// wait is registered BEFORE the request, or a chunk that meshes in
 /// between reports to nobody and the wait times out.
-pub struct ChunkBatch<'a> {
-    chunks: &'a ChunkGen,
+/// Owned rather than borrowing the service, so a batch can outlive the
+/// call that started it: the LOD pass registers builds from every level
+/// and waits for the lot ONCE, instead of each level waiting out its own
+/// GPU round trip while the pipeline drains.
+#[derive(Default)]
+pub struct ChunkBatch {
     waits: Vec<(ChunkKey, crossbeam_channel::Receiver<u32>)>,
 }
 
@@ -152,7 +148,7 @@ pub struct Built {
     pub stalled: Vec<ChunkKey>,
 }
 
-impl ChunkBatch<'_> {
+impl ChunkBatch {
     /// Ask for one chunk, hidden until it is committed. `hold` keeps the
     /// old mesh drawing meanwhile, for a chunk that is already shown.
     ///
@@ -162,29 +158,41 @@ impl ChunkBatch<'_> {
     /// chunk for an answer the caller already holds.
     pub fn add(
         &mut self,
+        chunks: &ChunkGen,
         key: ChunkKey,
         face_mask: u32,
         hold: bool,
         ops: Option<Arc<Vec<CsgOp>>>,
     ) {
-        let ready = self.chunks.wait_for(key);
-        self.chunks.request(key, face_mask, false, hold, ops);
+        let ready = chunks.wait_for(key);
+        chunks.request(key, face_mask, false, hold, ops);
         self.waits.push((key, ready));
     }
 
-    /// Block until every chunk has reported, or `timeout` elapses for one.
+    pub fn is_empty(&self) -> bool {
+        self.waits.is_empty()
+    }
+
+    /// Block until every chunk has reported, or `timeout` elapses for the
+    /// BATCH.
     ///
-    /// A timeout means the pipeline could not place the chunk — slab
+    /// A deadline, not a timeout per chunk: the waits are walked in order,
+    /// so a per-chunk timeout would let a wedged pipeline hold the caller
+    /// for `timeout` times the number of chunks — with a whole pass in one
+    /// batch, hours.
+    ///
+    /// Running out means the pipeline could not place the chunk — slab
     /// exhaustion — and the caller decides what a hole is worth; blocking
     /// forever instead would wedge the generation thread and present as a
     /// frozen world.
-    pub fn wait(self, timeout: std::time::Duration) -> Built {
+    pub fn wait(&mut self, timeout: std::time::Duration) -> Built {
+        let deadline = std::time::Instant::now() + timeout;
         let mut out = Built {
             built: Vec::with_capacity(self.waits.len()),
             stalled: Vec::new(),
         };
-        for (key, ready) in self.waits {
-            if ready.recv_timeout(timeout).is_ok() {
+        for (key, ready) in self.waits.drain(..) {
+            if ready.recv_deadline(deadline).is_ok() {
                 out.built.push(key);
             } else {
                 out.stalled.push(key);
@@ -253,8 +261,8 @@ mod tests {
     #[test]
     fn a_batch_hears_a_report_that_lands_immediately() {
         let (chunks, tx, queue) = service();
-        let mut batch = chunks.batch();
-        batch.add(key(), 0x7, false, None);
+        let mut batch = ChunkBatch::default();
+        batch.add(&chunks, key(), 0x7, false, None);
         assert!(matches!(
             queue.take().as_slice(),
             [ChunkCommand::Request {
@@ -278,8 +286,8 @@ mod tests {
     #[test]
     fn a_chunk_that_never_arrives_is_stalled_not_built() {
         let (chunks, _tx, _queue) = service();
-        let mut batch = chunks.batch();
-        batch.add(key(), 0x7, false, None);
+        let mut batch = ChunkBatch::default();
+        batch.add(&chunks, key(), 0x7, false, None);
         let out = batch.wait(Duration::from_millis(20));
         assert!(out.built.is_empty());
         assert_eq!(out.stalled, vec![key()]);
@@ -290,9 +298,9 @@ mod tests {
     fn a_batch_waits_for_all_of_its_members() {
         let (chunks, tx, _queue) = service();
         let other = ChunkKey::new(2, IVec3::new(4, 0, -1));
-        let mut batch = chunks.batch();
-        batch.add(key(), 0x1, true, None);
-        batch.add(other, 0x2, true, None);
+        let mut batch = ChunkBatch::default();
+        batch.add(&chunks, key(), 0x1, true, None);
+        batch.add(&chunks, other, 0x2, true, None);
         tx.send((key(), 0x1)).unwrap();
         chunks.pump();
         let out = batch.wait(Duration::from_millis(20));
@@ -304,8 +312,8 @@ mod tests {
     #[test]
     fn freeing_releases_the_waiter() {
         let (chunks, _tx, queue) = service();
-        let mut batch = chunks.batch();
-        batch.add(key(), 0x1, false, None);
+        let mut batch = ChunkBatch::default();
+        batch.add(&chunks, key(), 0x1, false, None);
         let _ = queue.take();
         chunks.free(key());
         // The waiter is disconnected, so the wait ends at once rather
