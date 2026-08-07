@@ -240,6 +240,9 @@ fn setup_scene(mut commands: Commands, scene: Res<HostScene>, level: Res<LevelDe
     if let Some(illuminance) = host.sun_illuminance {
         commands.spawn((
             LevelSun,
+            // The sun lights whichever world is being viewed: a light
+            // confined to layer 0 would leave world 1 black.
+            bevy::camera::visibility::RenderLayers::from_layers(&[0, 1, 2, 3]),
             DirectionalLight {
                 illuminance,
                 shadow_maps_enabled: true,
@@ -274,6 +277,8 @@ fn setup_scene(mut commands: Commands, scene: Res<HostScene>, level: Res<LevelDe
         .unwrap_or(host.look);
     let mut camera = commands.spawn((
         Camera3d::default(),
+        // World 0 to begin with; `follow_camera_world` moves it.
+        bevy::camera::visibility::RenderLayers::layer(0),
         Transform::from_translation(start).looking_at(start + look * 1000.0, up_for(look)),
         // The engine streams around whatever carries this.
         VoxelStreamSource,

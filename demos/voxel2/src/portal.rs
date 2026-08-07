@@ -12,6 +12,7 @@
 //! two solids rather than show two places.
 
 use bevy::prelude::*;
+use bevy::camera::visibility::RenderLayers;
 use voxel_engine::{LevelDef, StreamedWorlds};
 use voxel_render::WorldPrograms;
 
@@ -27,7 +28,8 @@ pub struct PortalPlugin;
 
 impl Plugin for PortalPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Startup, register_far_world);
+        app.add_systems(Startup, register_far_world)
+            .add_systems(Update, follow_camera_world);
     }
 }
 
@@ -81,4 +83,43 @@ fn register_far_world(
         materials.0[id] = def.pack();
     }
     info!("far level registered as world {id}");
+}
+
+/// Scene content belongs to a world, and Bevy already has the mechanism:
+/// render layers. Grass, trees, water and props are ordinary entities
+/// queued against the view's visible set, so putting the CAMERA on the
+/// layer of the world it is in filters every one of them at once, with no
+/// change to any of their pipelines.
+///
+/// Chunks are not entities and cannot use this — they are filtered by
+/// `key.world` in the draw loop instead. Two mechanisms, because there are
+/// two kinds of thing being drawn.
+fn follow_camera_world(
+    mut commands: Commands,
+    camera_world: Res<voxel_render::CameraWorld>,
+    // `Option`, because not every camera carries the component: the
+    // offscreen mirror camera `voxctl shot` renders through is spawned
+    // without one, so a query that REQUIRED it silently skipped the very
+    // camera the screenshots come from — the switch looked broken while
+    // working perfectly in the window.
+    mut cameras: Query<(Entity, Option<&mut RenderLayers>), With<Camera3d>>,
+) {
+    // Every frame, not just when the world changes: cameras appear late.
+    // The offscreen mirror camera `voxctl shot` renders through is created
+    // lazily on the first request, so gating on `is_changed` left it on
+    // layer 0 forever — the window showed the right world while every
+    // screenshot showed the wrong one.
+    let want = RenderLayers::layer(usize::from(camera_world.0));
+    for (entity, layers) in &mut cameras {
+        match layers {
+            Some(mut layers) => {
+                if *layers != want {
+                    *layers = want.clone();
+                }
+            }
+            None => {
+                commands.entity(entity).insert(want.clone());
+            }
+        }
+    }
 }

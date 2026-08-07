@@ -645,6 +645,12 @@ fn sync_terrain_materials(
 fn spawn_terrain_marker(mut commands: Commands) {
     commands.spawn((
         VoxelTerrainMarker,
+        // Visible from EVERY world's camera. This entity is not content,
+        // it is the anchor the chunk phase item hangs off, and which
+        // world's chunks get drawn is decided per chunk by `key.world`.
+        // Leaving it on layer 0 made a camera in world 1 draw no terrain
+        // at all — it could not see the anchor.
+        bevy::camera::visibility::RenderLayers::from_layers(&[0, 1, 2, 3]),
         Visibility::default(),
         Transform::default(),
         // Effectively infinite: chunk-level culling is a later milestone.
