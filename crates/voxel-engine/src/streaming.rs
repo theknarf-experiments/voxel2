@@ -483,9 +483,18 @@ impl Plugin for VoxelStreamingPlugin {
         app.add_plugins(ChunkGenPlugin)
             .init_resource::<LodConfig>()
             .init_resource::<StreamingRebuild>()
-            .init_resource::<LodTree>()
             .init_resource::<StreamProbe>()
-            .add_systems(Update, (lod_tick, log_fps));
+            .add_systems(Update, log_fps);
+        // Exactly one owner of chunk lifecycle. The layer path and the
+        // epoch machine both drive request/ready/free, and two owners of
+        // one readiness channel is not a configuration that has a meaning
+        // — so this chooses, once, at boot.
+        if std::env::var_os("VOXEL_LOD_LAYERS").is_some() {
+            app.add_plugins(crate::lod_layers::LodLayersPlugin);
+        } else {
+            app.init_resource::<LodTree>()
+                .add_systems(Update, lod_tick);
+        }
     }
 }
 
@@ -1072,7 +1081,6 @@ fn free_subtree(tree: &mut LodTree, chunks: &ChunkGen, cell: IVec3, max_level: u
 /// decides whether to log or draw it.
 fn log_fps(
     stats: Res<SharedRenderStats>,
-    tree: Res<LodTree>,
     time: Res<Time>,
     mut probe: ResMut<StreamProbe>,
     mut window: Local<(f32, u32, f32)>,
@@ -1086,7 +1094,6 @@ fn log_fps(
         probe.worst_frame_ms = window.2 * 1000.0;
         *window = (0.0, 0, 0.0);
     }
-    probe.leaves = tree.leaves.len();
     if let Ok(s) = stats.0.lock() {
         probe.slab_free = s.slab_free;
     }
@@ -1105,7 +1112,7 @@ fn log_fps(
 /// each neighbor's subtree and ask how fine the field wants it. Only
 /// touching subtrees are visited, so the walk is a handful of nodes per
 /// level, not a subtree.
-fn split_clamped(config: &LodConfig, anchor: DVec3, key: ChunkKey) -> bool {
+pub fn split_clamped(config: &LodConfig, anchor: DVec3, key: ChunkKey) -> bool {
     if split_wanted(config, anchor, key) {
         return true;
     }
@@ -1153,6 +1160,60 @@ fn field_wants_touching_finer(
         .any(|c| field_wants_touching_finer(config, anchor, *c, target, min_level))
 }
 
+/// Is this chunk inside the streamed volume — the ring of top-level cells
+/// the world consists of? Outside it there is nothing at all, which is a
+/// different thing from "coarser".
+pub fn in_top_ring(config: &LodConfig, anchor: DVec3, key: ChunkKey) -> bool {
+    let mut k = key;
+    while k.level < config.max_level {
+        k = k.parent();
+    }
+    let edge = k.edge_m();
+    let cx = (anchor.x / edge).floor() as i32;
+    let cz = (anchor.z / edge).floor() as i32;
+    (k.pos.x - cx).abs() <= config.top_radius
+        && (k.pos.z - cz).abs() <= config.top_radius
+        && k.pos.y >= config.top_y.0
+        && k.pos.y <= config.top_y.1
+}
+
+/// Seam mask of a chunk under the clamped field: one bit per direction of
+/// the 26-neighborhood, in scan order, set where the neighbor is COARSER.
+/// Twin of `PostState::seam_mask` and of `snap_to_parity` in the mesh
+/// shader — but a pure function of (chunk, anchor) rather than of a shown
+/// configuration, which is what lets a chunk be built without consulting
+/// a tree.
+///
+/// A neighbor is coarser exactly when the chunk covering its region is: if
+/// the neighbor's PARENT is not split, the leaf there is at least one
+/// level up.
+pub fn seam_mask_at(config: &LodConfig, anchor: DVec3, key: ChunkKey) -> u32 {
+    if key.level >= config.max_level {
+        return 0; // nothing is coarser than the top
+    }
+    let mut mask = 0u32;
+    let mut idx = 0;
+    for dz in -1..=1 {
+        for dy in -1..=1 {
+            for dx in -1..=1 {
+                if dx == 0 && dy == 0 && dz == 0 {
+                    continue;
+                }
+                let n = ChunkKey::new(key.level, key.pos + IVec3::new(dx, dy, dz));
+                // Nothing streams outside the top ring, so there is no
+                // neighbor there to snap to — the world simply ends, and
+                // a snap bit would pull vertices toward a mesh that does
+                // not exist.
+                if in_top_ring(config, anchor, n) && !split_clamped(config, anchor, n.parent()) {
+                    mask |= 1 << idx;
+                }
+                idx += 1;
+            }
+        }
+    }
+    mask
+}
+
 /// Where a LOD level is resident, as a predicate on one chunk: the level
 /// could be the finest covering it — its own split radius does not swallow
 /// it, and its parent's does.
@@ -1184,7 +1245,8 @@ pub fn resident_at(config: &LodConfig, anchor: DVec3, key: ChunkKey) -> bool {
 /// it holds precisely the shown set, which is what the closed-form clamp
 /// buys.
 pub fn resident_clamped(config: &LodConfig, anchor: DVec3, key: ChunkKey) -> bool {
-    !split_clamped(config, anchor, key)
+    in_top_ring(config, anchor, key)
+        && !split_clamped(config, anchor, key)
         && (key.level >= config.max_level || split_clamped(config, anchor, key.parent()))
 }
 
@@ -1196,11 +1258,20 @@ fn farthest_corner(p: DVec3, key: ChunkKey) -> f64 {
 }
 
 /// How far out a level's chunks can still be resident, in meters — the box
-/// a predicate has to be evaluated over. The parent splits out to
-/// `split_k·2E`, and a child can sit a parent's width beyond its near face.
+/// a predicate has to be evaluated over.
+///
+/// The parent splits out to `split_k·2E`, and a child sits somewhere
+/// inside that parent: at worst diagonally opposite the corner nearest the
+/// camera, which is a parent DIAGONAL — `2√3·E` — beyond the parent's near
+/// face, not a parent's width. Sampled anchors put the true reach at
+/// ~6.7E and this bound at 8.5E; the difference costs only predicate
+/// evaluations, since the predicate still decides what is resident. Too
+/// small a box silently clips corner chunks the field wants, which is a
+/// hole that only appears at some camera positions.
 pub fn resident_reach(config: &LodConfig, level: u8) -> f64 {
+    const SQRT_3: f64 = 1.732_050_807_568_877_2;
     let edge = ChunkKey::new(level, IVec3::ZERO).edge_m();
-    2.0 * config.split_k * edge + 2.0 * edge
+    2.0 * config.split_k * edge + 2.0 * SQRT_3 * edge
 }
 
 #[cfg(test)]
@@ -1269,10 +1340,9 @@ mod residency_shape {
         out
     }
 
+    /// One predicate covers every level, the top one included: outside the
+    /// ring there is no world.
     fn resident_level_clamped(config: &LodConfig, anchor: DVec3, level: u8) -> HashSet<ChunkKey> {
-        if level == config.max_level {
-            return top_ring(config, anchor);
-        }
         let edge = ChunkKey::new(level, IVec3::ZERO).edge_m();
         let reach = resident_reach(config, level);
         let lo = ((anchor - DVec3::splat(reach)) / edge).floor();
@@ -1412,6 +1482,72 @@ mod residency_shape {
                     expect.len(),
                 );
                 assert_eq!(got, expect, "{name} @{:?}", anchor.as_ivec3());
+            }
+        }
+    }
+
+    /// The mask a chunk gets from the field alone is the mask the epoch
+    /// machine derives from its shown configuration. Both feed the same
+    /// `snap_to_parity` in the mesh shader, so any disagreement is a crack.
+    #[test]
+    fn the_field_mask_is_the_shown_mask() {
+        for (name, config) in [("planet", planet()), ("mega", mega())] {
+            for anchor in [
+                DVec3::new(-27570.0, 80.0, -36770.0),
+                DVec3::new(1234.0, 600.0, -800.0),
+            ] {
+                let leaves = plan_genesis(&config, anchor, None).leaves;
+                let post = PostState::current(&leaves);
+                for leaf in &leaves {
+                    assert_eq!(
+                        seam_mask_at(&config, anchor, *leaf),
+                        post.seam_mask(config.max_level, *leaf),
+                        "{name} @{:?}: {leaf:?}",
+                        anchor.as_ivec3(),
+                    );
+                }
+            }
+        }
+    }
+
+    /// The configuration the closed form produces satisfies every
+    /// crack-freedom invariant the epoch machine's own tests assert of a
+    /// shown configuration — not just "same leaf set as genesis".
+    ///
+    /// `plan_genesis` clamps with a same-level neighbor test; the running
+    /// machine additionally vetoes a merge whose region would TOUCH
+    /// something two levels finer. Matching the first does not imply
+    /// matching the second, and a corner where it does not is a pinhole.
+    #[test]
+    fn the_closed_form_is_crack_free_by_the_machine_s_own_rules() {
+        for (name, config) in [("planet", planet()), ("mega", mega())] {
+            // One anchor per configuration: the scan is O(leaves x 26 x
+            // touching subtree) and this is already the slowest test here.
+            for anchor in [DVec3::new(-29840.0, 2400.0, -36767.0)] {
+                let mut leaves: HashSet<ChunkKey> = HashSet::new();
+                fn descend(
+                    config: &LodConfig,
+                    anchor: DVec3,
+                    k: ChunkKey,
+                    out: &mut HashSet<ChunkKey>,
+                ) {
+                    if split_clamped(config, anchor, k) {
+                        for c in k.children() {
+                            descend(config, anchor, c, out);
+                        }
+                    } else {
+                        out.insert(k);
+                    }
+                }
+                for top in top_ring(&config, anchor) {
+                    descend(&config, anchor, top, &mut leaves);
+                }
+                let masks: HashMap<ChunkKey, u32> = leaves
+                    .iter()
+                    .map(|k| (*k, seam_mask_at(&config, anchor, *k)))
+                    .collect();
+                let _ = name;
+                super::epoch_invariants::assert_consistent(&config, &leaves, &masks);
             }
         }
     }
@@ -1563,7 +1699,7 @@ mod epoch_invariants {
     }
 
     /// The 26 neighborhood directions in seam-mask scan order.
-    fn scan_dirs() -> Vec<IVec3> {
+    pub(super) fn scan_dirs() -> Vec<IVec3> {
         let mut dirs = Vec::new();
         for dz in -1..=1 {
             for dy in -1..=1 {
@@ -1580,7 +1716,7 @@ mod epoch_invariants {
     /// Assert the crack-freedom invariants of a shown configuration whose
     /// meshes carry `masks`: neighborhood levels within ±1, and the snap
     /// bit set exactly on the finer side of every unequal pair.
-    fn assert_consistent(
+    pub(super) fn assert_consistent(
         config: &LodConfig,
         leaves: &HashSet<ChunkKey>,
         masks: &HashMap<ChunkKey, u32>,

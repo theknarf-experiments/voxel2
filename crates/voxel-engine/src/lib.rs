@@ -3,6 +3,7 @@
 
 pub mod chunkgen;
 pub mod layers;
+pub mod lod_layers;
 pub mod level;
 pub mod planning;
 pub mod streaming;

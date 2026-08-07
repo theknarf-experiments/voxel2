@@ -87,9 +87,39 @@ pub struct LayerRuntime {
     thread: Option<JoinHandle<()>>,
 }
 
+/// Work that must land between ensuring the new configuration and
+/// releasing the old one. See [`LayerGraph::process_tops_with`].
+pub type BetweenPasses = Arc<dyn Fn(&LayerGraph) + Send + Sync>;
+
 impl LayerRuntime {
     /// Start generating for `tops`. Their order fixes the handle indices.
     pub fn start(graph: Arc<LayerGraph>, tops: Vec<TopDep>) -> Self {
+        Self::start_with(graph, tops, None)
+    }
+
+    /// Start, with work to run between ensuring and releasing on every
+    /// pass.
+    pub fn start_with(
+        graph: Arc<LayerGraph>,
+        tops: Vec<TopDep>,
+        between: Option<BetweenPasses>,
+    ) -> Self {
+        Self::start_hooked(graph, tops, None, between)
+    }
+
+    /// Start, with work at the head of every pass as well.
+    ///
+    /// `before` runs before the focuses are read, which is the only place
+    /// a caller can freeze whatever its layers derive from: the focuses
+    /// are read one dependency at a time, so anything sampled per-chunk
+    /// during a pass has to be snapshotted here or two levels can end up
+    /// working from camera positions a frame apart.
+    pub fn start_hooked(
+        graph: Arc<LayerGraph>,
+        tops: Vec<TopDep>,
+        before: Option<BetweenPasses>,
+        between: Option<BetweenPasses>,
+    ) -> Self {
         let shared = Arc::new(Shared {
             tops: tops.iter().map(|t| TopSlot::new(t.size())).collect(),
             stop: AtomicBool::new(false),
@@ -102,7 +132,7 @@ impl LayerRuntime {
             .spawn({
                 let graph = graph.clone();
                 let shared = shared.clone();
-                move || run(graph, shared, tops)
+                move || run(graph, shared, tops, before, between)
             })
             .expect("spawn layer thread");
         Self {
@@ -174,11 +204,20 @@ impl Drop for LayerRuntime {
     }
 }
 
-fn run(graph: Arc<LayerGraph>, shared: Arc<Shared>, mut tops: Vec<TopDep>) {
+fn run(
+    graph: Arc<LayerGraph>,
+    shared: Arc<Shared>,
+    mut tops: Vec<TopDep>,
+    before: Option<BetweenPasses>,
+    between: Option<BetweenPasses>,
+) {
     while !shared.stop.load(Ordering::Relaxed) {
         // Sampled before the pass: a request arriving while it runs must
         // not be swallowed by the idle flag it sets afterwards.
         let requests = shared.requests.load(Ordering::Acquire);
+        if let Some(before) = &before {
+            before(&graph);
+        }
         for (slot, top) in shared.tops.iter().zip(tops.iter_mut()) {
             top.set_size(TopSlot::load(&slot.size));
             top.set_focus(&graph, TopSlot::load(&slot.focus));
@@ -191,7 +230,11 @@ fn run(graph: Arc<LayerGraph>, shared: Arc<Shared>, mut tops: Vec<TopDep>) {
         let worked = tops.iter().any(TopDep::changed);
         if worked {
             shared.generating.store(true, Ordering::Relaxed);
-            graph.process_tops(&mut tops);
+            graph.process_tops_with(&mut tops, |g| {
+                if let Some(between) = &between {
+                    between(g);
+                }
+            });
             shared.generating.store(false, Ordering::Relaxed);
         }
         let quiet = !worked && shared.requests.load(Ordering::Acquire) == requests;

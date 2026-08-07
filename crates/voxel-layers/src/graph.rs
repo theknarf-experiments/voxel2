@@ -373,10 +373,14 @@ impl LayerGraph {
             return;
         }
         const PARALLEL_MIN: usize = 8;
+        // The worker budget is the only cap. It used to be the smaller of
+        // that and 8 per call, which is right when a create is CPU work
+        // and wrong when it waits: a layer whose create blocks on a GPU
+        // round-trip has its throughput set by how many are in flight.
         let helpers = if missing.len() < PARALLEL_MIN {
             0
         } else {
-            self.reserve_workers(missing.len().min(8) - 1)
+            self.reserve_workers(missing.len() - 1)
         };
         if helpers == 0 {
             for slot in missing {
@@ -564,6 +568,20 @@ impl LayerGraph {
     /// region belongs to neither for as long as it takes the second
     /// dependency to be processed, and that gap is a hole in the world.
     pub fn process_tops(&self, deps: &mut [TopDep]) {
+        self.process_tops_with(deps, |_| {});
+    }
+
+    /// The same, with a hook that runs after every ensure and before any
+    /// release.
+    ///
+    /// A chunk whose content depends on something outside its own
+    /// coordinates — a voxel chunk's seam mask follows the camera — has to
+    /// be rebuilt when that something changes, and there is exactly one
+    /// moment when it can be: the new configuration is fully resident and
+    /// the old one has not gone yet. Rebuilt earlier it would read a
+    /// configuration that is still arriving; later, one that has already
+    /// been shown wrong.
+    pub fn process_tops_with(&self, deps: &mut [TopDep], between: impl FnOnce(&LayerGraph)) {
         let mut old: Vec<Usage> = Vec::new();
         for dep in deps.iter_mut() {
             if !dep.changed {
@@ -577,6 +595,7 @@ impl LayerGraph {
                 dep.current = Some(usage);
             }
         }
+        between(self);
         for usage in old {
             self.release(usage);
         }

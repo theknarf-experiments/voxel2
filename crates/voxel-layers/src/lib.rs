@@ -31,6 +31,6 @@ pub use graph::{
     dep_bounds, ChunkCtx, ChunkRef, CoordFilter, LayerGraph, LayerStats, TopDep, View,
 };
 pub use layer::{layer_key, IAabb, LayerKey};
-pub use runtime::{LayerRuntime, TopHandle};
+pub use runtime::{BetweenPasses, LayerRuntime, TopHandle};
 pub use store::Usage;
 pub use traits::{Dep, Layer, LayerChunk, FINAL_LEVEL};
