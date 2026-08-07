@@ -1111,7 +1111,7 @@ impl Plugin for LevelPlugin {
         let mut worlds = crate::StreamedWorlds::default();
         worlds.add(LodConfig::from(&level.lod), generator.clone());
         app.insert_resource(worlds)
-            .insert_resource(program)
+            .insert_resource(voxel_render::WorldPrograms(vec![program]))
             .insert_resource(crate::planning::ops_provider(&world_query))
             .insert_resource(material_table(&level))
             .insert_resource(env_params(&level))
@@ -1209,6 +1209,8 @@ fn reload_level(
     mut lod: ResMut<LodConfig>,
     mut rebuild: ResMut<StreamingRebuild>,
     mut reloaded: MessageWriter<LevelReloaded>,
+    programs: Res<voxel_render::WorldPrograms>,
+    mut worlds: ResMut<crate::StreamedWorlds>,
 ) {
     if !source.poll.tick(time.delta()).just_finished() {
         return;
@@ -1258,7 +1260,13 @@ fn reload_level(
     // the facade below need one either way.
     let (program, generator) = apply_generator(&new, seed.0);
     if generator_changed {
-        commands.insert_resource(program);
+        let mut updated = programs.0.clone();
+        if updated.is_empty() {
+            updated.push(program);
+        } else {
+            updated[0] = program;
+        }
+        commands.insert_resource(voxel_render::WorldPrograms(updated));
     }
     let regen = generator_changed
         || new.planning != level.planning
@@ -1271,6 +1279,12 @@ fn reload_level(
         lod.max_level = new.lod.max_level;
         lod.top_radius = new.lod.top_radius;
         lod.top_y = new.lod.top_y;
+        // World 0's registered generator and field go stale otherwise:
+        // the graphs are about to be rebuilt from this registry.
+        if let Some(world) = worlds.0.first_mut() {
+            world.generator = generator.clone();
+            world.config = LodConfig::from(&new.lod);
+        }
         let world_query = build_ops_provider(&new, seed.0, &generator, planner.0.as_ref());
         commands.insert_resource(ops_provider(&world_query));
         commands.insert_resource(world_query);

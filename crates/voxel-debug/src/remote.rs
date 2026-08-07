@@ -25,6 +25,7 @@ impl Plugin for VoxelRemotePlugin {
                 .with_method_main("voxel/ops", ops)
                 .with_method_main("voxel/scan", scan)
                 .with_method_main("voxel/viz", viz)
+                .with_method_main("voxel/world", world_switch)
                 .with_method_main("voxel/screenshot", screenshot),
         )
         .add_plugins(RemoteHttpPlugin::default().with_port(self.port));
@@ -246,6 +247,24 @@ fn ops(In(params): In<Option<Value>>, world: Res<WorldQuery>) -> BrpResult {
 /// `{"chunks": bool?, "layers": bool|number?}` — toggle the debug
 /// overlays. `layers` takes a radius in meters, or a bool for the near
 /// range.
+/// `{"world": n}` — which world the camera is in, and so which one is
+/// drawn. Every registered world stays resident either way; this only
+/// chooses the view, which is how you can tell two levels are genuinely
+/// live at once rather than being swapped.
+fn world_switch(
+    In(params): In<Option<Value>>,
+    mut camera_world: ResMut<voxel_render::CameraWorld>,
+) -> BrpResult {
+    if let Some(w) = params
+        .as_ref()
+        .and_then(|p| p.get("world"))
+        .and_then(Value::as_u64)
+    {
+        camera_world.0 = w as u8;
+    }
+    Ok(json!({ "world": camera_world.0 }))
+}
+
 fn viz(In(params): In<Option<Value>>, mut viz: ResMut<crate::viz::DebugViz>) -> BrpResult {
     let params = params.ok_or_else(|| err("params required"))?;
     if let Some(v) = params.get("chunks").and_then(Value::as_bool) {

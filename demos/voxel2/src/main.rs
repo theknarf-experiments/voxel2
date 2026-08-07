@@ -21,11 +21,13 @@ use voxel_engine::{LevelDef, LevelPlugin, VoxelStreamSource};
 
 mod grass;
 mod planning;
+mod portal;
 mod scatter;
 mod props;
 mod ribbons;
 mod surface_paint;
 mod water;
+use portal::{FarLevel, PortalPlugin};
 use props::PropsPlugin;
 use grass::GrassPlugin;
 use ribbons::RibbonsPlugin;
@@ -137,6 +139,14 @@ fn main() {
         scene.clear_color
     };
 
+    // A second level, live alongside the first: `VOXEL_FAR=levels/x.json`.
+    let far = std::env::var("VOXEL_FAR").ok().map(|p| {
+        let json = std::fs::read_to_string(&p)
+            .unwrap_or_else(|e| panic!("failed to read far level '{p}': {e}"));
+        LevelDef::from_json(&json)
+            .unwrap_or_else(|e| panic!("failed to parse far level '{p}': {e}"))
+    });
+
     let mut app = App::new();
     app
         // Keep running at full speed when the window loses focus. Bevy's
@@ -188,7 +198,11 @@ fn main() {
                 // hand-written layers passes its own factory here.
                 planner: Some(std::sync::Arc::new(planning::StackPlanning)),
             },
-        ))
+        ));
+    if let Some(far) = far {
+        app.insert_resource(FarLevel(far)).add_plugins(PortalPlugin);
+    }
+    app
         .add_systems(Startup, setup_scene)
         .add_systems(Update, (autopilot, follow_reloaded_sun));
 

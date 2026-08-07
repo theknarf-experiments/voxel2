@@ -249,6 +249,16 @@ pub struct WorldProgram {
     pub sun_dir: Vec3,
 }
 
+/// Every loaded world's program. Index IS the world id, so the GPU
+/// header array and `ChunkKey::world` agree by construction.
+#[derive(Resource, Default)]
+pub struct WorldPrograms(pub Vec<WorldProgram>);
+
+/// Which world the camera is in — the only one drawn, until the portal
+/// pass draws another inside a stencil.
+#[derive(Resource, Default, Clone, Copy)]
+pub struct CameraWorld(pub voxel_core::WorldId);
+
 impl Default for WorldProgram {
     fn default() -> Self {
         Self {
@@ -523,7 +533,8 @@ impl Plugin for VoxelChunksPlugin {
         embedded_asset!(app, "shaders/voxel_chunk_draw.wgsl");
 
         let (ready_tx, ready_rx) = crossbeam_channel::unbounded();
-        app.init_resource::<WorldProgram>();
+        app.init_resource::<WorldPrograms>()
+            .init_resource::<CameraWorld>();
         app.init_resource::<FieldParams>();
         app.init_resource::<SurfaceMap>();
         app.init_resource::<WorldMaterials>();
@@ -548,7 +559,8 @@ impl Plugin for VoxelChunksPlugin {
             return;
         };
         render_app
-            .init_resource::<WorldProgram>()
+            .init_resource::<WorldPrograms>()
+            .init_resource::<CameraWorld>()
             .init_resource::<FieldParams>()
             .init_resource::<SurfaceMap>()
             .init_resource::<WorldMaterials>()
@@ -1117,13 +1129,15 @@ fn resolve_material_slots(
 }
 
 fn extract_program(
-    program: Extract<Res<WorldProgram>>,
+    programs: Extract<Res<WorldPrograms>>,
+    camera_world: Extract<Res<CameraWorld>>,
     field: Extract<Res<FieldParams>>,
     env: Extract<Res<EnvParams>>,
     surface_map: Extract<Res<SurfaceMap>>,
     mut commands: Commands,
 ) {
-    commands.insert_resource(program.clone());
+    commands.insert_resource(WorldPrograms(programs.0.clone()));
+    commands.insert_resource(**camera_world);
     commands.insert_resource(**field);
     commands.insert_resource(**env);
     // Cheap: an Arc of the raster, not the raster.
@@ -1197,7 +1211,8 @@ fn plan_frame(
     mut batches: ResMut<FrameBatches>,
     mut draw_list: ResMut<VoxelDrawList>,
     camera: Res<ExtractedCameraPos>,
-    (program, field, env): (Res<WorldProgram>, Res<FieldParams>, Res<EnvParams>),
+    camera_world: Res<CameraWorld>,
+    (programs, field, env): (Res<WorldPrograms>, Res<FieldParams>, Res<EnvParams>),
     surface_map: Res<SurfaceMap>,
     frustum: Res<ExtractedFrustum>,
     stats: Res<SharedRenderStats>,
@@ -1699,6 +1714,12 @@ fn plan_frame(
         if !chunk.visible {
             continue;
         }
+        // Other worlds are resident and meshed, they are simply not in
+        // THIS view. Two levels occupy the same coordinates, so drawing
+        // both would interleave two solids rather than show two places.
+        if key.world != camera_world.0 {
+            continue;
+        }
         if let Some(f) = &frustum.0 {
             // World-space AABB, inflated by the skirt depth. f32 is fine at
             // current view ranges; camera-relative culling comes with M6.
@@ -1739,7 +1760,7 @@ fn plan_frame(
     gpu.draw_uniforms
         .write_buffer(&render_device, &render_queue);
     gpu.program_buffer
-        .set(GpuWorldProgram::from_programs(std::slice::from_ref(&*program), &field));
+        .set(GpuWorldProgram::from_programs(&programs.0, &field));
     gpu.program_buffer
         .write_buffer(&render_device, &render_queue);
     gpu.env_uniform.set(*env);
