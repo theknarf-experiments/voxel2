@@ -251,9 +251,15 @@ impl Default for WorldProgram {
     }
 }
 
+/// Where the per-material threshold table starts, and how long it is: one
+/// `f32` per material id a texel can hold. Twin of the mesh shader's
+/// `SURFACE_MAP_THRESHOLDS`.
+const SURFACE_MAP_THRESHOLDS: usize = 8;
+const SURFACE_MAP_MATERIALS: usize = 256;
+
 /// Words of [`SurfaceMap`] header before the texels. Twin of the mesh
 /// shader's `SURFACE_MAP_HEADER`.
-const SURFACE_MAP_HEADER: usize = 8;
+const SURFACE_MAP_HEADER: usize = SURFACE_MAP_THRESHOLDS + SURFACE_MAP_MATERIALS;
 
 /// A raster of surface material ids the mesh pass paints onto up-facing
 /// vertices, without carving anything.
@@ -285,6 +291,16 @@ pub struct SurfaceMap {
     /// geometry with a texel grid. So the host says how coarse a chunk
     /// has to be before the approximation is the better answer.
     pub min_voxel_m: f32,
+    /// Per-material overrides of [`Self::min_voxel_m`], as
+    /// `(material id, min voxel)`.
+    ///
+    /// The handover scale belongs to the FEATURE, not to the map. A road
+    /// is only ever ground, so its paint can take over the moment the
+    /// carve stops resolving; a water course is also drawn as a surface
+    /// by whoever owns it, out to a range the map knows nothing about, and
+    /// painting inside that range draws the same river twice. A material
+    /// with no entry here uses the default.
+    pub coarse_from: Vec<(u32, f32)>,
     /// Bumped when the raster changes, so the GPU copy is rebuilt only
     /// then.
     pub generation: u64,
@@ -301,7 +317,14 @@ impl SurfaceMap {
         out.push(self.origin.x.to_bits());
         out.push(self.origin.y.to_bits());
         out.push(self.min_voxel_m.to_bits());
-        out.resize(SURFACE_MAP_HEADER, 0);
+        // Every material defaults to the map's own threshold, so a host
+        // that never names one behaves exactly as before.
+        out.resize(SURFACE_MAP_THRESHOLDS, 0);
+        out.resize(SURFACE_MAP_HEADER, self.min_voxel_m.to_bits());
+        for &(id, min_voxel) in &self.coarse_from {
+            out[SURFACE_MAP_THRESHOLDS + (id as usize % SURFACE_MAP_MATERIALS)] =
+                min_voxel.to_bits();
+        }
         out.extend_from_slice(&self.texels);
         out
     }
@@ -2079,3 +2102,54 @@ const MESHED_BY_LEVEL: [&str; 16] = [
     "mesh_L6", "mesh_L7", "mesh_L8", "mesh_L9", "mesh_L10", "mesh_L11",
     "mesh_L12", "mesh_L13", "mesh_L14", "mesh_L15",
 ];
+
+#[cfg(test)]
+mod surface_map_tests {
+    use super::*;
+
+    /// Reads a `const NAME: u32 = N u;` out of the mesh shader.
+    fn shader_const(name: &str) -> usize {
+        let src = include_str!("shaders/voxel_mesh_chunks.wgsl");
+        let prefix = format!("const {name}:");
+        let line = src
+            .lines()
+            .find(|l| l.trim_start().starts_with(&prefix))
+            .unwrap_or_else(|| panic!("{name} is not declared in the mesh shader"));
+        line.rsplit('=')
+            .next()
+            .unwrap()
+            .trim()
+            .trim_end_matches(';')
+            .trim_end_matches('u')
+            .parse()
+            .unwrap()
+    }
+
+    /// The header is a layout twin: Rust writes it, WGSL indexes it. Drift
+    /// does not fail to compile — the shader reads texels out of the
+    /// threshold table and paints the world with aliased float bits.
+    #[test]
+    fn the_header_layout_matches_the_shader() {
+        assert_eq!(shader_const("SURFACE_MAP_THRESHOLDS"), SURFACE_MAP_THRESHOLDS);
+        assert_eq!(shader_const("SURFACE_MAP_HEADER"), SURFACE_MAP_HEADER);
+    }
+
+    /// Every material answers, whether or not the host named it, and at
+    /// the index the shader will read it from.
+    #[test]
+    fn a_named_material_hands_over_later_than_the_rest() {
+        let map = SurfaceMap {
+            size: 1,
+            min_voxel_m: 3.2,
+            coarse_from: vec![(4, 6.4)],
+            texels: std::sync::Arc::new(vec![0]),
+            ..Default::default()
+        };
+        let words = map.to_words();
+        assert_eq!(words.len(), SURFACE_MAP_HEADER + 1);
+        let at = |id: usize| f32::from_bits(words[SURFACE_MAP_THRESHOLDS + id]);
+        assert_eq!(at(3), 3.2, "an unnamed material keeps the default");
+        assert_eq!(at(4), 6.4, "a named one takes over only when coarser");
+        assert_eq!(at(255), 3.2, "the table covers every id a texel can hold");
+    }
+}

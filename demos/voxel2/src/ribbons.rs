@@ -25,8 +25,16 @@ use voxel_engine::level::{LevelDef, MaterialDef};
 const FALLBACK_TINT: [f32; 4] = [0.16, 0.34, 0.44, 0.0];
 
 /// The levelled (water) scale: dense courses close to the camera.
+///
+/// The view distance is where the water surface hands over to the painted
+/// ground, and it is not free to be any number. A course's BED is carved
+/// by ops the level gates at 140 m of chunk edge — level 5, which the LOD
+/// field shows out to `2·split_k·E₅` = 512 m. Drawing the surface further
+/// than that lays it over ground with no channel cut in it, and painting
+/// nearer draws the same river twice. So both ends meet here, and
+/// [`crate::surface_paint`] derives its handover from this.
 pub const RIBBON_NEAR_TILE_M: i32 = 256;
-pub const RIBBON_NEAR_VIEW_M: i32 = 3072;
+pub const RIBBON_NEAR_VIEW_M: i32 = 512;
 
 /// Ribbon segments reach beyond the chunk that owns them, so a tile has to
 /// see its neighbours' emitters to catch the ones crossing into it.

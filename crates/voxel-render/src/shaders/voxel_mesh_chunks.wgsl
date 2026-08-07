@@ -84,7 +84,8 @@ struct WorldProgram {
 // Surface material map: a header, then one byte per texel, four per
 // word, row-major. Size 0 = nothing painted. Layout twin of
 // `SurfaceMap::to_words`.
-const SURFACE_MAP_HEADER: u32 = 8u;
+const SURFACE_MAP_THRESHOLDS: u32 = 8u;
+const SURFACE_MAP_HEADER: u32 = 264u;
 @group(0) @binding(7) var<storage, read> surface_map: array<u32>;
 
 /// The painted material at a world position, or 0 for "leave the
@@ -394,9 +395,17 @@ fn sn_vertices(@builtin(global_invocation_id) id: vec3<u32>) {
     // paints the ledge it runs along, not the cliff face beside it. Only
     // when coarse because near the camera the road is CARVED, at full
     // detail — painting over it would replace geometry with a texel grid.
-    if (normal.y > 0.5 && params.origin.w >= bitcast<f32>(surface_map[4])) {
+    //
+    // The scale at which the paint takes over is PER MATERIAL, because it
+    // is a property of the thing painted, not of the map: a road's carve
+    // stops resolving within 100 m, while a water course has a carved bed
+    // AND a surface drawn over it out to a distance its own layer sets.
+    // One threshold for both drew the river twice — the real surface and
+    // a painted band around it — everywhere the two ranges overlapped.
+    if (normal.y > 0.5) {
         let painted = painted_material(params.origin.xyz.xz + pv.xz * params.origin.w);
-        if (painted != 0u) {
+        if (painted != 0u
+            && params.origin.w >= bitcast<f32>(surface_map[SURFACE_MAP_THRESHOLDS + painted])) {
             mat = painted;
         }
     }

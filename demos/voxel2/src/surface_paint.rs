@@ -76,9 +76,24 @@ impl Plugin for SurfacePaintPlugin {
     }
 }
 
+/// The voxel size at which the paint takes over from a levelled ribbon's
+/// own surface, derived so the two cannot drift apart.
+///
+/// The LOD field shows level L over `[split_k·E_L, 2·split_k·E_L)`, so the
+/// level that begins at the ribbon layer's view distance is the first one
+/// that layer no longer covers — exactly where the paint must start.
+fn levelled_handover_voxel_m(lod: &voxel_engine::streaming::LodConfig) -> f32 {
+    let view = f64::from(crate::ribbons::RIBBON_NEAR_VIEW_M);
+    (0..=lod.max_level)
+        .map(|level| voxel_core::ChunkKey::new(level, IVec3::ZERO))
+        .find(|key| lod.split_k * key.edge_m() >= view)
+        .map_or(PAINT_FROM_VOXEL_M, |key| key.voxel_size_m() as f32)
+}
+
 fn repaint(
     world: Res<voxel_engine::WorldQuery>,
     sources: voxel_engine::StreamSourceQuery,
+    lod: Res<voxel_engine::streaming::LodConfig>,
     mut map: ResMut<SurfaceMap>,
     mut painted_at: Local<Option<Vec2>>,
     mut seen: Local<u64>,
@@ -107,6 +122,7 @@ fn repaint(
     let origin = eye - Vec2::splat(span * 0.5);
     let mut texels = vec![0u32; (MAP_SIZE * MAP_SIZE / 4) as usize];
     let mut painted = 0usize;
+    let mut coarse_from: Vec<(u32, f32)> = Vec::new();
     // Read the plan, not a render buffer: these carry the material the
     // level asked for and whether they are ground at all. Introspection,
     // so the empty distance is not charged to `reads_missed`.
@@ -118,6 +134,13 @@ fn repaint(
         // surrounding ground as sits under that height — otherwise the
         // capsule smears the river across the hillside it flows past.
         let under = (!seg.seated).then_some(seg.levels);
+        // A levelled material is drawn as a surface by the ribbon layer
+        // too, so its paint must wait until that layer has stopped. Taken
+        // from the plan rather than named here: the level decides which
+        // materials are water, this only notices which ones arrive levelled.
+        if under.is_some() && !coarse_from.iter().any(|&(id, _)| id == seg.material) {
+            coarse_from.push((seg.material, levelled_handover_voxel_m(&lod)));
+        }
         painted += stroke(
             &mut texels,
             origin,
@@ -134,6 +157,7 @@ fn repaint(
     map.texel_m = TEXEL_M;
     map.size = MAP_SIZE;
     map.min_voxel_m = PAINT_FROM_VOXEL_M;
+    map.coarse_from = coarse_from;
     map.generation = map.generation.wrapping_add(1);
     if std::env::var_os("VOXEL_LOG_LAYERS").is_some() {
         info!("surface paint: {painted} texels around {eye:?}");
