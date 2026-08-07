@@ -31,6 +31,7 @@ pub use chunkgen::{ChunkGen, ChunkOpsProvider};
 pub use layers::{MainThreadBudget, MainThreadQueue, VoxelLayersPlugin};
 pub use planning::{Marker, PatchSet, PlanningStats, RibbonSeg, WorldPlanner, WorldQuery};
 pub use streaming::{LodConfig, VoxelStreamingPlugin};
+pub use lod_layers::WorldFocus;
 pub use scatter::{Placement, PlacementInputs, ScatterInstance};
 pub use voxel_core::{ChunkKey, WorldId};
 

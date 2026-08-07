@@ -208,7 +208,7 @@ fn spawn_portal(
     commands.spawn(Portal {
         near,
         // Room to stand inside the megastructure.
-        far: Transform::from_translation(Vec3::new(0.0, 40.0, 0.0)),
+        far: Transform::from_translation(Vec3::new(0.0, 22.0, 0.0)),
         near_world: 0,
         far_world: 1,
         half: Vec2::new(4.0, 3.0),
@@ -227,6 +227,7 @@ fn drive_portal(
     sources: NearViews,
     mut portal_cams: Query<(Entity, &PortalCamera, &mut Transform, &mut Camera)>,
     mut clips: ResMut<voxel_render::WorldClips>,
+    mut focus: ResMut<voxel_engine::WorldFocus>,
     camera_world: Res<voxel_render::CameraWorld>,
 ) {
     clips.0.clear();
@@ -293,6 +294,12 @@ fn drive_portal(
         return;
     };
     let far_eye = motion.transform_point(eye.translation());
+    // Stream the far world around where the portal looks INTO it. Left on
+    // the camera's position it resides chunks in the far world at the near
+    // world's coordinates, and the opening looks out onto empty space.
+    focus.0.clear();
+    focus.0.resize(voxel_render::MAX_WORLDS, None);
+    focus.0[usize::from(showing)] = Some(far_eye.as_dvec3());
     let corners = Portal::corners(&to, portal.half);
     let mut planes = Vec::with_capacity(voxel_render::MAX_CLIP_PLANES);
     for i in 0..4 {

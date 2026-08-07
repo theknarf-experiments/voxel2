@@ -261,17 +261,35 @@ impl LodLayers {
     }
 
     /// Re-centre every world's field. True if any of them moved.
-    pub fn follow(&mut self, camera: DVec3) -> bool {
+    /// Re-centre each world's field on where THAT world is being looked
+    /// at from, falling back to the camera.
+    ///
+    /// A world seen through a portal is not seen from the camera: the far
+    /// side of the opening can be anywhere, and streaming it around the
+    /// near camera resides chunks nowhere near what the portal shows —
+    /// the portal looks out onto nothing, correctly and uselessly.
+    pub fn follow(&mut self, camera: DVec3, focus: &WorldFocus) -> bool {
         // NOT `any()`, and not `fold` with `||` either: both short-circuit,
         // and a world that never gets its focus published never streams.
         // `|=` evaluates every side.
         let mut moved = false;
         for world in &mut self.worlds {
-            moved |= world.follow(camera);
+            let at = focus
+                .0
+                .get(usize::from(world.shared.world))
+                .copied()
+                .flatten()
+                .unwrap_or(camera);
+            moved |= world.follow(at);
         }
         moved
     }
 }
+
+/// Where each world is being looked at from, when that is not the
+/// camera. Indexed by world; `None` means "follow the camera".
+#[derive(Resource, Default)]
+pub struct WorldFocus(pub Vec<Option<DVec3>>);
 
 /// How far the camera moves before the field is re-centred.
 pub const ANCHOR_STEP: f64 = 48.0;
@@ -546,6 +564,7 @@ fn build_lod_layers(
 #[allow(clippy::too_many_arguments)]
 fn follow_lod_focus(
     mut layers: ResMut<LodLayers>,
+    focus: Res<WorldFocus>,
     mut field: ResMut<voxel_render::FieldParams>,
     mut probe: ResMut<StreamProbe>,
     world: Res<crate::planning::WorldQuery>,
@@ -559,7 +578,7 @@ fn follow_lod_focus(
     }
     if let Ok(source) = sources.single() {
         let camera = source.translation().as_dvec3();
-        if layers.follow(camera) {
+        if layers.follow(camera, &focus) {
             field.anchor = camera.as_vec3();
         }
     }
@@ -592,6 +611,7 @@ pub struct LodLayersPlugin;
 impl Plugin for LodLayersPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<LodLayers>()
+            .init_resource::<WorldFocus>()
             .add_systems(Update, (build_lod_layers, follow_lod_focus).chain());
     }
 }
