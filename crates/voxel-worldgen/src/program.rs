@@ -202,11 +202,17 @@ pub fn eval_height(ops: &[WorldOp], seed: u32, xz: Vec2, vs: f32) -> f32 {
 /// Says nothing about planning ops, which carve into the world after
 /// this: a caller that prunes on this answer must either bound those too
 /// or only prune where they cannot reach.
-pub fn eval_range(ops: &[WorldOp], min: Vec3, max: Vec3) -> Option<Interval> {
+pub fn eval_range(ops: &[WorldOp], seed: u32, min: Vec3, max: Vec3, vs: f32) -> Option<Interval> {
     // Air, until an op says otherwise — the same start `eval` uses.
     let mut d = Interval::point(BIG);
     let mut h = Interval::point(0.0);
     let py = Interval::new(min.y, max.y);
+    // The xz box later height ops sample from; a warp widens it.
+    let mut pxz_lo = Vec2::new(min.x, min.z);
+    let mut pxz_hi = Vec2::new(max.x, max.z);
+    let frange = |lo: Vec2, hi: Vec2, s: f32, o: i32, m: u32| {
+        crate::fbm_range(seed, lo, hi, s, o, vs, m)
+    };
     for op in ops {
         // Generated from voxel-core::opgen; see `OpDef::range`.
         include!(concat!(env!("OUT_DIR"), "/op_arms_range.rs"));
@@ -542,7 +548,7 @@ mod range_tests {
             );
             let edge = 3.2 * (1u32 << (rng.next_f32() * 11.0) as u32) as f32;
             let (min, max) = (c, c + Vec3::splat(edge));
-            let bound = eval_range(&ops, min, max).expect("planet is analysable");
+            let bound = eval_range(&ops, 0, min, max, 1.0).expect("planet is analysable");
             if !bound.straddles_zero() {
                 informative += 1;
             }
@@ -572,19 +578,25 @@ mod range_tests {
     /// rather than claiming a bound it cannot justify.
     #[test]
     fn a_volumetric_world_declines() {
-        assert!(eval_range(&mega_program(), Vec3::ZERO, Vec3::splat(100.0)).is_none());
+        assert!(eval_range(&mega_program(), 0, Vec3::ZERO, Vec3::splat(100.0), 1.0).is_none());
     }
 
     /// The two answers worth having, on the world they are for.
     #[test]
     fn sky_is_air_and_the_deep_is_solid() {
         let ops = planet_program();
-        let sky = eval_range(&ops, Vec3::new(0.0, 8_000.0, 0.0), Vec3::new(800.0, 8_800.0, 800.0))
-            .unwrap();
-        assert!(sky.is_positive(), "sky should be all air: {sky:?}");
-        let deep =
-            eval_range(&ops, Vec3::new(0.0, -8_800.0, 0.0), Vec3::new(800.0, -8_000.0, 800.0))
+        let sky =
+            eval_range(&ops, 0, Vec3::new(0.0, 8_000.0, 0.0), Vec3::new(800.0, 8_800.0, 800.0), 1.0)
                 .unwrap();
+        assert!(sky.is_positive(), "sky should be all air: {sky:?}");
+        let deep = eval_range(
+            &ops,
+            0,
+            Vec3::new(0.0, -8_800.0, 0.0),
+            Vec3::new(800.0, -8_000.0, 800.0),
+            1.0,
+        )
+        .unwrap();
         assert!(deep.is_negative(), "the deep should be all solid: {deep:?}");
     }
 }

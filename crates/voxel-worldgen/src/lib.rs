@@ -55,6 +55,50 @@ pub(crate) fn fbm(seed: u32, p: Vec2, base_scale: f32, octaves: i32, voxel_size:
     fbm_mode(seed, p, base_scale, octaves, voxel_size, 0)
 }
 
+/// Bounds an FBM over an xz BOX, rather than at a point.
+///
+/// The amplitude alone bounds it everywhere — `±0.5 * amp` — but that is
+/// the whole world's range, so it decides nothing about a chunk near the
+/// ground. Locally it is far tighter: sample the middle and allow for how
+/// far each octave can move across the box.
+///
+/// Per octave, whichever is smaller:
+/// - its full swing, if the box spans enough of a wavelength to reach it;
+/// - a gradient bound otherwise. Value noise interpolates corner hashes
+///   in [0,1) with a quintic whose slope peaks at 1.875 per lattice unit;
+///   ridged and billow fold that through `|2n-1|`, doubling it.
+///
+/// Conservative by construction and checked by sampling: see
+/// `program::range_tests`.
+pub(crate) fn fbm_range(
+    seed: u32,
+    lo: Vec2,
+    hi: Vec2,
+    base_scale: f32,
+    octaves: i32,
+    voxel_size: f32,
+    mode: u32,
+) -> voxel_core::interval::Interval {
+    use voxel_core::interval::Interval;
+    let slope = if mode == 0 { 1.875 } else { 3.75 };
+    let mid = (lo + hi) * 0.5;
+    let reach = (hi - lo) * 0.5;
+    let centre = fbm_mode(seed, mid, base_scale, octaves, voxel_size, mode);
+    let mut margin = 0.0;
+    let mut amp = 0.5;
+    let mut freq = base_scale;
+    for _ in 0..octaves {
+        // What this octave contributes at most, and what it can move
+        // across the box; the tighter of the two is still a bound.
+        let full = amp * band_fade(1.0 / freq, voxel_size) * 0.5;
+        let slid = amp * slope * freq * (reach.x + reach.y);
+        margin += full.min(slid);
+        amp *= 0.5;
+        freq *= 2.0;
+    }
+    Interval::new(centre - margin, centre + margin)
+}
+
 /// FBM with a per-octave shaping mode: 0 plain, 1 ridged (sharp crests),
 /// 2 billow (rounded mounds). Mirrors the WGSL exactly.
 pub(crate) fn fbm_mode(
@@ -143,6 +187,18 @@ impl Generator {
     /// Field registers at a column (prop densities, gameplay queries).
     pub fn fields(&self, xz: Vec2) -> [f32; voxel_core::worldop::FIELD_SLOTS] {
         program::eval_fields(&self.ops, self.seed, xz, 4.0)
+    }
+
+    /// Bounds on this world's SDF over a box, or `None` if the program
+    /// has an op nobody has taught to bound itself. See
+    /// [`program::eval_range`].
+    pub fn range(
+        &self,
+        min: glam::Vec3,
+        max: glam::Vec3,
+        voxel_size: f32,
+    ) -> Option<voxel_core::interval::Interval> {
+        program::eval_range(&self.ops, self.seed, min, max, voxel_size)
     }
 
     /// The structural Y-lattice spacing, if the program has one.

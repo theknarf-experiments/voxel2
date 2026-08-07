@@ -310,6 +310,31 @@ pub fn resident_clamped(config: &LodConfig, anchor: DVec3, key: ChunkKey) -> boo
         && (key.level >= config.max_level || split_clamped(config, anchor, key.parent()))
 }
 
+/// Could this chunk contain a surface at all?
+///
+/// Evaluating the generator on the chunk's box instead of at points
+/// answers that for the cost of a dozen interval operations, where
+/// finding out by generating it costs a 38³ density pass and a GPU round
+/// trip. On the shipped planet 11,177 of 13,083 resident chunks exist
+/// only to be classified empty — sky and deep rock, either side of a
+/// surface that is nowhere near them.
+///
+/// Answers for the GENERATOR only. Planning carves into the world after
+/// it, so a caller has to account for that too: either by knowing the
+/// chunk has no ops, or by only asking past the ops horizon.
+///
+/// The box is padded by the density apron, because samples reach outside
+/// the chunk and a surface just beyond it still puts geometry inside.
+pub fn can_hold_surface(generator: &voxel_worldgen::Generator, key: ChunkKey) -> bool {
+    let apron = 4.0 * key.voxel_size_m() as f32;
+    let min = key.min_corner_m().as_vec3() - Vec3::splat(apron);
+    let max = min + Vec3::splat(key.edge_m() as f32 + 2.0 * apron);
+    // No bound means the program can put solid anywhere: keep the chunk.
+    generator
+        .range(min, max, key.voxel_size_m() as f32)
+        .is_none_or(|sdf| sdf.straddles_zero())
+}
+
 /// How far out a level's chunks can still be resident, in meters — the box
 /// a predicate has to be evaluated over.
 ///
@@ -972,5 +997,108 @@ mod field_invariants {
                 );
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod pruning {
+    use super::*;
+    use voxel_core::seed::Rng;
+
+    /// A chunk we refuse to generate must genuinely have no surface in
+    /// it. This is the property the whole optimisation rests on, and the
+    /// coverage eval cannot prove it: a wrongly pruned chunk is a hole
+    /// that appears only when the camera happens to look at it.
+    ///
+    /// So it is checked directly — densely sample the chunk's box with
+    /// the REAL evaluator, including the density apron, and assert the
+    /// SDF never changes sign in anything we skipped.
+    /// Densely sample a chunk's box, apron included, with the REAL
+    /// evaluator. Returns whether it holds both solid and air — i.e.
+    /// whether a surface crosses it.
+    fn has_surface(generator: &voxel_worldgen::Generator, key: ChunkKey) -> bool {
+        let vs = key.voxel_size_m() as f32;
+        let min = key.min_corner_m().as_vec3() - Vec3::splat(4.0 * vs);
+        let span = key.edge_m() as f32 + 8.0 * vs;
+        let (mut solid, mut air) = (false, false);
+        const N: i32 = 10;
+        for iz in 0..=N {
+            for iy in 0..=N {
+                for ix in 0..=N {
+                    let p = min + Vec3::new(ix as f32, iy as f32, iz as f32) * (span / N as f32);
+                    let (d, _) = voxel_worldgen::program::eval(generator.ops(), 0, p, vs);
+                    if d <= 0.0 {
+                        solid = true;
+                    } else {
+                        air = true;
+                    }
+                    if solid && air {
+                        return true;
+                    }
+                }
+            }
+        }
+        false
+    }
+
+    /// A chunk we refuse to generate must genuinely have no surface in
+    /// it. This is the property the whole optimisation rests on, and the
+    /// coverage eval cannot prove it: a wrongly pruned chunk is a hole
+    /// that shows only when the camera happens to look at it.
+    ///
+    /// Swept rather than sampled. Random chunks over a whole world are
+    /// almost all deep sky, where any bound is right and a broken one
+    /// passes — verified: halving the noise bound went unnoticed until
+    /// this walked the column THROUGH the ground at every level, which is
+    /// where a bound is load-bearing.
+    #[test]
+    fn nothing_pruned_had_a_surface_in_it() {
+        let generator = voxel_worldgen::Generator::new(
+            voxel_worldgen::program::planet_program(),
+            0,
+            Vec3::new(0.55, 0.5, 0.32),
+        );
+        let mut rng = Rng::new(0xC0DE_5EED);
+        let mut pruned = 0;
+        let mut marginal = 0;
+        for _ in 0..24 {
+            let xz = bevy::math::Vec2::new(
+                (rng.next_f32() - 0.5) * 60_000.0,
+                (rng.next_f32() - 0.5) * 60_000.0,
+            );
+            let ground = generator.height(xz, 1.0);
+            for level in 0..12u8 {
+                let edge = ChunkKey::new(level, IVec3::ZERO).edge_m() as f32;
+                let cy = (ground / edge).floor() as i32;
+                // The column through the surface, both ways out of it.
+                for dy in -6..=6 {
+                    let key = ChunkKey::new(
+                        level,
+                        IVec3::new(
+                            (xz.x / edge).floor() as i32,
+                            cy + dy,
+                            (xz.y / edge).floor() as i32,
+                        ),
+                    );
+                    if can_hold_surface(&generator, key) {
+                        continue;
+                    }
+                    pruned += 1;
+                    if dy.abs() <= 2 {
+                        marginal += 1;
+                    }
+                    assert!(
+                        !has_surface(&generator, key),
+                        "pruned {key:?} but a surface crosses it — that is a hole"
+                    );
+                }
+            }
+        }
+        assert!(pruned > 500, "only {pruned} chunks pruned; not a test");
+        assert!(
+            marginal > 20,
+            "only {marginal} pruned chunks were near the ground; the sweep is not reaching \
+             the cases where the bound is load-bearing"
+        );
     }
 }

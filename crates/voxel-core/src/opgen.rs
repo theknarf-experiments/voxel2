@@ -58,11 +58,10 @@ pub const OPS: &[OpDef] = &[
         body: "\
 h += @FBM(pxz + warp + @p0.xy, @p0.z, to_i(@p1.x), @VS@to_u(@p1.y)) * @p0.w;",
         range: Some("\
-            // Each octave is amp * (noise - 0.5), noise in [0,1) and amp
-            // halving from 0.5, so the sum is bounded by 0.5 wherever it
-            // is sampled — which is also why a warp before it cannot
-            // widen this.
-            h = h + Interval::symmetric(0.5 * @p0.w);"),
+            // Bounded over the box rather than everywhere: the amplitude
+            // alone is the whole world's range and decides nothing near
+            // the ground.
+            h = h + frange(pxz_lo + @p0.xy, pxz_hi + @p0.xy, @p0.z, to_i(@p1.x), to_u(@p1.y)) * @p0.w;"),
     },
     OpDef {
         name: "WOP_HEIGHT_OFFSET",
@@ -78,9 +77,16 @@ h += @FBM(pxz + warp + @p0.xy, @p0.z, to_i(@p1.x), @VS@to_u(@p1.y)) * @p0.w;",
         height: true,
         body: "h += @p0.z * smoothstep(@p0.x, @p0.y, h);",
         range: Some("\
-            // smoothstep is in [0, 1]: the step adds between nothing and
-            // its amplitude, of either sign.
-            h = h + Interval::new(0.0, @p0.z);"),
+            // smoothstep is in [0, 1], but which part of it depends on
+            // the height so far: below the ramp the step adds nothing, and
+            // above it the step adds all of itself. Only a height that
+            // straddles the ramp is uncertain.
+            if h.hi <= @p0.x {
+            } else if h.lo >= @p0.y {
+                h = h + @p0.z;
+            } else {
+                h = h + Interval::new(0.0, @p0.z);
+            }"),
     },
     OpDef {
         name: "WOP_WARP_XZ",
@@ -92,8 +98,11 @@ let oct = to_i(@p1.x);
 warp.x += @FBM(q, @p0.x, oct, @VS@0) * @p0.y;
 warp.y += @FBM(q + v2(713.0, -337.0), @p0.x, oct, @VS@0) * @p0.y;",
         range: Some("\
-            // Warps the xz that later height ops sample, and an FBM bound
-            // does not depend on where it is sampled."),
+            // Moves the xz that later height ops sample, by at most its
+            // own amplitude — so every later sample could come from
+            // anywhere in a box this much wider.
+            pxz_lo -= Vec2::splat(@p0.y.abs());
+            pxz_hi += Vec2::splat(@p0.y.abs());"),
     },
     OpDef {
         name: "WOP_FBM3",

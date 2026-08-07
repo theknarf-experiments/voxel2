@@ -39,7 +39,8 @@ use voxel_layers::{ChunkCtx, CoordFilter, Layer, LayerChunk, LayerGraph, LayerRu
 
 use crate::chunkgen::ChunkGen;
 use crate::streaming::{
-    level_span, resident_clamped, seam_mask_at, LodConfig, StreamProbe, StreamingRebuild,
+    can_hold_surface, level_span, resident_clamped, seam_mask_at, LodConfig, StreamProbe,
+    StreamingRebuild,
 };
 
 /// How long a `create` waits for its chunk to become drawable before
@@ -98,6 +99,9 @@ impl Anchor {
 struct LodShared {
     chunks: ChunkGen,
     config: LodConfig,
+    /// The world itself, for asking whether a chunk can hold a surface
+    /// before paying to find out.
+    generator: Arc<voxel_worldgen::Generator>,
     /// Where the camera has asked the field to be centred, and where THIS
     /// pass froze it. The pass reads the dependencies' focuses one at a
     /// time, so without a snapshot a publish landing mid-read leaves two
@@ -155,8 +159,18 @@ impl LayerChunk for LodChunk {
     fn create(&mut self, ctx: &ChunkCtx<'_, VoxelLod>, _level: u32) {
         let shared = &ctx.layer().shared;
         let key = ChunkKey::new(ctx.layer().level, ctx.coord());
-        let mask = seam_mask_at(&shared.config, shared.anchor.load().as_dvec3(), key);
         let ops = shared.chunks.ops_for(key);
+        // With the chunk's own ops in hand the question is exact: nothing
+        // planned here, and a generator that cannot put a surface in the
+        // box, means there is nothing to build. Skipping costs a dozen
+        // interval operations and saves a 38³ density pass and the GPU
+        // round trip the pass is waited on — which is what actually
+        // bounds how fast a world can appear.
+        if ops.is_none() && !can_hold_surface(&shared.generator, key) {
+            self.key = None;
+            return;
+        }
+        let mask = seam_mask_at(&shared.config, shared.anchor.load().as_dvec3(), key);
         // Hidden until the pass swaps: shown the moment it is drawable, a
         // new chunk would be drawn against neighbors whose masks this pass
         // has not refreshed yet — a hairline along the boundary it just
@@ -204,9 +218,14 @@ pub struct LodLayers {
 pub const ANCHOR_STEP: f64 = 48.0;
 
 impl LodLayers {
-    fn new(config: LodConfig, chunks: ChunkGen) -> Self {
+    fn new(
+        config: LodConfig,
+        chunks: ChunkGen,
+        generator: Arc<voxel_worldgen::Generator>,
+    ) -> Self {
         let shared = Arc::new(LodShared {
             chunks,
+            generator,
             requested: Anchor::default(),
             anchor: Anchor::default(),
             state: Mutex::new(LodState::default()),
@@ -227,11 +246,16 @@ impl LodLayers {
             // predicate is what decides.
             let at = shared.clone();
             let filter: CoordFilter = Arc::new(move |coord: IVec3| {
-                resident_clamped(
-                    &at.config,
-                    at.anchor.load().as_dvec3(),
-                    ChunkKey::new(level, coord),
-                )
+                let key = ChunkKey::new(level, coord);
+                if !resident_clamped(&at.config, at.anchor.load().as_dvec3(), key) {
+                    return false;
+                }
+                // Past the ops horizon the generator is the whole story,
+                // so a chunk it cannot put a surface in need not exist at
+                // all. Nearer than that, planning may still carve one, and
+                // `create` decides with the chunk's actual ops in hand.
+                (key.edge_m() as f32) <= crate::planning::OPS_HORIZON_EDGE_M
+                    || can_hold_surface(&at.generator, key)
             });
             tops.push(
                 TopDep::at_level(&instance(level), 0, level_span(&config, level))
@@ -380,6 +404,7 @@ fn build_lod_layers(
     existing: Option<ResMut<LodLayers>>,
     config: Res<LodConfig>,
     chunks: Res<ChunkGen>,
+    world: Res<crate::planning::WorldQuery>,
     mut field: ResMut<voxel_render::FieldParams>,
     mut rebuild: ResMut<StreamingRebuild>,
 ) {
@@ -397,7 +422,11 @@ fn build_lod_layers(
         // it is set with the graph rather than on every anchor move.
         field.dist_scale = (config.split_k * 32.0) as f32;
         field.max_vs = (1u32 << config.max_level) as f32;
-        commands.insert_resource(LodLayers::new(config.clone(), chunks.clone()));
+        commands.insert_resource(LodLayers::new(
+            config.clone(),
+            chunks.clone(),
+            world.generator().clone(),
+        ));
     }
 }
 
