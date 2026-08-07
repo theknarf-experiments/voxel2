@@ -24,10 +24,12 @@ mod planning;
 mod scatter;
 mod props;
 mod ribbons;
+mod surface_paint;
 mod water;
 use props::PropsPlugin;
 use grass::GrassPlugin;
 use ribbons::RibbonsPlugin;
+use surface_paint::SurfacePaintPlugin;
 use water::WaterPlugin;
 
 /// The demo's presentation for one world. A game would inline these
@@ -161,6 +163,7 @@ fn main() {
             scatter::ScatterPlugin,
             // Water is the demo's: generic ribbon data in, water look out.
             RibbonsPlugin,
+            SurfacePaintPlugin,
             WaterPlugin,
             // Ground cover: the engine scatters points, this draws blades.
             GrassPlugin,

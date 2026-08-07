@@ -749,6 +749,11 @@ pub enum EmitKind {
     /// Bed notch + ribbon surface segments along a `flow`
     /// source. Half width grows from `width[0]` to `width[1]` downstream.
     Ribbon { material: u32, width: [f32; 2] },
+    /// A ribbon laid on the ground along a `connect` source: the same
+    /// surface primitive, seated instead of levelled, and carving
+    /// nothing. What a road IS at a distance where cutting a 0.5 m notch
+    /// into 25 m voxels does nothing at all.
+    PathRibbon { material: u32, width: [f32; 2] },
     /// Sphere-cut chains from a `worm` source (caves).
     WormCuts,
     /// Build a structure (level data — see [`crate::structure`]) at each
@@ -889,8 +894,35 @@ impl EmitPatches {
                                 half_w,
                                 levels: seg_levels,
                                 material: *material,
+                                // A water course carries its own level.
+                                seated: false,
                             });
                             out.clearance.push([seg[0], seg[1]]);
+                        }
+                    }
+                }
+            }
+            EmitKind::PathRibbon { material, width } => {
+                for (_, c) in ctx.get_named::<ConnectPaths>(&self.cfg.source, padded).iter() {
+                    for waypoints in &c.paths {
+                        let n = waypoints.len();
+                        for (i, seg) in waypoints.windows(2).enumerate() {
+                            if !in_own((seg[0] + seg[1]) * 0.5) {
+                                continue;
+                            }
+                            let t = i as f32 / n as f32;
+                            let half_w = width[0] + (width[1] - width[0]) * t;
+                            out.ribbons.push(RibbonSeg {
+                                a: seg[0],
+                                b: seg[1],
+                                half_w,
+                                // Seated: whoever draws it decides the
+                                // height, against the surface they are
+                                // drawing at that distance.
+                                levels: [0.0; 2],
+                                material: *material,
+                                seated: true,
+                            });
                         }
                     }
                 }

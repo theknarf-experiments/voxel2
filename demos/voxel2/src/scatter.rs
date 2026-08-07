@@ -168,11 +168,13 @@ impl LayerChunk for ScatterDrawChunk {
         let mut placements = Vec::new();
         ctx.get_named::<ScatterPopulation>(&layer.source, ctx.chunk_bounds())
             .for_each(|_, chunk| placements.extend(chunk.placements.iter().cloned()));
-        layer.sink.put(ctx.coord(), placements);
+        layer.sink.put(ctx.instance_key(), ctx.coord(), placements);
     }
 
     fn destroy(&mut self, ctx: &ChunkCtx<'_, ScatterDraw>, _level: u32) {
-        ctx.layer().sink.take(ctx.coord());
+        ctx.layer()
+            .sink
+            .take(ctx.instance_key(), ctx.coord());
     }
 }
 
@@ -184,8 +186,9 @@ pub struct PopulationHandle {
     pub class: Arc<str>,
     pub output: ScatterOutput,
     pub sink: Sink<Placement>,
-    /// Entities currently spawned per chunk, for entity populations.
-    spawned: std::collections::HashMap<IVec3, Vec<Entity>>,
+    /// Entities currently spawned per contributing chunk, for entity
+    /// populations. Keyed like the sink: instance AND coordinate.
+    spawned: std::collections::HashMap<crate::planning::world::PartKey, Vec<Entity>>,
     seen_generation: u64,
 }
 
@@ -277,8 +280,8 @@ fn reconcile(
             }
             ScatterOutput::Entities => {
                 let live = population.sink.keys();
-                population.spawned.retain(|coord, entities| {
-                    if live.contains(coord) {
+                population.spawned.retain(|part, entities| {
+                    if live.contains(part) {
                         return true;
                     }
                     for entity in entities.drain(..) {
@@ -286,11 +289,11 @@ fn reconcile(
                     }
                     false
                 });
-                for coord in live {
-                    if population.spawned.contains_key(&coord) {
+                for part in live {
+                    if population.spawned.contains_key(&part) {
                         continue;
                     }
-                    let Some(placements) = population.sink.get(coord) else {
+                    let Some(placements) = population.sink.get(part) else {
                         continue;
                     };
                     let entities = placements
@@ -312,7 +315,7 @@ fn reconcile(
                                 .id()
                         })
                         .collect();
-                    population.spawned.insert(coord, entities);
+                    population.spawned.insert(part, entities);
                 }
             }
         }

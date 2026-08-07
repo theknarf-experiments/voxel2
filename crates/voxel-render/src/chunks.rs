@@ -242,6 +242,48 @@ impl Default for WorldProgram {
     }
 }
 
+/// A raster of surface material ids the mesh pass paints onto up-facing
+/// vertices, without carving anything.
+///
+/// The mechanism a feature needs once it is smaller than a voxel. A road
+/// is 0.5 m thick, so cutting it stops doing anything about 100 m from
+/// the camera — but a road is not an object standing ON the ground, it IS
+/// the ground, so at every distance past that it is a material rather
+/// than a shape. One fetch per VERTEX, independent of how many roads
+/// there are, where serving them as ops costs a loop per SAMPLE.
+///
+/// The engine owns the mechanism and nothing about what is painted: the
+/// host rasterizes whatever its layers planned, and material 0 means
+/// "leave the terrain's own material alone".
+#[derive(Resource, Clone, Default)]
+pub struct SurfaceMap {
+    /// Material ids, one byte per texel, four per word, row-major.
+    pub texels: std::sync::Arc<Vec<u32>>,
+    /// World xz of texel (0, 0).
+    pub origin: Vec2,
+    pub texel_m: f32,
+    /// Texels per side. 0 disables the map.
+    pub size: u32,
+    /// Bumped when the raster changes, so the GPU copy is rebuilt only
+    /// then.
+    pub generation: u64,
+}
+
+impl SurfaceMap {
+    /// Header + payload, as the shader reads it. The placement travels in
+    /// the buffer rather than in a uniform so that no layout twin grows a
+    /// field: `ChunkParams` is already mirrored in two shaders and Rust.
+    fn to_words(&self) -> Vec<u32> {
+        let mut out = Vec::with_capacity(4 + self.texels.len());
+        out.push(self.size);
+        out.push(self.texel_m.to_bits());
+        out.push(self.origin.x.to_bits());
+        out.push(self.origin.y.to_bits());
+        out.extend_from_slice(&self.texels);
+        out
+    }
+}
+
 /// Renders a uniform base color modulated by grain, pour/mortar bands,
 /// grime, drip streaks, moss in upward crevices, and optional emissive
 /// ceiling light strips.
@@ -407,6 +449,7 @@ impl Plugin for VoxelChunksPlugin {
         let (ready_tx, ready_rx) = crossbeam_channel::unbounded();
         app.init_resource::<WorldProgram>();
         app.init_resource::<FieldParams>();
+        app.init_resource::<SurfaceMap>();
         app.init_resource::<WorldMaterials>();
         app.init_resource::<EnvParams>();
         app.init_resource::<ChunkCommandQueue>()
@@ -431,6 +474,7 @@ impl Plugin for VoxelChunksPlugin {
         render_app
             .init_resource::<WorldProgram>()
             .init_resource::<FieldParams>()
+            .init_resource::<SurfaceMap>()
             .init_resource::<WorldMaterials>()
             .init_resource::<EnvParams>()
             .insert_resource(stats)
@@ -684,6 +728,11 @@ pub struct ChunkGpuResources {
     /// replay its height ops (shorelines, water depth) on the GPU without
     /// hand-copying a CPU/GPU twin.
     pub program_buffer: StorageBuffer<GpuWorldProgram>,
+    /// The surface map's words, and the generation they were built from.
+    surface_map: Option<(Buffer, u64)>,
+    /// A header saying "size 0", for when no host has painted anything.
+    /// Aliasing another buffer would read its contents as a raster.
+    surface_map_dummy: Buffer,
     env_uniform: UniformBuffer<EnvParams>,
     draw_uniforms: DynamicUniformBuffer<ChunkDrawUniform>,
     map_tx: crossbeam_channel::Sender<usize>,
@@ -785,6 +834,12 @@ fn init_chunk_resources(
         slab: SlabAllocator::new(),
         gen_uniforms: DynamicUniformBuffer::default(),
         program_buffer: StorageBuffer::default(),
+        surface_map: None,
+        surface_map_dummy: render_device.create_buffer_with_data(&BufferInitDescriptor {
+            label: Some("voxel_surface_map_dummy"),
+            contents: bytemuck::cast_slice(&[0u32; 4]),
+            usage: BufferUsages::STORAGE,
+        }),
         env_uniform: UniformBuffer::default(),
         draw_uniforms: DynamicUniformBuffer::default(),
         map_tx,
@@ -815,6 +870,7 @@ fn init_chunk_resources(
                 storage_buffer_sized(false, None),           // index slab
                 storage_buffer_sized(false, None),           // counts
                 storage_buffer_read_only_sized(false, None), // generator program
+                storage_buffer_read_only_sized(false, None), // surface material map
             ),
         ),
     );
@@ -977,11 +1033,14 @@ fn extract_program(
     program: Extract<Res<WorldProgram>>,
     field: Extract<Res<FieldParams>>,
     env: Extract<Res<EnvParams>>,
+    surface_map: Extract<Res<SurfaceMap>>,
     mut commands: Commands,
 ) {
     commands.insert_resource(program.clone());
     commands.insert_resource(**field);
     commands.insert_resource(**env);
+    // Cheap: an Arc of the raster, not the raster.
+    commands.insert_resource((**surface_map).clone());
 }
 
 fn extract_camera_pos(
@@ -1052,6 +1111,7 @@ fn plan_frame(
     mut draw_list: ResMut<VoxelDrawList>,
     camera: Res<ExtractedCameraPos>,
     (program, field, env): (Res<WorldProgram>, Res<FieldParams>, Res<EnvParams>),
+    surface_map: Res<SurfaceMap>,
     frustum: Res<ExtractedFrustum>,
     stats: Res<SharedRenderStats>,
     ready_tx: Res<ChunkReadySender>,
@@ -1579,6 +1639,24 @@ fn plan_frame(
     gpu.env_uniform.set(*env);
     gpu.env_uniform.write_buffer(&render_device, &render_queue);
 
+    // The surface map is rebuilt wholesale when the host repaints it,
+    // which is on the order of once per kilometre of travel — not per
+    // frame, and never per chunk.
+    if surface_map.size > 0
+        && gpu
+            .surface_map
+            .as_ref()
+            .is_none_or(|(_, generation)| *generation != surface_map.generation)
+    {
+        let words = surface_map.to_words();
+        let buffer = render_device.create_buffer_with_data(&BufferInitDescriptor {
+            label: Some("voxel_surface_map"),
+            contents: bytemuck::cast_slice(&words),
+            usage: BufferUsages::STORAGE,
+        });
+        gpu.surface_map = Some((buffer, surface_map.generation));
+    }
+
     // 7. HUD stats.
     if let Ok(mut s) = stats.0.lock() {
         s.drawn_masks.clear();
@@ -1695,6 +1773,10 @@ fn dispatch_chunk_work(
             gpu.index_slab.as_entire_buffer_binding(),
             gpu.counts.as_entire_buffer_binding(),
             program_binding,
+            gpu.surface_map
+                .as_ref()
+                .map_or(&gpu.surface_map_dummy, |(b, _)| b)
+                .as_entire_buffer_binding(),
         )),
     );
 

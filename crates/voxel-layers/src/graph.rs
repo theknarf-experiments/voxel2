@@ -873,6 +873,17 @@ impl<L: Layer> ChunkCtx<'_, L> {
         self.coord
     }
 
+    /// Which INSTANCE this chunk belongs to.
+    ///
+    /// A layer type can be registered several times — the same ribbons
+    /// tiled finely near and coarsely far — and every instance has a
+    /// chunk (0,0,0). Anything a chunk publishes outside the graph has to
+    /// be keyed by this as well as by the coordinate, or one instance
+    /// silently overwrites another's.
+    pub fn instance_key(&self) -> LayerKey {
+        self.key
+    }
+
     /// Which level is being generated (0-based).
     pub fn level(&self) -> u32 {
         self.level

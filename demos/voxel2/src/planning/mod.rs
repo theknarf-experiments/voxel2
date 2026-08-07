@@ -70,6 +70,8 @@ struct Emitter {
     gate: Option<f32>,
     /// Residency this layer's data is held to regardless of the gate.
     keep_m: Option<f32>,
+    /// Its ribbons lie on the ground rather than at a level.
+    seated: bool,
     ribbons: bool,
     clearance: bool,
     markers: bool,
@@ -77,8 +79,13 @@ struct Emitter {
 
 impl Emitter {
     fn new(name: String, gate: Option<f32>, keep_m: Option<f32>, emit: &EmitDef) -> Self {
+        let seated = matches!(emit, EmitDef::PathRibbon { .. });
         let (ribbons, clearance, markers) = match emit {
             EmitDef::Ribbon { .. } => (true, true, false),
+            // Ribbons yes; clearance no — the carved road beside it
+            // already declares that, and props must not be kept off a
+            // road twice.
+            EmitDef::PathRibbon { .. } => (true, false, false),
             EmitDef::PathSlabs { clearance, .. } => (false, *clearance, false),
             EmitDef::SiteStructure { marker, .. } | EmitDef::SiteStructure3 { marker, .. } => {
                 (false, false, marker.is_some())
@@ -88,6 +95,7 @@ impl Emitter {
         Self {
             name,
             keep_m,
+            seated,
             gate,
             ribbons,
             clearance,
@@ -349,12 +357,24 @@ impl StackPlanner {
         }
         // Presentation layers: this game's own, sitting on the emit
         // layers and turning what they plan into something it can draw.
-        let ribbon_sources: Vec<String> = emitters
+        // Only LEVELLED ribbons become geometry. A seated ribbon is
+        // ground, and the ground draws itself — see `surface_paint`. A
+        // second ribbon layer for them would also be a dependency on
+        // every seated emit at ITS view distance, which dragged the fine
+        // road network across 80 km: 505k planning chunks and 5 fps.
+        let levelled: Vec<String> = emitters
             .iter()
-            .filter(|e| e.ribbons)
+            .filter(|e| e.ribbons && !e.seated)
             .map(|e| e.name.clone())
             .collect();
-        if let Some(top) = crate::ribbons::register(&mut graph, level, ribbon_sources) {
+        if let Some(top) = crate::ribbons::register(
+            &mut graph,
+            level,
+            "ribbon-surface",
+            levelled,
+            crate::ribbons::RIBBON_NEAR_TILE_M,
+            crate::ribbons::RIBBON_NEAR_VIEW_M,
+        ) {
             deps.push(top);
         }
         let emit_names: Vec<String> = emitters.iter().map(|e| e.name.clone()).collect();

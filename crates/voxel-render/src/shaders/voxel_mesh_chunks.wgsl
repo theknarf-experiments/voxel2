@@ -81,6 +81,33 @@ struct WorldProgram {
 }
 @group(0) @binding(6) var<storage, read> prog: WorldProgram;
 
+// Surface material map: [size, texel_m, origin_x, origin_z, then one byte
+// per texel, four per word, row-major]. Size 0 = nothing painted.
+@group(0) @binding(7) var<storage, read> surface_map: array<u32>;
+
+/// The painted material at a world position, or 0 for "leave the
+/// terrain's own material alone".
+///
+/// One fetch, whatever the host planned there. This is what a feature
+/// becomes once it is thinner than a voxel: a road is 0.5 m thick, so
+/// carving it stops doing anything about 100 m out, but a road is not an
+/// object on the ground — it IS the ground, and past that distance it is
+/// a material rather than a shape.
+fn painted_material(world_xz: vec2<f32>) -> u32 {
+    let size = surface_map[0];
+    if (size == 0u) {
+        return 0u;
+    }
+    let texel_m = bitcast<f32>(surface_map[1]);
+    let origin = vec2<f32>(bitcast<f32>(surface_map[2]), bitcast<f32>(surface_map[3]));
+    let t = floor((world_xz - origin) / texel_m);
+    if (t.x < 0.0 || t.y < 0.0 || u32(t.x) >= size || u32(t.y) >= size) {
+        return 0u;
+    }
+    let idx = u32(t.y) * size + u32(t.x);
+    return (surface_map[4u + idx / 4u] >> ((idx % 4u) * 8u)) & 0xFFu;
+}
+
 fn corner_offset(i: u32) -> vec3<i32> {
     return vec3<i32>(i32(i & 1u), i32((i >> 1u) & 1u), i32((i >> 2u) & 1u));
 }
@@ -356,6 +383,15 @@ fn sn_vertices(@builtin(global_invocation_id) id: vec3<u32>) {
         if (s[i] < best) {
             best = s[i];
             mat = sample_material(c + corner_offset(i));
+        }
+    }
+    // A painted surface overrides the material of an UP-FACING vertex.
+    // Up-facing because the map is a plan view: a road crossing a cliff
+    // paints the ledge it runs along, not the cliff face beside it.
+    if (normal.y > 0.5) {
+        let painted = painted_material(params.origin.xyz.xz + pv.xz * params.origin.w);
+        if (painted != 0u) {
+            mat = painted;
         }
     }
     // Debug (eval): flag failed-snap vertices via a reserved material so

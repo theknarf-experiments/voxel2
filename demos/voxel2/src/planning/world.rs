@@ -11,6 +11,11 @@
 //! rebuilds whatever buffer draws it whenever the set changes. Residency
 //! decides what exists — there is no radius, no eviction scan and no
 //! "is it still near the camera" test anywhere in this file.
+//!
+//! A contribution is keyed by INSTANCE and coordinate, not coordinate
+//! alone. Two instances of one layer at different scales — the same
+//! ribbons tiled at 256 m near and 4096 m far — both have a chunk (0,0,0),
+//! and keyed by coordinate the coarse one silently erases the fine one.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -50,8 +55,11 @@ pub struct Sink<T> {
     inner: Arc<Mutex<SinkInner<T>>>,
 }
 
+/// Instance key and chunk coordinate: what identifies a contribution.
+pub type PartKey = (u64, IVec3);
+
 struct SinkInner<T> {
-    parts: HashMap<IVec3, Vec<T>>,
+    parts: HashMap<PartKey, Vec<T>>,
     generation: u64,
 }
 
@@ -70,22 +78,22 @@ impl<T: Clone> Sink<T> {
     /// Publish a chunk's contribution. Empty contributions are not stored:
     /// most tiles of a sparse feature have nothing in them, and an empty
     /// entry would still cost a rebuild.
-    pub fn put(&self, coord: IVec3, items: Vec<T>) {
+    pub fn put(&self, instance: u64, coord: IVec3, items: Vec<T>) {
         let mut inner = self.inner.lock().unwrap();
         if items.is_empty() {
-            if inner.parts.remove(&coord).is_some() {
+            if inner.parts.remove(&(instance, coord)).is_some() {
                 inner.generation += 1;
             }
             return;
         }
-        inner.parts.insert(coord, items);
+        inner.parts.insert((instance, coord), items);
         inner.generation += 1;
     }
 
     /// Withdraw a chunk's contribution, from its `destroy`.
-    pub fn take(&self, coord: IVec3) {
+    pub fn take(&self, instance: u64, coord: IVec3) {
         let mut inner = self.inner.lock().unwrap();
-        if inner.parts.remove(&coord).is_some() {
+        if inner.parts.remove(&(instance, coord)).is_some() {
             inner.generation += 1;
         }
     }
@@ -94,15 +102,15 @@ impl<T: Clone> Sink<T> {
         self.inner.lock().unwrap().generation
     }
 
-    /// Coordinates with a contribution — what an entity population diffs
-    /// its spawned set against.
-    pub fn keys(&self) -> std::collections::HashSet<IVec3> {
+    /// Contributions present — what an entity population diffs its
+    /// spawned set against.
+    pub fn keys(&self) -> std::collections::HashSet<PartKey> {
         self.inner.lock().unwrap().parts.keys().copied().collect()
     }
 
     /// One chunk's contribution.
-    pub fn get(&self, coord: IVec3) -> Option<Vec<T>> {
-        self.inner.lock().unwrap().parts.get(&coord).cloned()
+    pub fn get(&self, key: PartKey) -> Option<Vec<T>> {
+        self.inner.lock().unwrap().parts.get(&key).cloned()
     }
 
     /// Everything currently published, flattened.

@@ -358,11 +358,15 @@ impl LayerChunk for FarForestChunk {
                     });
                 }
             });
-        ctx.context::<WorldCtx>().far_props.put(ctx.coord(), props);
+        ctx.context::<WorldCtx>()
+            .far_props
+            .put(ctx.instance_key(), ctx.coord(), props);
     }
 
     fn destroy(&mut self, ctx: &ChunkCtx<'_, FarForest>, _level: u32) {
-        ctx.context::<WorldCtx>().far_props.take(ctx.coord());
+        ctx.context::<WorldCtx>()
+            .far_props
+            .take(ctx.instance_key(), ctx.coord());
     }
 }
 
@@ -390,7 +394,7 @@ fn reconcile_far_forest(
     mut meshes: ResMut<Assets<Mesh>>,
     assets: Res<PropAssets>,
     world: Option<Res<voxel_engine::WorldQuery>>,
-    mut spawned: Local<HashMap<IVec3, Option<Entity>>>,
+    mut spawned: Local<HashMap<crate::planning::world::PartKey, Option<Entity>>>,
     mut seen: Local<u64>,
 ) {
     let Some(sink) = world
@@ -407,8 +411,8 @@ fn reconcile_far_forest(
     }
     *seen = generation;
     let live = sink.keys();
-    spawned.retain(|coord, entity| {
-        if live.contains(coord) {
+    spawned.retain(|part, entity| {
+        if live.contains(part) {
             return true;
         }
         if let Some(entity) = entity.take() {
@@ -416,12 +420,12 @@ fn reconcile_far_forest(
         }
         false
     });
-    for coord in live {
-        if spawned.contains_key(&coord) {
+    for part in live {
+        if spawned.contains_key(&part) {
             continue;
         }
-        let Some(props) = sink.get(coord) else { continue };
-        spawned.insert(coord, build_super_tile(&mut commands, &mut meshes, &assets, &props));
+        let Some(props) = sink.get(part) else { continue };
+        spawned.insert(part, build_super_tile(&mut commands, &mut meshes, &assets, &props));
     }
 }
 

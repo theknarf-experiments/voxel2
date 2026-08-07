@@ -93,6 +93,7 @@ fn project(world: vec3<f32>) -> vec4<f32> {
     return view.clip_from_view * vec4<f32>(view_space, 1.0);
 }
 
+
 // One widened quad per river segment: endpoints stretched 0.3 m along the
 // flow so consecutive segments never open a sliver, corners offset by the
 // half width across it, seated a hair under the emitted water line.
@@ -175,9 +176,6 @@ fn vertex(@builtin(vertex_index) vid: u32) -> VsOut {
     out.strip = vec3<f32>(0.0);
     return out;
 }
-
-// --- coarse terrain height (shoreline) ---------------------------------------
-
 fn hash2(p: vec2<i32>) -> f32 {
     var h: u32 = u32(p.x) * 374761393u + u32(p.y) * 668265263u
         + prog.count.z * 2654435769u;
@@ -272,6 +270,10 @@ fn seabed_height(xz: vec2<f32>) -> f32 {
     }
     return h;
 }
+
+
+// --- coarse terrain height (shoreline) ---------------------------------------
+
 
 @fragment
 fn fragment(in: VsOut) -> @location(0) vec4<f32> {

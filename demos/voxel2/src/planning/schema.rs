@@ -447,6 +447,14 @@ pub enum EmitDef {
         #[serde(default = "d_course_width")]
         width: [f32; 2],
     },
+    /// A ground-seated ribbon along a `connect` source: a road as a
+    /// surface rather than as a cut. Carves nothing, so it costs no ops
+    /// and stays visible at any distance the data reaches.
+    PathRibbon {
+        material: u32,
+        #[serde(default = "d_course_width")]
+        width: [f32; 2],
+    },
     /// Sphere-cut chains from a `worm` source (caves).
     WormCuts,
     /// Build a named structure (from the level's `structures` table) at
@@ -581,6 +589,7 @@ impl EmitDef {
                 clearance,
             },
             EmitDef::Ribbon { material, width } => EmitKind::Ribbon { material, width },
+            EmitDef::PathRibbon { material, width } => EmitKind::PathRibbon { material, width },
             EmitDef::WormCuts => EmitKind::WormCuts,
             EmitDef::SiteStructure { structure, marker } => EmitKind::SiteStructure {
                 structure: build(&structure),
@@ -760,6 +769,7 @@ pub fn validate_stack(
                 let expect = match emit {
                     EmitDef::PathSlabs { .. } => StackKind::Connect,
                     EmitDef::Ribbon { .. } => StackKind::Flow,
+                    EmitDef::PathRibbon { .. } => StackKind::Connect,
                     EmitDef::WormCuts => StackKind::Worm,
                     EmitDef::SiteStructure { structure, .. } => {
                         check_structure(structures, name, structure)?;

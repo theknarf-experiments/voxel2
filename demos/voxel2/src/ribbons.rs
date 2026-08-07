@@ -24,13 +24,9 @@ use voxel_engine::level::{LevelDef, MaterialDef};
 /// Used when a ribbon's material id is not in the level table.
 const FALLBACK_TINT: [f32; 4] = [0.16, 0.34, 0.44, 0.0];
 
-const RIBBON_TILE_M: i32 = 256;
-
-/// How much visible river surface to keep around the camera. Formerly a
-/// tile radius policed by an assert; now simply the size of this layer's
-/// top dependency, and the graph guarantees the emit layers underneath it
-/// reach far enough because this layer declares that as padding.
-const RIBBON_VIEW_M: i32 = 3072;
+/// The levelled (water) scale: dense courses close to the camera.
+pub const RIBBON_NEAR_TILE_M: i32 = 256;
+pub const RIBBON_NEAR_VIEW_M: i32 = 3072;
 
 /// Ribbon segments reach beyond the chunk that owns them, so a tile has to
 /// see its neighbours' emitters to catch the ones crossing into it.
@@ -40,12 +36,20 @@ const RIBBON_PAD_M: i32 = 512;
 /// emit layers that carry them can be volumetric.
 const RIBBON_Y_M: i32 = 4096;
 
-/// Turns the emit layers' ribbon segments into water geometry.
+/// Turns the emit layers' ribbon segments into drawable surface strips.
+///
+/// Registered once per SCALE. A levelled ribbon (a water course) is dense
+/// and near, so it tiles finely over a few kilometres; a seated ribbon (a
+/// road) is sparse and wants to reach the horizon, so it tiles coarsely
+/// over tens. Same layer, same geometry, different grid — which is the
+/// whole reason instances are named rather than typed.
 pub struct RibbonSurface {
     /// Emit instances that produce ribbons.
     sources: Vec<String>,
     /// Material id → color, resolved from the level once.
     palette: Vec<(u32, [f32; 4])>,
+    tile_m: i32,
+    pad_m: i32,
 }
 
 #[derive(Default)]
@@ -56,13 +60,13 @@ impl Layer for RibbonSurface {
     const NAME: &'static str = "ribbon-surface";
 
     fn chunk_extent(&self) -> DVec3 {
-        DVec3::new(RIBBON_TILE_M as f64, 0.0, RIBBON_TILE_M as f64)
+        DVec3::new(self.tile_m as f64, 0.0, self.tile_m as f64)
     }
 
     fn dependencies(&self, _level: u32) -> Vec<Dep> {
         self.sources
             .iter()
-            .map(|name| Dep::named(name, IVec3::new(RIBBON_PAD_M, RIBBON_Y_M, RIBBON_PAD_M)))
+            .map(|name| Dep::named(name, IVec3::new(self.pad_m, RIBBON_Y_M, self.pad_m)))
             .collect()
     }
 }
@@ -82,7 +86,7 @@ impl LayerChunk for RibbonSurfaceChunk {
     fn create(&mut self, ctx: &ChunkCtx<'_, RibbonSurface>, _level: u32) {
         let layer = ctx.layer();
         let own = ctx.chunk_bounds();
-        let pad = IVec3::new(RIBBON_PAD_M, RIBBON_Y_M, RIBBON_PAD_M);
+        let pad = IVec3::new(layer.pad_m, RIBBON_Y_M, layer.pad_m);
         let mut segs = Vec::new();
         for source in &layer.sources {
             ctx.get_named::<crate::planning::layers::EmitPatches>(source, voxel_layers::dep_bounds(own, pad))
@@ -96,17 +100,28 @@ impl LayerChunk for RibbonSurfaceChunk {
                     }
                 });
         }
-        ctx.context::<WorldCtx>().ribbons.put(ctx.coord(), segs);
+        ctx.context::<WorldCtx>()
+            .ribbons
+            .put(ctx.instance_key(), ctx.coord(), segs);
     }
 
     fn destroy(&mut self, ctx: &ChunkCtx<'_, RibbonSurface>, _level: u32) {
-        ctx.context::<WorldCtx>().ribbons.take(ctx.coord());
+        ctx.context::<WorldCtx>()
+            .ribbons
+            .take(ctx.instance_key(), ctx.coord());
     }
 }
 
 /// Register the layer and its top dependency. Called while the world's
 /// graph is being built, after the emit layers it reads.
-pub fn register(graph: &mut LayerGraph, level: &LevelDef, ribbon_sources: Vec<String>) -> Option<TopDep> {
+pub fn register(
+    graph: &mut LayerGraph,
+    level: &LevelDef,
+    instance: &str,
+    ribbon_sources: Vec<String>,
+    tile_m: i32,
+    view_m: i32,
+) -> Option<TopDep> {
     if ribbon_sources.is_empty() {
         return None; // a level with no ribbons registers no ribbon layer
     }
@@ -118,14 +133,21 @@ pub fn register(graph: &mut LayerGraph, level: &LevelDef, ribbon_sources: Vec<St
             _ => None,
         })
         .collect();
-    graph.register(RibbonSurface {
-        sources: ribbon_sources,
-        palette,
-    });
+    graph.register_as(
+        instance,
+        RibbonSurface {
+            sources: ribbon_sources,
+            palette,
+            tile_m,
+            // A segment reaches beyond the cell that owns it, and a
+            // coarse cell's segments reach proportionally further.
+            pad_m: (tile_m * 2).max(RIBBON_PAD_M),
+        },
+    );
     Some(TopDep::at_level(
-        RibbonSurface::NAME,
+        instance,
         0,
-        IVec3::new(2 * RIBBON_VIEW_M, 0, 2 * RIBBON_VIEW_M),
+        IVec3::new(2 * view_m, 0, 2 * view_m),
     ))
 }
 
@@ -158,6 +180,8 @@ mod tests {
 
     fn surface_for(level: &LevelDef) -> RibbonSurface {
         RibbonSurface {
+            tile_m: RIBBON_NEAR_TILE_M,
+            pad_m: RIBBON_PAD_M,
             sources: vec!["rivers".into()],
             palette: level
                 .materials

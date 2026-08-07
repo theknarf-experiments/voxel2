@@ -21,6 +21,15 @@ pub struct RibbonSeg {
     /// Level material id. The host decides what a ribbon of this material
     /// looks like; the engine only says where it is.
     pub material: u32,
+    /// Lay the ribbon on the ground rather than at [`Self::levels`].
+    ///
+    /// A water surface is level by definition and its height is data. A
+    /// road is not: it follows the ground, and WHICH ground depends on how
+    /// far away it is being drawn — the surface of a chunk 20 km out is a
+    /// coarse approximation of the one the planner measured. So a seated
+    /// ribbon carries no height at all and is placed by whoever draws it,
+    /// against the surface they are actually drawing.
+    pub seated: bool,
 }
 
 /// A point of interest emitted by planning (dungeon entrance, bridge,
