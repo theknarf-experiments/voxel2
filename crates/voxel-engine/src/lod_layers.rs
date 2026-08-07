@@ -57,7 +57,7 @@ const CREATE_TIMEOUT: Duration = Duration::from_secs(10);
 /// Layer-thread workers. Each one spends its time waiting on the GPU
 /// rather than computing, so this is a count of chunks in flight, not of
 /// cores in use — sized to keep the pipeline's per-frame budget fed.
-const LOD_WORKERS: usize = 48;
+const LOD_WORKERS: usize = 256;
 
 /// Instance name of a level's layer.
 fn instance(level: u8) -> String {
