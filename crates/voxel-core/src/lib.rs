@@ -14,7 +14,7 @@ pub mod seed;
 pub mod voxel;
 pub mod worldop;
 
-pub use key::ChunkKey;
+pub use key::{ChunkKey, WorldId};
 pub use pos::GlobalPos;
 pub use voxel::Voxel;
 

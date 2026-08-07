@@ -32,7 +32,46 @@ pub use layers::{MainThreadBudget, MainThreadQueue, VoxelLayersPlugin};
 pub use planning::{Marker, PatchSet, PlanningStats, RibbonSeg, WorldPlanner, WorldQuery};
 pub use streaming::{LodConfig, VoxelStreamingPlugin};
 pub use scatter::{Placement, PlacementInputs, ScatterInstance};
-pub use voxel_core::ChunkKey;
+pub use voxel_core::{ChunkKey, WorldId};
+
+/// One world the engine streams.
+///
+/// A portal shows two levels at once, so "the world" stops being a
+/// singleton: each has its own LOD field, its own anchor and its own
+/// generator. They share one chunk service and one GPU arena, because the
+/// world rides in [`ChunkKey`].
+pub struct StreamedWorld {
+    pub id: WorldId,
+    pub config: LodConfig,
+    pub generator: std::sync::Arc<voxel_worldgen::Generator>,
+}
+
+/// The worlds to stream. `LevelPlugin` registers the level it loaded as
+/// world 0; a host adds more.
+#[derive(Resource, Default)]
+pub struct StreamedWorlds(pub Vec<StreamedWorld>);
+
+impl StreamedWorlds {
+    /// Register a world and return its id.
+    pub fn add(
+        &mut self,
+        config: LodConfig,
+        generator: std::sync::Arc<voxel_worldgen::Generator>,
+    ) -> WorldId {
+        let id = self.0.len() as WorldId;
+        assert!(
+            (id as usize) < voxel_render::MAX_WORLDS,
+            "at most {} worlds fit one program buffer",
+            voxel_render::MAX_WORLDS,
+        );
+        self.0.push(StreamedWorld {
+            id,
+            config,
+            generator,
+        });
+        id
+    }
+}
 
 /// Everything needed for a streamed voxel world. The world itself is data:
 /// a generator program in [`voxel_render::WorldProgram`], normally installed

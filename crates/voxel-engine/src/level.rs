@@ -1105,7 +1105,13 @@ impl Plugin for LevelPlugin {
         }
         let world_query =
             build_ops_provider(&level, self.seed, &generator, self.planner.as_ref());
-        app.insert_resource(program)
+        // World 0: the level this plugin loaded. A host that wants a
+        // second level (a portal's far side) registers it on
+        // `StreamedWorlds` and the streamer picks it up.
+        let mut worlds = crate::StreamedWorlds::default();
+        worlds.add(LodConfig::from(&level.lod), generator.clone());
+        app.insert_resource(worlds)
+            .insert_resource(program)
             .insert_resource(crate::planning::ops_provider(&world_query))
             .insert_resource(material_table(&level))
             .insert_resource(env_params(&level))

@@ -103,6 +103,9 @@ impl Anchor {
 /// together on every pass, and a level holding five clones of them was
 /// five chances for one to be forgotten.
 struct LodShared {
+    /// Which world these levels stream. Every key they build carries it,
+    /// so one `ChunkGen` and one GPU arena serve every loaded world.
+    world: voxel_core::WorldId,
     chunks: ChunkGen,
     config: LodConfig,
     /// The world itself, for asking whether a chunk can hold a surface
@@ -168,7 +171,7 @@ impl LayerChunk for LodChunk {
 
     fn create(&mut self, ctx: &ChunkCtx<'_, VoxelLod>, _level: u32) {
         let shared = &ctx.layer().shared;
-        let key = ChunkKey::new(ctx.layer().level, ctx.coord());
+        let key = ChunkKey::in_world(shared.world, ctx.layer().level, ctx.coord());
         let ops = shared.chunks.ops_for(key);
         // With the chunk's own ops in hand the question is exact: nothing
         // planned here, and a generator that cannot put a surface in the
@@ -213,10 +216,9 @@ impl LayerChunk for LodChunk {
     }
 }
 
-/// The running LOD graph: one layer per level, and the thread that keeps
-/// their top dependencies satisfied.
-#[derive(Resource)]
-pub struct LodLayers {
+/// One world's running LOD graph: a layer per level, and the thread that
+/// keeps their top dependencies satisfied.
+pub struct WorldLod {
     runtime: LayerRuntime,
     shared: Arc<LodShared>,
     /// Sticky anchor: the field is only re-centred when the camera has
@@ -224,16 +226,65 @@ pub struct LodLayers {
     published: Option<DVec3>,
 }
 
+/// Every world the engine is streaming.
+///
+/// A portal shows two levels at once, so residency cannot be a property
+/// of "the" world: each has its own field, its own anchor and its own
+/// generator, and they share one chunk service because the world rides in
+/// the chunk key.
+#[derive(Resource, Default)]
+pub struct LodLayers {
+    worlds: Vec<WorldLod>,
+}
+
+impl LodLayers {
+    pub fn is_empty(&self) -> bool {
+        self.worlds.is_empty()
+    }
+
+    /// Sum over worlds — what the HUD and the settle metric report.
+    pub fn resident(&self) -> usize {
+        self.worlds.iter().map(WorldLod::resident).sum()
+    }
+
+    pub fn stalled(&self) -> usize {
+        self.worlds.iter().map(WorldLod::stalled).sum()
+    }
+
+    pub fn is_generating(&self) -> bool {
+        self.worlds.iter().any(WorldLod::is_generating)
+    }
+
+    /// Every world has caught up with the focus.
+    pub fn is_idle(&self) -> bool {
+        self.worlds.iter().all(WorldLod::is_idle)
+    }
+
+    /// Re-centre every world's field. True if any of them moved.
+    pub fn follow(&mut self, camera: DVec3) -> bool {
+        // NOT `any()`, and not `fold` with `||` either: both short-circuit,
+        // and a world that never gets its focus published never streams.
+        // `|=` evaluates every side.
+        let mut moved = false;
+        for world in &mut self.worlds {
+            moved |= world.follow(camera);
+        }
+        moved
+    }
+}
+
 /// How far the camera moves before the field is re-centred.
 pub const ANCHOR_STEP: f64 = 48.0;
 
-impl LodLayers {
+impl WorldLod {
     fn new(
+        world: voxel_core::WorldId,
         config: LodConfig,
         chunks: ChunkGen,
         generator: Arc<voxel_worldgen::Generator>,
     ) -> Self {
         let shared = Arc::new(LodShared {
+            world,
             chunks,
             generator,
             requested: Anchor::default(),
@@ -242,7 +293,7 @@ impl LodLayers {
             stalled: AtomicUsize::new(0),
             config: config.clone(),
         });
-        let mut graph = LayerGraph::new(0).with_threads(LOD_WORKERS);
+        let mut graph = LayerGraph::new(u64::from(world)).with_threads(LOD_WORKERS);
         let mut tops = Vec::new();
         // Coarsest FIRST. Tops are ensured one after another, so whichever
         // is processed first decides what the pipeline chews on while
@@ -260,7 +311,7 @@ impl LodLayers {
             // predicate is what decides.
             let at = shared.clone();
             let filter: CoordFilter = Arc::new(move |coord: IVec3| {
-                let key = ChunkKey::new(level, coord);
+                let key = ChunkKey::in_world(at.world, level, coord);
                 if !resident_clamped(&at.config, at.anchor.load().as_dvec3(), key) {
                     return false;
                 }
@@ -453,35 +504,40 @@ fn refresh_masks(shared: &LodShared) {
         .fetch_add(outcome.stalled.len(), Ordering::Relaxed);
 }
 
-/// Build the LOD graph once the level's configuration exists, and rebuild
-/// it when a hot reload changes generation.
+/// Build a LOD graph per registered world once configuration exists, and
+/// rebuild them when a hot reload changes generation.
 fn build_lod_layers(
-    mut commands: Commands,
-    existing: Option<ResMut<LodLayers>>,
-    config: Res<LodConfig>,
+    mut layers: ResMut<LodLayers>,
+    worlds: Res<crate::StreamedWorlds>,
     chunks: Res<ChunkGen>,
-    world: Res<crate::planning::WorldQuery>,
     mut field: ResMut<voxel_render::FieldParams>,
     mut rebuild: ResMut<StreamingRebuild>,
 ) {
-    let stale = existing.is_some() && rebuild.0;
-    if stale {
+    if rebuild.0 && !layers.is_empty() {
         rebuild.0 = false;
-        // Dropping the graph destroys every chunk, which frees every
+        // Dropping a graph destroys every chunk it owns, which frees every
         // slab: a rebuild needs no separate teardown pass.
-        commands.remove_resource::<LodLayers>();
+        layers.worlds.clear();
         return;
     }
-    if existing.is_none() {
-        rebuild.0 = false;
+    if !layers.is_empty() || worlds.0.is_empty() {
+        return;
+    }
+    rebuild.0 = false;
+    for world in &worlds.0 {
         // The density band's scale is a constant of the configuration, so
         // it is set with the graph rather than on every anchor move.
-        field.dist_scale = (config.split_k * 32.0) as f32;
-        field.max_vs = (1u32 << config.max_level) as f32;
-        commands.insert_resource(LodLayers::new(
-            config.clone(),
+        // World 0 owns it: the band is a property of the view, and every
+        // world is viewed from the same camera.
+        if world.id == 0 {
+            field.dist_scale = (world.config.split_k * 32.0) as f32;
+            field.max_vs = (1u32 << world.config.max_level) as f32;
+        }
+        layers.worlds.push(WorldLod::new(
+            world.id,
+            world.config.clone(),
             chunks.clone(),
-            world.generator().clone(),
+            world.generator.clone(),
         ));
     }
 }
@@ -489,7 +545,7 @@ fn build_lod_layers(
 /// Publish the camera to every level, and report.
 #[allow(clippy::too_many_arguments)]
 fn follow_lod_focus(
-    layers: Option<ResMut<LodLayers>>,
+    mut layers: ResMut<LodLayers>,
     mut field: ResMut<voxel_render::FieldParams>,
     mut probe: ResMut<StreamProbe>,
     world: Res<crate::planning::WorldQuery>,
@@ -498,9 +554,9 @@ fn follow_lod_focus(
     time: Res<Time>,
     mut settling: Local<f32>,
 ) {
-    let Some(mut layers) = layers else {
+    if layers.is_empty() {
         return;
-    };
+    }
     if let Ok(source) = sources.single() {
         let camera = source.translation().as_dvec3();
         if layers.follow(camera) {
@@ -535,6 +591,7 @@ pub struct LodLayersPlugin;
 
 impl Plugin for LodLayersPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Update, (build_lod_layers, follow_lod_focus).chain());
+        app.init_resource::<LodLayers>()
+            .add_systems(Update, (build_lod_layers, follow_lod_focus).chain());
     }
 }
