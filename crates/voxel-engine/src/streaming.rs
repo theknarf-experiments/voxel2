@@ -21,9 +21,8 @@ use voxel_render::SharedRenderStats;
 
 use crate::chunkgen::ChunkGenPlugin;
 
-/// The LOD field: does the field want this chunk refined? A pure function
-/// of (chunk, quantized camera anchor). Advisory only — it drives which
-/// transitions an epoch attempts; seam masks come from the shown tree.
+/// Does the field want this chunk refined? The one rule everything else
+/// here is built from: a chunk splits inside `split_k` of its own edge.
 fn split_wanted(config: &LodConfig, anchor: DVec3, key: ChunkKey) -> bool {
     key.level > 0 && aabb_distance(anchor, key) < config.split_k * key.edge_m()
 }
@@ -156,7 +155,7 @@ fn aabb_distance(camera: DVec3, key: ChunkKey) -> f64 {
 /// each neighbor's subtree and ask how fine the field wants it. Only
 /// touching subtrees are visited, so the walk is a handful of nodes per
 /// level, not a subtree.
-pub fn split_clamped(config: &LodConfig, anchor: DVec3, key: ChunkKey) -> bool {
+fn split_clamped(config: &LodConfig, anchor: DVec3, key: ChunkKey) -> bool {
     if split_wanted(config, anchor, key) {
         return true;
     }
@@ -207,7 +206,7 @@ fn field_wants_touching_finer(
 /// Is this chunk inside the streamed volume — the ring of top-level cells
 /// the world consists of? Outside it there is nothing at all, which is a
 /// different thing from "coarser".
-pub fn in_top_ring(config: &LodConfig, anchor: DVec3, key: ChunkKey) -> bool {
+fn in_top_ring(config: &LodConfig, anchor: DVec3, key: ChunkKey) -> bool {
     let mut k = key;
     while k.level < config.max_level {
         k = k.parent();
@@ -235,6 +234,12 @@ pub fn seam_mask_at(config: &LodConfig, anchor: DVec3, key: ChunkKey) -> u32 {
     if key.level >= config.max_level {
         return 0; // nothing is coarser than the top
     }
+    // The 26 neighbors have at most 8 distinct parents — three consecutive
+    // coordinates halve to at most two — and `split_clamped` is a subtree
+    // descent, so asking it once per neighbor asks the same question 3x
+    // over.
+    let mut seen: [(IVec3, bool); 8] = [(IVec3::ZERO, false); 8];
+    let mut count = 0usize;
     let mut mask = 0u32;
     let mut idx = 0;
     for dz in -1..=1 {
@@ -248,8 +253,20 @@ pub fn seam_mask_at(config: &LodConfig, anchor: DVec3, key: ChunkKey) -> u32 {
                 // neighbor there to snap to — the world simply ends, and
                 // a snap bit would pull vertices toward a mesh that does
                 // not exist.
-                if in_top_ring(config, anchor, n) && !split_clamped(config, anchor, n.parent()) {
-                    mask |= 1 << idx;
+                if in_top_ring(config, anchor, n) {
+                    let parent = n.parent();
+                    let split = match seen[..count].iter().find(|(p, _)| *p == parent.pos) {
+                        Some((_, split)) => *split,
+                        None => {
+                            let split = split_clamped(config, anchor, parent);
+                            seen[count] = (parent.pos, split);
+                            count += 1;
+                            split
+                        }
+                    };
+                    if !split {
+                        mask |= 1 << idx;
+                    }
                 }
                 idx += 1;
             }
@@ -258,64 +275,63 @@ pub fn seam_mask_at(config: &LodConfig, anchor: DVec3, key: ChunkKey) -> u32 {
     mask
 }
 
-/// Where a LOD level is resident, as a predicate on one chunk: the level
+/// Where a LOD level is resident, as a predicate on one chunk: this level
 /// could be the finest covering it — its own split radius does not swallow
-/// it, and its parent's does.
+/// it, its parent's does, and it is inside the streamed ring.
 ///
 /// A top dependency is a box, and the plan sized these levels as a box
-/// with a hole: `2·merge_k·2E` across, `2·split_k·E` of hole. Measured
-/// against the configuration that ships, that box holds 2.35x the chunks
-/// the field draws (2.14x on the megastructure), because a box is not an
-/// annulus — its diagonal reaches 1.7x further than its face. On the
-/// megastructure, where 78% of chunks carry geometry, 2.14x is ~5.1k
-/// meshed against 3,656 slots: the same wall nested balls hit.
-///
-/// The field itself holds 1.21x / 1.13x, because it is the shape the LOD
-/// actually wants. Residency is therefore a predicate, not a shape.
-pub fn resident_at(config: &LodConfig, anchor: DVec3, key: ChunkKey) -> bool {
-    // Conservative at both ends: a chunk counts as split only when it lies
-    // ENTIRELY inside the split radius, and its parent counts as split when
-    // ANY of it does.
-    let split_here = key.level > 0
-        && farthest_corner(anchor, key) < config.split_k * key.edge_m();
-    let parent = key.parent();
-    let parent_split = key.level >= config.max_level
-        || aabb_distance(anchor, parent) < config.split_k * parent.edge_m();
-    !split_here && parent_split
-}
-
-/// [`resident_at`], against the clamped field: a chunk is resident when it
-/// is not split and its parent is. Exact — no conservative widening — so
-/// it holds precisely the shown set, which is what the closed-form clamp
-/// buys.
+/// with a hole. Measured against the configuration that ships, that box
+/// holds 2.35x the chunks the field draws (2.14x on the megastructure),
+/// because a box is not an annulus — its diagonal reaches 1.7x further
+/// than its face. On the megastructure, where 78% of chunks carry
+/// geometry, 2.14x is ~5.1k meshed against 3,656 slots: the same wall
+/// nested balls hit. This holds 1.00x. Residency is a predicate, not a
+/// shape.
 pub fn resident_clamped(config: &LodConfig, anchor: DVec3, key: ChunkKey) -> bool {
     in_top_ring(config, anchor, key)
         && !split_clamped(config, anchor, key)
         && (key.level >= config.max_level || split_clamped(config, anchor, key.parent()))
 }
 
-/// Distance from `p` to the farthest corner of a chunk's box.
-fn farthest_corner(p: DVec3, key: ChunkKey) -> f64 {
-    let min = key.min_corner_m();
-    let max = min + DVec3::splat(key.edge_m());
-    (p - min).abs().max((p - max).abs()).length()
-}
-
 /// How far out a level's chunks can still be resident, in meters — the box
 /// a predicate has to be evaluated over.
 ///
-/// The parent splits out to `split_k·2E`, and a child sits somewhere
-/// inside that parent: at worst diagonally opposite the corner nearest the
-/// camera, which is a parent DIAGONAL — `2√3·E` — beyond the parent's near
-/// face, not a parent's width. Sampled anchors put the true reach at
-/// ~6.7E and this bound at 8.5E; the difference costs only predicate
-/// evaluations, since the predicate still decides what is resident. Too
-/// small a box silently clips corner chunks the field wants, which is a
-/// hole that only appears at some camera positions.
+/// A chunk of level L is drawn only if its parent split, which happens
+/// within `split_k·2E` of the parent's near face. The chunk sits in one
+/// octant of that parent, so its own nearest point is at worst half a
+/// parent diagonal — `√3·E` — further out. Hence `2·split_k·E + √3·E`,
+/// which on the shipped planet is 6.73E against a measured worst case of
+/// 6.7E: the bound is tight, not padded.
+///
+/// Too small a box silently clips corner chunks the field wants, which is
+/// a hole that only appears at some camera positions. Too large costs
+/// predicate evaluations here and residency in every consumer that sizes
+/// itself from this.
 pub fn resident_reach(config: &LodConfig, level: u8) -> f64 {
     const SQRT_3: f64 = 1.732_050_807_568_877_2;
     let edge = ChunkKey::new(level, IVec3::ZERO).edge_m();
-    2.0 * config.split_k * edge + 2.0 * SQRT_3 * edge
+    2.0 * config.split_k * edge + SQRT_3 * edge
+}
+
+/// The box a level's residency predicate must be evaluated over, as a
+/// `TopDep` size.
+///
+/// Lives beside the rules it must not clip: [`resident_reach`] for a
+/// level that is bounded by distance, and the ring's own cell count and
+/// vertical band for the top level, which is bounded by neither.
+pub fn level_span(config: &LodConfig, level: u8) -> IVec3 {
+    if level < config.max_level {
+        return IVec3::splat(2 * resident_reach(config, level).ceil() as i32);
+    }
+    let edge = ChunkKey::new(level, IVec3::ZERO).edge_m().ceil() as i32;
+    // The band is absolute, not centred on the camera, so the box has to
+    // reach it from wherever the camera is; a cell of slack on each side
+    // costs only predicate evaluations.
+    IVec3::new(
+        2 * edge * (config.top_radius + 1),
+        4 * edge * (config.top_y.1 - config.top_y.0 + 2),
+        2 * edge * (config.top_radius + 1),
+    )
 }
 
 #[cfg(test)]
@@ -397,20 +413,6 @@ mod residency_shape {
     /// A shown configuration, as the epoch machine modelled one: a leaf
     /// set, from which the level covering any region and the seam mask of
     /// any leaf follow.
-    /// Do the two chunks' closed axis-aligned boxes share at least a point
-    /// (face-, edge- or corner-touch)? Coordinates in level-0 cells.
-    fn boxes_touch(a: ChunkKey, b: ChunkKey) -> bool {
-        let (amin, amax) = key_box(a);
-        let (bmin, bmax) = key_box(b);
-        amin.cmple(bmax).all() && bmin.cmple(amax).all()
-    }
-
-    fn key_box(k: ChunkKey) -> (bevy::math::I64Vec3, bevy::math::I64Vec3) {
-        let min = k.pos.as_i64vec3() << (k.level as i64);
-        let max = (k.pos + IVec3::ONE).as_i64vec3() << (k.level as i64);
-        (min, max)
-    }
-
     struct PostState<'a> {
         leaves: &'a HashSet<ChunkKey>,
     }
@@ -545,6 +547,25 @@ mod residency_shape {
             }
         }
         out
+    }
+
+    /// The field predicate WITHOUT the clamp, kept only to measure what
+    /// the clamp is worth: it misses the forced splits, which are
+    /// two-level jumps, which are pinholes.
+    fn resident_at(config: &LodConfig, anchor: DVec3, key: ChunkKey) -> bool {
+        let split_here =
+            key.level > 0 && farthest_corner(anchor, key) < config.split_k * key.edge_m();
+        let parent = key.parent();
+        let parent_split = key.level >= config.max_level
+            || aabb_distance(anchor, parent) < config.split_k * parent.edge_m();
+        in_top_ring(config, anchor, key) && !split_here && parent_split
+    }
+
+    /// Distance from `p` to the farthest corner of a chunk's box.
+    fn farthest_corner(p: DVec3, key: ChunkKey) -> f64 {
+        let min = key.min_corner_m();
+        let max = min + DVec3::splat(key.edge_m());
+        (p - min).abs().max((p - max).abs()).length()
     }
 
     /// One predicate covers every level, the top one included: outside the

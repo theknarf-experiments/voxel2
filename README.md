@@ -25,13 +25,13 @@ cargo run -p voxel2 -- levels/megastructure.json  # endless interior: pocket dis
 There are no hardcoded worlds. A level file describes everything, most
 importantly the **generator program**: an ordered list of composable ops
 (FBM height bands, floor lattices, pillar/wall grids, shafts, catwalk
-beams, plus the `water` meta op) that one GPU interpreter evaluates as
+beams, 3D noise carves, domain warp) that one GPU interpreter evaluates as
 the world's SDF — a lush planet and a concrete megacity are the same
 engine fed different data. Planned structure is data too, declared as a
 **planning stack**: a small generic layer vocabulary — `biomes` (blended
 regions), `scatter`/`scatter3` (sites), `connect`/`connect3` (pathfound
 or orthogonal links), `flow` (descent hydrology), `worm` (burrows), and
-`emit` (CSG patches, water segments, clearance, markers) — that levels
+`emit` (CSG patches, ribbons, clearance, markers) — that levels
 compose by instance name: ruins, roads, rivers, caves, dungeons, and the
 megastructure's habitation districts are all stack configurations, not
 engine features. Shading follows the same rule: a **material table**
@@ -73,16 +73,15 @@ speed. Env vars:
 | `VOXEL_REMOTE=1` | BRP server for the `voxctl` CLI (teleport, planning queries, offscreen screenshots) |
 | `VOXEL_SCREENSHOT=path[,secs]` | Periodic offscreen frame dumps (works occluded) |
 | `VOXEL_EVAL_HOLES=1` | Coverage-eval rendering (used by `mise run eval`) |
-| `VOXEL_LOG_FPS=1` | fps/leaves/slab telemetry to the log |
 | `VOXEL_LOG_LAYERS=<n>` | Log the ensure-load passes and the first `n` read-driven generations (with a backtrace) |
 | `VOXEL_ENSURE_THREADS=<n>` | Override the planning ensure-load worker count |
-| `VOXEL_NO_PREPARE=1` | Fall back to read-driven planning generation (A/B) |
 
 **Live tooling**: run with `VOXEL_REMOTE=1`, then drive the running game:
-`cargo run -p voxctl -- status | goto X Y Z [DX DY DZ] | water X Z [R] |
-markers X Z [R] [KIND] | scan X Z [R] [STEP] | shot PATH` — `scan` ranks
+`cargo run -p voxctl -- status | goto X Y Z [DX DY DZ] | ribbons X Z [R] |
+markers X Z [R] [KIND] | scan X Z [R] [STEP] | shot PATH | raw METHOD [JSON]`
+— `scan` ranks
 scenic spots (steep, high terrain) from the CPU world mirror. In-game overlays: F8 chunk
-boundaries by LOD, F9 planning layers (markers, clearance, water, biome
+boundaries by LOD, F9 planning layers (markers, clearance, ribbons, biome
 field).
 
 ## How it works
@@ -94,29 +93,33 @@ field).
   that drives bucketed slab allocation; surface-nets compute passes then
   mesh straight into shared vertex/index slabs. Nothing but 8-byte counts
   ever crosses the bus. Everything is deterministic and regenerable.
-- **LOD octree with ready-before-swap.** 32³-cell chunks at every level
-  (voxel size doubles per level); a main-world controller splits/merges
-  with hysteresis and only swaps when every replacement chunk is drawable —
-  no holes, no double-LOD. Seams are closed by *stitched surface nets*:
-  boundary-band vertices geomorph onto the coarse-parity surface, which is
-  bit-identical across neighbors.
+- **LOD levels are layers, with ready-before-swap.** 32³-cell chunks at
+  every level (voxel size doubles per level). Which chunks exist is not
+  planned: it is a pure function of the chunk and a sticky camera anchor,
+  declared to the dependency graph as one top dependency per level, so
+  residency IS the drawn set. A chunk's `create` blocks until it is
+  drawable and the graph runs every ensure before any release, so a
+  replacement always exists before the chunk it replaces goes — no holes,
+  no double-LOD, and no epoch machine to arrange it. Seams are closed by
+  *stitched surface nets*: boundary-band vertices geomorph onto the
+  coarse-parity surface, which is bit-identical across neighbors.
 - **Compressed geometry.** 12-byte vertices (unorm16 positions, octahedral
   normals, material + baked sun shadow in the spare u16) and packed u16
   indices; drawn camera-relative through a custom phase item (the view
   matrix is applied with w = 0, so world-space f32 error never grows with
   distance).
 - **Planning layers drive the GPU** (the LayerProcGen part): generation is
-  *dependency-driven* — before the LOD planner queries anything, it
-  ensure-loads the planning closure for the chunks it is about to request
-  (and a second pass for the prop/water streamers' radius), resolving
-  declared dependencies first, nearest-first, in parallel and off the main
-  thread. `read_generated` in the debug status reports any consumer whose
-  working set that misses. The level's stack builds one `LayerManager` of
-  CPU layers with declared padded dependencies; `emit` layers bucket their output by owning cell (a road
-  is owned by the chunk containing its midpoint) and a single `WorldQuery`
+  *dependency-driven* — nothing generates except to satisfy a declared
+  dependency, resolved nearest-first, in parallel and off the main thread,
+  and a read returns what is resident rather than generating it.
+  `reads_missed` in the debug status reports any consumer whose working
+  set a top dependency does not cover. The level's stack builds one
+  `LayerGraph` of CPU layers with declared padded dependencies; `emit`
+  layers bucket their output by owning cell (a road is owned by the chunk
+  containing its midpoint) and a single `WorldQuery`
   facade serves CSG ops to chunks (with per-emitter carve-horizon gates),
-  clearance to spawners, water segments to the renderer, and markers to
-  gameplay. Ops upload with the generation batch and the density shader
+  clearance to spawners, ribbon segments to the host that draws them,
+  and markers to gameplay. Ops upload with the generation batch and the density shader
   applies them after the base SDF. Determinism is enforced by construction
   and by tests that race generation across thread counts.
 - **CPU mirrors for gameplay.** The generator program's interpreter is
@@ -140,7 +143,7 @@ field).
 | `voxel-layers` | LayerProcGen framework: padded deps, recursive on-demand generation |
 | `voxel-worldgen` | CPU twin of the generator interpreter + the stack vocabulary (scatter/connect/flow/worm/biomes/emit), recipes, hydrology, pathfinding |
 | `voxel-render` | Density/meshing compute, slab allocator, LOD draw, grass, materials |
-| `voxel-engine` | LOD controller, level definitions (JSON), vegetation + water streaming, remote tooling |
+| `voxel-engine` | The LOD field and its layers, chunk generation service, level definitions (JSON), remote tooling |
 | `voxel-debug` | Flycam + HUD (fps, chunk/arena/slab occupancy, LOD histogram) |
 
 `tools/voxctl` drives a running instance over the Bevy Remote Protocol;

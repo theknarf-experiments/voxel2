@@ -46,9 +46,17 @@ pub trait WorldPlanner: Send + Sync + 'static {
     /// computes on its behalf.
     fn set_focus(&self, _focus: IVec3) {}
 
-    /// Residency and health, for the HUD and the eval.
+    /// Residency and health, for the HUD and the eval. Builds a snapshot
+    /// of every layer — for a display, not for a frame.
     fn stats(&self) -> PlanningStats {
         PlanningStats::default()
+    }
+
+    /// Reads that found no resident chunk. Separate from [`Self::stats`]
+    /// because the engine watches it every frame and the snapshot costs a
+    /// read lock and a `String` per layer instance.
+    fn reads_missed(&self) -> usize {
+        0
     }
 
     /// Block until residency has caught up with the focus. For loading
@@ -220,6 +228,11 @@ impl WorldQuery {
 
     pub fn stats(&self) -> PlanningStats {
         self.planner.as_ref().map_or_else(PlanningStats::default, |p| p.stats())
+    }
+
+    /// See [`WorldPlanner::reads_missed`].
+    pub fn reads_missed(&self) -> usize {
+        self.planner.as_ref().map_or(0, |p| p.reads_missed())
     }
 
     /// The host's per-world layer state, downcast to `C`.

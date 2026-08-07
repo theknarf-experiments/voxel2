@@ -513,10 +513,8 @@ fn a_top_dependency_can_be_shaped_by_a_predicate() {
     graph.process_top(&mut solid);
     assert_eq!(graph.resident_chunks(), 0);
 
-    let mut shell = TopDep::at_level("play", 0, size).with_filter(|focus: IVec3| {
-        let center = IVec3::new(focus.x.div_euclid(CELL), 0, focus.z.div_euclid(CELL));
-        Arc::new(move |coord: IVec3| (coord - center).abs().max_element() > 1)
-    });
+    let mut shell = TopDep::at_level("play", 0, size)
+        .with_filter(Arc::new(|coord: IVec3| coord.abs().max_element() > 1));
     shell.set_focus(&graph, IVec3::new(CELL / 2, 0, CELL / 2));
     graph.process_top(&mut shell);
     assert_eq!(
@@ -543,19 +541,21 @@ fn a_predicate_follows_the_focus_within_one_cell() {
     let ledger = Arc::new(Ledger::default());
     let graph = graph(ledger, 0, 0, 1);
 
-    // Wants one cell: whichever contains the focus.
-    let mut top = TopDep::at_level("play", 0, IVec3::new(CELL * 7, 0, CELL * 7)).with_filter(
-        |focus: IVec3| {
-            let cell = IVec3::new(focus.x.div_euclid(CELL), 0, focus.z.div_euclid(CELL));
-            Arc::new(move |coord: IVec3| coord == cell)
-        },
-    );
+    // Wants one cell, read from a value the test moves — the shape of a
+    // filter is a function of something OUTSIDE the dependency, which is
+    // why any move has to re-evaluate it.
+    let wanted = Arc::new(AtomicUsize::new(0));
+    let mut top = TopDep::at_level("play", 0, IVec3::new(CELL * 7, 0, CELL * 7)).with_filter({
+        let wanted = wanted.clone();
+        Arc::new(move |coord: IVec3| coord == IVec3::new(wanted.load(Ordering::Relaxed) as i32, 0, 0))
+    });
     top.set_focus(&graph, IVec3::new(1, 0, 1));
     graph.process_top(&mut top);
     assert_eq!(graph.resident_in("play"), 1);
 
-    // A move well inside the window, landing in the next cell: the box
-    // covers the same indices, and the shape still has to follow.
+    // A move well inside the window: the box covers the same indices, and
+    // the shape still has to follow.
+    wanted.store(1, Ordering::Relaxed);
     top.set_focus(&graph, IVec3::new(CELL + 1, 0, 1));
     assert!(top.changed(), "a filtered dependency must re-evaluate on a move");
     graph.process_top(&mut top);
@@ -581,19 +581,22 @@ fn a_region_handed_between_top_dependencies_is_never_dropped() {
         // the left one covers the two cells below it, the right one the
         // two at and above it.
         let window = IVec3::new(CELL * 9, 0, CELL * 9);
-        let band = |lo: i32, hi: i32| {
-            move |focus: IVec3| -> voxel_layers::CoordFilter {
-                let c = focus.x.div_euclid(CELL);
-                Arc::new(move |coord: IVec3| {
-                    coord.y == 0 && coord.z == 0 && coord.x >= c + lo && coord.x < c + hi
-                })
-            }
+        // The bands follow one shared cell — as consecutive LOD levels
+        // follow one camera anchor, rather than each reading its own.
+        let center = Arc::new(AtomicUsize::new(0));
+        let band = |lo: i32, hi: i32| -> voxel_layers::CoordFilter {
+            let center = center.clone();
+            Arc::new(move |coord: IVec3| {
+                let c = center.load(Ordering::Relaxed) as i32;
+                coord.y == 0 && coord.z == 0 && coord.x >= c + lo && coord.x < c + hi
+            })
         };
         let mut tops = vec![
             TopDep::at_level("play", 0, window).with_filter(band(-2, 0)),
             TopDep::at_level("play", 0, window).with_filter(band(0, 2)),
         ];
         let focus = |tops: &mut Vec<TopDep>, cell: i32| {
+            center.store(cell as usize, Ordering::Relaxed);
             for i in order {
                 tops[i].set_focus(&graph, IVec3::new(cell * CELL + CELL / 2, 0, 0));
             }

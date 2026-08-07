@@ -27,6 +27,18 @@ pub struct LodDef {
     pub merge_k: f64,
 }
 
+impl From<&LodDef> for LodConfig {
+    fn from(d: &LodDef) -> Self {
+        Self {
+            max_level: d.max_level,
+            top_radius: d.top_radius,
+            top_y: d.top_y,
+            split_k: d.split_k,
+            merge_k: d.merge_k,
+        }
+    }
+}
+
 
 /// Lighting + atmosphere for the chunk draw. Every field has the sun-lit
 /// outdoor default, so levels only state what differs.
@@ -1097,13 +1109,7 @@ impl Plugin for LevelPlugin {
             .insert_resource(crate::planning::ops_provider(&world_query))
             .insert_resource(material_table(&level))
             .insert_resource(env_params(&level))
-            .insert_resource(LodConfig {
-                max_level: level.lod.max_level,
-                top_radius: level.lod.top_radius,
-                top_y: level.lod.top_y,
-                split_k: level.lod.split_k,
-                merge_k: level.lod.merge_k,
-            })
+            .insert_resource(LodConfig::from(&level.lod))
             .insert_resource(world_query)
             .insert_resource(level.clone())
             .add_plugins(VoxelEnginePlugin)

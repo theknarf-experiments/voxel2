@@ -94,27 +94,18 @@ pub type BetweenPasses = Arc<dyn Fn(&LayerGraph) + Send + Sync>;
 impl LayerRuntime {
     /// Start generating for `tops`. Their order fixes the handle indices.
     pub fn start(graph: Arc<LayerGraph>, tops: Vec<TopDep>) -> Self {
-        Self::start_with(graph, tops, None)
+        Self::start_with(graph, tops, None, None)
     }
 
-    /// Start, with work to run between ensuring and releasing on every
-    /// pass.
-    pub fn start_with(
-        graph: Arc<LayerGraph>,
-        tops: Vec<TopDep>,
-        between: Option<BetweenPasses>,
-    ) -> Self {
-        Self::start_hooked(graph, tops, None, between)
-    }
-
-    /// Start, with work at the head of every pass as well.
+    /// Start, with work at the head of every pass and between ensuring
+    /// and releasing.
     ///
     /// `before` runs before the focuses are read, which is the only place
     /// a caller can freeze whatever its layers derive from: the focuses
     /// are read one dependency at a time, so anything sampled per-chunk
     /// during a pass has to be snapshotted here or two levels can end up
     /// working from camera positions a frame apart.
-    pub fn start_hooked(
+    pub fn start_with(
         graph: Arc<LayerGraph>,
         tops: Vec<TopDep>,
         before: Option<BetweenPasses>,

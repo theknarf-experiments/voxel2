@@ -197,6 +197,10 @@ impl WorldPlanner for StackPlanner {
         }
     }
 
+    fn reads_missed(&self) -> usize {
+        self.stack.as_ref().map_or(0, |rt| rt.graph().reads_missed())
+    }
+
     fn stats(&self) -> PlanningStats {
         self.stack.as_ref().map_or_else(PlanningStats::default, |rt| PlanningStats {
             resident_chunks: rt.graph().resident_chunks(),
@@ -208,24 +212,25 @@ impl WorldPlanner for StackPlanner {
 }
 
 /// The LOD field is evaluated at a camera anchor quantized to this, so a
-/// chunk can be up to this much further out than its nominal band.
-const ANCHOR_SLOP_M: f32 = 48.0;
+/// chunk can be up to this much further out than its nominal band. The
+/// engine owns the step; this is the same number seen from the host.
+const ANCHOR_SLOP_M: f32 = voxel_engine::lod_layers::ANCHOR_STEP as f32;
 
-/// The largest chunk edge not exceeding `cap`.
+/// The coarsest LOD level whose chunk edge does not exceed `cap`.
 ///
 /// A chunk is [`voxel_core::CHUNK_CELLS`] cells of [`voxel_core::BASE_VOXEL_M`]
-/// at level 0 and doubles per level, so the ops horizon admits a specific
-/// edge rather than the horizon value itself. Derived from the constants
+/// at level 0 and doubles per level, so a carve horizon admits a specific
+/// level rather than the horizon value itself. Derived from the constants
 /// rather than written down: assuming 32 m here instead of 3.2 m
 /// under-sized every reach by a factor of ten, and an empirical slack was
 /// quietly covering for it.
-fn largest_leaf_edge(cap: f32) -> f32 {
+fn largest_leaf_level(cap: f32) -> u8 {
     let base = (voxel_core::CHUNK_CELLS as f64 * voxel_core::BASE_VOXEL_M) as f32;
-    let mut edge = base;
-    while edge * 2.0 <= cap {
-        edge *= 2.0;
+    let mut level = 0u8;
+    while base * (1u32 << (level + 1)) as f32 <= cap {
+        level += 1;
     }
-    edge
+    level
 }
 
 impl StackPlanner {
@@ -271,27 +276,30 @@ impl StackPlanner {
         // One top dependency per emit layer, sized to the furthest thing
         // that can ask it for ops.
         //
-        // A chunk of edge E stays a leaf while the camera is within
-        // `split_k * 2E` of it, so an emitter gated at edge G is never
-        // queried from further than that. The carve-horizon gate stops
-        // being a per-query filter and becomes a residency size — which is
-        // the whole point of expressing this as a dependency graph.
-        let merge_k = level.lod.merge_k as f32;
+        // A chunk of edge E stays a leaf only within a bounded distance
+        // of the camera, so an emitter gated at edge G is never queried
+        // from further than that. The carve-horizon gate stops being a
+        // per-query filter and becomes a residency size — which is the
+        // whole point of expressing this as a dependency graph.
+        let lod = voxel_engine::LodConfig::from(&level.lod);
         let mut deps = Vec::new();
         for e in &emitters {
-            // What the chunk streamer needs is exact, once every term is
-            // accounted for. A leaf of edge E appears when its parent
-            // splits (`split_k * 2E`) and survives until the parent merges
-            // (`merge_k * 2E`) — the hysteresis gap is the bound that
-            // matters. Distance is measured to the chunk's near face, so
-            // its far face is another E out; the ops query then adds the
-            // density apron and the element pad, and the LOD field is
-            // evaluated at an anchor quantized to ANCHOR_SLOP_M.
+            // How far a leaf of edge E can be and still be drawn is the
+            // engine's own bound — `resident_reach`, which the engine
+            // derives and tests, rather than a second derivation here that
+            // can drift from it. (It did: this used to size from `merge_k`
+            // and a hysteresis gap that no longer exists, and came out
+            // SHORTER than the engine's bound.) On top of that, distance
+            // is measured to the chunk's near face so its far face is
+            // another E out; the ops query adds the density apron and the
+            // element pad; and the LOD field is evaluated at an anchor
+            // quantized to ANCHOR_SLOP_M.
             //
             // So a carve-horizon gate is not a query filter any more — it
             // is a residency size, in every axis.
-            let edge = largest_leaf_edge(e.gate.unwrap_or(OPS_HORIZON_EDGE_M));
-            let ops_reach = 2.0 * merge_k * edge
+            let leaf = largest_leaf_level(e.gate.unwrap_or(OPS_HORIZON_EDGE_M));
+            let edge = voxel_core::ChunkKey::new(leaf, bevy::math::IVec3::ZERO).edge_m() as f32;
+            let ops_reach = voxel_engine::streaming::resident_reach(&lod, leaf) as f32
                 + edge
                 + edge / 8.0
                 + layers::ELEM_PAD_M

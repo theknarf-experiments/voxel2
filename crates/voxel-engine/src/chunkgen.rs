@@ -57,14 +57,17 @@ impl ChunkGen {
         *self.0.ops.lock().unwrap() = ops;
     }
 
-    fn ops_fn(&self) -> Option<OpsFn> {
-        self.0.ops.lock().unwrap().clone()
-    }
-
     /// Resolve `key`'s ops now. Empty is `None`: the density pass binds a
     /// dummy op buffer rather than an empty one.
     pub fn ops_for(&self, key: ChunkKey) -> Option<Arc<Vec<CsgOp>>> {
-        resolve_ops(self.ops_fn().as_deref(), key)
+        self.0
+            .ops
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map(|f| f(key))
+            .filter(|v| !v.is_empty())
+            .map(Arc::new)
     }
 
     // --- readiness ---------------------------------------------------------
@@ -78,23 +81,27 @@ impl ChunkGen {
     }
 
     /// A receiver that fires when `key` next becomes drawable, carrying the
-    /// seam mask of the mesh. Disconnects if the chunk is freed or its
-    /// request cancelled, so a blocked `create` cannot wait forever.
-    pub fn wait_for(&self, key: ChunkKey) -> crossbeam_channel::Receiver<u32> {
+    /// seam mask of the mesh. Disconnects if the chunk is freed, so a
+    /// blocked caller cannot wait forever.
+    fn wait_for(&self, key: ChunkKey) -> crossbeam_channel::Receiver<u32> {
         self.0.waiters.wait_for(key)
     }
 
     // --- lifecycle ---------------------------------------------------------
 
+    /// A set of chunks to build together. See [`ChunkBatch`].
+    pub fn batch(&self) -> ChunkBatch<'_> {
+        ChunkBatch {
+            chunks: self,
+            waits: Vec::new(),
+        }
+    }
+
     /// Generate `key` with `face_mask`. `show_on_ready` draws it the moment
     /// it is drawable; otherwise it waits for [`Self::commit`]. `hold`
     /// marks an in-place remesh of an already-shown chunk: the old mesh
     /// keeps drawing until the commit swaps them.
-    ///
-    /// A wait may only be satisfied by a report that ARRIVES after the
-    /// request, which is why [`Self::wait_for`] is registered first and
-    /// readiness is a notification rather than a state anyone polls.
-    pub fn request(
+    fn request(
         &self,
         key: ChunkKey,
         face_mask: u32,
@@ -120,24 +127,71 @@ impl ChunkGen {
     /// is released too — a chunk that will never arrive must not leave a
     /// `create` blocked.
     pub fn free(&self, key: ChunkKey) {
-        self.forget(key);
-        self.0.queue.push(ChunkCommand::Free(key));
-    }
-
-    fn forget(&self, key: ChunkKey) {
         self.0.waiters.abandon(key);
+        self.0.queue.push(ChunkCommand::Free(key));
     }
 }
 
-/// Shared by the service and the planning tasks that resolve ops off-thread.
-pub(crate) fn resolve_ops(
-    provider: Option<&(dyn Fn(ChunkKey) -> Vec<CsgOp> + Send + Sync)>,
-    key: ChunkKey,
-) -> Option<Arc<Vec<CsgOp>>> {
-    provider
-        .map(|f| f(key))
-        .filter(|v| !v.is_empty())
-        .map(Arc::new)
+/// Chunks asked for together, so they can be revealed together.
+///
+/// Half a swapped set is a crack, so a caller that changes several chunks
+/// at once has to wait for all of them before showing any. Batching that
+/// here also makes the one ordering rule impossible to get wrong: the
+/// wait is registered BEFORE the request, or a chunk that meshes in
+/// between reports to nobody and the wait times out.
+pub struct ChunkBatch<'a> {
+    chunks: &'a ChunkGen,
+    waits: Vec<(ChunkKey, crossbeam_channel::Receiver<u32>)>,
+}
+
+/// What a batch managed to build. A chunk that stalled has NOT been
+/// built, and a caller must not record it as though it had — the mask it
+/// would have carried is not the mask on screen.
+pub struct Built {
+    pub built: Vec<ChunkKey>,
+    pub stalled: Vec<ChunkKey>,
+}
+
+impl ChunkBatch<'_> {
+    /// Ask for one chunk, hidden until it is committed. `hold` keeps the
+    /// old mesh drawing meanwhile, for a chunk that is already shown.
+    ///
+    /// Ops are passed in rather than resolved here: a chunk being rebuilt
+    /// for its seam alone is the same chunk at the same coordinate, so
+    /// re-querying planning for it would be a planning-graph read per
+    /// chunk for an answer the caller already holds.
+    pub fn add(
+        &mut self,
+        key: ChunkKey,
+        face_mask: u32,
+        hold: bool,
+        ops: Option<Arc<Vec<CsgOp>>>,
+    ) {
+        let ready = self.chunks.wait_for(key);
+        self.chunks.request(key, face_mask, false, hold, ops);
+        self.waits.push((key, ready));
+    }
+
+    /// Block until every chunk has reported, or `timeout` elapses for one.
+    ///
+    /// A timeout means the pipeline could not place the chunk — slab
+    /// exhaustion — and the caller decides what a hole is worth; blocking
+    /// forever instead would wedge the generation thread and present as a
+    /// frozen world.
+    pub fn wait(self, timeout: std::time::Duration) -> Built {
+        let mut out = Built {
+            built: Vec::with_capacity(self.waits.len()),
+            stalled: Vec::new(),
+        };
+        for (key, ready) in self.waits {
+            if ready.recv_timeout(timeout).is_ok() {
+                out.built.push(key);
+            } else {
+                out.stalled.push(key);
+            }
+        }
+        out
+    }
 }
 
 /// Installs the service. Requires `voxel_render::VoxelChunksPlugin` — the
@@ -174,6 +228,7 @@ fn pump_ready(chunks: Res<ChunkGen>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
 
     fn service() -> (
         ChunkGen,
@@ -193,44 +248,71 @@ mod tests {
         ChunkKey::new(2, IVec3::new(3, 0, -1))
     }
 
-    /// The drain wakes whoever is waiting on that chunk, carrying the
-    /// seam mask its mesh was built with. This is the whole readiness
-    /// surface: a `create` registers, requests, and blocks.
+    /// A batch registers its wait before requesting, so a chunk that
+    /// meshes in between still reports to the caller.
     #[test]
-    fn readiness_reaches_the_waiter() {
-        let (chunks, tx, _queue) = service();
-        let waiting = chunks.wait_for(key());
-        tx.send((key(), 0x5)).unwrap();
-        chunks.pump();
-        assert_eq!(waiting.recv(), Ok(0x5));
-    }
-
-    /// A chunk that will never arrive must not leave a create blocked.
-    #[test]
-    fn freeing_releases_the_waiter() {
-        let (chunks, _tx, queue) = service();
-        let waiting = chunks.wait_for(key());
-        chunks.free(key());
-        assert!(waiting.recv().is_err(), "waiter left hanging on a freed chunk");
-        assert!(matches!(queue.take().as_slice(), [ChunkCommand::Free(k)] if *k == key()));
-    }
-
-    /// A request carries what the pipeline needs to build the chunk, and
-    /// nothing decides visibility but the caller.
-    #[test]
-    fn a_request_carries_its_mask_and_visibility() {
-        let (chunks, _tx, queue) = service();
-        chunks.request(key(), 0x7, false, true, None);
+    fn a_batch_hears_a_report_that_lands_immediately() {
+        let (chunks, tx, queue) = service();
+        let mut batch = chunks.batch();
+        batch.add(key(), 0x7, false, None);
         assert!(matches!(
             queue.take().as_slice(),
             [ChunkCommand::Request {
                 key: k,
                 show_on_ready: false,
-                hold: true,
+                hold: false,
                 face_mask: 0x7,
                 ..
             }] if *k == key()
         ));
+        tx.send((key(), 0x7)).unwrap();
+        chunks.pump();
+        let out = batch.wait(Duration::from_secs(1));
+        assert_eq!(out.built, vec![key()]);
+        assert!(out.stalled.is_empty());
+    }
+
+    /// A chunk the pipeline cannot place is reported as stalled rather
+    /// than waited on forever — and NOT as built, because a caller that
+    /// records it as built records a mask that is not on screen.
+    #[test]
+    fn a_chunk_that_never_arrives_is_stalled_not_built() {
+        let (chunks, _tx, _queue) = service();
+        let mut batch = chunks.batch();
+        batch.add(key(), 0x7, false, None);
+        let out = batch.wait(Duration::from_millis(20));
+        assert!(out.built.is_empty());
+        assert_eq!(out.stalled, vec![key()]);
+    }
+
+    /// A batch waits for every member: half a swapped set is a crack.
+    #[test]
+    fn a_batch_waits_for_all_of_its_members() {
+        let (chunks, tx, _queue) = service();
+        let other = ChunkKey::new(2, IVec3::new(4, 0, -1));
+        let mut batch = chunks.batch();
+        batch.add(key(), 0x1, true, None);
+        batch.add(other, 0x2, true, None);
+        tx.send((key(), 0x1)).unwrap();
+        chunks.pump();
+        let out = batch.wait(Duration::from_millis(20));
+        assert_eq!(out.built, vec![key()]);
+        assert_eq!(out.stalled, vec![other]);
+    }
+
+    /// A chunk that will never arrive must not leave a caller blocked.
+    #[test]
+    fn freeing_releases_the_waiter() {
+        let (chunks, _tx, queue) = service();
+        let mut batch = chunks.batch();
+        batch.add(key(), 0x1, false, None);
+        let _ = queue.take();
+        chunks.free(key());
+        // The waiter is disconnected, so the wait ends at once rather
+        // than burning the timeout.
+        let out = batch.wait(Duration::from_secs(30));
+        assert_eq!(out.stalled, vec![key()]);
+        assert!(matches!(queue.take().as_slice(), [ChunkCommand::Free(k)] if *k == key()));
     }
 
     /// Ops resolve through the installed provider; an empty result is

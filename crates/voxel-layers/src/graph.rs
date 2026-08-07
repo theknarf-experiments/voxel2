@@ -275,58 +275,54 @@ impl LayerGraph {
     ) {
         let entry = self.entry(key);
         let (lo, hi) = range_of(entry.extent, bounds);
-        let wanted = |coord: IVec3| -> bool { filter.is_none_or(|f| f(coord)) };
+        // 1. The coordinates this dependency wants. A filter is an
+        //    arbitrary predicate the caller supplies — for LOD, the field
+        //    itself — so it is asked once per coordinate and the answer
+        //    kept, not re-asked under the write lock.
+        let mut wanted: Vec<IVec3> = Vec::new();
+        for z in lo.z..=hi.z {
+            for y in lo.y..=hi.y {
+                for x in lo.x..=hi.x {
+                    let coord = IVec3::new(x, y, z);
+                    if filter.is_none_or(|f| f(coord)) {
+                        wanted.push(coord);
+                    }
+                }
+            }
+        }
 
-        // 1. Slots for every covered coordinate, creating empty ones as
+        // 2. Slots for every wanted coordinate, creating empty ones as
         //    needed. Only this step touches the grid lock.
-        let mut slots: Vec<Arc<ChunkSlot>> = Vec::new();
+        let mut slots: Vec<Arc<ChunkSlot>> = Vec::with_capacity(wanted.len());
         {
             let existing = entry.grid.read().unwrap();
             let mut all_present = true;
-            for z in lo.z..=hi.z {
-                for y in lo.y..=hi.y {
-                    for x in lo.x..=hi.x {
-                        let coord = IVec3::new(x, y, z);
-                        if !wanted(coord) {
-                            continue;
-                        }
-                        match existing.get(&coord) {
-                            Some(slot) => slots.push(slot.clone()),
-                            None => {
-                                all_present = false;
-                            }
-                        }
-                    }
+            for coord in &wanted {
+                match existing.get(coord) {
+                    Some(slot) => slots.push(slot.clone()),
+                    None => all_present = false,
                 }
             }
             if !all_present {
                 drop(existing);
                 slots.clear();
                 let mut grid = entry.grid.write().unwrap();
-                for z in lo.z..=hi.z {
-                    for y in lo.y..=hi.y {
-                        for x in lo.x..=hi.x {
-                            let coord = IVec3::new(x, y, z);
-                            if !wanted(coord) {
-                                continue;
-                            }
-                            let slot = grid.entry(coord).or_insert_with(|| {
-                                let data = entry
-                                    .pool
-                                    .lock()
-                                    .unwrap()
-                                    .pop()
-                                    .unwrap_or_else(|| (entry.new_chunk)());
-                                Arc::new(ChunkSlot::new(key, coord, entry.levels as usize, data))
-                            });
-                            slots.push(slot.clone());
-                        }
-                    }
+                for coord in &wanted {
+                    let slot = grid.entry(*coord).or_insert_with(|| {
+                        let data = entry
+                            .pool
+                            .lock()
+                            .unwrap()
+                            .pop()
+                            .unwrap_or_else(|| (entry.new_chunk)());
+                        Arc::new(ChunkSlot::new(key, *coord, entry.levels as usize, data))
+                    });
+                    slots.push(slot.clone());
                 }
             }
         }
 
-        // 2. Generate what is missing, nearest-first — the order a player
+        // 3. Generate what is missing, nearest-first — the order a player
         //    notices.
         let center = IVec3::new(
             bounds.min.x.saturating_add(bounds.max.x) / 2,
@@ -352,7 +348,7 @@ impl LayerGraph {
             self.create_all(key, &missing, level);
         }
 
-        // 3. Everything covered is now a provider of whatever asked for it,
+        // 4. Everything covered is now a provider of whatever asked for it,
         //    whether this call generated it or found it.
         for slot in slots {
             slot.add_user(level);
@@ -729,7 +725,6 @@ pub struct TopDep {
     /// ring — it is the field, and the field is a predicate. Given one,
     /// residency lands at 1.02-1.09x of the drawn set.
     filter: Option<CoordFilter>,
-    make_filter: Option<Arc<dyn Fn(IVec3) -> CoordFilter + Send + Sync>>,
     focus: IVec3,
     /// Chunk index range the current focus resolves to. Movement within
     /// one chunk index is not a change — that quantization IS the
@@ -755,7 +750,6 @@ impl TopDep {
             level,
             size,
             filter: None,
-            make_filter: None,
             focus: IVec3::ZERO,
             indices: None,
             current: None,
@@ -764,23 +758,17 @@ impl TopDep {
         }
     }
 
-    /// Want only the coordinates a predicate accepts. `make` is handed the
-    /// current focus and returns the test for it, so the shape follows the
-    /// focus instead of being a box around it.
+    /// Want only the coordinates a predicate accepts, instead of every
+    /// coordinate in the box.
     ///
     /// A filtered dependency re-evaluates whenever the focus MOVES, not
-    /// only when the covered chunk indices change: its shape depends on
-    /// where the focus is, not on which cells the box happens to touch.
-    /// Quantize the focus before publishing it if you want hysteresis —
-    /// which is what the reference's index quantization is, and what a
-    /// sticky camera anchor is.
-    pub fn with_filter(
-        mut self,
-        make: impl Fn(IVec3) -> CoordFilter + Send + Sync + 'static,
-    ) -> Self {
-        let make = Arc::new(make);
-        self.filter = Some(make(self.focus));
-        self.make_filter = Some(make);
+    /// only when the covered chunk indices change: a shape that follows
+    /// the focus depends on where it is, not on which cells the box
+    /// happens to touch. Quantize the focus before publishing it if you
+    /// want hysteresis — which is what the reference's index quantization
+    /// is, and what a sticky camera anchor is.
+    pub fn with_filter(mut self, filter: CoordFilter) -> Self {
+        self.filter = Some(filter);
         self.changed = true;
         self
     }
@@ -802,11 +790,8 @@ impl TopDep {
             self.indices = Some(indices);
             self.changed = true;
         }
-        if let Some(make) = &self.make_filter {
-            if moved {
-                self.filter = Some(make(focus));
-                self.changed = true;
-            }
+        if moved && self.filter.is_some() {
+            self.changed = true;
         }
     }
 
