@@ -132,7 +132,11 @@ fn status(
             "awaiting": s.awaiting,
             "drawn": s.drawn,
             "arena_free": s.arena_free,
-            "slabs": s.slab_occupancy,
+            "slab_used": s.slab_used,
+            "slab_free": s.slab_free,
+            "slab_capacity": voxel_render::slab::CLASS_SLOTS,
+            "slab_oversized": s.slab_pressure.oversized,
+            "slab_failed": s.slab_pressure.failed,
             "states": s.state_counts.iter().cloned().collect::<std::collections::HashMap<_,_>>(),
         });
     }

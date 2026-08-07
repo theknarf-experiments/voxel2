@@ -26,9 +26,10 @@ fn engine_hud(
                 s.tracked, s.meshed, s.drawn, s.culled, s.awaiting
             ));
             let occ: Vec<String> = s
-                .slab_occupancy
+                .slab_used
                 .iter()
-                .map(|(free, total)| format!("{}/{}", total - free, total))
+                .zip(voxel_render::slab::CLASS_SLOTS)
+                .map(|(used, total)| format!("{used}/{total}"))
                 .collect();
             hud.0.push(format!(
                 "arena free: {} | slab used: [{}]",

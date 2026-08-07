@@ -12,15 +12,18 @@
 /// sizing heuristic, not a correctness bound. The largest class covers the
 /// theoretical 34³ extended-cell maximum with skirt twins.
 pub const CLASS_VERTS: [u32; 4] = [2_048, 6_144, 16_384, 53_248];
-/// Slots per class, sized for ground-level LOD (~2000-3000 live surface
-/// chunks across all levels). Balance matters more than the totals:
-/// architectural worlds (megastructure interiors) and canopy terrain land
-/// most fine chunks in classes 1-2, and exhausting a middle class wedges
-/// generation — every pending regen holds an arena slot while it waits
-/// for a slab that never frees (observed live: 121 regens starved with
-/// class 0 two-thirds empty). Class 0 was over-provisioned by 3x; class 3
-/// monsters are rare.
-pub const CLASS_SLOTS: [u32; 4] = [1_536, 1_536, 448, 64];
+/// Slots per class. Balance matters more than the totals: exhausting a
+/// middle class wedges generation, because every pending regen holds an
+/// arena slot while it waits for a slab that never frees.
+///
+/// Measured rather than guessed, once `used_slots` and `SlabPressure`
+/// existed to measure with. The shipped planet uses class 0 alone
+/// (305/1536, everything else idle); the megastructure interior is the
+/// demanding one and sat at 1154/975/429 — class 2 at 96%, which is the
+/// wedge waiting to happen. Class 3 saw no use on either world: it is the
+/// safety net for a theoretical maximum that got smaller when skirts were
+/// deleted, so half of it buys class 2 real headroom for nothing.
+pub const CLASS_SLOTS: [u32; 4] = [1_536, 1_536, 552, 32];
 pub const INDEX_FACTOR: u32 = 6;
 
 /// A granted allocation: ranges into the shared vertex/index buffers.
@@ -34,8 +37,23 @@ pub struct SlabAlloc {
     pub first_index: u32,
 }
 
+/// What the allocator has had to do to keep up. A class sitting at zero
+/// free slots is not by itself a problem — slots recycle — so the signals
+/// that matter are how often a chunk had to take a larger slot than it
+/// needed, and how often nothing fit at all.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct SlabPressure {
+    /// Allocations that fell through to a class larger than they needed,
+    /// wasting the difference.
+    pub oversized: u64,
+    /// Allocations that found nothing. These become AwaitingAlloc, which
+    /// holds an arena slot while it waits — the wedge condition.
+    pub failed: u64,
+}
+
 pub struct SlabAllocator {
     free: [Vec<u32>; 4],
+    pressure: SlabPressure,
     /// Base offsets (in vertices / indices) of each class region.
     class_vertex_base: [u32; 4],
     class_index_base: [u32; 4],
@@ -61,6 +79,7 @@ impl SlabAllocator {
         }
         Self {
             free: core::array::from_fn(|c| (0..CLASS_SLOTS[c]).rev().collect()),
+            pressure: SlabPressure::default(),
             class_vertex_base,
             class_index_base,
         }
@@ -81,11 +100,18 @@ impl SlabAllocator {
     /// Allocate the smallest slot fitting the exact counts, or `None` if the
     /// counts exceed the largest class or every fitting class is exhausted.
     pub fn alloc(&mut self, vertex_count: u32, index_count: u32) -> Option<SlabAlloc> {
+        let mut wanted: Option<usize> = None;
         for (class, &class_verts) in CLASS_VERTS.iter().enumerate() {
             if vertex_count > class_verts || index_count > class_verts * INDEX_FACTOR {
                 continue;
             }
+            if wanted.is_none() {
+                wanted = Some(class);
+            }
             if let Some(slot) = self.free[class].pop() {
+                if wanted != Some(class) {
+                    self.pressure.oversized += 1;
+                }
                 return Some(SlabAlloc {
                     class: class as u8,
                     slot,
@@ -96,7 +122,26 @@ impl SlabAllocator {
             }
             // Class fits but is full — try the next larger one.
         }
+        self.pressure.failed += 1;
         None
+    }
+
+    /// Free slots per class. Zero is normal for a class at its working
+    /// set; it only matters alongside [`SlabPressure`].
+    pub fn free_slots(&self) -> [u32; 4] {
+        core::array::from_fn(|c| self.free[c].len() as u32)
+    }
+
+    /// Slots in use per class. There used to be an `occupancy()` that
+    /// returned `(free, capacity)` under a name every reader takes to mean
+    /// the opposite; it produced a confident, wrong conclusion about slab
+    /// exhaustion. Both directions are now spelled out.
+    pub fn used_slots(&self) -> [u32; 4] {
+        core::array::from_fn(|c| CLASS_SLOTS[c] - self.free[c].len() as u32)
+    }
+
+    pub fn pressure(&self) -> SlabPressure {
+        self.pressure
     }
 
     pub fn free(&mut self, alloc: SlabAlloc) {
@@ -106,10 +151,6 @@ impl SlabAllocator {
         self.free[class].push(alloc.slot);
     }
 
-    /// (free, total) slots per class, for the debug HUD.
-    pub fn occupancy(&self) -> [(u32, u32); 4] {
-        core::array::from_fn(|c| (self.free[c].len() as u32, CLASS_SLOTS[c]))
-    }
 }
 
 #[cfg(test)]

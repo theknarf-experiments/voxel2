@@ -165,7 +165,12 @@ pub struct RenderStats {
     pub empty_classified: usize,
     pub awaiting: usize,
     pub arena_free: u32,
-    pub slab_occupancy: [(u32, u32); 4],
+    /// Slots in use and free per class, both spelled out, and what the
+    /// allocator had to do to keep up. A class at zero free is a working
+    /// set, not a problem; pressure is the number that means something.
+    pub slab_used: [u32; 4],
+    pub slab_free: [u32; 4],
+    pub slab_pressure: crate::slab::SlabPressure,
     pub drawn: usize,
     pub culled: usize,
     /// Wedge forensics: (state name, count) over all tracked chunks,
@@ -1566,7 +1571,9 @@ fn plan_frame(
             .filter(|c| !matches!(c.state, ChunkState::Meshed { .. } | ChunkState::Empty))
             .count();
         s.arena_free = gpu.arena_free.len() as u32;
-        s.slab_occupancy = gpu.slab.occupancy();
+        s.slab_used = gpu.slab.used_slots();
+        s.slab_free = gpu.slab.free_slots();
+        s.slab_pressure = gpu.slab.pressure();
         let mut counts: std::collections::HashMap<&'static str, usize> = Default::default();
         for c in table.chunks.values() {
             let state = match c.state {

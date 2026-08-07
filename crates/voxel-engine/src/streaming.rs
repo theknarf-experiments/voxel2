@@ -1173,7 +1173,7 @@ fn log_fps(
     }
     probe.leaves = tree.leaves.len();
     if let Ok(s) = stats.0.lock() {
-        probe.slab_free = s.slab_occupancy.map(|(free, _)| free);
+        probe.slab_free = s.slab_free;
     }
 }
 
