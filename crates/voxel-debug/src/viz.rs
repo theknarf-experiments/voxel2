@@ -9,9 +9,21 @@
 //!   you see what a coarse planning layer reaches; it costs a lot of
 //!   gizmo lines, so the near range stays for close work.
 
+use bevy::gizmos::config::{GizmoConfigGroup, GizmoConfigStore};
 use bevy::prelude::*;
 
 use voxel_engine::WorldQuery;
+
+/// The planning overlay's own gizmo group, so it can draw IN FRONT of the
+/// world while chunk boundaries stay depth-tested.
+///
+/// A planned feature is drawn at its full-detail ground height, but the
+/// terrain 20 km away is a level-9 mesh whose surface differs from that
+/// height by tens of meters — so depth-tested, the far half of the
+/// network is buried inside the hill it runs over. Depth-testing an
+/// X-ray view of the plan was never what was wanted anyway.
+#[derive(Default, Reflect, GizmoConfigGroup)]
+pub struct PlanningGizmos;
 
 #[derive(Resource, Default)]
 pub struct DebugViz {
@@ -33,7 +45,7 @@ impl DebugViz {
 /// The two ranges F9 cycles through: close work, and the whole streamed
 /// world.
 const LAYER_VIZ_NEAR_M: f32 = 512.0;
-const LAYER_VIZ_FAR_M: f32 = 20_000.0;
+const LAYER_VIZ_FAR_M: f32 = 40_000.0;
 
 pub fn toggle_debug_viz(keys: Res<ButtonInput<KeyCode>>, mut viz: ResMut<DebugViz>) {
     if keys.just_pressed(KeyCode::F8) {
@@ -63,11 +75,14 @@ const CHUNK_VIZ_RADIUS_M: f32 = 400.0;
 
 /// Gizmo lines the planning overlay may draw in one frame.
 ///
-/// At 20 km the resident road network is hundreds of thousands of
-/// segments and drawing them all costs more than the world does. The
-/// budget is spent nearest-first, and what it could not draw is reported
-/// rather than silently missing.
-const LAYER_VIZ_MAX_LINES: usize = 24_000;
+/// Measured, at 4 km up over the planet: the whole resident planning set
+/// is ~20k lines and saturates — 20 km and 40 km draw the same thing,
+/// because that is all there is. So this is a runaway guard, not a
+/// working limit, and it is far above what any measured vantage wants.
+/// What it cannot draw is reported rather than silently missing: a
+/// truncated overlay looks exactly like a world that stops, which is the
+/// one thing this view exists to tell apart.
+const LAYER_VIZ_MAX_LINES: usize = 200_000;
 
 pub fn draw_debug_viz(
     mut viz: ResMut<DebugViz>,
@@ -75,6 +90,7 @@ pub fn draw_debug_viz(
     stats: Option<Res<voxel_render::SharedRenderStats>>,
     sources: voxel_engine::StreamSourceQuery,
     mut gizmos: Gizmos,
+    mut planning: Gizmos<PlanningGizmos>,
 ) {
     let Ok(source) = sources.single() else {
         return;
@@ -140,7 +156,7 @@ pub fn draw_debug_viz(
         }
         viz.drawn = lines.len();
         for (a, b, color) in lines {
-            gizmos.line(a, b, color);
+            planning.line(a, b, color);
         }
 
         // Biome sample grid: a stake per cell colored by dominant biome.
@@ -163,7 +179,7 @@ pub fn draw_debug_viz(
                     let _ = biome;
                     let y = world.generator().height(p, 8.0) + 2.0;
                     let color = Color::hsl(i as f32 * 137.5 % 360.0, 0.8, 0.5);
-                    gizmos.line(
+                    planning.line(
                         Vec3::new(p.x, y, p.y),
                         Vec3::new(p.x, y + 4.0 + 12.0 * w, p.y),
                         color,
@@ -181,6 +197,13 @@ pub struct VoxelVizPlugin;
 impl Plugin for VoxelVizPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<DebugViz>()
+            .init_gizmo_group::<PlanningGizmos>()
+            .add_systems(Startup, configure_planning_gizmos)
             .add_systems(Update, (toggle_debug_viz, draw_debug_viz));
     }
+}
+
+fn configure_planning_gizmos(mut store: ResMut<GizmoConfigStore>) {
+    let (config, _) = store.config_mut::<PlanningGizmos>();
+    config.depth_bias = -1.0;
 }
