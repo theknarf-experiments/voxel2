@@ -258,8 +258,25 @@ impl LayerGraph {
     /// resolving each one's declared dependency closure first, and record
     /// them all in `usage` — which is what keeps them resident.
     fn ensure(&self, key: LayerKey, bounds: IAabb, level: u32, usage: &mut Usage) {
+        self.ensure_shell(key, bounds, None, level, usage);
+    }
+
+    /// `ensure`, minus any chunk whose own bounds lie entirely inside
+    /// `hole`. A chunk straddling the hole's edge is kept: it is partly
+    /// wanted, and half a chunk is not a thing.
+    fn ensure_shell(
+        &self,
+        key: LayerKey,
+        bounds: IAabb,
+        hole: Option<IAabb>,
+        level: u32,
+        usage: &mut Usage,
+    ) {
         let entry = self.entry(key);
         let (lo, hi) = range_of(entry.extent, bounds);
+        let wanted = |coord: IVec3| -> bool {
+            hole.is_none_or(|hole| !hole.contains(bounds_of(entry.extent, coord)))
+        };
 
         // 1. Slots for every covered coordinate, creating empty ones as
         //    needed. Only this step touches the grid lock.
@@ -270,7 +287,11 @@ impl LayerGraph {
             for z in lo.z..=hi.z {
                 for y in lo.y..=hi.y {
                     for x in lo.x..=hi.x {
-                        match existing.get(&IVec3::new(x, y, z)) {
+                        let coord = IVec3::new(x, y, z);
+                        if !wanted(coord) {
+                            continue;
+                        }
+                        match existing.get(&coord) {
                             Some(slot) => slots.push(slot.clone()),
                             None => {
                                 all_present = false;
@@ -287,6 +308,9 @@ impl LayerGraph {
                     for y in lo.y..=hi.y {
                         for x in lo.x..=hi.x {
                             let coord = IVec3::new(x, y, z);
+                            if !wanted(coord) {
+                                continue;
+                            }
                             let slot = grid.entry(coord).or_insert_with(|| {
                                 let data = entry
                                     .pool
@@ -537,7 +561,7 @@ impl LayerGraph {
         let old = dep.current.take();
         if dep.active {
             let mut usage = Usage::default();
-            self.ensure(dep.key, dep.bounds(), dep.level, &mut usage);
+            self.ensure_shell(dep.key, dep.bounds(), dep.hole_bounds(), dep.level, &mut usage);
             dep.current = Some(usage);
         }
         if let Some(old) = old {
@@ -659,6 +683,17 @@ pub struct TopDep {
     key: LayerKey,
     level: u32,
     size: IVec3,
+    /// Optional inner box, centred on the focus, that this dependency
+    /// does *not* want.
+    ///
+    /// The reference has no such thing: a top dependency is a box, and
+    /// its LOD sample keeps every level resident in its own nested ball.
+    /// That works at four levels and does not at twelve — an interior
+    /// world would hold roughly 5k meshed chunks against 3.6k slots.
+    /// What LOD actually wants is the annulus where a level is the finest
+    /// one covering a point, and a box cannot say that. So a top
+    /// dependency can have a hole.
+    hole: Option<IVec3>,
     focus: IVec3,
     /// Chunk index range the current focus resolves to. Movement within
     /// one chunk index is not a change — that quantization IS the
@@ -683,6 +718,7 @@ impl TopDep {
             key: layer_key(instance),
             level,
             size,
+            hole: None,
             focus: IVec3::ZERO,
             indices: None,
             current: None,
@@ -694,6 +730,43 @@ impl TopDep {
     /// Half-open, and never degenerate: a size of 1 covers exactly the
     /// chunk the focus is in. `focus - size/2 .. + size`, matching
     /// LayerProcGen's `GridBounds(focus - size / 2, size)`.
+    /// Keep only the shell: chunks fully inside `hole` are not wanted.
+    /// Sized like `size`, so a level whose ring runs from `a` to `b` uses
+    /// `size = 2b`, `hole = 2a`.
+    pub fn with_hole(mut self, hole: IVec3) -> Self {
+        self.hole = Some(hole);
+        self.changed = true;
+        self
+    }
+
+    /// The inner box this dependency does not want, in world space.
+    ///
+    /// A zero on an axis means "unrestricted there", matching how a
+    /// collapsed axis is read everywhere else — a planar layer's chunks
+    /// span all of y, so a hole that did not also span all of y could
+    /// never contain one.
+    fn hole_bounds(&self) -> Option<IAabb> {
+        let hole = self.hole?;
+        if hole.cmple(IVec3::ZERO).all() {
+            return None;
+        }
+        let axis = |size: i32, focus: i32| -> (i32, i32) {
+            if size <= 0 {
+                (i32::MIN, i32::MAX)
+            } else {
+                let min = focus - size / 2;
+                (min, min.saturating_add(size))
+            }
+        };
+        let (x0, x1) = axis(hole.x, self.focus.x);
+        let (y0, y1) = axis(hole.y, self.focus.y);
+        let (z0, z1) = axis(hole.z, self.focus.z);
+        Some(IAabb::new(
+            IVec3::new(x0, y0, z0),
+            IVec3::new(x1, y1, z1),
+        ))
+    }
+
     pub fn bounds(&self) -> IAabb {
         let size = self.size.max(IVec3::ONE);
         let min = self.focus - size / 2;

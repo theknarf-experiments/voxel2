@@ -486,3 +486,68 @@ fn chunk_objects_are_pooled_across_residency() {
     assert_eq!(play.created, held * 2, "both windows generated");
     assert_eq!(play.destroyed, held, "the first window was released");
 }
+
+/// A top dependency can have a hole, so a level can be resident exactly
+/// where it is the finest one covering a point.
+///
+/// The reference cannot express this — a top dependency is a box, and its
+/// LOD sample keeps every level in its own nested ball. That is affordable
+/// at four levels and not at twelve.
+#[test]
+fn a_top_dependency_can_be_a_shell() {
+    let ledger = Arc::new(Ledger::default());
+    let graph = graph(ledger.clone(), 0, 0, 1);
+
+    // Solid 7x7 window, then the same window with its middle 3x3 removed.
+    let size = IVec3::new(CELL * 7, 0, CELL * 7);
+    let mut solid = TopDep::at_level("play", 0, size);
+    solid.set_focus(&graph, IVec3::new(CELL / 2, 0, CELL / 2));
+    graph.process_top(&mut solid);
+    let full = graph.resident_in("play");
+    assert_eq!(full, 49);
+
+    solid.set_active(false);
+    graph.process_top(&mut solid);
+    assert_eq!(graph.resident_chunks(), 0);
+
+    let mut shell = TopDep::at_level("play", 0, size).with_hole(IVec3::new(CELL * 3, 0, CELL * 3));
+    shell.set_focus(&graph, IVec3::new(CELL / 2, 0, CELL / 2));
+    graph.process_top(&mut shell);
+    assert_eq!(
+        graph.resident_in("play"),
+        full - 9,
+        "the hole should have removed exactly the middle 3x3",
+    );
+
+    // And it still tears down cleanly.
+    shell.set_active(false);
+    graph.process_top(&mut shell);
+    assert_eq!(graph.resident_chunks(), 0);
+    assert_eq!(
+        ledger.created.load(Ordering::Relaxed),
+        ledger.destroyed.load(Ordering::Relaxed),
+    );
+}
+
+/// A chunk straddling the hole's edge is still wanted — it is partly
+/// inside the shell, and half a chunk is not a thing.
+#[test]
+fn a_shell_keeps_chunks_straddling_its_hole() {
+    let ledger = Arc::new(Ledger::default());
+    let graph = graph(ledger, 0, 0, 1);
+
+    // Focused on a chunk boundary, so the hole's edges fall mid-chunk:
+    // it spans [-1.5, 1.5] cells, fully containing only chunks -1 and 0.
+    let mut shell = TopDep::at_level("play", 0, IVec3::new(CELL * 7, 0, CELL * 7))
+        .with_hole(IVec3::new(CELL * 3, 0, CELL * 3));
+    shell.set_focus(&graph, IVec3::ZERO);
+    graph.process_top(&mut shell);
+
+    // Focused on a boundary the 7-cell window straddles 8 chunks per
+    // axis; the hole wholly contains 2 of them per axis.
+    assert_eq!(
+        graph.resident_in("play"),
+        64 - 4,
+        "only chunks wholly inside the hole should go",
+    );
+}
