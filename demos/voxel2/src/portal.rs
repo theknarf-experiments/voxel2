@@ -111,6 +111,12 @@ fn follow_camera_world(
     // screenshot showed the wrong one.
     let want = RenderLayers::layer(usize::from(camera_world.0));
     for (entity, layers) in &mut cameras {
+        // The layer filters scene ENTITIES; `ViewWorld` tells the chunk
+        // draw which world's list to render. Both, because chunks are not
+        // entities.
+        commands
+            .entity(entity)
+            .insert(voxel_render::ViewWorld(camera_world.0));
         match layers {
             Some(mut layers) => {
                 if *layers != want {

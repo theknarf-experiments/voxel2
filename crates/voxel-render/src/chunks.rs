@@ -254,10 +254,18 @@ pub struct WorldProgram {
 #[derive(Resource, Default)]
 pub struct WorldPrograms(pub Vec<WorldProgram>);
 
-/// Which world the camera is in — the only one drawn, until the portal
-/// pass draws another inside a stencil.
+/// Which world the camera is in. The host sets it; it drives the main
+/// view's [`ViewWorld`] and render layer.
 #[derive(Resource, Default, Clone, Copy)]
 pub struct CameraWorld(pub voxel_core::WorldId);
+
+/// Which world a VIEW looks at.
+///
+/// Per view, not global, because a portal renders a second view of a
+/// DIFFERENT world into the same frame. A camera without one looks at
+/// world 0.
+#[derive(Component, Default, Clone, Copy, ExtractComponent)]
+pub struct ViewWorld(pub voxel_core::WorldId);
 
 impl Default for WorldProgram {
     fn default() -> Self {
@@ -545,6 +553,7 @@ impl Plugin for VoxelChunksPlugin {
             .init_resource::<ChunkWaiters>()
             .add_plugins((
                 ExtractComponentPlugin::<VoxelTerrainMarker>::default(),
+                ExtractComponentPlugin::<ViewWorld>::default(),
                 // Gives the terrain material the usual asset lifecycle:
                 // extraction, prepared bind groups, a bind group allocator.
                 MaterialPlugin::<VoxelSurfaceMaterial>::default(),
@@ -570,7 +579,7 @@ impl Plugin for VoxelChunksPlugin {
             .init_resource::<ExtractedChunkCommands>()
             .init_resource::<ChunkTable>()
             .init_resource::<FrameBatches>()
-            .init_resource::<VoxelDrawList>()
+            .init_resource::<VoxelDrawLists>()
             .init_resource::<PendingVoxelQueues>()
             .init_resource::<ViewBindGroupRes>()
             .add_render_command::<Opaque3d, DrawVoxelChunksCommands>()
@@ -759,7 +768,20 @@ struct DrawEntry {
 }
 
 #[derive(Resource, Default)]
-struct VoxelDrawList(Vec<DrawEntry>);
+struct VoxelDrawLists(Vec<Vec<DrawEntry>>);
+
+impl VoxelDrawLists {
+    fn clear(&mut self) {
+        self.0.resize_with(MAX_WORLDS, Vec::new);
+        for list in &mut self.0 {
+            list.clear();
+        }
+    }
+
+    fn total(&self) -> usize {
+        self.0.iter().map(Vec::len).sum()
+    }
+}
 
 #[derive(ShaderType, Clone, Copy)]
 struct ChunkParams {
@@ -1215,9 +1237,8 @@ fn plan_frame(
     mut table: ResMut<ChunkTable>,
     mut extracted: ResMut<ExtractedChunkCommands>,
     mut batches: ResMut<FrameBatches>,
-    mut draw_list: ResMut<VoxelDrawList>,
+    mut draw_lists: ResMut<VoxelDrawLists>,
     camera: Res<ExtractedCameraPos>,
-    camera_world: Res<CameraWorld>,
     (programs, field, env): (Res<WorldPrograms>, Res<FieldParams>, Res<EnvParams>),
     surface_map: Res<SurfaceMap>,
     frustum: Res<ExtractedFrustum>,
@@ -1245,7 +1266,7 @@ fn plan_frame(
     batches.staging_idx = None;
     gpu.gen_uniforms.clear();
     gpu.draw_uniforms.clear();
-    draw_list.0.clear();
+    draw_lists.clear();
 
     // 0. Request mapping for staging copies recorded *last* frame. Doing
     //    this here (not in last frame's Cleanup) guarantees the copy has
@@ -1720,12 +1741,6 @@ fn plan_frame(
         if !chunk.visible {
             continue;
         }
-        // Other worlds are resident and meshed, they are simply not in
-        // THIS view. Two levels occupy the same coordinates, so drawing
-        // both would interleave two solids rather than show two places.
-        if key.world != camera_world.0 {
-            continue;
-        }
         if let Some(f) = &frustum.0 {
             // World-space AABB, inflated by the skirt depth. f32 is fine at
             // current view ranges; camera-relative culling comes with M6.
@@ -1754,7 +1769,7 @@ fn plan_frame(
                 key.voxel_size_m() as f32,
             ),
         });
-        draw_list.0.push(DrawEntry {
+        draw_lists.0[usize::from(key.world)].push(DrawEntry {
             uniform_offset: offset,
             base_vertex: alloc.base_vertex,
             first_index: alloc.first_index,
@@ -1857,7 +1872,7 @@ fn plan_frame(
         counts.insert("with_ops", with_ops);
         counts.insert("total_ops", total_ops);
         s.state_counts = counts.into_iter().collect();
-        s.drawn = draw_list.0.len();
+        s.drawn = draw_lists.total();
         s.culled = culled;
     }
 }
@@ -2123,30 +2138,34 @@ where
     type Param = (
         SRes<ChunkGpuResources>,
         SRes<ViewBindGroupRes>,
-        SRes<VoxelDrawList>,
+        SRes<VoxelDrawLists>,
     );
-    type ViewQuery = ();
+    /// The VIEW decides which world it draws — that is the whole portal.
+    type ViewQuery = Option<bevy::ecs::system::lifetimeless::Read<ViewWorld>>;
     type ItemQuery = ();
 
     fn render<'w>(
         _: &P,
-        _: ROQueryItem<'w, '_, Self::ViewQuery>,
+        view_world: ROQueryItem<'w, '_, Self::ViewQuery>,
         _: Option<ROQueryItem<'w, '_, Self::ItemQuery>>,
-        (gpu, bind_groups, draw_list): SystemParamItem<'w, '_, Self::Param>,
+        (gpu, bind_groups, draw_lists): SystemParamItem<'w, '_, Self::Param>,
         pass: &mut TrackedRenderPass<'w>,
     ) -> RenderCommandResult {
         let gpu = gpu.into_inner();
         let bind_groups = bind_groups.into_inner();
-        let draw_list = draw_list.into_inner();
+        let world = view_world.map_or(0, |w| w.0);
+        let Some(draw_list) = draw_lists.into_inner().0.get(usize::from(world)) else {
+            return RenderCommandResult::Success;
+        };
         let Some(chunk_bg) = &bind_groups.chunk else {
             return RenderCommandResult::Skip;
         };
-        if draw_list.0.is_empty() {
+        if draw_list.is_empty() {
             return RenderCommandResult::Success;
         }
         pass.set_vertex_buffer(0, gpu.vertex_slab.slice(..));
         pass.set_index_buffer(gpu.index_slab.slice(..), IndexFormat::Uint16);
-        for entry in &draw_list.0 {
+        for entry in draw_list {
             pass.set_bind_group(2, chunk_bg, &[entry.uniform_offset]);
             pass.draw_indexed(
                 entry.first_index..entry.first_index + entry.index_count,

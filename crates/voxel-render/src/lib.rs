@@ -15,7 +15,7 @@ pub use chunks::{
     ChunkCommand, ChunkCommandQueue, ChunkReadyChannel, ChunkWaiters, EnvParams, FieldParams,
     SharedRenderStats,
     SurfaceMap, VoxelChunksPlugin, WorldMaterial, WorldMaterials, WorldProgram, MATERIAL_SLOTS,
-    MAX_WORLDS, WorldPrograms, CameraWorld,
+    MAX_WORLDS, WorldPrograms, CameraWorld, ViewWorld,
     MAT_KIND_CANOPY, MAT_KIND_SURFACE, MAT_KIND_ZONED,
 };
 pub use scatter_points::{ScatterPoint, ScatterPoints};
