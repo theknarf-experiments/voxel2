@@ -169,6 +169,7 @@ fn ribbons(In(params): In<Option<Value>>, world: Res<WorldQuery>) -> BrpResult {
     let c = f32s(&params, "center", 2)?;
     let r = radius(&params, 512.0);
     let (min, max) = (Vec2::new(c[0] - r, c[1] - r), Vec2::new(c[0] + r, c[1] + r));
+    let _peek = world.peek();
     let segs: Vec<Value> = world
         .ribbons_in(min, max)
         .iter()
@@ -192,6 +193,7 @@ fn markers(In(params): In<Option<Value>>, world: Res<WorldQuery>) -> BrpResult {
     let r = radius(&params, 2048.0);
     let kind = params.get("kind").and_then(Value::as_str);
     let (min, max) = (Vec2::new(c[0] - r, c[1] - r), Vec2::new(c[0] + r, c[1] + r));
+    let _peek = world.peek();
     let found: Vec<Value> = world
         .markers_in(min, max, kind)
         .iter()
@@ -208,6 +210,9 @@ fn ops(In(params): In<Option<Value>>, world: Res<WorldQuery>) -> BrpResult {
     let r = radius(&params, 40.0);
     let edge = params.get("edge").and_then(Value::as_f64).unwrap_or(12.8) as f32;
     let center = Vec3::new(c[0], c[1], c[2]);
+    // Introspection: what the provider WOULD serve here. An absent chunk
+    // is part of the answer, not a consumer failing to declare coverage.
+    let _peek = world.peek();
     let found = world.ops_in(center - Vec3::splat(r), center + Vec3::splat(r), edge);
     let adds = found.iter().filter(|o| o.kind & 1 == 0).count();
     let sample: Vec<Value> = found
@@ -239,7 +244,9 @@ fn viz(In(params): In<Option<Value>>, mut viz: ResMut<crate::viz::DebugViz>) -> 
         viz.chunks = v;
     }
     match params.get("layers") {
-        Some(Value::Bool(v)) => viz.layer_radius_m = if *v { 512.0 } else { 0.0 },
+        Some(Value::Bool(v)) => {
+            viz.layer_radius_m = if *v { crate::viz::LAYER_VIZ_NEAR_M } else { 0.0 }
+        }
         Some(v) => {
             if let Some(r) = v.as_f64() {
                 viz.layer_radius_m = r as f32;

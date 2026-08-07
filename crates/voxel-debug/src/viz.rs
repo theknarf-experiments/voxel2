@@ -42,9 +42,9 @@ impl DebugViz {
     }
 }
 
-/// The two ranges F9 cycles through: close work, and the whole streamed
-/// world.
-const LAYER_VIZ_NEAR_M: f32 = 512.0;
+/// The two ranges F9 cycles through: the near field, and the whole
+/// streamed world.
+pub const LAYER_VIZ_NEAR_M: f32 = 5_000.0;
 const LAYER_VIZ_FAR_M: f32 = 40_000.0;
 
 pub fn toggle_debug_viz(keys: Res<ButtonInput<KeyCode>>, mut viz: ResMut<DebugViz>) {
@@ -161,9 +161,11 @@ pub fn draw_debug_viz(
 
         // Biome sample grid: a stake per cell colored by dominant biome.
         for name in world.biome_fields() {
-            // The biome grid stays a fixed 17x17 sample regardless of
-            // range: it is a field readout, not a feature set, and one
-            // stake per 20 km/8 would say nothing.
+            // A 17x17 sample of the near range, whatever that is: this
+            // is a field readout, not a feature set. At the near range it
+            // spans 10 km with a stake every 625 m, which resolves 2 km
+            // biome cells; at the far range one stake per 5 km would
+            // alias them into noise, so it does not follow that far.
             let step = LAYER_VIZ_NEAR_M / 8.0;
             for gz in -8..=8 {
                 for gx in -8..=8 {
