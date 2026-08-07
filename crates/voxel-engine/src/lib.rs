@@ -1,6 +1,7 @@
 //! Engine glue: Bevy plugins for chunk streaming lifecycle, generation
 //! budgets, edit application, and persistence.
 
+pub mod chunkgen;
 pub mod layers;
 pub mod level;
 pub mod planning;
@@ -25,6 +26,7 @@ pub struct VoxelStreamSource;
 pub type StreamSourceQuery<'w, 's> = Query<'w, 's, &'static GlobalTransform, With<VoxelStreamSource>>;
 
 pub use level::{LevelDef, LevelPlugin};
+pub use chunkgen::{ChunkGen, ChunkOpsProvider};
 pub use layers::{MainThreadBudget, MainThreadQueue, VoxelLayersPlugin};
 pub use planning::{Marker, PatchSet, PlanningStats, RibbonSeg, WorldPlanner, WorldQuery};
 pub use streaming::{LodConfig, VoxelStreamingPlugin};

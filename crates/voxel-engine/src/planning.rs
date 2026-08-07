@@ -288,12 +288,12 @@ impl WorldQuery {
 ///
 /// This runs in the async planning task, never on a frame, and the wait is
 /// one atomic load once residency has caught up.
-pub fn ops_provider(world: &WorldQuery) -> crate::streaming::ChunkOpsProvider {
+pub fn ops_provider(world: &WorldQuery) -> crate::chunkgen::ChunkOpsProvider {
     if world.is_empty() {
-        return crate::streaming::ChunkOpsProvider(None);
+        return crate::chunkgen::ChunkOpsProvider(None);
     }
     let world = world.clone();
-    crate::streaming::ChunkOpsProvider(Some(Arc::new(move |key: ChunkKey| {
+    crate::chunkgen::ChunkOpsProvider(Some(Arc::new(move |key: ChunkKey| {
         world.wait_idle();
         world.chunk_ops(key)
     })))

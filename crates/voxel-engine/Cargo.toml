@@ -10,5 +10,6 @@ voxel-layers.workspace = true
 voxel-worldgen.workspace = true
 voxel-render.workspace = true
 bevy.workspace = true
+crossbeam-channel.workspace = true
 serde.workspace = true
 serde_json.workspace = true

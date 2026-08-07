@@ -122,17 +122,23 @@ pub enum ChunkCommand {
 /// accept-any marker, so readiness gates can't be satisfied by them.
 const STALE_MASK: u32 = u32::MAX - 1;
 
-/// Main-world queue of chunk lifecycle commands (filled by the LOD
-/// controller in voxel-engine, drained by extraction). Interior mutability
-/// because extraction system params must be read-only.
-#[derive(Resource, Default)]
+/// Main-world queue of chunk lifecycle commands (filled by the chunk
+/// generation service in voxel-engine, drained by extraction). Interior
+/// mutability because extraction system params must be read-only; a shared
+/// handle because the service that owns it hands it to generation threads.
+#[derive(Resource, Default, Clone)]
 pub struct ChunkCommandQueue {
-    inner: Mutex<Vec<ChunkCommand>>,
+    inner: Arc<Mutex<Vec<ChunkCommand>>>,
 }
 
 impl ChunkCommandQueue {
     pub fn push(&self, command: ChunkCommand) {
         self.inner.lock().unwrap().push(command);
+    }
+
+    /// Take everything queued so far.
+    pub fn take(&self) -> Vec<ChunkCommand> {
+        std::mem::take(&mut *self.inner.lock().unwrap())
     }
 }
 
@@ -142,7 +148,8 @@ impl ChunkCommandQueue {
 /// deciding what to swap. A layer that *owns* a chunk needs the opposite:
 /// to ask for one and block until it exists, because `create` is where a
 /// chunk's resources are acquired. Both read the same notifications, so
-/// there is exactly one drain and it fans out to whoever is waiting.
+/// there is exactly one drain — the chunk generation service in
+/// voxel-engine — and it fans out to whoever is waiting.
 #[derive(Resource, Default, Clone)]
 pub struct ChunkWaiters(Arc<Mutex<HashMap<ChunkKey, Vec<crossbeam_channel::Sender<u32>>>>>);
 
@@ -176,8 +183,8 @@ impl ChunkWaiters {
 }
 
 /// Render→main notifications: a requested chunk became drawable (meshed) or
-/// was classified empty. The LOD controller uses these for
-/// ready-before-swap.
+/// was classified empty. Drained by the chunk generation service, which
+/// the LOD controller reads for ready-before-swap.
 #[derive(Resource, Clone)]
 pub struct ChunkReadyChannel {
     /// (key, face_mask baked into the drawable mesh; u32::MAX for
@@ -937,7 +944,7 @@ fn extract_chunk_commands(
     queue: Extract<Res<ChunkCommandQueue>>,
     mut extracted: ResMut<ExtractedChunkCommands>,
 ) {
-    extracted.0.append(&mut queue.inner.lock().unwrap());
+    extracted.0.append(&mut queue.take());
 }
 
 /// Asset ids of the world's surface materials, in material-id order.

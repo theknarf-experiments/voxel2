@@ -24,38 +24,12 @@ use bevy::math::DVec3;
 use bevy::prelude::*;
 use voxel_core::csg::CsgOp;
 use voxel_core::ChunkKey;
-use voxel_render::{ChunkCommand, ChunkCommandQueue, ChunkReadyChannel, SharedRenderStats};
+use voxel_render::SharedRenderStats;
+
+use crate::chunkgen::{resolve_ops, ChunkGen, ChunkGenPlugin};
 
 /// (key, mask, hold, ops) rows queued for the chunk pipeline.
 type RequestList = Vec<(ChunkKey, u32, bool, Option<Arc<Vec<CsgOp>>>)>;
-
-/// Optional hook supplying planning-layer CSG ops for a requested chunk
-/// (already AABB-culled to the chunk). Installed by the app/worldgen.
-#[derive(Resource, Default)]
-pub struct ChunkOpsProvider(pub Option<Arc<dyn Fn(ChunkKey) -> Vec<CsgOp> + Send + Sync>>);
-
-fn request(
-    queue: &ChunkCommandQueue,
-    provider: &ChunkOpsProvider,
-    key: ChunkKey,
-    show_on_ready: bool,
-    hold: bool,
-    face_mask: u32,
-) {
-    let ops = provider
-        .0
-        .as_ref()
-        .map(|f| f(key))
-        .filter(|v| !v.is_empty())
-        .map(Arc::new);
-    queue.push(ChunkCommand::Request {
-        key,
-        show_on_ready,
-        hold,
-        ops,
-        face_mask,
-    });
-}
 
 /// The LOD field: does the field want this chunk refined? A pure function
 /// of (chunk, quantized camera anchor). Advisory only — it drives which
@@ -186,22 +160,12 @@ fn plan_genesis(
     let post = PostState::current(&leaves);
     let mut sent_masks = HashMap::new();
     let mut waits = HashMap::new();
-    let ops_for = |key: ChunkKey| -> Option<Arc<Vec<CsgOp>>> {
-        provider.and_then(|f| {
-            let v = f(key);
-            if v.is_empty() {
-                None
-            } else {
-                Some(Arc::new(v))
-            }
-        })
-    };
     let mut to_request = Vec::new();
     for leaf in &leaves {
         let mask = post.seam_mask(config.max_level, *leaf);
         sent_masks.insert(*leaf, mask);
         waits.insert(*leaf, mask);
-        to_request.push((*leaf, mask, false, ops_for(*leaf)));
+        to_request.push((*leaf, mask, false, resolve_ops(provider, *leaf)));
     }
     to_request.sort_by(|a, b| {
         aabb_distance(anchor, a.0).total_cmp(&aabb_distance(anchor, b.0))
@@ -301,9 +265,6 @@ struct LodTree {
     leaves: HashSet<ChunkKey>,
     /// The single in-flight epoch, if any.
     epoch: Option<Epoch>,
-    /// Latest drawable mesh per chunk, with the seam mask it was built
-    /// with (u32::MAX = empty, satisfies any expectation).
-    ready: HashMap<ChunkKey, u32>,
     /// Top-level cells whose subtree is live.
     top_cells: HashSet<IVec3>,
     /// Seam mask of each shown chunk's committed (or in-flight requested)
@@ -519,8 +480,8 @@ pub struct VoxelStreamingPlugin;
 
 impl Plugin for VoxelStreamingPlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<LodConfig>()
-            .init_resource::<ChunkOpsProvider>()
+        app.add_plugins(ChunkGenPlugin)
+            .init_resource::<LodConfig>()
             .init_resource::<StreamingRebuild>()
             .init_resource::<LodTree>()
             .init_resource::<StreamProbe>()
@@ -695,16 +656,6 @@ fn plan_epoch_snapshot(
     }
 
     let post = PostState::plan(leaves, &splits, &merges);
-    let ops_for = |key: ChunkKey| -> Option<Arc<Vec<CsgOp>>> {
-        provider.and_then(|f| {
-            let v = f(key);
-            if v.is_empty() {
-                None
-            } else {
-                Some(Arc::new(v))
-            }
-        })
-    };
     let mut epoch = Epoch {
         born: std::time::Instant::now(),
         splits: Vec::new(),
@@ -764,32 +715,30 @@ fn plan_epoch_snapshot(
     }
     // Fill each chunk's ops from resident planning, off the main thread.
     for (key, _, _, ops) in epoch.to_request.iter_mut() {
-        *ops = ops_for(*key);
+        *ops = resolve_ops(provider, *key);
     }
     Some(epoch)
 }
 
-fn commit_epoch(tree: &mut LodTree, queue: &ChunkCommandQueue, epoch: Epoch) {
+fn commit_epoch(tree: &mut LodTree, chunks: &ChunkGen, epoch: Epoch) {
     for (parent, children) in &epoch.splits {
         tree.leaves.remove(parent);
-        tree.ready.remove(parent);
         tree.sent_masks.remove(parent);
-        queue.push(ChunkCommand::Free(*parent));
+        chunks.free(*parent);
         tree.leaves.extend(children.iter().copied());
     }
     for (parent, children) in &epoch.merges {
         tree.leaves.insert(*parent);
         for c in children {
             tree.leaves.remove(c);
-            tree.ready.remove(c);
             tree.sent_masks.remove(c);
-            queue.push(ChunkCommand::Free(*c));
+            chunks.free(*c);
         }
     }
     // One command batch: every member becomes visible / swaps its held
     // mesh in the same frame the replaced chunks are freed.
     for key in epoch.waits.keys() {
-        queue.push(ChunkCommand::Commit(*key));
+        chunks.commit(*key);
     }
 }
 
@@ -798,12 +747,9 @@ fn lod_tick(
     config: Res<LodConfig>,
     mut tick_worst: Local<(f32, f32)>,
     mut tree: ResMut<LodTree>,
-    queue: Res<ChunkCommandQueue>,
-    ops_provider: Res<ChunkOpsProvider>,
+    chunks: Res<ChunkGen>,
     world: Res<crate::planning::WorldQuery>,
     mut rebuild: ResMut<StreamingRebuild>,
-    ready_rx: Res<ChunkReadyChannel>,
-    waiters: Res<voxel_render::ChunkWaiters>,
     mut field: ResMut<voxel_render::FieldParams>,
     stats: Res<SharedRenderStats>,
     mut probe: ResMut<StreamProbe>,
@@ -849,22 +795,16 @@ fn lod_tick(
             requested.extend(plan.waits.keys().copied());
         }
         for key in requested {
-            queue.push(ChunkCommand::Free(key));
+            chunks.free(key);
         }
         *tree = LodTree::default();
+        // Nothing reported before a rebuild describes a chunk that still
+        // exists.
+        chunks.reset();
         tree.replan_needed = true;
     }
 
-    // 1. Absorb readiness notifications.
-    // The single drain, fanned out: the epoch machine takes readiness as
-    // a batch to decide swaps, and anything waiting on one chunk gets
-    // woken here too.
-    for (key, mask) in ready_rx.rx.try_iter() {
-        tree.ready.insert(key, mask);
-        waiters.notify(key, mask);
-    }
-
-    // 1b. Cold start: an empty tree bootstraps through genesis — the
+    // 1. Cold start: an empty tree bootstraps through genesis — the
     //    converged configuration generates hidden and reveals in one
     //    atomic commit. No intermediate LODs are generated at all, and
     //    the screen goes "loading -> world" instead of morphing through
@@ -885,19 +825,10 @@ fn lod_tick(
                 // drawable. Requests are nearest-first, so the chunk the
                 // player stands in appears first and the world grows
                 // outward.
-                queue.push(ChunkCommand::Request {
-                    key,
-                    show_on_ready: true,
-                    hold: false,
-                    ops,
-                    face_mask: mask,
-                });
+                chunks.request(key, mask, true, false, ops);
             }
             let done = plan.to_request.is_empty()
-                && plan
-                    .waits
-                    .iter()
-                    .all(|(k, m)| matches!(tree.ready.get(k), Some(&r) if r == *m || r == u32::MAX));
+                && plan.waits.iter().all(|(k, m)| chunks.is_ready(*k, *m));
             if done {
                 tree.top_cells = plan.top_cells;
                 tree.leaves = plan.leaves;
@@ -914,7 +845,7 @@ fn lod_tick(
             }
         } else {
             let config = config.clone();
-            let provider = ops_provider.0.clone();
+            let provider = chunks.ops_fn();
             tree.genesis_planning = Some(bevy::tasks::AsyncComputeTaskPool::get().spawn(
                 async move {
                     plan_genesis(&config, anchor, provider.as_deref())
@@ -938,7 +869,7 @@ fn lod_tick(
                     let key = ChunkKey::new(config.max_level, cell);
                     let mask = PostState::current(&tree.leaves).seam_mask(config.max_level, key);
                     tree.sent_masks.insert(key, mask);
-                    request(&queue, &ops_provider, key, true, false, mask);
+                    chunks.request(key, mask, true, false, chunks.ops_for(key));
                     tree.leaves.insert(key);
                     tree.replan_needed = true;
                 }
@@ -958,7 +889,7 @@ fn lod_tick(
             .collect();
         for cell in stale {
             tree.top_cells.remove(&cell);
-            free_subtree(tree, &queue, cell, config.max_level);
+            free_subtree(tree, &chunks, cell, config.max_level);
         }
     }
 
@@ -982,7 +913,7 @@ fn lod_tick(
             let leaves = tree.leaves.clone();
             let sent_masks = tree.sent_masks.clone();
             let config = config.clone();
-            let provider = ops_provider.0.clone();
+            let provider = chunks.ops_fn();
             let split_cap = if tree
                 .split_cooldown_until
                 .is_none_or(|until| std::time::Instant::now() >= until)
@@ -1010,28 +941,13 @@ fn lod_tick(
     if let Some(mut epoch) = tree.epoch.take() {
         let n = epoch.to_request.len().min(EPOCH_REQUEST_BUDGET);
         for (key, mask, hold, ops) in epoch.to_request.drain(..n) {
-            // A wait may only be satisfied by a report that ARRIVES after
-            // this request: a stale entry (held mesh cancelled by an
-            // earlier abort, or an old empty classification) would let
-            // the epoch commit against a mesh that no longer exists —
-            // permanent crack plus an orphaned held alloc.
-            tree.ready.remove(&key);
             tree.sent_masks.insert(key, mask);
-            queue.push(ChunkCommand::Request {
-                key,
-                show_on_ready: false,
-                hold,
-                ops,
-                face_mask: mask,
-            });
+            chunks.request(key, mask, false, hold, ops);
         }
         let done = epoch.to_request.is_empty()
-            && epoch
-                .waits
-                .iter()
-                .all(|(k, m)| matches!(tree.ready.get(k), Some(&r) if r == *m || r == u32::MAX));
+            && epoch.waits.iter().all(|(k, m)| chunks.is_ready(*k, *m));
         if done {
-            commit_epoch(tree, &queue, epoch);
+            commit_epoch(tree, &chunks, epoch);
             // Refinement cascades: the new configuration may want more.
             tree.replan_needed = true;
         } else if epoch.born.elapsed() > EPOCH_STALL_LIMIT {
@@ -1048,17 +964,12 @@ fn lod_tick(
                 if tree.leaves.contains(key) {
                     // In-place remesh: drop the held result (if any) and
                     // forget the sent mask so a later epoch re-requests it.
-                    // The ready entry goes too — the held mesh it reported
-                    // is being cancelled.
-                    queue.push(ChunkCommand::CancelHold(*key));
-                    tree.ready.remove(key);
-                    tree.sent_masks.remove(key);
+                    chunks.cancel_hold(*key);
                 } else {
                     // Hidden replacement chunk: free it outright.
-                    queue.push(ChunkCommand::Free(*key));
-                    tree.ready.remove(key);
-                    tree.sent_masks.remove(key);
+                    chunks.free(*key);
                 }
+                tree.sent_masks.remove(key);
             }
             tree.split_cooldown_until = Some(std::time::Instant::now() + ABORT_COOLDOWN);
             tree.replan_needed = true;
@@ -1137,24 +1048,23 @@ fn lod_tick(
 
 /// Free every requested chunk whose subtree hangs under `cell`. Only
 /// called between epochs, so no in-flight members are touched.
-fn free_subtree(tree: &mut LodTree, queue: &ChunkCommandQueue, cell: IVec3, max_level: u8) {
-    let in_subtree = |key: &ChunkKey| top_ancestor(*key, max_level) == cell;
+fn free_subtree(tree: &mut LodTree, chunks: &ChunkGen, cell: IVec3, max_level: u8) {
+    let in_subtree = |key: ChunkKey| top_ancestor(key, max_level) == cell;
 
     let mut to_free: HashSet<ChunkKey> = HashSet::new();
     tree.leaves.retain(|k| {
-        let stale = in_subtree(k);
+        let stale = in_subtree(*k);
         if stale {
             to_free.insert(*k);
         }
         !stale
     });
     for key in to_free {
-        tree.ready.remove(&key);
         tree.sent_masks.remove(&key);
-        queue.push(ChunkCommand::Free(key));
+        chunks.free(key);
     }
-    tree.ready.retain(|k, _| !in_subtree(k));
-    tree.sent_masks.retain(|k, _| !in_subtree(k));
+    chunks.forget_ready_matching(in_subtree);
+    tree.sent_masks.retain(|k, _| !in_subtree(*k));
 }
 
 
