@@ -412,9 +412,9 @@ fn follow_lod_focus(
             field.max_vs = (1u32 << layers.config.max_level) as f32;
         }
     }
-    probe.leaves = layers.resident();
-    probe.planning = layers.is_generating();
-    probe.epoch_waits = layers.stalled();
+    probe.resident = layers.resident();
+    probe.generating = layers.is_generating();
+    probe.stalled = layers.stalled();
     probe.reads_missed = world.stats().reads_missed;
 }
 

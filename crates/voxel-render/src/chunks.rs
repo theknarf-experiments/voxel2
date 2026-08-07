@@ -91,8 +91,9 @@ const STAGING_BUFFERS: usize = 3;
 #[derive(Clone, Debug)]
 pub enum ChunkCommand {
     /// Generate (and mesh, if non-empty) this chunk. `show_on_ready` makes
-    /// it visible as soon as it is drawable; otherwise it stays hidden until
-    /// an explicit [`ChunkCommand::Show`] (ready-before-swap LOD flips).
+    /// it visible as soon as it is drawable; otherwise it stays hidden
+    /// until [`ChunkCommand::Commit`], which is how a set of chunks is
+    /// revealed together.
     /// `ops` are planning-layer CSG operations applied by the density pass.
     Request {
         key: ChunkKey,
@@ -107,13 +108,8 @@ pub enum ChunkCommand {
         /// coarser, 2 = neighbor finer. Drives seam ownership + band blend.
         face_mask: u32,
     },
-    Show(ChunkKey),
     /// Make visible and swap in any held regen result.
     Commit(ChunkKey),
-    /// Drop a held regen result without swapping (epoch aborted): frees
-    /// the held slab allocation, keeps drawing the old mesh. In-flight
-    /// pending states are left to complete (they hold arena slots).
-    CancelHold(ChunkKey),
     Free(ChunkKey),
 }
 
@@ -1178,11 +1174,6 @@ fn plan_frame(
                     },
                 }
             }
-            ChunkCommand::Show(key) => {
-                if let Some(chunk) = table.chunks.get_mut(&key) {
-                    chunk.visible = true;
-                }
-            }
             ChunkCommand::Commit(key) => {
                 if let Some(chunk) = table.chunks.get_mut(&key) {
                     chunk.visible = true;
@@ -1200,15 +1191,6 @@ fn plan_frame(
                             }
                             chunk.state = ChunkState::Empty;
                         }
-                        other => chunk.pending = other,
-                    }
-                }
-            }
-            ChunkCommand::CancelHold(key) => {
-                if let Some(chunk) = table.chunks.get_mut(&key) {
-                    match chunk.pending.take() {
-                        Some(Pending::Held { alloc, .. }) => gpu.slab.free(alloc),
-                        Some(Pending::HeldEmpty) | None => {}
                         other => chunk.pending = other,
                     }
                 }

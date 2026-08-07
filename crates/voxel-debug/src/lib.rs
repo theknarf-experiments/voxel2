@@ -39,8 +39,14 @@ fn engine_hud(
         }
     }
     hud.0.push(format!(
-        "leaves: {} | planning reads missed: {}",
-        probe.leaves, probe.reads_missed
+        "resident: {}{} | planning reads missed: {}",
+        probe.resident,
+        if probe.stalled > 0 {
+            format!(" | STALLED {}", probe.stalled)
+        } else {
+            String::new()
+        },
+        probe.reads_missed
     ));
 }
 

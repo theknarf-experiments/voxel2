@@ -2,19 +2,17 @@
 //!
 //! Everything that drives a voxel chunk's lifecycle goes through here —
 //! resolving its planning ops, asking the render world to generate it,
-//! learning that it became drawable, committing it, freeing it. The epoch
-//! machine in [`crate::streaming`] is the only caller today; per-level
-//! `VoxelLod` layers are the next one, and the two cannot both drain the
-//! readiness channel or both decide when a slab is released. One owner,
-//! two callers.
+//! learning that it became drawable, committing it, freeing it. Nothing
+//! else may: two owners of one readiness channel, or two opinions about
+//! when a slab is released, is not a configuration that has a meaning.
 //!
-//! The service is a cloneable handle rather than a system param because a
-//! layer's `create` runs on a generation thread: it needs to request a
-//! chunk and block on [`ChunkGen::wait_for`] until it exists.
+//! The service is a cloneable handle rather than a system param because
+//! its caller is a layer's `create`, which runs on a generation thread:
+//! it requests a chunk and blocks on [`ChunkGen::wait_for`] until the
+//! chunk exists.
 
 use std::sync::{Arc, Mutex};
 
-use bevy::platform::collections::HashMap;
 use bevy::prelude::*;
 use voxel_core::csg::CsgOp;
 use voxel_core::ChunkKey;
@@ -36,9 +34,6 @@ struct Service {
     queue: ChunkCommandQueue,
     ready_rx: crossbeam_channel::Receiver<(ChunkKey, u32)>,
     waiters: ChunkWaiters,
-    /// Latest drawable mesh per requested chunk, with the seam mask it was
-    /// built with (`u32::MAX` = classified empty, satisfies any mask).
-    ready: Mutex<HashMap<ChunkKey, u32>>,
     ops: Mutex<Option<OpsFn>>,
 }
 
@@ -52,7 +47,6 @@ impl ChunkGen {
             queue,
             ready_rx,
             waiters,
-            ready: Mutex::new(HashMap::new()),
             ops: Mutex::new(None),
         }))
     }
@@ -63,9 +57,7 @@ impl ChunkGen {
         *self.0.ops.lock().unwrap() = ops;
     }
 
-    /// The provider itself, for callers that resolve ops off the main
-    /// thread (planning does, so provider cost never lands on a frame).
-    pub fn ops_fn(&self) -> Option<OpsFn> {
+    fn ops_fn(&self) -> Option<OpsFn> {
         self.0.ops.lock().unwrap().clone()
     }
 
@@ -77,31 +69,12 @@ impl ChunkGen {
 
     // --- readiness ---------------------------------------------------------
 
-    /// Drain the render world's readiness reports and fan them out: the
-    /// batch a planner polls, and a wake for anything blocked on one chunk.
-    /// Exactly one drain exists, and this is it.
+    /// Drain the render world's readiness reports and wake whoever is
+    /// waiting on each chunk. Exactly one drain exists, and this is it.
     pub fn pump(&self) {
-        let mut ready = self.0.ready.lock().unwrap();
         for (key, mask) in self.0.ready_rx.try_iter() {
-            ready.insert(key, mask);
             self.0.waiters.notify(key, mask);
         }
-    }
-
-    /// Is `key` drawable with a mesh that satisfies `want`? An
-    /// empty-classified chunk (`u32::MAX`) satisfies any seam mask.
-    pub fn is_ready(&self, key: ChunkKey, want: u32) -> bool {
-        matches!(self.ready_mask(key), Some(r) if r == want || r == u32::MAX)
-    }
-
-    pub fn ready_mask(&self, key: ChunkKey) -> Option<u32> {
-        self.0.ready.lock().unwrap().get(&key).copied()
-    }
-
-    /// Drop readiness for every key matching `pred` without freeing
-    /// anything — for keys the caller has stopped tracking.
-    pub fn forget_ready_matching(&self, pred: impl Fn(ChunkKey) -> bool) {
-        self.0.ready.lock().unwrap().retain(|k, _| !pred(*k));
     }
 
     /// A receiver that fires when `key` next becomes drawable, carrying the
@@ -118,10 +91,9 @@ impl ChunkGen {
     /// marks an in-place remesh of an already-shown chunk: the old mesh
     /// keeps drawing until the commit swaps them.
     ///
-    /// Requesting always forgets earlier readiness: a wait may only be
-    /// satisfied by a report that ARRIVES after the request, or a stale
-    /// entry (a held mesh cancelled by an abort, an old empty
-    /// classification) lets a caller act on a mesh that no longer exists.
+    /// A wait may only be satisfied by a report that ARRIVES after the
+    /// request, which is why [`Self::wait_for`] is registered first and
+    /// readiness is a notification rather than a state anyone polls.
     pub fn request(
         &self,
         key: ChunkKey,
@@ -130,7 +102,6 @@ impl ChunkGen {
         hold: bool,
         ops: Option<Arc<Vec<CsgOp>>>,
     ) {
-        self.0.ready.lock().unwrap().remove(&key);
         self.0.queue.push(ChunkCommand::Request {
             key,
             show_on_ready,
@@ -145,26 +116,15 @@ impl ChunkGen {
         self.0.queue.push(ChunkCommand::Commit(key));
     }
 
-    /// Drop a held remesh without swapping: the old mesh keeps drawing.
-    pub fn cancel_hold(&self, key: ChunkKey) {
-        self.forget(key);
-        self.0.queue.push(ChunkCommand::CancelHold(key));
-    }
-
-    /// Release the chunk and its slab allocation.
+    /// Release the chunk and its slab allocation. Anything waiting on it
+    /// is released too — a chunk that will never arrive must not leave a
+    /// `create` blocked.
     pub fn free(&self, key: ChunkKey) {
         self.forget(key);
         self.0.queue.push(ChunkCommand::Free(key));
     }
 
-    /// Everything is gone (a full streaming rebuild): the caller has freed
-    /// what it tracked, and no report from before is worth keeping.
-    pub fn reset(&self) {
-        self.0.ready.lock().unwrap().clear();
-    }
-
     fn forget(&self, key: ChunkKey) {
-        self.0.ready.lock().unwrap().remove(&key);
         self.0.waiters.abandon(key);
     }
 }
@@ -233,39 +193,34 @@ mod tests {
         ChunkKey::new(2, IVec3::new(3, 0, -1))
     }
 
-    /// One drain, two consumers: a planner polling the batch and a create
-    /// blocked on the single chunk it owns both learn from the same report.
+    /// The drain wakes whoever is waiting on that chunk, carrying the
+    /// seam mask its mesh was built with. This is the whole readiness
+    /// surface: a `create` registers, requests, and blocks.
     #[test]
-    fn readiness_reaches_the_batch_and_the_waiter() {
+    fn readiness_reaches_the_waiter() {
         let (chunks, tx, _queue) = service();
         let waiting = chunks.wait_for(key());
         tx.send((key(), 0x5)).unwrap();
         chunks.pump();
-        assert_eq!(chunks.ready_mask(key()), Some(0x5));
         assert_eq!(waiting.recv(), Ok(0x5));
-        assert!(chunks.is_ready(key(), 0x5));
-        assert!(!chunks.is_ready(key(), 0x6));
     }
 
-    /// An empty-classified chunk has no seams to get wrong.
+    /// A chunk that will never arrive must not leave a create blocked.
     #[test]
-    fn an_empty_chunk_satisfies_any_mask() {
-        let (chunks, tx, _queue) = service();
-        tx.send((key(), u32::MAX)).unwrap();
-        chunks.pump();
-        assert!(chunks.is_ready(key(), 0x0));
-        assert!(chunks.is_ready(key(), 0x3ff));
+    fn freeing_releases_the_waiter() {
+        let (chunks, _tx, queue) = service();
+        let waiting = chunks.wait_for(key());
+        chunks.free(key());
+        assert!(waiting.recv().is_err(), "waiter left hanging on a freed chunk");
+        assert!(matches!(queue.take().as_slice(), [ChunkCommand::Free(k)] if *k == key()));
     }
 
-    /// Requesting invalidates the previous report — otherwise a caller can
-    /// commit against a mesh the new request is replacing.
+    /// A request carries what the pipeline needs to build the chunk, and
+    /// nothing decides visibility but the caller.
     #[test]
-    fn requesting_forgets_earlier_readiness() {
-        let (chunks, tx, queue) = service();
-        tx.send((key(), 0x5)).unwrap();
-        chunks.pump();
+    fn a_request_carries_its_mask_and_visibility() {
+        let (chunks, _tx, queue) = service();
         chunks.request(key(), 0x7, false, true, None);
-        assert_eq!(chunks.ready_mask(key()), None);
         assert!(matches!(
             queue.take().as_slice(),
             [ChunkCommand::Request {
@@ -276,32 +231,6 @@ mod tests {
                 ..
             }] if *k == key()
         ));
-    }
-
-    /// A chunk that will never arrive must not leave a create blocked.
-    #[test]
-    fn freeing_forgets_readiness_and_releases_the_waiter() {
-        let (chunks, tx, queue) = service();
-        tx.send((key(), 0x5)).unwrap();
-        chunks.pump();
-        let waiting = chunks.wait_for(key());
-        chunks.free(key());
-        assert_eq!(chunks.ready_mask(key()), None);
-        assert!(waiting.recv().is_err(), "waiter left hanging on a freed chunk");
-        assert!(matches!(queue.take().as_slice(), [ChunkCommand::Free(k)] if *k == key()));
-    }
-
-    /// A cancelled hold is the same promise broken a different way.
-    #[test]
-    fn cancelling_a_hold_forgets_readiness_and_releases_the_waiter() {
-        let (chunks, tx, queue) = service();
-        tx.send((key(), 0x5)).unwrap();
-        chunks.pump();
-        let waiting = chunks.wait_for(key());
-        chunks.cancel_hold(key());
-        assert_eq!(chunks.ready_mask(key()), None);
-        assert!(waiting.recv().is_err());
-        assert!(matches!(queue.take().as_slice(), [ChunkCommand::CancelHold(k)] if *k == key()));
     }
 
     /// Ops resolve through the installed provider; an empty result is

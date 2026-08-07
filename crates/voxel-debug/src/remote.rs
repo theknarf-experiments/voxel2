@@ -96,12 +96,9 @@ fn status(
     });
     if let Some(p) = probe {
         out["stream"] = json!({
-            "leaves": p.leaves,
-            "planning": p.planning,
-            "replan_needed": p.replan_needed,
-            "epoch_waits": p.epoch_waits,
-            "epoch_to_request": p.epoch_to_request,
-            "epoch_age_s": p.epoch_age_s,
+            "resident": p.resident,
+            "generating": p.generating,
+            "stalled": p.stalled,
             "reads_missed": p.reads_missed,
         });
     }
