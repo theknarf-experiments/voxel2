@@ -3,8 +3,11 @@
 //!
 //! - F8 toggles chunk boundaries (drawn LOD leaves near the camera,
 //!   colored by level).
-//! - F9 toggles planning layers: markers (by kind), clearance segments,
-//!   ribbon segments, and a biome sample grid colored by dominant biome.
+//! - F9 cycles planning layers: off -> near -> far. Markers (by kind),
+//!   clearance segments, ribbon segments, and a biome sample grid colored
+//!   by dominant biome. "Far" is the whole streamed world, which is how
+//!   you see what a coarse planning layer reaches; it costs a lot of
+//!   gizmo lines, so the near range stays for close work.
 
 use bevy::prelude::*;
 
@@ -13,8 +16,24 @@ use voxel_engine::WorldQuery;
 #[derive(Resource, Default)]
 pub struct DebugViz {
     pub chunks: bool,
-    pub layers: bool,
+    /// Half-extent of the planning query, in meters; 0 = off.
+    pub layer_radius_m: f32,
+    /// Lines drawn and lines wanted, last frame — a truncated overlay
+    /// looks exactly like a world that stops, so it says which it is.
+    pub drawn: usize,
+    pub wanted: usize,
 }
+
+impl DebugViz {
+    pub fn layers(&self) -> bool {
+        self.layer_radius_m > 0.0
+    }
+}
+
+/// The two ranges F9 cycles through: close work, and the whole streamed
+/// world.
+const LAYER_VIZ_NEAR_M: f32 = 512.0;
+const LAYER_VIZ_FAR_M: f32 = 20_000.0;
 
 pub fn toggle_debug_viz(keys: Res<ButtonInput<KeyCode>>, mut viz: ResMut<DebugViz>) {
     if keys.just_pressed(KeyCode::F8) {
@@ -22,8 +41,12 @@ pub fn toggle_debug_viz(keys: Res<ButtonInput<KeyCode>>, mut viz: ResMut<DebugVi
         info!("debug viz: chunk boundaries {}", viz.chunks);
     }
     if keys.just_pressed(KeyCode::F9) {
-        viz.layers = !viz.layers;
-        info!("debug viz: planning layers {}", viz.layers);
+        viz.layer_radius_m = match viz.layer_radius_m {
+            r if r <= 0.0 => LAYER_VIZ_NEAR_M,
+            r if r <= LAYER_VIZ_NEAR_M => LAYER_VIZ_FAR_M,
+            _ => 0.0,
+        };
+        info!("debug viz: planning layers {} m", viz.layer_radius_m);
     }
 }
 
@@ -37,10 +60,17 @@ fn kind_color(kind: &str) -> Color {
 }
 
 const CHUNK_VIZ_RADIUS_M: f32 = 400.0;
-const LAYER_VIZ_RADIUS_M: f32 = 512.0;
+
+/// Gizmo lines the planning overlay may draw in one frame.
+///
+/// At 20 km the resident road network is hundreds of thousands of
+/// segments and drawing them all costs more than the world does. The
+/// budget is spent nearest-first, and what it could not draw is reported
+/// rather than silently missing.
+const LAYER_VIZ_MAX_LINES: usize = 24_000;
 
 pub fn draw_debug_viz(
-    viz: Res<DebugViz>,
+    mut viz: ResMut<DebugViz>,
     world: Res<WorldQuery>,
     stats: Option<Res<voxel_render::SharedRenderStats>>,
     sources: voxel_engine::StreamSourceQuery,
@@ -72,34 +102,53 @@ pub fn draw_debug_viz(
         }
     }
 
-    if viz.layers {
+    if viz.layers() {
+        // Introspection, not a working set: everything beyond what the
+        // graph happens to hold is absent by design out here, and must
+        // not count against `reads_missed`.
+        let _peek = world.peek();
+        let radius = viz.layer_radius_m;
         let c2 = Vec2::new(eye.x, eye.z);
-        let (min, max) = (c2 - Vec2::splat(LAYER_VIZ_RADIUS_M), c2 + Vec2::splat(LAYER_VIZ_RADIUS_M));
+        let (min, max) = (c2 - Vec2::splat(radius), c2 + Vec2::splat(radius));
+        // Nearest-first, so a truncated overlay is the near field rather
+        // than an arbitrary slice.
+        let mut lines: Vec<(Vec3, Vec3, Color)> = Vec::new();
 
         for m in world.markers_in(min, max, None) {
             let color = kind_color(&m.kind);
-            gizmos.line(m.pos, m.pos + Vec3::Y * 30.0, color);
-            gizmos.sphere(m.pos + Vec3::Y * 30.0, 2.0, color);
+            lines.push((m.pos, m.pos + Vec3::Y * 30.0, color));
         }
+        let h = |p: Vec2| world.generator().height(p, 1.0) + 1.0;
         for seg in world.clearance_in(min, max) {
-            let h = |p: Vec2| world.generator().height(p, 1.0) + 1.0;
-            gizmos.line(
+            lines.push((
                 Vec3::new(seg[0].x, h(seg[0]), seg[0].y),
                 Vec3::new(seg[1].x, h(seg[1]), seg[1].y),
                 Color::srgb(1.0, 0.8, 0.2),
-            );
+            ));
         }
         for w in world.ribbons_in(min, max) {
-            gizmos.line(
+            lines.push((
                 Vec3::new(w.a.x, w.levels[0] + 0.5, w.a.y),
                 Vec3::new(w.b.x, w.levels[1] + 0.5, w.b.y),
                 Color::srgb(0.2, 0.6, 1.0),
-            );
+            ));
+        }
+        viz.wanted = lines.len();
+        if lines.len() > LAYER_VIZ_MAX_LINES {
+            lines.sort_by_cached_key(|(a, _, _)| (a.distance_squared(eye) * 0.01) as i64);
+            lines.truncate(LAYER_VIZ_MAX_LINES);
+        }
+        viz.drawn = lines.len();
+        for (a, b, color) in lines {
+            gizmos.line(a, b, color);
         }
 
         // Biome sample grid: a stake per cell colored by dominant biome.
         for name in world.biome_fields() {
-            let step = LAYER_VIZ_RADIUS_M / 8.0;
+            // The biome grid stays a fixed 17x17 sample regardless of
+            // range: it is a field readout, not a feature set, and one
+            // stake per 20 km/8 would say nothing.
+            let step = LAYER_VIZ_NEAR_M / 8.0;
             for gz in -8..=8 {
                 for gx in -8..=8 {
                     let p = c2 + Vec2::new(gx as f32, gz as f32) * step;

@@ -235,6 +235,13 @@ impl WorldQuery {
         self.planner.as_ref().map_or(0, |p| p.reads_missed())
     }
 
+    /// Hold while making INTROSPECTION reads — a debug overlay asking what
+    /// the world has, rather than a consumer asserting its working set is
+    /// covered. Absent chunks are not counted against `reads_missed`.
+    pub fn peek(&self) -> voxel_layers::Peek {
+        voxel_layers::peek()
+    }
+
     /// The host's per-world layer state, downcast to `C`.
     pub fn host_ctx<C: 'static>(&self) -> Option<&C> {
         self.planner

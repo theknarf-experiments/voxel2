@@ -16,6 +16,7 @@ pub mod viz;
 fn engine_hud(
     probe: Option<Res<voxel_engine::streaming::StreamProbe>>,
     stats: Option<Res<voxel_render::SharedRenderStats>>,
+    viz: Option<Res<viz::DebugViz>>,
     mut hud: ResMut<DebugHudExtra>,
 ) {
     let Some(probe) = probe else { return };
@@ -48,6 +49,19 @@ fn engine_hud(
         },
         probe.reads_missed
     ));
+    if let Some(viz) = viz.filter(|v| v.layers()) {
+        hud.0.push(format!(
+            "planning viz: {} m | {} of {} lines{}",
+            viz.layer_radius_m as i32,
+            viz.drawn,
+            viz.wanted,
+            if viz.drawn < viz.wanted {
+                " (TRUNCATED)"
+            } else {
+                ""
+            },
+        ));
+    }
 }
 
 pub use remote::VoxelRemotePlugin;

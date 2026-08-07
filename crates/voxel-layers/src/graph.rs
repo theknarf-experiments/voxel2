@@ -65,6 +65,32 @@ thread_local! {
     /// Create stack, for cycle detection — a cycle would otherwise
     /// deadlock on a level lock.
     static GEN_STACK: RefCell<Vec<(LayerKey, u32, IVec3)>> = const { RefCell::new(Vec::new()) };
+    /// Set while a [`Peek`] guard is alive on this thread.
+    static PEEKING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Read what is resident without recording what is not, until dropped.
+///
+/// A read is normally an assertion that the caller's working set is
+/// covered, and an absent chunk is the diagnostic saying it is not —
+/// which is what `reads_missed` counts and why it must stay at zero.
+/// Introspection is the exception: a debug overlay asking for everything
+/// within 20 km is asking what the graph HAS, and counting the empty
+/// distance as failure would drown the signal the counter exists to give.
+///
+/// Thread-local, so a peek on the main thread cannot blind the generation
+/// threads.
+#[must_use = "the guard must outlive the reads it covers"]
+pub struct Peek(bool);
+
+pub fn peek() -> Peek {
+    Peek(PEEKING.replace(true))
+}
+
+impl Drop for Peek {
+    fn drop(&mut self) {
+        PEEKING.set(self.0);
+    }
 }
 
 /// Owns the registered layers and every resident chunk.
@@ -630,7 +656,7 @@ impl LayerGraph {
                 }
             }
         }
-        if missing > 0 {
+        if missing > 0 && !PEEKING.get() {
             let n = self.reads_missed.fetch_add(missing, Ordering::Relaxed);
             // A miss means someone's working set is not covered. Name the
             // instance and the box, capped so a systemic miss cannot

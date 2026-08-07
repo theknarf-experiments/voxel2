@@ -324,6 +324,12 @@ pub enum StackLayerDef {
         corridor_m: f32,
         #[serde(default = "d_slope_penalty")]
         slope_penalty: f32,
+        /// Pathfinding lattice step (meters). The cost of a route is
+        /// quadratic in this, so a long-range corridor is planned on a
+        /// coarse lattice and a local track on a fine one — which is what
+        /// makes the same layer kind serve both scales.
+        #[serde(default = "d_path_step")]
+        step_m: f32,
     },
     /// Descent courses (pond-and-spill hydrology) from sites.
     Flow {
@@ -479,6 +485,9 @@ fn d_corridor() -> f32 {
 }
 fn d_slope_penalty() -> f32 {
     60.0
+}
+fn d_path_step() -> f32 {
+    8.0
 }
 fn d_flow_steps() -> usize {
     400
@@ -853,6 +862,7 @@ impl StackLayerDef {
                 reach_m,
                 corridor_m,
                 slope_penalty,
+                step_m,
             } => mgr.register_as(
                 &name,
                 ConnectPaths {
@@ -861,6 +871,7 @@ impl StackLayerDef {
                         reach_m,
                         corridor_m,
                         slope_penalty,
+                        step_m,
                     },
                     cell_m,
                 },

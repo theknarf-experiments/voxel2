@@ -428,6 +428,42 @@
       },
       {
         "kind": "scatter",
+        "name": "sites:regions",
+        "cell_m": 4096,
+        "chance": 0.7,
+        "altitude": [
+          8.0,
+          280.0
+        ],
+        "up": [
+          0.8,
+          1.0
+        ]
+      },
+      {
+        "kind": "connect",
+        "name": "paths:highways",
+        "source": "sites:regions",
+        "cell_m": 4096,
+        "reach_m": 8192.0,
+        "corridor_m": 1024.0,
+        "step_m": 128.0
+      },
+      {
+        "kind": "emit",
+        "name": "highways",
+        "source": "paths:highways",
+        "cell_m": 4096,
+        "max_chunk_edge_m": 1000.0,
+        "pad_m": 9216.0,
+        "emit": {
+          "type": "path_slabs",
+          "half_w": 24.0,
+          "thickness": 4.0
+        }
+      },
+      {
+        "kind": "scatter",
         "name": "sites:springs",
         "cell_m": 512,
         "chance": 0.5,

@@ -230,16 +230,29 @@ fn ops(In(params): In<Option<Value>>, world: Res<WorldQuery>) -> BrpResult {
     }))
 }
 
-/// `{"chunks": bool?, "layers": bool?}` — toggle the debug overlays.
+/// `{"chunks": bool?, "layers": bool|number?}` — toggle the debug
+/// overlays. `layers` takes a radius in meters, or a bool for the near
+/// range.
 fn viz(In(params): In<Option<Value>>, mut viz: ResMut<crate::viz::DebugViz>) -> BrpResult {
     let params = params.ok_or_else(|| err("params required"))?;
     if let Some(v) = params.get("chunks").and_then(Value::as_bool) {
         viz.chunks = v;
     }
-    if let Some(v) = params.get("layers").and_then(Value::as_bool) {
-        viz.layers = v;
+    match params.get("layers") {
+        Some(Value::Bool(v)) => viz.layer_radius_m = if *v { 512.0 } else { 0.0 },
+        Some(v) => {
+            if let Some(r) = v.as_f64() {
+                viz.layer_radius_m = r as f32;
+            }
+        }
+        None => {}
     }
-    Ok(json!({"chunks": viz.chunks, "layers": viz.layers}))
+    Ok(json!({
+        "chunks": viz.chunks,
+        "layers_radius_m": viz.layer_radius_m,
+        "lines_drawn": viz.drawn,
+        "lines_wanted": viz.wanted,
+    }))
 }
 
 /// Scenic-spot scoring: local relief (how dramatically the terrain

@@ -439,6 +439,10 @@ pub struct ConnectCfg {
     /// Pathfinding corridor half-width around the endpoint box.
     pub corridor_m: f32,
     pub slope_penalty: f32,
+    /// Pathfinding lattice step (meters). Search cost is quadratic in the
+    /// corridor's size measured in these, so a corridor spanning
+    /// kilometres is only affordable on a coarse lattice.
+    pub step_m: f32,
 }
 
 impl Default for ConnectCfg {
@@ -448,6 +452,7 @@ impl Default for ConnectCfg {
             reach_m: 700.0,
             corridor_m: 192.0,
             slope_penalty: 60.0,
+            step_m: 8.0,
         }
     }
 }
@@ -513,6 +518,7 @@ impl ConnectPaths {
             let chi = lo.max(hi) + Vec2::splat(self.cfg.corridor_m);
             let params = voxel_worldgen::path::PathParams {
                 slope_penalty: self.cfg.slope_penalty,
+                step_m: self.cfg.step_m,
                 ..Default::default()
             };
             let waypoints = voxel_worldgen::path::find_path(
@@ -527,7 +533,7 @@ impl ConnectPaths {
                 // Straight fallback, SUBDIVIDED: a single reach-length
                 // segment would put slabs ~350 m from its midpoint cell
                 // and break the ELEM_PAD_M query contract.
-                let n = (lo.distance(hi) / 16.0).ceil().max(1.0) as usize;
+                let n = (lo.distance(hi) / (2.0 * self.cfg.step_m)).ceil().max(1.0) as usize;
                 (0..=n).map(|i| lo.lerp(hi, i as f32 / n as f32)).collect()
             });
             if !paths.contains(&waypoints) {
