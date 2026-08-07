@@ -1092,6 +1092,212 @@ fn log_fps(
     }
 }
 
+/// Where a LOD level is resident, as a predicate on one chunk: the level
+/// could be the finest covering it — its own split radius does not swallow
+/// it, and its parent's does.
+///
+/// A top dependency is a box, and the plan sized these levels as a box
+/// with a hole: `2·merge_k·2E` across, `2·split_k·E` of hole. Measured
+/// against the configuration that ships, that box holds 2.35x the chunks
+/// the field draws (2.14x on the megastructure), because a box is not an
+/// annulus — its diagonal reaches 1.7x further than its face. On the
+/// megastructure, where 78% of chunks carry geometry, 2.14x is ~5.1k
+/// meshed against 3,656 slots: the same wall nested balls hit.
+///
+/// The field itself holds 1.21x / 1.13x, because it is the shape the LOD
+/// actually wants. Residency is therefore a predicate, not a shape.
+pub fn resident_at(config: &LodConfig, anchor: DVec3, key: ChunkKey) -> bool {
+    // Conservative at both ends: a chunk counts as split only when it lies
+    // ENTIRELY inside the split radius, and its parent counts as split when
+    // ANY of it does.
+    let split_here = key.level > 0
+        && farthest_corner(anchor, key) < config.split_k * key.edge_m();
+    let parent = key.parent();
+    let parent_split = key.level >= config.max_level
+        || aabb_distance(anchor, parent) < config.split_k * parent.edge_m();
+    !split_here && parent_split
+}
+
+/// Distance from `p` to the farthest corner of a chunk's box.
+fn farthest_corner(p: DVec3, key: ChunkKey) -> f64 {
+    let min = key.min_corner_m();
+    let max = min + DVec3::splat(key.edge_m());
+    (p - min).abs().max((p - max).abs()).length()
+}
+
+/// How far out a level's chunks can still be resident, in meters — the box
+/// a predicate has to be evaluated over. The parent splits out to
+/// `split_k·2E`, and a child can sit a parent's width beyond its near face.
+pub fn resident_reach(config: &LodConfig, level: u8) -> f64 {
+    let edge = ChunkKey::new(level, IVec3::ZERO).edge_m();
+    2.0 * config.split_k * edge + 2.0 * edge
+}
+
+#[cfg(test)]
+mod residency_shape {
+    use super::*;
+
+    fn planet() -> LodConfig {
+        LodConfig {
+            max_level: 11,
+            top_radius: 3,
+            top_y: (-1, 0),
+            split_k: 2.5,
+            merge_k: 3.0,
+        }
+    }
+
+    fn mega() -> LodConfig {
+        LodConfig {
+            max_level: 8,
+            top_radius: 2,
+            top_y: (-3, 3),
+            split_k: 1.6,
+            merge_k: 2.1,
+        }
+    }
+
+    fn top_ring(config: &LodConfig, anchor: DVec3) -> HashSet<ChunkKey> {
+        let edge = ChunkKey::new(config.max_level, IVec3::ZERO).edge_m();
+        let cx = (anchor.x / edge).floor() as i32;
+        let cz = (anchor.z / edge).floor() as i32;
+        let mut out = HashSet::new();
+        for dz in -config.top_radius..=config.top_radius {
+            for dx in -config.top_radius..=config.top_radius {
+                for y in config.top_y.0..=config.top_y.1 {
+                    out.insert(ChunkKey::new(
+                        config.max_level,
+                        IVec3::new(cx + dx, y, cz + dz),
+                    ));
+                }
+            }
+        }
+        out
+    }
+
+    /// Chunks of one level a top dependency would hold under the field
+    /// predicate. The top level has no parent, so it keeps today's ring.
+    fn resident_level(config: &LodConfig, anchor: DVec3, level: u8) -> HashSet<ChunkKey> {
+        if level == config.max_level {
+            return top_ring(config, anchor);
+        }
+        let edge = ChunkKey::new(level, IVec3::ZERO).edge_m();
+        let reach = resident_reach(config, level);
+        let lo = ((anchor - DVec3::splat(reach)) / edge).floor();
+        let hi = ((anchor + DVec3::splat(reach)) / edge).ceil();
+        let mut out = HashSet::new();
+        for z in lo.z as i32..hi.z as i32 {
+            for y in lo.y as i32..hi.y as i32 {
+                for x in lo.x as i32..hi.x as i32 {
+                    let key = ChunkKey::new(level, IVec3::new(x, y, z));
+                    if resident_at(config, anchor, key) {
+                        out.insert(key);
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    /// Chunks a box-with-hole top dependency would hold, the sizing the
+    /// plan specified — kept as the measurement it lost to.
+    fn boxed_level(config: &LodConfig, anchor: DVec3, level: u8) -> HashSet<ChunkKey> {
+        if level == config.max_level {
+            return top_ring(config, anchor);
+        }
+        let edge = ChunkKey::new(level, IVec3::ZERO).edge_m();
+        let hole = if level == 0 { 0.0 } else { config.split_k * edge };
+        let outer = 2.0 * config.merge_k * edge;
+        let lo = ((anchor - DVec3::splat(outer)) / edge).floor();
+        let hi = ((anchor + DVec3::splat(outer)) / edge).ceil();
+        let mut out = HashSet::new();
+        for z in lo.z as i32..hi.z as i32 {
+            for y in lo.y as i32..hi.y as i32 {
+                for x in lo.x as i32..hi.x as i32 {
+                    let key = ChunkKey::new(level, IVec3::new(x, y, z));
+                    let min = key.min_corner_m();
+                    let max = min + DVec3::splat(edge);
+                    let in_hole = min.cmpge(anchor - DVec3::splat(hole)).all()
+                        && max.cmple(anchor + DVec3::splat(hole)).all();
+                    if !in_hole {
+                        out.insert(key);
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    fn measure(
+        config: &LodConfig,
+        anchor: DVec3,
+        shape: fn(&LodConfig, DVec3, u8) -> HashSet<ChunkKey>,
+        drawn: &HashSet<ChunkKey>,
+    ) -> (usize, usize) {
+        let levels: Vec<HashSet<ChunkKey>> = (0..=config.max_level)
+            .map(|l| shape(config, anchor, l))
+            .collect();
+        let resident = levels.iter().map(HashSet::len).sum();
+        let uncovered = drawn
+            .iter()
+            .filter(|k| !levels[k.level as usize].contains(*k))
+            .count();
+        (resident, uncovered)
+    }
+
+    /// The residency each shape would cost, against the configuration the
+    /// shipped levels use. This is the measurement the LOD-as-layers
+    /// conversion is sized from; the ratios are asserted so that changing
+    /// the shape, or `split_k`, cannot quietly move them.
+    #[test]
+    fn the_field_is_a_cheaper_shape_than_a_box() {
+        for (name, config, ceiling) in [("planet", planet(), 1.3), ("mega", mega(), 1.3)] {
+            for anchor in [
+                DVec3::new(-27570.0, 80.0, -36770.0),
+                DVec3::new(1234.0, 600.0, -800.0),
+            ] {
+                let drawn = plan_genesis(&config, anchor, None).leaves;
+                let (field, field_missed) = measure(&config, anchor, resident_level, &drawn);
+                let (boxed, boxed_missed) = measure(&config, anchor, boxed_level, &drawn);
+                println!(
+                    "{name} @{:?}: drawn {} — field {field} ({:.2}x, {field_missed} missed), \
+                     box {boxed} ({:.2}x, {boxed_missed} missed)",
+                    anchor.as_ivec3(),
+                    drawn.len(),
+                    field as f64 / drawn.len() as f64,
+                    boxed as f64 / drawn.len() as f64,
+                );
+                assert!(
+                    (field as f64) < ceiling * drawn.len() as f64,
+                    "{name}: field residency {field} exceeds {ceiling}x of {}",
+                    drawn.len(),
+                );
+            }
+        }
+    }
+
+    /// Every chunk the epoch machine draws today is resident under the
+    /// predicate — except the ones the +-1 clamp force-split, which the
+    /// predicate cannot see because it looks at one chunk at a time.
+    ///
+    /// This is the gap the conversion has to close: a chunk shown two
+    /// levels from its neighbour is a pinhole, so the clamp has to be part
+    /// of the residency rule, not a fixpoint run afterwards.
+    #[test]
+    fn the_clamp_is_what_the_predicate_still_misses() {
+        let config = mega();
+        let anchor = DVec3::new(-27570.0, 80.0, -36770.0);
+        let drawn = plan_genesis(&config, anchor, None).leaves;
+        let (_, missed) = measure(&config, anchor, resident_level, &drawn);
+        assert!(
+            missed > 0 && missed < drawn.len() / 100,
+            "clamp gap moved: {missed} of {} shown chunks not resident",
+            drawn.len(),
+        );
+    }
+}
+
+
 #[cfg(test)]
 mod epoch_invariants {
     /// Face directions in mask order (+x, -x, +y, -y, +z, -z).
