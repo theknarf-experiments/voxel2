@@ -304,6 +304,12 @@ impl LodLayers {
     pub fn is_generating(&self) -> bool {
         self.runtime.is_generating()
     }
+
+    /// Residency has caught up with the focus. Says nothing about the
+    /// render pipeline, which is the other half of settled.
+    pub fn is_idle(&self) -> bool {
+        self.runtime.is_idle()
+    }
 }
 
 /// Rebuild, in place, every resident chunk whose mask the field has
@@ -396,12 +402,16 @@ fn build_lod_layers(
 }
 
 /// Publish the camera to every level, and report.
+#[allow(clippy::too_many_arguments)]
 fn follow_lod_focus(
     layers: Option<ResMut<LodLayers>>,
     mut field: ResMut<voxel_render::FieldParams>,
     mut probe: ResMut<StreamProbe>,
     world: Res<crate::planning::WorldQuery>,
     sources: crate::StreamSourceQuery,
+    stats: Res<voxel_render::SharedRenderStats>,
+    time: Res<Time>,
+    mut settling: Local<f32>,
 ) {
     let Some(mut layers) = layers else {
         return;
@@ -416,6 +426,23 @@ fn follow_lod_focus(
     probe.generating = layers.is_generating();
     probe.stalled = layers.stalled();
     probe.reads_missed = world.reads_missed();
+
+    // Settled: residency agrees with the focus AND the pipeline has
+    // drained. Either half alone lies — the graph is idle the moment it
+    // stops asking, while the chunks it asked for are still meshing.
+    let awaiting = stats.0.lock().map_or(0, |s| s.awaiting);
+    let settled = layers.is_idle() && awaiting == 0 && !layers.is_generating();
+    if settled {
+        if *settling > 0.0 {
+            probe.last_settle_s = *settling;
+            probe.worst_settle_s = probe.worst_settle_s.max(*settling);
+            *settling = 0.0;
+        }
+    } else {
+        *settling += time.delta_secs();
+    }
+    probe.settled = settled;
+    probe.settling_s = *settling;
 }
 
 /// Installs the LOD-as-layers streaming path.

@@ -49,6 +49,16 @@ fn engine_hud(
         },
         probe.reads_missed
     ));
+    hud.0.push(format!(
+        "settle: {} | last {:.1}s | worst {:.1}s",
+        if probe.settled {
+            "yes".to_string()
+        } else {
+            format!("{:.1}s...", probe.settling_s)
+        },
+        probe.last_settle_s,
+        probe.worst_settle_s,
+    ));
     if let Some(viz) = viz.filter(|v| v.layers()) {
         hud.0.push(format!(
             "planning viz: {} m | {} of {} lines{}",

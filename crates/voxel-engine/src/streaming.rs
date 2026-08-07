@@ -60,6 +60,8 @@ impl Default for LodConfig {
     }
 }
 
+
+
 /// Set to request a full streaming rebuild (e.g. after a hot-reloaded
 /// level changes generation parameters): the LOD graph is dropped, which
 /// destroys every chunk it holds, and rebuilt against the new world.
@@ -84,6 +86,21 @@ pub struct StreamProbe {
     /// Chunks that never became drawable inside their timeout — slab
     /// exhaustion, and a hole for as long as it lasts.
     pub stalled: usize,
+    /// The world matches where the camera is: nothing generating, nothing
+    /// left in the pipeline.
+    pub settled: bool,
+    /// How long the CURRENT unsettled stretch has lasted, in seconds; 0
+    /// when settled.
+    pub settling_s: f32,
+    /// How long the last one took.
+    ///
+    /// Every anchor move starts a stretch and the world catching up ends
+    /// it, so this is the answer to "how long after I move does the world
+    /// agree with me" — the number that says whether generation is keeping
+    /// up, which a frame rate does not.
+    pub last_settle_s: f32,
+    /// The worst stretch since start.
+    pub worst_settle_s: f32,
 }
 
 /// Do the two chunks' closed axis-aligned boxes share at least a point

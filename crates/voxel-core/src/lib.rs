@@ -3,6 +3,7 @@
 //!
 //! This crate deliberately has no Bevy dependency.
 
+pub mod interval;
 pub mod opgen;
 pub mod csg;
 pub mod key;

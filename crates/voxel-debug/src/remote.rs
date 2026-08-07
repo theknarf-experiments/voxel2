@@ -100,6 +100,10 @@ fn status(
             "generating": p.generating,
             "stalled": p.stalled,
             "reads_missed": p.reads_missed,
+            "settled": p.settled,
+            "settling_s": p.settling_s,
+            "last_settle_s": p.last_settle_s,
+            "worst_settle_s": p.worst_settle_s,
         });
     }
     if let Some(world) = world {
