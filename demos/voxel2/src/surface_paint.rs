@@ -37,6 +37,15 @@ const TEXEL_M: f32 = 16.0;
 /// covers far more than it needs to so this can be rare.
 const REPAINT_M: f32 = 4096.0;
 
+/// Paint only chunks at least this coarse.
+///
+/// A road is 4.8 m wide, so a chunk whose voxels are finer than about
+/// half that still carries the carved road as real geometry, at a detail
+/// the 16 m texels of this map cannot approach. 3.2 m is level 5, which
+/// the LOD field puts 256 m out — near enough that the carve is doing the
+/// work, far enough that it has stopped resolving.
+const PAINT_FROM_VOXEL_M: f32 = 3.2;
+
 /// Rasterizes planning ribbons into the ground's material.
 pub struct SurfacePaintPlugin;
 
@@ -95,6 +104,7 @@ fn repaint(
     map.origin = origin;
     map.texel_m = TEXEL_M;
     map.size = MAP_SIZE;
+    map.min_voxel_m = PAINT_FROM_VOXEL_M;
     map.generation = map.generation.wrapping_add(1);
     if std::env::var_os("VOXEL_LOG_LAYERS").is_some() {
         info!("surface paint: {painted} texels around {eye:?}");

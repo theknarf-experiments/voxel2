@@ -242,6 +242,10 @@ impl Default for WorldProgram {
     }
 }
 
+/// Words of [`SurfaceMap`] header before the texels. Twin of the mesh
+/// shader's `SURFACE_MAP_HEADER`.
+const SURFACE_MAP_HEADER: usize = 8;
+
 /// A raster of surface material ids the mesh pass paints onto up-facing
 /// vertices, without carving anything.
 ///
@@ -264,6 +268,14 @@ pub struct SurfaceMap {
     pub texel_m: f32,
     /// Texels per side. 0 disables the map.
     pub size: u32,
+    /// Only paint chunks whose voxels are at least this big.
+    ///
+    /// The map is what a feature becomes when it is smaller than a voxel.
+    /// Where the voxels are finer than that, the real thing is there —
+    /// carved, at full detail — and painting over it would replace
+    /// geometry with a texel grid. So the host says how coarse a chunk
+    /// has to be before the approximation is the better answer.
+    pub min_voxel_m: f32,
     /// Bumped when the raster changes, so the GPU copy is rebuilt only
     /// then.
     pub generation: u64,
@@ -274,11 +286,13 @@ impl SurfaceMap {
     /// the buffer rather than in a uniform so that no layout twin grows a
     /// field: `ChunkParams` is already mirrored in two shaders and Rust.
     fn to_words(&self) -> Vec<u32> {
-        let mut out = Vec::with_capacity(4 + self.texels.len());
+        let mut out = Vec::with_capacity(SURFACE_MAP_HEADER + self.texels.len());
         out.push(self.size);
         out.push(self.texel_m.to_bits());
         out.push(self.origin.x.to_bits());
         out.push(self.origin.y.to_bits());
+        out.push(self.min_voxel_m.to_bits());
+        out.resize(SURFACE_MAP_HEADER, 0);
         out.extend_from_slice(&self.texels);
         out
     }
@@ -837,7 +851,7 @@ fn init_chunk_resources(
         surface_map: None,
         surface_map_dummy: render_device.create_buffer_with_data(&BufferInitDescriptor {
             label: Some("voxel_surface_map_dummy"),
-            contents: bytemuck::cast_slice(&[0u32; 4]),
+            contents: bytemuck::cast_slice(&[0u32; SURFACE_MAP_HEADER]),
             usage: BufferUsages::STORAGE,
         }),
         env_uniform: UniformBuffer::default(),

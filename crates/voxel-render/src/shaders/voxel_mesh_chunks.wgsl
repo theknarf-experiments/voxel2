@@ -81,8 +81,10 @@ struct WorldProgram {
 }
 @group(0) @binding(6) var<storage, read> prog: WorldProgram;
 
-// Surface material map: [size, texel_m, origin_x, origin_z, then one byte
-// per texel, four per word, row-major]. Size 0 = nothing painted.
+// Surface material map: a header, then one byte per texel, four per
+// word, row-major. Size 0 = nothing painted. Layout twin of
+// `SurfaceMap::to_words`.
+const SURFACE_MAP_HEADER: u32 = 8u;
 @group(0) @binding(7) var<storage, read> surface_map: array<u32>;
 
 /// The painted material at a world position, or 0 for "leave the
@@ -105,7 +107,7 @@ fn painted_material(world_xz: vec2<f32>) -> u32 {
         return 0u;
     }
     let idx = u32(t.y) * size + u32(t.x);
-    return (surface_map[4u + idx / 4u] >> ((idx % 4u) * 8u)) & 0xFFu;
+    return (surface_map[SURFACE_MAP_HEADER + idx / 4u] >> ((idx % 4u) * 8u)) & 0xFFu;
 }
 
 fn corner_offset(i: u32) -> vec3<i32> {
@@ -385,10 +387,14 @@ fn sn_vertices(@builtin(global_invocation_id) id: vec3<u32>) {
             mat = sample_material(c + corner_offset(i));
         }
     }
-    // A painted surface overrides the material of an UP-FACING vertex.
+    // A painted surface overrides the material of an UP-FACING vertex,
+    // and only where the chunk is too coarse to show the real thing.
+    //
     // Up-facing because the map is a plan view: a road crossing a cliff
-    // paints the ledge it runs along, not the cliff face beside it.
-    if (normal.y > 0.5) {
+    // paints the ledge it runs along, not the cliff face beside it. Only
+    // when coarse because near the camera the road is CARVED, at full
+    // detail — painting over it would replace geometry with a texel grid.
+    if (normal.y > 0.5 && params.origin.w >= bitcast<f32>(surface_map[4])) {
         let painted = painted_material(params.origin.xyz.xz + pv.xz * params.origin.w);
         if (painted != 0u) {
             mat = painted;
