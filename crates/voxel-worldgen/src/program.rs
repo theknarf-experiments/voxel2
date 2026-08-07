@@ -16,6 +16,7 @@ use glam::{IVec2, IVec3, Vec2, Vec3};
 fn round_half_up(x: f32) -> f32 {
     (x + 0.5).floor()
 }
+use voxel_core::interval::Interval;
 use voxel_core::worldop::*;
 
 
@@ -187,6 +188,30 @@ pub fn eval_height(ops: &[WorldOp], seed: u32, xz: Vec2, vs: f32) -> f32 {
         include!(concat!(env!("OUT_DIR"), "/op_arms_height.rs"));
     }
     h
+}
+
+/// Bounds on the program's SDF over a box, or `None` if the program
+/// contains an op nobody has taught to bound itself.
+///
+/// The cheap half of "is there anything here". A box whose bound is
+/// entirely positive is all air and entirely negative is all solid —
+/// either way no surface crosses it, so there is nothing to mesh and no
+/// reason to spend a 38³ density pass discovering that. On the shipped
+/// planet that is 11,177 of 13,083 chunks.
+///
+/// Says nothing about planning ops, which carve into the world after
+/// this: a caller that prunes on this answer must either bound those too
+/// or only prune where they cannot reach.
+pub fn eval_range(ops: &[WorldOp], min: Vec3, max: Vec3) -> Option<Interval> {
+    // Air, until an op says otherwise — the same start `eval` uses.
+    let mut d = Interval::point(BIG);
+    let mut h = Interval::point(0.0);
+    let py = Interval::new(min.y, max.y);
+    for op in ops {
+        // Generated from voxel-core::opgen; see `OpDef::range`.
+        include!(concat!(env!("OUT_DIR"), "/op_arms_range.rs"));
+    }
+    Some(d)
 }
 
 /// The Y-lattice spacing of the program, if it has one (used by planning
@@ -493,5 +518,73 @@ mod tests {
             }
         }
         assert!(solid > 20, "no floating solids: {solid}");
+    }
+}
+
+#[cfg(test)]
+mod range_tests {
+    use super::*;
+
+    /// The bound must contain what the real evaluator produces anywhere
+    /// in the box. This is the test the whole optimisation rests on: a
+    /// bound that is too wide costs a chunk we did not need to generate,
+    /// one that is too narrow deletes world.
+    #[test]
+    fn the_bound_contains_the_sdf_it_bounds() {
+        let ops = planet_program();
+        let mut rng = voxel_core::seed::Rng::new(0xB0DE);
+        let mut informative = 0;
+        for _ in 0..4_000 {
+            let c = Vec3::new(
+                (rng.next_f32() - 0.5) * 60_000.0,
+                (rng.next_f32() - 0.5) * 4_000.0,
+                (rng.next_f32() - 0.5) * 60_000.0,
+            );
+            let edge = 3.2 * (1u32 << (rng.next_f32() * 11.0) as u32) as f32;
+            let (min, max) = (c, c + Vec3::splat(edge));
+            let bound = eval_range(&ops, min, max).expect("planet is analysable");
+            if !bound.straddles_zero() {
+                informative += 1;
+            }
+            for _ in 0..12 {
+                let p = Vec3::new(
+                    min.x + (max.x - min.x) * rng.next_f32(),
+                    min.y + (max.y - min.y) * rng.next_f32(),
+                    min.z + (max.z - min.z) * rng.next_f32(),
+                );
+                let (d, _) = eval(&ops, 0, p, 1.0);
+                assert!(
+                    bound.contains(d),
+                    "sdf {d} at {p:?} escapes {bound:?} for box {min:?}..{max:?}"
+                );
+            }
+        }
+        // A bound that always says "maybe" would pass the above and be
+        // worthless.
+        println!("decided {informative} of 4000 boxes");
+        assert!(
+            informative > 1_000,
+            "only {informative} of 4000 boxes were decided; the bound is too loose to prune"
+        );
+    }
+
+    /// A world that can put solid anywhere declines to be analysed,
+    /// rather than claiming a bound it cannot justify.
+    #[test]
+    fn a_volumetric_world_declines() {
+        assert!(eval_range(&mega_program(), Vec3::ZERO, Vec3::splat(100.0)).is_none());
+    }
+
+    /// The two answers worth having, on the world they are for.
+    #[test]
+    fn sky_is_air_and_the_deep_is_solid() {
+        let ops = planet_program();
+        let sky = eval_range(&ops, Vec3::new(0.0, 8_000.0, 0.0), Vec3::new(800.0, 8_800.0, 800.0))
+            .unwrap();
+        assert!(sky.is_positive(), "sky should be all air: {sky:?}");
+        let deep =
+            eval_range(&ops, Vec3::new(0.0, -8_800.0, 0.0), Vec3::new(800.0, -8_000.0, 800.0))
+                .unwrap();
+        assert!(deep.is_negative(), "the deep should be all solid: {deep:?}");
     }
 }

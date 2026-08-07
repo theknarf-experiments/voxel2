@@ -34,6 +34,20 @@ pub struct OpDef {
     pub height: bool,
     /// Body in the shared dialect.
     pub body: &'static str,
+    /// How this op bounds the registers over a BOX, in plain Rust against
+    /// [`crate::interval::Interval`], with the same `@p0.x` param tokens.
+    ///
+    /// Range analysis runs on the CPU only, so this needs no WGSL twin:
+    /// it is one more line in this table rather than a third dialect.
+    /// `None` means nobody has bounded this op yet, and a program
+    /// containing one declines to be analysed — unbounded costs pruning,
+    /// never correctness, which is what lets a heightfield be pruned and
+    /// an infinite megastructure simply not be.
+    ///
+    /// In scope: `d` and `h` (`Interval`, the SDF and height registers)
+    /// and `py` (the box's y extent). Must be CONSERVATIVE: the result
+    /// has to contain every value the op could produce over the box.
+    pub range: Option<&'static str>,
 }
 
 pub const OPS: &[OpDef] = &[
@@ -43,18 +57,30 @@ pub const OPS: &[OpDef] = &[
         height: true,
         body: "\
 h += @FBM(pxz + warp + @p0.xy, @p0.z, to_i(@p1.x), @VS@to_u(@p1.y)) * @p0.w;",
+        range: Some("\
+            // Each octave is amp * (noise - 0.5), noise in [0,1) and amp
+            // halving from 0.5, so the sum is bounded by 0.5 wherever it
+            // is sampled — which is also why a warp before it cannot
+            // widen this.
+            h = h + Interval::symmetric(0.5 * @p0.w);"),
     },
     OpDef {
         name: "WOP_HEIGHT_OFFSET",
         kind: WOP_HEIGHT_OFFSET,
         height: true,
         body: "h += @p0.x;",
+        range: Some("\
+            h = h + @p0.x;"),
     },
     OpDef {
         name: "WOP_HEIGHT_STEP",
         kind: WOP_HEIGHT_STEP,
         height: true,
         body: "h += @p0.z * smoothstep(@p0.x, @p0.y, h);",
+        range: Some("\
+            // smoothstep is in [0, 1]: the step adds between nothing and
+            // its amplitude, of either sign.
+            h = h + Interval::new(0.0, @p0.z);"),
     },
     OpDef {
         name: "WOP_WARP_XZ",
@@ -65,6 +91,9 @@ let q = pxz + @p0.zw;
 let oct = to_i(@p1.x);
 warp.x += @FBM(q, @p0.x, oct, @VS@0) * @p0.y;
 warp.y += @FBM(q + v2(713.0, -337.0), @p0.x, oct, @VS@0) * @p0.y;",
+        range: Some("\
+            // Warps the xz that later height ops sample, and an FBM bound
+            // does not depend on where it is sampled."),
     },
     OpDef {
         name: "WOP_FBM3",
@@ -79,6 +108,7 @@ if @p1.w < 0.5 {
 } else {
     d = max(d, -sd);
 }",
+        range: None,
     },
     OpDef {
         name: "WOP_HEIGHT_SURFACE",
@@ -87,12 +117,16 @@ if @p1.w < 0.5 {
         body: "\
 let nd = p.y - h;
 if nd < d { d = nd; mat = @mat; }",
+        range: Some("\
+            // Solid below the height, air above it.
+            d = d.min(py - h);"),
     },
     OpDef {
         name: "WOP_COARSE_SOLID",
         kind: WOP_COARSE_SOLID,
         height: false,
         body: "if SOLID < d { d = SOLID; mat = @mat; }",
+        range: None,
     },
     OpDef {
         name: "WOP_LATTICE_Y",
@@ -101,6 +135,7 @@ if nd < d { d = nd; mat = @mat; }",
         body: "\
 level = round_half_up(p.y / @p0.x);
 fy = p.y - level * @p0.x;",
+        range: None,
     },
     OpDef {
         name: "WOP_SLABS_Y",
@@ -109,6 +144,7 @@ fy = p.y - level * @p0.x;",
         body: "\
 let nd = abs(fy) - @p0.x;
 if nd < d { d = nd; mat = @mat; }",
+        range: None,
     },
     OpDef {
         name: "WOP_GRID_HOLES",
@@ -122,6 +158,7 @@ if hash3(iv3(c.x, to_i(level), c.y)) < @p0.y {
     let cut = sd_box(v3(p.x - oc.x, fy, p.z - oc.y), @p1.xyz);
     d = max(d, -cut);
 }",
+        range: None,
     },
     OpDef {
         name: "WOP_PILLARS_XZ",
@@ -135,6 +172,7 @@ let q = pxz - to_v2(c) * sp - jit;
 let girth = @p0.z + hash2(c + iv2(9, -4)) * @p0.w;
 let nd = max(abs(q.x), abs(q.y)) - girth;
 if nd < d { d = nd; mat = @mat; }",
+        range: None,
     },
     OpDef {
         name: "WOP_WALLS",
@@ -158,6 +196,7 @@ if hash2(iv2(to_i(wi) + to_i(@p1.x), to_i(level))) < @p0.z {
     }
     if wall < d { d = wall; mat = @mat; }
 }",
+        range: None,
     },
     OpDef {
         name: "WOP_SHAFTS_XZ",
@@ -170,12 +209,14 @@ let jit = v2(hash2(c + iv2(41, 13)) - 0.5, hash2(c + iv2(-7, 99)) - 0.5) * @p0.y
 sxz = pxz - to_v2(c) * sp - jit;
 sr = @p0.z + hash2(c) * @p0.w;
 shaft = length(sxz) - sr;",
+        range: None,
     },
     OpDef {
         name: "WOP_SHAFTS_CUT",
         kind: WOP_SHAFTS_CUT,
         height: false,
         body: "d = max(d, -shaft);",
+        range: None,
     },
     OpDef {
         name: "WOP_BEAMS",
@@ -187,6 +228,7 @@ if abs(level - round_half_up(level / n) * n) < 0.5 {
     let beam = max(max(abs(sxz.y) - @p0.y, abs(fy + @p0.z) - @p0.w), length(sxz) - (sr + @p1.x));
     if beam < d { d = beam; mat = @mat; }
 }",
+        range: None,
     },
 ];
 
@@ -269,6 +311,35 @@ pub fn rust_arms(ctx: Ctx) -> String {
         ));
     }
     out.push_str("    _ => {}\n}\n");
+    out
+}
+
+/// The Rust `match op.kind { ... }` for the RANGE interpreter.
+///
+/// Three outcomes, and the difference between them is the whole safety
+/// argument:
+///
+/// - an op with a rule bounds the registers;
+/// - an op in this table WITHOUT one returns `None`, because it can put
+///   solid somewhere this analysis cannot see;
+/// - an op that is not in this table at all is not part of the SDF —
+///   `eval` ignores it too, by the same `_ => {}`.
+pub fn rust_range_arms() -> String {
+    let mut out = String::from("match op.kind {\n");
+    for op in OPS {
+        match op.range {
+            Some(rule) => out.push_str(&format!(
+                "    {} => {{\n{}\n    }}\n",
+                op.name,
+                indent(&substitute(rule, Ctx::Full, false), "        ")
+            )),
+            None => out.push_str(&format!(
+                "    {} => return None, // unbounded: no rule yet\n",
+                op.name
+            )),
+        }
+    }
+    out.push_str("    _ => {} // not an SDF op\n}\n");
     out
 }
 
