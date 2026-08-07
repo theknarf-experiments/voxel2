@@ -12,6 +12,7 @@ use std::collections::HashMap;
 
 use bevy::mesh::{Indices, PrimitiveTopology};
 use bevy::light::NotShadowCaster;
+use bevy::math::DVec3;
 use bevy::prelude::*;
 use voxel_layers::{ChunkCtx, Dep, Layer, LayerChunk, LayerGraph, TopDep};
 
@@ -326,8 +327,8 @@ impl Layer for FarForest {
     type Chunk = FarForestChunk;
     const NAME: &'static str = "far-forest";
 
-    fn chunk_extent(&self) -> IVec3 {
-        IVec3::new(SUPER_M as i32, 0, SUPER_M as i32)
+    fn chunk_extent(&self) -> DVec3 {
+        DVec3::new(SUPER_M as f64, 0.0, SUPER_M as f64)
     }
 
     fn dependencies(&self, _level: u32) -> Vec<Dep> {

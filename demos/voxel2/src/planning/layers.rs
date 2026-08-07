@@ -4,7 +4,7 @@
 //! roads, rivers, caves, dungeons, districts) are configurations of these
 //! kinds, not engine code.
 
-use glam::{IVec3, Vec2, Vec3};
+use glam::{DVec3, IVec3, Vec2, Vec3};
 use voxel_core::csg::CsgOp;
 use voxel_layers::{ChunkCtx, Dep, IAabb, Layer, LayerChunk, LayerGraph};
 
@@ -58,8 +58,8 @@ impl Layer for ScatterSites {
     type Chunk = SitesChunk;
     const NAME: &'static str = "stack/scatter";
 
-    fn chunk_extent(&self) -> IVec3 {
-        IVec3::new(self.cfg.cell_m, 0, self.cfg.cell_m)
+    fn chunk_extent(&self) -> DVec3 {
+        DVec3::new(self.cfg.cell_m as f64, 0.0, self.cfg.cell_m as f64)
     }
 
     fn dependencies(&self, _level: u32) -> Vec<Dep> {
@@ -145,8 +145,8 @@ impl Layer for BiomeField {
     type Chunk = BiomeChunk;
     const NAME: &'static str = "stack/biomes";
 
-    fn chunk_extent(&self) -> IVec3 {
-        IVec3::new(self.cfg.cell_m, 0, self.cfg.cell_m)
+    fn chunk_extent(&self) -> DVec3 {
+        DVec3::new(self.cfg.cell_m as f64, 0.0, self.cfg.cell_m as f64)
     }
 
 }
@@ -277,8 +277,8 @@ impl Layer for Scatter3Sites {
     type Chunk = Sites3Chunk;
     const NAME: &'static str = "stack/scatter3";
 
-    fn chunk_extent(&self) -> IVec3 {
-        IVec3::new(self.cfg.cell_m, self.cfg.cell_y_m, self.cfg.cell_m)
+    fn chunk_extent(&self) -> DVec3 {
+        DVec3::new(self.cfg.cell_m as f64, self.cfg.cell_y_m as f64, self.cfg.cell_m as f64)
     }
 
     fn dependencies(&self, _level: u32) -> Vec<Dep> {
@@ -363,8 +363,8 @@ impl Layer for Connect3Paths {
     type Chunk = Paths3Chunk;
     const NAME: &'static str = "stack/connect3";
 
-    fn chunk_extent(&self) -> IVec3 {
-        IVec3::new(self.cell_m, self.cell_y_m, self.cell_m)
+    fn chunk_extent(&self) -> DVec3 {
+        DVec3::new(self.cell_m as f64, self.cell_y_m as f64, self.cell_m as f64)
     }
 
     fn dependencies(&self, _level: u32) -> Vec<Dep> {
@@ -468,8 +468,8 @@ impl Layer for ConnectPaths {
     type Chunk = PathsChunk;
     const NAME: &'static str = "stack/connect";
 
-    fn chunk_extent(&self) -> IVec3 {
-        IVec3::new(self.cell_m, 0, self.cell_m)
+    fn chunk_extent(&self) -> DVec3 {
+        DVec3::new(self.cell_m as f64, 0.0, self.cell_m as f64)
     }
 
     fn dependencies(&self, _level: u32) -> Vec<Dep> {
@@ -572,8 +572,8 @@ impl Layer for FlowCourses {
     type Chunk = CoursesChunk;
     const NAME: &'static str = "stack/flow";
 
-    fn chunk_extent(&self) -> IVec3 {
-        IVec3::new(self.cell_m, 0, self.cell_m)
+    fn chunk_extent(&self) -> DVec3 {
+        DVec3::new(self.cell_m as f64, 0.0, self.cell_m as f64)
     }
 
     fn dependencies(&self, _level: u32) -> Vec<Dep> {
@@ -664,8 +664,8 @@ impl Layer for WormBurrows {
     type Chunk = WormsChunk;
     const NAME: &'static str = "stack/worm";
 
-    fn chunk_extent(&self) -> IVec3 {
-        IVec3::new(self.cell_m, 0, self.cell_m)
+    fn chunk_extent(&self) -> DVec3 {
+        DVec3::new(self.cell_m as f64, 0.0, self.cell_m as f64)
     }
 
     fn dependencies(&self, _level: u32) -> Vec<Dep> {
@@ -804,8 +804,8 @@ impl Layer for EmitPatches {
     type Chunk = PatchChunk;
     const NAME: &'static str = "stack/emit";
 
-    fn chunk_extent(&self) -> IVec3 {
-        IVec3::new(self.cell_m, self.cell_y_m, self.cell_m)
+    fn chunk_extent(&self) -> DVec3 {
+        DVec3::new(self.cell_m as f64, self.cell_y_m as f64, self.cell_m as f64)
     }
 
     fn dependencies(&self, _level: u32) -> Vec<Dep> {

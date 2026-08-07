@@ -11,7 +11,7 @@ use std::sync::{
     Arc,
 };
 
-use glam::IVec3;
+use glam::{DVec3, IVec3};
 use voxel_layers::{ChunkCtx, Dep, IAabb, Layer, LayerChunk, LayerGraph, TopDep};
 
 const CELL: i32 = 256;
@@ -52,8 +52,8 @@ struct BaseChunk {
 impl Layer for Base {
     type Chunk = BaseChunk;
     const NAME: &'static str = "base";
-    fn chunk_extent(&self) -> IVec3 {
-        IVec3::new(CELL, 0, CELL)
+    fn chunk_extent(&self) -> DVec3 {
+        DVec3::new(CELL as f64, 0.0, CELL as f64)
     }
     fn levels(&self) -> u32 {
         2
@@ -116,8 +116,8 @@ struct PlayChunk {
 impl Layer for Play {
     type Chunk = PlayChunk;
     const NAME: &'static str = "play";
-    fn chunk_extent(&self) -> IVec3 {
-        IVec3::new(CELL, 0, CELL)
+    fn chunk_extent(&self) -> DVec3 {
+        DVec3::new(CELL as f64, 0.0, CELL as f64)
     }
     fn dependencies(&self, _level: u32) -> Vec<Dep> {
         vec![Dep::named_at(

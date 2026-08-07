@@ -13,6 +13,7 @@
 //! left is a chunk that declares its padding, fills itself in, and gives
 //! the geometry back when nothing needs it.
 
+use bevy::math::DVec3;
 use bevy::prelude::*;
 use voxel_layers::{ChunkCtx, Dep, Layer, LayerChunk, LayerGraph, TopDep};
 
@@ -54,8 +55,8 @@ impl Layer for RibbonSurface {
     type Chunk = RibbonSurfaceChunk;
     const NAME: &'static str = "ribbon-surface";
 
-    fn chunk_extent(&self) -> IVec3 {
-        IVec3::new(RIBBON_TILE_M, 0, RIBBON_TILE_M)
+    fn chunk_extent(&self) -> DVec3 {
+        DVec3::new(RIBBON_TILE_M as f64, 0.0, RIBBON_TILE_M as f64)
     }
 
     fn dependencies(&self, _level: u32) -> Vec<Dep> {

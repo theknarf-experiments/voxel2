@@ -7,7 +7,7 @@
 //! own entities, GPU slots or pooled buffers — the framework guarantees
 //! destroy runs exactly once for every create, in dependency order.
 
-use glam::IVec3;
+use glam::{DVec3, IVec3};
 
 use crate::layer::{layer_key, LayerKey};
 
@@ -72,8 +72,10 @@ pub trait Layer: Send + Sync + 'static {
     /// Renaming reshuffles randomness — treat like a save-format change.
     const NAME: &'static str;
 
-    /// Chunk extent in meters per axis (0 = collapsed axis).
-    fn chunk_extent(&self) -> IVec3;
+    /// Chunk extent in meters per axis (0 = collapsed axis). Fractional,
+    /// because a voxel LOD level's chunk edge is `3.2 · 2^level` and a
+    /// layer that owns one voxel chunk per cell has to sit on that grid.
+    fn chunk_extent(&self) -> DVec3;
 
     /// Generation levels within this layer. Each is a separate create /
     /// destroy pass over the same chunk, and other layers can depend on

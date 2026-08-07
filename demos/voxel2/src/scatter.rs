@@ -16,6 +16,7 @@
 
 use std::sync::Arc;
 
+use bevy::math::DVec3;
 use bevy::prelude::*;
 use voxel_engine::{
     level::{LevelDef, ScatterDef, ScatterOutput},
@@ -54,8 +55,8 @@ impl Layer for ScatterPopulation {
     type Chunk = ScatterChunk;
     const NAME: &'static str = "scatter";
 
-    fn chunk_extent(&self) -> IVec3 {
-        IVec3::new(self.def.tile_m as i32, 0, self.def.tile_m as i32)
+    fn chunk_extent(&self) -> DVec3 {
+        DVec3::new(self.def.tile_m as f64, 0.0, self.def.tile_m as f64)
     }
 
     fn dependencies(&self, _level: u32) -> Vec<Dep> {
@@ -150,8 +151,8 @@ impl Layer for ScatterDraw {
     type Chunk = ScatterDrawChunk;
     const NAME: &'static str = "scatter-draw";
 
-    fn chunk_extent(&self) -> IVec3 {
-        IVec3::new(self.tile_m as i32, 0, self.tile_m as i32)
+    fn chunk_extent(&self) -> DVec3 {
+        DVec3::new(self.tile_m as f64, 0.0, self.tile_m as f64)
     }
 
     fn dependencies(&self, _level: u32) -> Vec<Dep> {

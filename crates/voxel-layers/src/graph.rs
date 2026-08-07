@@ -18,7 +18,7 @@ use std::marker::PhantomData;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 
-use glam::IVec3;
+use glam::{DVec3, IVec3};
 use voxel_core::seed::{chunk_seed, Rng};
 
 use crate::layer::{layer_key, IAabb, LayerKey};
@@ -32,7 +32,7 @@ type NewChunkFn = Box<dyn Fn() -> ErasedChunk + Send + Sync>;
 struct LayerEntry {
     name: String,
     type_id: TypeId,
-    extent: IVec3,
+    extent: DVec3,
     levels: u32,
     /// `level_padding(l)` captured at registration.
     level_pads: Vec<IVec3>,
@@ -144,8 +144,8 @@ impl LayerGraph {
         );
         let extent = layer.chunk_extent();
         assert!(
-            extent.cmpge(IVec3::ZERO).all(),
-            "chunk_extent must be non-negative"
+            extent.cmpge(DVec3::ZERO).all() && extent.is_finite(),
+            "chunk_extent must be non-negative and finite"
         );
         let levels = layer.levels();
         assert!(levels >= 1, "a layer needs at least one level");
@@ -334,11 +334,11 @@ impl LayerGraph {
             bounds.min.y.saturating_add(bounds.max.y) / 2,
             bounds.min.z.saturating_add(bounds.max.z) / 2,
         );
-        let extent = entry.extent.max(IVec3::ONE);
+        let extent = entry.extent.max(DVec3::ONE);
         let center_coord = IVec3::new(
-            center.x.div_euclid(extent.x),
-            center.y.div_euclid(extent.y),
-            center.z.div_euclid(extent.z),
+            (center.x as f64 / extent.x).floor() as i32,
+            (center.y as f64 / extent.y).floor() as i32,
+            (center.z as f64 / extent.z).floor() as i32,
         );
         let mut missing: Vec<Arc<ChunkSlot>> = slots
             .iter()
