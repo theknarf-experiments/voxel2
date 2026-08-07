@@ -27,7 +27,9 @@ pub mod runtime;
 pub mod store;
 pub mod traits;
 
-pub use graph::{dep_bounds, ChunkCtx, ChunkRef, LayerGraph, LayerStats, TopDep, View};
+pub use graph::{
+    dep_bounds, ChunkCtx, ChunkRef, CoordFilter, LayerGraph, LayerStats, TopDep, View,
+};
 pub use layer::{layer_key, IAabb, LayerKey};
 pub use runtime::{LayerRuntime, TopHandle};
 pub use store::Usage;

@@ -487,14 +487,17 @@ fn chunk_objects_are_pooled_across_residency() {
     assert_eq!(play.destroyed, held, "the first window was released");
 }
 
-/// A top dependency can have a hole, so a level can be resident exactly
-/// where it is the finest one covering a point.
+/// A top dependency can be shaped by a predicate, so a level can be
+/// resident exactly where it is the finest one covering a point.
 ///
 /// The reference cannot express this — a top dependency is a box, and its
 /// LOD sample keeps every level in its own nested ball. That is affordable
-/// at four levels and not at twelve.
+/// at four levels and not at twelve, and neither is the obvious next
+/// guess: measured against the shipped LOD configurations, a box with a
+/// hole holds 2.35x the chunks the field draws, while the field as a
+/// predicate holds 1.09x.
 #[test]
-fn a_top_dependency_can_be_a_shell() {
+fn a_top_dependency_can_be_shaped_by_a_predicate() {
     let ledger = Arc::new(Ledger::default());
     let graph = graph(ledger.clone(), 0, 0, 1);
 
@@ -510,13 +513,16 @@ fn a_top_dependency_can_be_a_shell() {
     graph.process_top(&mut solid);
     assert_eq!(graph.resident_chunks(), 0);
 
-    let mut shell = TopDep::at_level("play", 0, size).with_hole(IVec3::new(CELL * 3, 0, CELL * 3));
+    let mut shell = TopDep::at_level("play", 0, size).with_filter(|focus: IVec3| {
+        let center = IVec3::new(focus.x.div_euclid(CELL), 0, focus.z.div_euclid(CELL));
+        Arc::new(move |coord: IVec3| (coord - center).abs().max_element() > 1)
+    });
     shell.set_focus(&graph, IVec3::new(CELL / 2, 0, CELL / 2));
     graph.process_top(&mut shell);
     assert_eq!(
         graph.resident_in("play"),
         full - 9,
-        "the hole should have removed exactly the middle 3x3",
+        "the predicate should have removed exactly the middle 3x3",
     );
 
     // And it still tears down cleanly.
@@ -529,25 +535,103 @@ fn a_top_dependency_can_be_a_shell() {
     );
 }
 
-/// A chunk straddling the hole's edge is still wanted — it is partly
-/// inside the shell, and half a chunk is not a thing.
+/// A filtered dependency re-shapes on ANY focus move, not only when the
+/// box covers different cells: its shape is a function of where the focus
+/// is. Hysteresis is the publisher's job — quantize before publishing.
 #[test]
-fn a_shell_keeps_chunks_straddling_its_hole() {
+fn a_predicate_follows_the_focus_within_one_cell() {
     let ledger = Arc::new(Ledger::default());
     let graph = graph(ledger, 0, 0, 1);
 
-    // Focused on a chunk boundary, so the hole's edges fall mid-chunk:
-    // it spans [-1.5, 1.5] cells, fully containing only chunks -1 and 0.
-    let mut shell = TopDep::at_level("play", 0, IVec3::new(CELL * 7, 0, CELL * 7))
-        .with_hole(IVec3::new(CELL * 3, 0, CELL * 3));
-    shell.set_focus(&graph, IVec3::ZERO);
-    graph.process_top(&mut shell);
-
-    // Focused on a boundary the 7-cell window straddles 8 chunks per
-    // axis; the hole wholly contains 2 of them per axis.
-    assert_eq!(
-        graph.resident_in("play"),
-        64 - 4,
-        "only chunks wholly inside the hole should go",
+    // Wants one cell: whichever contains the focus.
+    let mut top = TopDep::at_level("play", 0, IVec3::new(CELL * 7, 0, CELL * 7)).with_filter(
+        |focus: IVec3| {
+            let cell = IVec3::new(focus.x.div_euclid(CELL), 0, focus.z.div_euclid(CELL));
+            Arc::new(move |coord: IVec3| coord == cell)
+        },
     );
+    top.set_focus(&graph, IVec3::new(1, 0, 1));
+    graph.process_top(&mut top);
+    assert_eq!(graph.resident_in("play"), 1);
+
+    // A move well inside the window, landing in the next cell: the box
+    // covers the same indices, and the shape still has to follow.
+    top.set_focus(&graph, IVec3::new(CELL + 1, 0, 1));
+    assert!(top.changed(), "a filtered dependency must re-evaluate on a move");
+    graph.process_top(&mut top);
+    assert_eq!(graph.resident_in("play"), 1);
+}
+
+/// Handing a region from one top dependency to another must not destroy
+/// it in between. Every ensure runs before any release, so the chunk both
+/// of them touch is never briefly held by neither.
+///
+/// Per-dependency ordering is not enough, and which dependency is
+/// processed first decides whether it shows: the one GIVING UP a region
+/// releases it before the one taking it has asked. For consecutive LOD
+/// levels — one shrinking exactly where the other grows — that gap is a
+/// hole in the world, so the test runs both orders.
+#[test]
+fn a_region_handed_between_top_dependencies_is_never_dropped() {
+    for (order, names) in [([0, 1], "grower first"), ([1, 0], "shrinker first")] {
+        let ledger = Arc::new(Ledger::default());
+        let graph = graph(ledger.clone(), 0, 0, 1);
+
+        // Two bands abutting at the focus cell, both following the focus:
+        // the left one covers the two cells below it, the right one the
+        // two at and above it.
+        let window = IVec3::new(CELL * 9, 0, CELL * 9);
+        let band = |lo: i32, hi: i32| {
+            move |focus: IVec3| -> voxel_layers::CoordFilter {
+                let c = focus.x.div_euclid(CELL);
+                Arc::new(move |coord: IVec3| {
+                    coord.y == 0 && coord.z == 0 && coord.x >= c + lo && coord.x < c + hi
+                })
+            }
+        };
+        let mut tops = vec![
+            TopDep::at_level("play", 0, window).with_filter(band(-2, 0)),
+            TopDep::at_level("play", 0, window).with_filter(band(0, 2)),
+        ];
+        let focus = |tops: &mut Vec<TopDep>, cell: i32| {
+            for i in order {
+                tops[i].set_focus(&graph, IVec3::new(cell * CELL + CELL / 2, 0, 0));
+            }
+            let mut ordered: Vec<TopDep> = Vec::new();
+            for i in order {
+                ordered.push(std::mem::replace(
+                    &mut tops[i],
+                    TopDep::at_level("play", 0, IVec3::ZERO),
+                ));
+            }
+            graph.process_tops(&mut ordered);
+            for (n, i) in order.into_iter().enumerate() {
+                tops[i] = ordered.remove(0);
+                let _ = n;
+            }
+        };
+
+        let play = |graph: &LayerGraph| -> (usize, usize) {
+            let stats = graph.layer_stats();
+            let s = stats.iter().find(|s| s.name == "play").expect("play");
+            (s.created, s.destroyed)
+        };
+
+        focus(&mut tops, 0);
+        assert_eq!(graph.resident_in("play"), 4, "{names}");
+        assert_eq!(play(&graph), (4, 0), "{names}");
+
+        // The focus steps one cell right: the cell at the old boundary
+        // passes from the right band to the left one. One new cell is
+        // generated at the far end and one falls off the near end; the
+        // handed-over cell must not be touched at all.
+        focus(&mut tops, 1);
+        assert_eq!(graph.resident_in("play"), 4, "{names}");
+        assert_eq!(
+            play(&graph),
+            (5, 1),
+            "{names}: a handed-over chunk was destroyed and regenerated",
+        );
+        let _ = &ledger;
+    }
 }

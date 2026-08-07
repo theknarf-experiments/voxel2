@@ -27,6 +27,8 @@ use crate::traits::{Dep, Layer, LayerChunk, FINAL_LEVEL};
 use crate::store::{ChunkSlot, ErasedChunk, Provider, Usage};
 
 type CreateFn = Box<dyn Fn(&LayerGraph, &Arc<ChunkSlot>, u32) + Send + Sync>;
+/// Which chunk coordinates a top dependency wants, for one focus.
+pub type CoordFilter = Arc<dyn Fn(IVec3) -> bool + Send + Sync>;
 type NewChunkFn = Box<dyn Fn() -> ErasedChunk + Send + Sync>;
 
 struct LayerEntry {
@@ -261,22 +263,19 @@ impl LayerGraph {
         self.ensure_shell(key, bounds, None, level, usage);
     }
 
-    /// `ensure`, minus any chunk whose own bounds lie entirely inside
-    /// `hole`. A chunk straddling the hole's edge is kept: it is partly
-    /// wanted, and half a chunk is not a thing.
+    /// `ensure`, minus whatever `filter` rejects. A dependency's own
+    /// bounds are always a plain box; only a top dependency has a shape.
     fn ensure_shell(
         &self,
         key: LayerKey,
         bounds: IAabb,
-        hole: Option<IAabb>,
+        filter: Option<&CoordFilter>,
         level: u32,
         usage: &mut Usage,
     ) {
         let entry = self.entry(key);
         let (lo, hi) = range_of(entry.extent, bounds);
-        let wanted = |coord: IVec3| -> bool {
-            hole.is_none_or(|hole| !hole.contains(bounds_of(entry.extent, coord)))
-        };
+        let wanted = |coord: IVec3| -> bool { filter.is_none_or(|f| f(coord)) };
 
         // 1. Slots for every covered coordinate, creating empty ones as
         //    needed. Only this step touches the grid lock.
@@ -554,18 +553,32 @@ impl LayerGraph {
     /// moving focus safe — nothing a consumer still needs is ever released
     /// before its replacement exists.
     pub fn process_top(&self, dep: &mut TopDep) {
-        if !dep.changed {
-            return;
+        self.process_tops(std::slice::from_mut(dep));
+    }
+
+    /// The same, across a set: EVERY ensure before ANY release.
+    ///
+    /// Per-dependency ordering is not enough once two dependencies hand
+    /// regions to each other, which is what consecutive LOD levels do —
+    /// one shrinks exactly where the other grows. Released first, the
+    /// region belongs to neither for as long as it takes the second
+    /// dependency to be processed, and that gap is a hole in the world.
+    pub fn process_tops(&self, deps: &mut [TopDep]) {
+        let mut old: Vec<Usage> = Vec::new();
+        for dep in deps.iter_mut() {
+            if !dep.changed {
+                continue;
+            }
+            dep.changed = false;
+            old.extend(dep.current.take());
+            if dep.active && !self.aborting.load(Ordering::Relaxed) {
+                let mut usage = Usage::default();
+                self.ensure_shell(dep.key, dep.bounds(), dep.filter.as_ref(), dep.level, &mut usage);
+                dep.current = Some(usage);
+            }
         }
-        dep.changed = false;
-        let old = dep.current.take();
-        if dep.active {
-            let mut usage = Usage::default();
-            self.ensure_shell(dep.key, dep.bounds(), dep.hole_bounds(), dep.level, &mut usage);
-            dep.current = Some(usage);
-        }
-        if let Some(old) = old {
-            self.release(old);
+        for usage in old {
+            self.release(usage);
         }
     }
 
@@ -683,17 +696,21 @@ pub struct TopDep {
     key: LayerKey,
     level: u32,
     size: IVec3,
-    /// Optional inner box, centred on the focus, that this dependency
-    /// does *not* want.
+    /// Which coordinates inside `size` this dependency actually wants,
+    /// re-bound to the focus on every move.
     ///
-    /// The reference has no such thing: a top dependency is a box, and
-    /// its LOD sample keeps every level resident in its own nested ball.
-    /// That works at four levels and does not at twelve — an interior
-    /// world would hold roughly 5k meshed chunks against 3.6k slots.
-    /// What LOD actually wants is the annulus where a level is the finest
-    /// one covering a point, and a box cannot say that. So a top
-    /// dependency can have a hole.
-    hole: Option<IVec3>,
+    /// The reference has no such thing: a top dependency is a box, and its
+    /// LOD sample keeps every level resident in its own nested ball. That
+    /// works at four levels and does not at twelve — an interior world
+    /// would hold roughly 5k meshed chunks against 3.6k slots. An annulus
+    /// was the obvious next guess and is barely better: measured against
+    /// the shipped configurations, a box with a hole holds 2.35x the
+    /// chunks the LOD field draws, because a box's diagonal reaches 1.7x
+    /// further than its face. What a level wants is neither a box nor a
+    /// ring — it is the field, and the field is a predicate. Given one,
+    /// residency lands at 1.02-1.09x of the drawn set.
+    filter: Option<CoordFilter>,
+    make_filter: Option<Arc<dyn Fn(IVec3) -> CoordFilter + Send + Sync>>,
     focus: IVec3,
     /// Chunk index range the current focus resolves to. Movement within
     /// one chunk index is not a change — that quantization IS the
@@ -718,7 +735,8 @@ impl TopDep {
             key: layer_key(instance),
             level,
             size,
-            hole: None,
+            filter: None,
+            make_filter: None,
             focus: IVec3::ZERO,
             indices: None,
             current: None,
@@ -727,44 +745,25 @@ impl TopDep {
         }
     }
 
-    /// Half-open, and never degenerate: a size of 1 covers exactly the
-    /// chunk the focus is in. `focus - size/2 .. + size`, matching
-    /// LayerProcGen's `GridBounds(focus - size / 2, size)`.
-    /// Keep only the shell: chunks fully inside `hole` are not wanted.
-    /// Sized like `size`, so a level whose ring runs from `a` to `b` uses
-    /// `size = 2b`, `hole = 2a`.
-    pub fn with_hole(mut self, hole: IVec3) -> Self {
-        self.hole = Some(hole);
+    /// Want only the coordinates a predicate accepts. `make` is handed the
+    /// current focus and returns the test for it, so the shape follows the
+    /// focus instead of being a box around it.
+    ///
+    /// A filtered dependency re-evaluates whenever the focus MOVES, not
+    /// only when the covered chunk indices change: its shape depends on
+    /// where the focus is, not on which cells the box happens to touch.
+    /// Quantize the focus before publishing it if you want hysteresis —
+    /// which is what the reference's index quantization is, and what a
+    /// sticky camera anchor is.
+    pub fn with_filter(
+        mut self,
+        make: impl Fn(IVec3) -> CoordFilter + Send + Sync + 'static,
+    ) -> Self {
+        let make = Arc::new(make);
+        self.filter = Some(make(self.focus));
+        self.make_filter = Some(make);
         self.changed = true;
         self
-    }
-
-    /// The inner box this dependency does not want, in world space.
-    ///
-    /// A zero on an axis means "unrestricted there", matching how a
-    /// collapsed axis is read everywhere else — a planar layer's chunks
-    /// span all of y, so a hole that did not also span all of y could
-    /// never contain one.
-    fn hole_bounds(&self) -> Option<IAabb> {
-        let hole = self.hole?;
-        if hole.cmple(IVec3::ZERO).all() {
-            return None;
-        }
-        let axis = |size: i32, focus: i32| -> (i32, i32) {
-            if size <= 0 {
-                (i32::MIN, i32::MAX)
-            } else {
-                let min = focus - size / 2;
-                (min, min.saturating_add(size))
-            }
-        };
-        let (x0, x1) = axis(hole.x, self.focus.x);
-        let (y0, y1) = axis(hole.y, self.focus.y);
-        let (z0, z1) = axis(hole.z, self.focus.z);
-        Some(IAabb::new(
-            IVec3::new(x0, y0, z0),
-            IVec3::new(x1, y1, z1),
-        ))
     }
 
     pub fn bounds(&self) -> IAabb {
@@ -776,12 +775,19 @@ impl TopDep {
     /// Move the focus. Only marks the dependency changed when the covered
     /// chunk indices actually differ.
     pub fn set_focus(&mut self, graph: &LayerGraph, focus: IVec3) {
+        let moved = self.focus != focus;
         self.focus = focus;
         let extent = graph.entry(self.key).extent;
         let indices = range_of(extent, self.bounds());
         if self.indices != Some(indices) {
             self.indices = Some(indices);
             self.changed = true;
+        }
+        if let Some(make) = &self.make_filter {
+            if moved {
+                self.filter = Some(make(focus));
+                self.changed = true;
+            }
         }
     }
 

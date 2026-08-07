@@ -179,21 +179,20 @@ fn run(graph: Arc<LayerGraph>, shared: Arc<Shared>, mut tops: Vec<TopDep>) {
         // Sampled before the pass: a request arriving while it runs must
         // not be swallowed by the idle flag it sets afterwards.
         let requests = shared.requests.load(Ordering::Acquire);
-        let mut worked = false;
         for (slot, top) in shared.tops.iter().zip(tops.iter_mut()) {
             top.set_size(TopSlot::load(&slot.size));
             top.set_focus(&graph, TopSlot::load(&slot.focus));
             top.set_active(slot.active.load(Ordering::Relaxed));
-            if !top.changed() {
-                continue;
-            }
-            worked = true;
+        }
+        // One pass over all of them, not one pass each: every ensure runs
+        // before any release, so a region one dependency gives up and
+        // another takes is never held by neither. Consecutive LOD levels
+        // do exactly that at every ring boundary.
+        let worked = tops.iter().any(TopDep::changed);
+        if worked {
             shared.generating.store(true, Ordering::Relaxed);
-            graph.process_top(top);
+            graph.process_tops(&mut tops);
             shared.generating.store(false, Ordering::Relaxed);
-            if shared.stop.load(Ordering::Relaxed) {
-                break;
-            }
         }
         let quiet = !worked && shared.requests.load(Ordering::Acquire) == requests;
         shared.idle.store(quiet, Ordering::Release);
@@ -204,8 +203,8 @@ fn run(graph: Arc<LayerGraph>, shared: Arc<Shared>, mut tops: Vec<TopDep>) {
     // Release everything on the way out, so each chunk's destroy runs.
     for top in &mut tops {
         top.set_active(false);
-        graph.process_top(top);
     }
+    graph.process_tops(&mut tops);
 }
 
 /// App-side control of one top dependency. Every setter is a plain atomic
