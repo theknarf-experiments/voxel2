@@ -53,7 +53,8 @@ use bevy::{
             CachedComputePipelineId,
             Canonical, ColorTargetState, ColorWrites, CompareFunction, ComputePassDescriptor,
             ComputePipelineDescriptor, DepthStencilState, DynamicUniformBuffer, FragmentState,
-            IndexFormat, MapMode, PipelineCache, RenderPipeline, RenderPipelineDescriptor,
+            Face, IndexFormat, MapMode, PipelineCache, PrimitiveState, RenderPipeline,
+            RenderPipelineDescriptor,
             ShaderStages, ShaderType, Specializer, SpecializerKey, StorageBuffer, TextureFormat,
             UniformBuffer, Variants, VertexAttribute, VertexFormat, VertexState, VertexStepMode,
         },
@@ -1030,6 +1031,16 @@ fn init_chunk_resources(
             stencil: default(),
             bias: default(),
         }),
+        // The surface is CLOSED and consistently wound — `write_quad`
+        // flips the winding on the sign of the density, so every triangle
+        // faces out of the solid. Without this it defaults to `None` and
+        // every one of them is rasterized from behind as well, which on a
+        // fill-bound view is the whole back half of the world being
+        // shaded and then depth-rejected.
+        primitive: PrimitiveState {
+            cull_mode: Some(Face::Back),
+            ..default()
+        },
         ..default()
     };
     commands.insert_resource(ChunkDrawPipeline {
