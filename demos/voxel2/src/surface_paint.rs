@@ -37,6 +37,27 @@ const TEXEL_M: f32 = 16.0;
 /// covers far more than it needs to so this can be rare.
 const REPAINT_M: f32 = 4096.0;
 
+/// How far above a water surface the ground may still count as covered by
+/// it — how wide the course spreads, not whether it is drawn at all.
+///
+/// It cannot be zero. A course's level is set at `ground - 0.35` as the
+/// descent walks, so the ground along the centre line is always slightly
+/// ABOVE its own water surface, and the bed that would sink it is carved
+/// by the very ops this map exists because they stopped being served.
+///
+/// Beyond that it stays tight. Widening it to cover the texel's sampling
+/// error instead was the wrong repair: it does not reconnect a dashed
+/// course (the gaps are where the bank is steep, which no tolerance
+/// reaches without also flooding), and it smears gentle ground into
+/// lakes. Connectivity comes from the centre-line walk.
+const BANK_M: f32 = 1.0;
+
+/// Detail level for the ground samples. Matches the `flow` layer, so a
+/// course's centre line compares against the same heightfield that
+/// produced its levels. (The generator is unbanded, so this changes
+/// nothing today; it stays as the statement of intent.)
+const GROUND_SAMPLE_M: f32 = 8.0;
+
 /// Paint only chunks at least this coarse.
 ///
 /// A road is 4.8 m wide, so a chunk whose voxels are finer than about
@@ -91,13 +112,21 @@ fn repaint(
     // so the empty distance is not charged to `reads_missed`.
     let _peek = world.peek();
     for seg in world.ribbons_in(origin, origin + Vec2::splat(span)) {
-        // Only seated ribbons ARE the ground. A water course has its own
-        // level and its own surface; painting it here would smear a river
-        // across the hillside it flows past.
-        if !seg.seated {
-            continue;
-        }
-        painted += stroke(&mut texels, origin, seg.a, seg.b, seg.half_w, seg.material);
+        // A seated ribbon IS the ground, so its footprint is the whole
+        // capsule. A levelled one is a water surface at a height the plan
+        // decided: it covers its own course, and then only as much of the
+        // surrounding ground as sits under that height — otherwise the
+        // capsule smears the river across the hillside it flows past.
+        let under = (!seg.seated).then_some(seg.levels);
+        painted += stroke(
+            &mut texels,
+            origin,
+            seg.a,
+            seg.b,
+            seg.half_w,
+            seg.material,
+            under.map(|levels| (levels, &*ctx.generator)),
+        );
     }
 
     map.texels = std::sync::Arc::new(texels);
@@ -116,6 +145,10 @@ fn repaint(
 /// A capsule rather than a rectangle: consecutive segments of a path meet
 /// at an angle, and rectangles leave a wedge of unpainted ground at every
 /// corner of a road that turns.
+///
+/// `under` makes the stamp conditional on the ground lying beneath a water
+/// surface running from one end level to the other — what a levelled
+/// ribbon needs and a seated one must not have.
 fn stroke(
     texels: &mut [u32],
     origin: Vec2,
@@ -123,6 +156,7 @@ fn stroke(
     b: Vec2,
     half_w: f32,
     material: u32,
+    under: Option<([f32; 2], &voxel_worldgen::Generator)>,
 ) -> usize {
     let half_w = half_w.max(TEXEL_M * 0.5);
     let lo = a.min(b) - Vec2::splat(half_w);
@@ -146,12 +180,49 @@ fn stroke(
             if p.distance_squared(a + ab * t) > half_w * half_w {
                 continue;
             }
-            let idx = (z * MAP_SIZE + x) as usize;
-            let word = &mut texels[idx / 4];
-            let shift = (idx % 4) * 8;
-            *word = (*word & !(0xFFu32 << shift)) | ((material & 0xFF) << shift);
+            // Only where the water reaches. Sampled per texel, not per
+            // segment: a course runs down a valley whose width varies, and
+            // that variation is the whole difference between a river and a
+            // blue stripe ruled across the landscape.
+            if let Some((levels, generator)) = under {
+                let level = levels[0] + (levels[1] - levels[0]) * t;
+                if generator.height(p, GROUND_SAMPLE_M) > level + BANK_M {
+                    continue;
+                }
+            }
+            put(texels, x, z, material);
             n += 1;
         }
     }
+    // A course must stay CONNECTED, and the width pass cannot promise
+    // that: it samples texel CENTRES, and a river a few metres wide runs
+    // through 16 m texels whose centres sit up the bank and fail the
+    // depth test. The result is a river drawn as a dashed line. So the
+    // centre line is walked and painted for what it is — the texels the
+    // water demonstrably runs through — and the width pass only adds the
+    // ground around it that the water also covers.
+    if under.is_some() {
+        let steps = (a.distance(b) / (TEXEL_M * 0.5)).ceil().max(1.0) as usize;
+        for i in 0..=steps {
+            let p = a.lerp(b, i as f32 / steps as f32);
+            let t = (p - origin) / TEXEL_M;
+            if t.x < 0.0 || t.y < 0.0 {
+                continue;
+            }
+            let (x, z) = (t.x as u32, t.y as u32);
+            if x < MAP_SIZE && z < MAP_SIZE {
+                put(texels, x, z, material);
+                n += 1;
+            }
+        }
+    }
     n
+}
+
+/// Write one texel's material id into the packed 4-per-word raster.
+fn put(texels: &mut [u32], x: u32, z: u32, material: u32) {
+    let idx = (z * MAP_SIZE + x) as usize;
+    let word = &mut texels[idx / 4];
+    let shift = (idx % 4) * 8;
+    *word = (*word & !(0xFFu32 << shift)) | ((material & 0xFF) << shift);
 }

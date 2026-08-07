@@ -504,7 +504,8 @@
         "emit": {
           "type": "ribbon",
           "material": 4
-        }
+        },
+        "keep_m": 12000.0
       },
       {
         "kind": "scatter",
