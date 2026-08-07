@@ -68,13 +68,27 @@ pub fn find_path(
         return None;
     }
 
+    // One height per lattice node, not one per edge. `height` is the
+    // whole SDF program, and the naive search evaluates it around 24
+    // times per node: three times per `move_cost`, and every node is
+    // expanded from up to eight neighbors. The lattice is what makes the
+    // memo sound — a node's height is a function of the node alone.
+    let heights = std::cell::RefCell::new(std::collections::HashMap::<(i32, i32), f32>::new());
+    let h = |n: (i32, i32)| -> f32 {
+        if let Some(&v) = heights.borrow().get(&n) {
+            return v;
+        }
+        let v = height(pos(n));
+        heights.borrow_mut().insert(n, v);
+        v
+    };
+
     let move_cost = |from: (i32, i32), to: (i32, i32)| -> f32 {
-        let (pf, pt) = (pos(from), pos(to));
-        let run = pf.distance(pt);
-        let rise = height(pt) - height(pf);
-        let slope = rise / run;
+        let run = pos(from).distance(pos(to));
+        let (hf, ht) = (h(from), h(to));
+        let slope = (ht - hf) / run;
         let mut c = run * (1.0 + params.slope_penalty * slope * slope);
-        if height(pt) <= params.low_ground_m {
+        if ht <= params.low_ground_m {
             c *= 25.0;
         }
         c
@@ -164,6 +178,38 @@ mod tests {
         assert_eq!(*path.last().unwrap(), b);
         let len: f32 = path.windows(2).map(|w| w[0].distance(w[1])).sum();
         assert!(len < a.distance(b) * 1.15, "flat path detours: {len}");
+    }
+
+    /// Each lattice node's height is evaluated exactly once. `height` is
+    /// the whole SDF program and a road network is thousands of these
+    /// searches, so this is a cost contract rather than a detail: without
+    /// the memo the count comes back around twenty times higher.
+    #[test]
+    fn a_node_height_is_evaluated_once() {
+        let calls = std::cell::Cell::new(0u32);
+        let seen = std::cell::RefCell::new(std::collections::HashSet::new());
+        let terrain = |p: Vec2| {
+            calls.set(calls.get() + 1);
+            seen.borrow_mut().insert((p.x.to_bits(), p.y.to_bits()));
+            (p.x * 0.05).sin() * 20.0 + (p.y * 0.03).cos() * 15.0
+        };
+        let path = find_path(
+            &terrain,
+            Vec2::new(0.0, 0.0),
+            Vec2::new(240.0, 160.0),
+            Vec2::splat(-200.0),
+            Vec2::splat(400.0),
+            &PathParams::default(),
+        )
+        .expect("path exists");
+        assert!(path.len() > 2, "degenerate path proves nothing");
+        let distinct = seen.borrow().len() as u32;
+        assert_eq!(
+            calls.get(),
+            distinct,
+            "{} evaluations for {distinct} distinct nodes",
+            calls.get(),
+        );
     }
 
     #[test]

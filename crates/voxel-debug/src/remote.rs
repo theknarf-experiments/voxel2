@@ -128,6 +128,10 @@ fn status(
     if let Some(s) = stats {
         let s = s.0.lock().unwrap();
         out["chunks"] = json!({
+            "gen_started": s.gen_started,
+            "mesh_started": s.mesh_started,
+            "reported_ready": s.reported_ready,
+            "gen_starved": s.gen_starved,
             "tracked": s.tracked,
             "meshed": s.meshed,
             "awaiting": s.awaiting,

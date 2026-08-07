@@ -215,6 +215,15 @@ pub struct RenderStats {
     pub slab_pressure: crate::slab::SlabPressure,
     pub drawn: usize,
     pub culled: usize,
+    /// Chunks that have entered each pipeline stage since start. Rates
+    /// come from differencing these: which stage is the narrowest is not
+    /// something the budgets tell you, because a budget only says what a
+    /// frame is ALLOWED to do.
+    pub gen_started: u64,
+    pub mesh_started: u64,
+    pub reported_ready: u64,
+    /// Frames the gen batch stopped early for want of an arena slot.
+    pub gen_starved: u64,
     /// Wedge forensics: (state name, count) over all tracked chunks,
     /// including the pending track — every arena-slot holder is visible.
     pub state_counts: Vec<(&'static str, usize)>,
@@ -1133,7 +1142,11 @@ fn plan_frame(
     pipeline_cache: Res<PipelineCache>,
     render_device: Res<RenderDevice>,
     render_queue: Res<RenderQueue>,
-) {
+) {    // Stage counters: which stage is narrowest is not something the
+    // budgets can tell you, since a budget only says what a frame is
+    // ALLOWED to do.
+    let mut readies = 0u64;
+
     let gpu = &mut *gpu;
     // Plan no GPU work until every compute pipeline is compiled; this keeps
     // dispatch unconditional and avoids unwinding half-planned state.
@@ -1337,6 +1350,7 @@ fn plan_frame(
                     // Report anyway so an epoch waiting on this chunk can
                     // complete instead of wedging on a pathological mesh.
                     let _ = ready_tx.0.send((*key, chunk.gen_mask));
+                    readies += 1;
                 } else if verts == 0 || quads == 0 {
                     gpu.arena_free.push(slot);
                     if chunk.hold {
@@ -1349,6 +1363,7 @@ fn plan_frame(
                         chunk.state = ChunkState::Empty;
                     }
                     let _ = ready_tx.0.send((*key, u32::MAX));
+                    readies += 1;
                 } else {
                     chunk.pending = Some(Pending::AwaitingAlloc {
                         slot,
@@ -1395,6 +1410,7 @@ fn plan_frame(
                         table.empty_classified += 1;
                         chunk.state = ChunkState::Empty;
                         let _ = ready_tx.0.send((*key, u32::MAX));
+                        readies += 1;
                     } else {
                         chunk.state = ChunkState::AwaitingAlloc {
                             slot,
@@ -1429,6 +1445,9 @@ fn plan_frame(
             .take(MESH_BUDGET.min((COUNTS_SLOTS as usize).saturating_sub(GEN_BUDGET)))
             .collect()
     };
+    if let Ok(mut st) = stats.0.lock() {
+        st.mesh_started += mesh_keys.len() as u64;
+    }
     for key in mesh_keys {
         let chunk = table.chunks.get_mut(&key).unwrap();
         let (slot, verts, indices, is_pending) = match (&chunk.state, &chunk.pending) {
@@ -1489,6 +1508,7 @@ fn plan_frame(
                     chunk.pending = Some(Pending::Queued);
                 } else {
                     let _ = ready_tx.0.send((key, chunk.gen_mask));
+                    readies += 1;
                 }
                 freed_slots.push(slot);
                 continue;
@@ -1539,10 +1559,14 @@ fn plan_frame(
             .map(|(k, _)| (*k, gen_priority(*k, camera.0)))
             .collect();
         queued.sort_by(|a, b| a.1.total_cmp(&b.1));
+        let mut started = 0u64;
+        let mut starved = false;
         for (key, _) in queued.into_iter().take(GEN_BUDGET) {
             let Some(slot) = gpu.arena_free.pop() else {
+                starved = true;
                 break;
             };
+            started += 1;
             let chunk = table.chunks.get_mut(&key).unwrap();
             // Copy this chunk's planning ops into the frame buffer. Kept
             // on the chunk (not consumed): any later regen of the same
@@ -1592,6 +1616,10 @@ fn plan_frame(
                 }),
             )
         };
+        if let Ok(mut st) = stats.0.lock() {
+            st.gen_started += started;
+            st.gen_starved += u64::from(starved);
+        }
     }
 
     // 5. Arena slots freed by meshing become reusable next frame.
@@ -1673,6 +1701,7 @@ fn plan_frame(
 
     // 7. HUD stats.
     if let Ok(mut s) = stats.0.lock() {
+        s.reported_ready += readies;
         s.drawn_masks.clear();
         for (key, c) in &table.chunks {
             if c.visible && matches!(c.state, ChunkState::Meshed { .. }) {
@@ -1696,7 +1725,7 @@ fn plan_frame(
         s.slab_free = gpu.slab.free_slots();
         s.slab_pressure = gpu.slab.pressure();
         let mut counts: std::collections::HashMap<&'static str, usize> = Default::default();
-        for c in table.chunks.values() {
+        for (key, c) in table.chunks.iter() {
             let state = match c.state {
                 ChunkState::QueuedGen => "queued_gen",
                 ChunkState::CountsInFlight { .. } => "counts_in_flight",
@@ -1717,6 +1746,16 @@ fn plan_frame(
             if let Some(p) = pending {
                 *counts.entry(p).or_default() += 1;
             }
+            // Per level, so a loose emptiness bound can be attributed to a
+            // scale rather than guessed at. A chunk the GPU generated only
+            // to classify empty cost a full density pass for nothing.
+            let level = key.level.min(15) as usize;
+            let bucket: &'static str = match c.state {
+                ChunkState::Empty => EMPTY_BY_LEVEL[level],
+                ChunkState::Meshed { .. } => MESHED_BY_LEVEL[level],
+                _ => continue,
+            };
+            *counts.entry(bucket).or_default() += 1;
         }
         let with_ops = table.chunks.values().filter(|c| c.ops.is_some()).count();
         let total_ops: usize = table
@@ -2027,3 +2066,16 @@ where
         RenderCommandResult::Success
     }
 }
+
+/// Per-level histogram bucket names. Static strings because the stats map
+/// is keyed by `&'static str`; the index is the LOD level.
+const EMPTY_BY_LEVEL: [&str; 16] = [
+    "empty_L0", "empty_L1", "empty_L2", "empty_L3", "empty_L4", "empty_L5",
+    "empty_L6", "empty_L7", "empty_L8", "empty_L9", "empty_L10", "empty_L11",
+    "empty_L12", "empty_L13", "empty_L14", "empty_L15",
+];
+const MESHED_BY_LEVEL: [&str; 16] = [
+    "mesh_L0", "mesh_L1", "mesh_L2", "mesh_L3", "mesh_L4", "mesh_L5",
+    "mesh_L6", "mesh_L7", "mesh_L8", "mesh_L9", "mesh_L10", "mesh_L11",
+    "mesh_L12", "mesh_L13", "mesh_L14", "mesh_L15",
+];

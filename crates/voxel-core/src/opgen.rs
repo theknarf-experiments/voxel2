@@ -98,11 +98,18 @@ let oct = to_i(@p1.x);
 warp.x += @FBM(q, @p0.x, oct, @VS@0) * @p0.y;
 warp.y += @FBM(q + v2(713.0, -337.0), @p0.x, oct, @VS@0) * @p0.y;",
         range: Some("\
-            // Moves the xz that later height ops sample, by at most its
-            // own amplitude — so every later sample could come from
-            // anywhere in a box this much wider.
-            pxz_lo -= Vec2::splat(@p0.y.abs());
-            pxz_hi += Vec2::splat(@p0.y.abs());"),
+            // The warp is smooth noise, not an arbitrary displacement, so
+            // bound what it can be OVER THIS BOX rather than by its
+            // amplitude. The amplitude is the whole world's warp: using it
+            // turned a 3 m chunk into a 40 m one, and a fine chunk sitting
+            // well clear of the ground could not be decided at all.
+            let wlo = pxz_lo + @p0.zw;
+            let whi = pxz_hi + @p0.zw;
+            let off = Vec2::new(713.0, -337.0);
+            let wx = frange(wlo, whi, @p0.x, to_i(@p1.x), 0) * @p0.y;
+            let wy = frange(wlo + off, whi + off, @p0.x, to_i(@p1.x), 0) * @p0.y;
+            pxz_lo += Vec2::new(wx.lo, wy.lo);
+            pxz_hi += Vec2::new(wx.hi, wy.hi);"),
     },
     OpDef {
         name: "WOP_FBM3",

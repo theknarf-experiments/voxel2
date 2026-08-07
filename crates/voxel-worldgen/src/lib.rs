@@ -55,18 +55,59 @@ pub(crate) fn fbm(seed: u32, p: Vec2, base_scale: f32, octaves: i32, voxel_size:
     fbm_mode(seed, p, base_scale, octaves, voxel_size, 0)
 }
 
+/// The range of `value_noise` over an xz BOX, from the lattice itself.
+///
+/// The noise interpolates four corner hashes with weights that are
+/// convex — a quintic of a value in [0,1], so each weight is in [0,1] and
+/// they sum to one. A convex combination cannot leave the span of the
+/// values it combines, so the min and max of every corner the box touches
+/// IS a bound, and a tight one.
+///
+/// A box spanning many cells touches so many corners that the bound
+/// approaches the noise's full [0,1] anyway, so past a few cells this
+/// stops enumerating and says so.
+fn value_noise_range(seed: u32, lo: Vec2, hi: Vec2) -> voxel_core::interval::Interval {
+    use voxel_core::interval::Interval;
+    /// Cells per axis past which enumeration stops paying.
+    const MAX_CELLS: i32 = 4;
+    let (x0, y0) = (lo.x.floor() as i32, lo.y.floor() as i32);
+    let (x1, y1) = (hi.x.floor() as i32, hi.y.floor() as i32);
+    if x1.saturating_sub(x0) > MAX_CELLS || y1.saturating_sub(y0) > MAX_CELLS {
+        return Interval::new(0.0, 1.0);
+    }
+    // Plain floats, not an empty Interval: `Interval::new` orders its
+    // ends, so an "empty" accumulator built from ±inf comes back as all
+    // of the number line and never narrows.
+    let (mut lo_v, mut hi_v) = (f32::INFINITY, f32::NEG_INFINITY);
+    for y in y0..=y1 + 1 {
+        for x in x0..=x1 + 1 {
+            let v = hash2(seed, glam::IVec2::new(x, y));
+            lo_v = lo_v.min(v);
+            hi_v = hi_v.max(v);
+        }
+    }
+    Interval::new(lo_v, hi_v)
+}
+
 /// Bounds an FBM over an xz BOX, rather than at a point.
 ///
 /// The amplitude alone bounds it everywhere — `±0.5 * amp` — but that is
 /// the whole world's range, so it decides nothing about a chunk near the
-/// ground. Locally it is far tighter: sample the middle and allow for how
-/// far each octave can move across the box.
+/// ground. Two independent bounds are available per octave, tight in
+/// opposite regimes, and since both are valid the INTERSECTION is too:
 ///
-/// Per octave, whichever is smaller:
-/// - its full swing, if the box spans enough of a wavelength to reach it;
-/// - a gradient bound otherwise. Value noise interpolates corner hashes
-///   in [0,1) with a quintic whose slope peaks at 1.875 per lattice unit;
-///   ridged and billow fold that through `|2n-1|`, doubling it.
+/// - a gradient bound around the box's middle. Value noise interpolates
+///   corner hashes in [0,1) with a quintic whose slope peaks at 1.875 per
+///   lattice unit; ridged and billow fold that through `|2n-1|`, doubling
+///   it. Tight when the box is small against the wavelength.
+/// - the span of the lattice corners the box touches. Interpolation
+///   weights are convex, so the value cannot leave that span. Tight once
+///   the box is comparable to a cell, where the gradient bound has
+///   already exceeded the full swing.
+///
+/// Taking only the corner span is much worse: a box a thousandth of a
+/// cell across still touches corners spanning the whole cell, which on
+/// the shipped planet turned a 33 m bound into a 900 m one.
 ///
 /// Conservative by construction and checked by sampling: see
 /// `program::range_tests`.
@@ -83,20 +124,43 @@ pub(crate) fn fbm_range(
     let slope = if mode == 0 { 1.875 } else { 3.75 };
     let mid = (lo + hi) * 0.5;
     let reach = (hi - lo) * 0.5;
-    let centre = fbm_mode(seed, mid, base_scale, octaves, voxel_size, mode);
-    let mut margin = 0.0;
+    let mut sum = Interval::point(0.0);
     let mut amp = 0.5;
     let mut freq = base_scale;
     for _ in 0..octaves {
-        // What this octave contributes at most, and what it can move
-        // across the box; the tighter of the two is still a bound.
-        let full = amp * band_fade(1.0 / freq, voxel_size) * 0.5;
-        let slid = amp * slope * freq * (reach.x + reach.y);
-        margin += full.min(slid);
+        let fade = band_fade(1.0 / freq, voxel_size);
+        // This octave's own contribution at the middle, and how far it can
+        // move away from that across the box.
+        let n = value_noise(seed, mid * freq);
+        let centre = match mode {
+            1 => 0.5 - (2.0 * n - 1.0).abs(),
+            2 => (2.0 * n - 1.0).abs() - 0.5,
+            _ => n - 0.5,
+        };
+        let span = value_noise_range(seed, lo * freq, hi * freq);
+        // The slope constant is per unit of noise VALUE change, and the
+        // corners the box touches bound how much value is available to
+        // change over: 1.875 assumes adjacent corners differ by the whole
+        // of [0,1), where a typical pair differs by about a third.
+        let full = fade * 0.5;
+        let slid = slope * span.width() * freq * (reach.x + reach.y);
+        let gradient = Interval::new(centre - slid.min(full), centre + slid.min(full));
+        // The same shapings, applied to the corner span.
+        let corners = match mode {
+            1 => Interval::point(0.5) - (span * 2.0 - 1.0).abs(),
+            2 => (span * 2.0 - 1.0).abs() - 0.5,
+            _ => span - 0.5,
+        } * fade;
+        // Both hold, so the tighter ends of each do.
+        let octave = Interval {
+            lo: gradient.lo.max(corners.lo),
+            hi: gradient.hi.min(corners.hi),
+        };
+        sum = sum + octave * amp;
         amp *= 0.5;
         freq *= 2.0;
     }
-    Interval::new(centre - margin, centre + margin)
+    sum
 }
 
 /// FBM with a per-octave shaping mode: 0 plain, 1 ridged (sharp crests),

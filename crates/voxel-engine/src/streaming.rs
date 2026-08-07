@@ -1051,6 +1051,55 @@ mod pruning {
     /// passes — verified: halving the noise bound went unnoticed until
     /// this walked the column THROUGH the ground at every level, which is
     /// where a bound is load-bearing.
+    /// Diagnostic: how often the bound actually DECIDES, per level, on
+    /// the shipped planet, for chunks that genuinely have no surface.
+    /// A bound that is always conservative but never decisive prunes
+    /// nothing, and the streamer pays a density pass for each one.
+    #[test]
+    #[ignore]
+    fn how_decisive_is_the_bound() {
+        let generator = voxel_worldgen::Generator::new(
+            voxel_worldgen::program::planet_program(),
+            0,
+            Vec3::new(0.55, 0.5, 0.32),
+        );
+        let mut rng = Rng::new(0xC0DE_5EED);
+        println!("{:>4} {:>8} {:>8} {:>8}", "lvl", "empty", "pruned", "%");
+        for level in 0..12u8 {
+            let (mut empty, mut pruned) = (0, 0);
+            for _ in 0..40 {
+                let xz = bevy::math::Vec2::new(
+                    (rng.next_f32() - 0.5) * 60_000.0,
+                    (rng.next_f32() - 0.5) * 60_000.0,
+                );
+                let ground = generator.height(xz, 1.0);
+                let edge = ChunkKey::new(level, IVec3::ZERO).edge_m() as f32;
+                let cy = (ground / edge).floor() as i32;
+                for dy in -6..=6 {
+                    let key = ChunkKey::new(
+                        level,
+                        IVec3::new(
+                            (xz.x / edge).floor() as i32,
+                            cy + dy,
+                            (xz.y / edge).floor() as i32,
+                        ),
+                    );
+                    if has_surface(&generator, key) {
+                        continue;
+                    }
+                    empty += 1;
+                    if !can_hold_surface(&generator, key) {
+                        pruned += 1;
+                    }
+                }
+            }
+            println!(
+                "{level:>4} {empty:>8} {pruned:>8} {:>7.0}%",
+                100.0 * f64::from(pruned) / f64::from(empty.max(1))
+            );
+        }
+    }
+
     #[test]
     fn nothing_pruned_had_a_surface_in_it() {
         let generator = voxel_worldgen::Generator::new(
