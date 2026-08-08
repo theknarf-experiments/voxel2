@@ -141,14 +141,16 @@ impl Worlds {
 /// than the sets themselves is what makes appending to one of them alone
 /// impossible to write.
 #[derive(bevy::ecs::system::SystemParam)]
-pub struct WorldLoader<'w> {
+pub struct WorldLoader<'w, 's> {
     worlds: ResMut<'w, Worlds>,
     render: ResMut<'w, voxel_render::RenderWorlds>,
     planner: Res<'w, level::HostPlanner>,
     rebuild: ResMut<'w, streaming::StreamingRebuild>,
+    /// Where the camera is. Demand is measured THERE, not at the origin.
+    sources: StreamSourceQuery<'w, 's>,
 }
 
-impl WorldLoader<'_> {
+impl WorldLoader<'_, '_> {
     /// Load a level as a new world and return its id.
     ///
     /// `config` is separate from the level's own `lod` block because a
@@ -204,7 +206,17 @@ impl WorldLoader<'_> {
     /// dropped, and repeated loads cannot ratchet it down.
     fn rebalance(&mut self) -> bool {
         let capacity = voxel_render::SlabAllocator::capacity_slots();
-        let anchor = bevy::math::DVec3::ZERO;
+        // WHERE THE CAMERA IS, not the origin. Residency is radial, so I
+        // assumed the count barely moved with the anchor and measured at
+        // the origin — it moves by a THIRD on both shipped levels (1.37x
+        // and 1.31x at the demo's own start positions). Measuring in the
+        // wrong place let two worlds be admitted into 3568 of 3656 slots
+        // when they wanted 5310 where the player actually stood, which
+        // filled every slab class and stopped the world settling at all.
+        let anchor = self
+            .sources
+            .single()
+            .map_or(bevy::math::DVec3::ZERO, |t| t.translation().as_dvec3());
         let n = self.worlds.0.len().max(1);
         let mut budget = vec![capacity / n; n];
 
