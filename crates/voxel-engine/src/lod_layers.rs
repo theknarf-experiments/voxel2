@@ -260,7 +260,6 @@ impl LodLayers {
         self.worlds.iter().all(WorldLod::is_idle)
     }
 
-    /// Re-centre every world's field. True if any of them moved.
     /// Re-centre each world's field on where THAT world is being looked
     /// at from, falling back to the camera.
     ///
@@ -268,11 +267,7 @@ impl LodLayers {
     /// side of the opening can be anywhere, and streaming it around the
     /// near camera resides chunks nowhere near what the portal shows —
     /// the portal looks out onto nothing, correctly and uselessly.
-    pub fn follow(&mut self, camera: DVec3, focus: &WorldFocus) -> bool {
-        // NOT `any()`, and not `fold` with `||` either: both short-circuit,
-        // and a world that never gets its focus published never streams.
-        // `|=` evaluates every side.
-        let mut moved = false;
+    pub fn follow(&mut self, camera: DVec3, focus: &WorldFocus) {
         for world in &mut self.worlds {
             let at = focus
                 .0
@@ -280,9 +275,8 @@ impl LodLayers {
                 .copied()
                 .flatten()
                 .unwrap_or(camera);
-            moved |= world.follow(at);
+            world.follow(at);
         }
-        moved
     }
 }
 
@@ -379,16 +373,16 @@ impl WorldLod {
     }
 
     /// Re-centre the field, if the camera has moved far enough to matter.
-    fn follow(&mut self, camera: DVec3) -> bool {
+    fn follow(&mut self, camera: DVec3) {
         if self.published.is_some_and(|a| camera.distance(a) < ANCHOR_STEP) {
-            return false;
+            return;
         }
         // One pass runs against one focus. Moving it mid-pass would let
         // levels processed early and late disagree about where the field
         // is centred, which is a seam nobody owns; the next frame
         // publishes instead.
         if self.runtime.is_generating() {
-            return false;
+            return;
         }
         self.published = Some(camera);
         // Published, not applied: the next pass snapshots it at its head,
@@ -397,7 +391,6 @@ impl WorldLod {
         for i in 0..self.runtime.tops() {
             self.runtime.top(i).set_focus(camera.as_ivec3());
         }
-        true
     }
 
     /// Resident chunks. Residency is exactly the shown set.
@@ -528,7 +521,6 @@ fn build_lod_layers(
     mut layers: ResMut<LodLayers>,
     worlds: Res<crate::StreamedWorlds>,
     chunks: Res<ChunkGen>,
-    mut field: ResMut<voxel_render::FieldParams>,
     mut rebuild: ResMut<StreamingRebuild>,
 ) {
     if rebuild.0 && !layers.is_empty() {
@@ -547,14 +539,6 @@ fn build_lod_layers(
         if layers.worlds.iter().any(|w| w.shared.world == world.id) {
             continue;
         }
-        // The density band's scale is a constant of the configuration, so
-        // it is set with the graph rather than on every anchor move.
-        // World 0 owns it: the band is a property of the view, and every
-        // world is viewed from the same camera.
-        if world.id == 0 {
-            field.dist_scale = (world.config.split_k * 32.0) as f32;
-            field.max_vs = (1u32 << world.config.max_level) as f32;
-        }
         layers.worlds.push(WorldLod::new(
             world.id,
             world.config.clone(),
@@ -569,7 +553,6 @@ fn build_lod_layers(
 fn follow_lod_focus(
     mut layers: ResMut<LodLayers>,
     focus: Res<WorldFocus>,
-    mut field: ResMut<voxel_render::FieldParams>,
     mut probe: ResMut<StreamProbe>,
     world: Res<crate::planning::WorldQuery>,
     sources: crate::StreamSourceQuery,
@@ -581,10 +564,7 @@ fn follow_lod_focus(
         return;
     }
     if let Ok(source) = sources.single() {
-        let camera = source.translation().as_dvec3();
-        if layers.follow(camera, &focus) {
-            field.anchor = camera.as_vec3();
-        }
+        layers.follow(source.translation().as_dvec3(), &focus);
     }
     probe.resident = layers.resident();
     probe.generating = layers.is_generating();

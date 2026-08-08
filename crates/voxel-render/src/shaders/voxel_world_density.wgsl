@@ -62,8 +62,6 @@ struct WorldHeader {
     sun: vec4<f32>,
 }
 struct WorldProgram {
-    anchor: vec4<f32>, // LOD field anchor | dist_scale
-    field: vec4<f32>,  // max_vs | unused
     worlds: array<WorldHeader, 4>,
     ops: array<WorldOp>,
 }

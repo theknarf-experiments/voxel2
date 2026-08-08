@@ -433,28 +433,6 @@ pub struct EnvParams {
     pub material_slots: [UVec4; 2],
 }
 
-/// The continuous LOD field the density band derives from: every chunk at
-/// every level samples the generator at `vs(p) = clamp(|p - anchor| /
-/// dist_scale, 1, max_vs)`, so shared corners store bit-identical values
-/// regardless of which chunk generated them — seams cannot disagree.
-#[derive(Resource, Clone, Copy)]
-pub struct FieldParams {
-    pub anchor: Vec3,
-    /// split_k × 32 m (voxel size doubles per dist_scale of distance).
-    pub dist_scale: f32,
-    pub max_vs: f32,
-}
-
-impl Default for FieldParams {
-    fn default() -> Self {
-        Self {
-            anchor: Vec3::ZERO,
-            dist_scale: 80.0,
-            max_vs: 256.0,
-        }
-    }
-}
-
 /// GPU layout twin of `voxel_core::worldop::WorldOp` (64 B).
 #[derive(ShaderType, Clone, Copy, Default)]
 pub(crate) struct GpuWorldOp {
@@ -488,16 +466,13 @@ pub struct GpuWorldHeader {
 /// set of GPU resources.
 #[derive(ShaderType, Clone, Default)]
 pub struct GpuWorldProgram {
-    /// xyz = field anchor, w = dist_scale; field.x = max_vs.
-    anchor: Vec4,
-    field: Vec4,
     worlds: [GpuWorldHeader; MAX_WORLDS],
     #[shader(size(runtime))]
     ops: Vec<GpuWorldOp>,
 }
 
 impl GpuWorldProgram {
-    fn from_programs(programs: &[WorldProgram], field: &FieldParams) -> Self {
+    fn from_programs(programs: &[WorldProgram]) -> Self {
         let mut gpu_ops: Vec<GpuWorldOp> = Vec::new();
         let mut worlds = [GpuWorldHeader::default(); MAX_WORLDS];
         for (world, program) in programs.iter().take(MAX_WORLDS).enumerate() {
@@ -519,8 +494,6 @@ impl GpuWorldProgram {
             gpu_ops.push(GpuWorldOp::default());
         }
         Self {
-            anchor: field.anchor.extend(field.dist_scale),
-            field: Vec4::new(field.max_vs, 0.0, 0.0, 0.0),
             worlds,
             ops: gpu_ops,
         }
@@ -546,7 +519,6 @@ impl Plugin for VoxelChunksPlugin {
         app.init_resource::<WorldPrograms>()
             .init_resource::<CameraWorld>()
             .init_resource::<WorldClips>();
-        app.init_resource::<FieldParams>();
         app.init_resource::<SurfaceMap>();
         app.init_resource::<WorldMaterials>();
         app.init_resource::<EnvParams>();
@@ -575,7 +547,6 @@ impl Plugin for VoxelChunksPlugin {
             .init_resource::<CameraWorld>()
             .init_resource::<WorldClips>()
             .init_resource::<WorldViews>()
-            .init_resource::<FieldParams>()
             .init_resource::<SurfaceMap>()
             .init_resource::<WorldMaterials>()
             .init_resource::<EnvParams>()
@@ -1208,7 +1179,6 @@ fn extract_program(
     programs: Extract<Res<WorldPrograms>>,
     clips: Extract<Res<WorldClips>>,
     camera_world: Extract<Res<CameraWorld>>,
-    field: Extract<Res<FieldParams>>,
     env: Extract<Res<EnvParams>>,
     surface_map: Extract<Res<SurfaceMap>>,
     mut commands: Commands,
@@ -1216,7 +1186,6 @@ fn extract_program(
     commands.insert_resource(WorldPrograms(programs.0.clone()));
     commands.insert_resource((**clips).clone());
     commands.insert_resource(**camera_world);
-    commands.insert_resource(**field);
     commands.insert_resource(**env);
     // Cheap: an Arc of the raster, not the raster.
     commands.insert_resource((**surface_map).clone());
@@ -1301,7 +1270,7 @@ fn plan_frame(
     camera: Res<ExtractedCameraPos>,
     // Grouped: Bevy caps a system at 16 parameters.
     (world_views, clips): (Res<WorldViews>, Res<WorldClips>),
-    (programs, field, env): (Res<WorldPrograms>, Res<FieldParams>, Res<EnvParams>),
+    (programs, env): (Res<WorldPrograms>, Res<EnvParams>),
     surface_map: Res<SurfaceMap>,
     frustum: Res<ExtractedFrustum>,
     stats: Res<SharedRenderStats>,
@@ -1859,7 +1828,7 @@ fn plan_frame(
     gpu.draw_uniforms
         .write_buffer(&render_device, &render_queue);
     gpu.program_buffer
-        .set(GpuWorldProgram::from_programs(&programs.0, &field));
+        .set(GpuWorldProgram::from_programs(&programs.0));
     gpu.program_buffer
         .write_buffer(&render_device, &render_queue);
     gpu.env_uniform.set(*env);

@@ -12,7 +12,7 @@ pub mod slab;
 
 pub use chunks::{
     ChunkGpuResources, GpuWorldProgram,
-    ChunkCommand, ChunkCommandQueue, ChunkReadyChannel, ChunkWaiters, EnvParams, FieldParams,
+    ChunkCommand, ChunkCommandQueue, ChunkReadyChannel, ChunkWaiters, EnvParams,
     SharedRenderStats,
     SurfaceMap, VoxelChunksPlugin, WorldMaterial, WorldMaterials, WorldProgram, MATERIAL_SLOTS,
     MAX_WORLDS, WorldPrograms, CameraWorld, ViewWorld, WorldClips, MAX_CLIP_PLANES,
