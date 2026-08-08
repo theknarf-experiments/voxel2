@@ -273,8 +273,9 @@ pub struct RenderWorld {
     pub materials: Vec<WorldMaterial>,
     /// What this world's host painted on its own ground.
     pub surface_map: SurfaceMap,
-    /// Half-spaces masking this world to a portal opening; empty when it
-    /// is being seen directly.
+    /// Half-spaces this world's chunks are clipped to; empty when it is
+    /// drawn whole. A host showing one world through an opening in
+    /// another uses these to keep it on the far side of the opening.
     pub clip: Vec<Vec4>,
 }
 
@@ -319,13 +320,15 @@ impl RenderWorlds {
         self.0.iter()
     }
 
-    /// Clip planes for a world, empty when it has none or does not exist.
+    /// Clip planes for a world, empty when it has none or does not
+    /// exist.
     pub fn clip(&self, id: voxel_core::WorldId) -> &[Vec4] {
         self.get(id).map_or(&[], |w| &w.clip[..])
     }
 
-    /// Drop every world's clip planes. The host republishes the ones that
-    /// still apply each frame, so a portal that closed stops masking.
+    /// Drop every world's clip planes. The host republishes the ones
+    /// that still apply each frame, so a mask it stops setting stops
+    /// being applied.
     pub fn clear_clips(&mut self) {
         for world in &mut self.0 {
             world.clip.clear();
@@ -983,20 +986,20 @@ struct ChunkDrawUniform {
     /// a material id means whatever the chunk's own level says it means.
     head: UVec4,
     /// World-space half-spaces this chunk is clipped to; a fragment
-    /// survives where `dot(n, p) + d >= 0` for all of them. This is how a
-    /// portal masks the far world to its own opening — see
+    /// survives where `dot(n, p) + d >= 0` for all of them — see
     /// [`RenderWorld::clip`].
     ///
-    /// A portal is a hole: the far world must appear only within the
-    /// opening, and only beyond it. Bevy's depth texture is
+    /// The engine owns the mechanism and not what it is for. A host
+    /// showing one world through an opening in another wants the far
+    /// world only beyond the opening's plane, and Bevy's depth texture is
     /// `Depth32Float` with no stencil aspect, so the mask cannot be a
-    /// stencil; for a convex opening, clipping against the pyramid's side
-    /// planes is exactly equivalent.
+    /// stencil; a half-space is exact for a planar boundary and costs a
+    /// dot product.
     clip: [Vec4; MAX_CLIP_PLANES],
 }
 
-/// Four sides of the pyramid from the eye through the portal, plus the
-/// portal's own plane.
+/// Half-spaces one chunk draw can carry. Enough for a convex opening's
+/// four sides and its own plane.
 pub const MAX_CLIP_PLANES: usize = 5;
 
 enum StagingState {

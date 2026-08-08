@@ -57,30 +57,16 @@ pub fn all_world_layers() -> bevy::camera::visibility::RenderLayers {
 /// every view.
 pub const TERRAIN_LAYER: usize = MAX_WORLDS;
 
-/// A world's PORTAL SURFACES — the quads an opening is drawn on.
+/// First render layer a host may use for its own purposes.
 ///
-/// They cannot live on the world's own layer. A portal surface samples
-/// the image the far camera renders, and that camera draws the world it
-/// is showing; if the surface shared that world's layer the far camera
-/// would draw the quad that samples its own target. A texture read while
-/// it is being written is undefined, and it presents as an image that
-/// updates sometimes — which is a great deal harder to recognise than
-/// one that never updates at all.
-pub fn portal_layer(world: voxel_core::WorldId) -> bevy::camera::visibility::RenderLayers {
-    bevy::camera::visibility::RenderLayers::layer(FIRST_PORTAL_LAYER + usize::from(world))
-}
-
-/// What a camera standing IN `world` sees: its content, its lights, and
-/// the portal surfaces cut into it.
-pub fn near_view_layers(world: voxel_core::WorldId) -> bevy::camera::visibility::RenderLayers {
-    world_layer(world).union(&portal_layer(world))
-}
-
-pub const FIRST_PORTAL_LAYER: usize = TERRAIN_LAYER + 1;
-
-/// First render layer a host may use for its own purposes. See
-/// [`world_layer`].
-pub const FIRST_HOST_LAYER: usize = FIRST_PORTAL_LAYER + MAX_WORLDS;
+/// The engine claims `0..=TERRAIN_LAYER` and nothing above it. A host
+/// wanting per-world surfaces of its own — a view model, a 3D UI, the
+/// quad an opening between two worlds is drawn on — allocates its own
+/// band from here, and must keep its world's layer in the set too: Bevy
+/// hides an entity when its layers do not intersect the view's, so a
+/// camera on `{0, N}` and an entity on `{1, N}` still intersect at N and
+/// the entity would be visible from the wrong world.
+pub const FIRST_HOST_LAYER: usize = TERRAIN_LAYER + 1;
 
 /// Marker for helper cameras (offscreen screenshot mirrors, etc.) that
 /// gameplay/streaming systems must ignore when looking for "the player

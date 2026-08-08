@@ -23,15 +23,21 @@ use bevy::render::render_resource::AsBindGroup;
 use bevy::shader::ShaderRef;
 use voxel_engine::{LevelDef, LodConfig, WorldLoader};
 
-/// The far side: which level file to open onto, and — once opened — the
-/// level itself with its own background, which the opening shows wherever
-/// the far world is empty.
+/// A second level this host can load, and its id once it has been.
 ///
-/// Loaded on demand rather than at startup: a portal is something you
-/// open, and a second world is not free (it roughly doubles the meshed
-/// working set), so nobody should pay for one until they ask.
+/// A LOADED LEVEL AND AN OPENING ARE DIFFERENT THINGS. A level is loaded
+/// once and stays: it holds a slab budget, a planning graph and an LOD
+/// field, and it streams whether or not anything is looking at it. A
+/// portal is a rectangle that comes and goes. Closing one does not
+/// unload the world behind it, and opening one onto an
+/// already-loaded world costs nothing.
+///
+/// Loading is still on demand rather than at startup, because a second
+/// world roughly doubles the meshed working set and caps what the first
+/// can stream — see `WorldLoader::load`. But "on demand" means "when the
+/// host asks", and a portal is only one thing that might ask.
 #[derive(Resource)]
-pub struct FarLevel {
+pub struct ExtraLevel {
     pub path: String,
     pub loaded: Option<LevelDef>,
     /// How the far side is dressed — its background, its sun, its
@@ -39,6 +45,28 @@ pub struct FarLevel {
     /// whichever level the app happened to launch with.
     pub scene: crate::Scene,
     pub world: Option<u8>,
+}
+
+/// The layer this demo draws a world's portal surfaces on.
+///
+/// A HOST band, from [`voxel_render::FIRST_HOST_LAYER`]: the engine has
+/// no idea what a portal is, and a game that loads several levels
+/// without ever cutting an opening between them needs none of this.
+///
+/// The surfaces cannot share their world's own layer. A surface samples
+/// the image the far camera renders, and that camera draws the world it
+/// is showing — so on the world's layer the far camera would draw the
+/// quad that samples the image it is writing. A texture read while it is
+/// written is undefined, and it presents as an image that updates
+/// sometimes, which is far harder to recognise than one that never does.
+fn portal_layer(world: voxel_engine::WorldId) -> RenderLayers {
+    RenderLayers::layer(voxel_render::FIRST_HOST_LAYER + usize::from(world))
+}
+
+/// What a camera standing IN `world` sees: the world, and the portal
+/// surfaces this demo cut into it.
+fn near_view_layers(world: voxel_engine::WorldId) -> RenderLayers {
+    voxel_render::world_layer(world).union(&portal_layer(world))
 }
 
 pub struct PortalPlugin;
@@ -51,7 +79,7 @@ impl Plugin for PortalPlugin {
         app.add_systems(
                 Update,
                 (
-                    open_portal,
+                    toggle_portal,
                     traverse_portal,
                     follow_camera_world,
                     sync_backdrops,
@@ -66,11 +94,14 @@ impl Plugin for PortalPlugin {
     }
 }
 
-/// Load the far level and register it as its own world, once.
+/// Load this level as its own world, once, and return its id.
 ///
-/// Returns the world id, or `None` if it could not be read — a portal to
-/// a level that will not parse should say so rather than open onto
-/// nothing.
+/// Idempotent: the second call hands back the id the first produced.
+/// Says nothing about portals — it is "load this level", and the caller
+/// decides what to do with the world.
+///
+/// `None` if the file could not be read, so a caller opening onto a
+/// level that will not parse can say so rather than open onto nothing.
 ///
 /// One call. Everything a world needs — generator, program, materials,
 /// planning, ops provider, LOD config — is registered together by
@@ -78,8 +109,8 @@ impl Plugin for PortalPlugin {
 /// first. It gets its own material ids (planet's 1 and the
 /// megastructure's 1 no longer collide), its own planning graph, and its
 /// own painted surface map.
-fn ensure_far_world(
-    far: &mut FarLevel,
+fn ensure_loaded(
+    far: &mut ExtraLevel,
     loader: &mut WorldLoader,
     scenes: &mut crate::WorldScenes,
 ) -> Option<u8> {
@@ -140,7 +171,7 @@ fn follow_camera_world(
             clear.0 = here.clear_color;
         }
     }
-    let want = voxel_render::near_view_layers(camera_world.0);
+    let want = near_view_layers(camera_world.0);
     for (entity, layers) in &mut cameras {
         // The layer filters scene ENTITIES; `ViewWorld` tells the chunk
         // draw which world's list to render. Both, because chunks are not
@@ -399,24 +430,22 @@ fn far_view_image(width: u32, height: u32) -> Image {
 #[derive(Component)]
 pub struct PortalCamera(pub Entity);
 
-/// Place the opening in front of the camera, once, and give it a camera
-/// of its own.
+/// Toggle the opening, on F7 or `voxctl portal`.
 ///
-/// Positioned from where the camera ACTUALLY is rather than from the
-/// level's declared start, so `VOXEL_START` still puts you in front of it.
-/// Open the portal in front of the camera, on F7 or on
-/// `voxctl portal`.
+/// Open, close, open again somewhere else. Positioned from where the
+/// camera ACTUALLY is rather than from the level's declared start, so
+/// `VOXEL_START` still puts you in front of it.
 ///
 /// Not at startup and not from an env var: a portal is something you
-/// open, where you are looking. Opening it again moves it, so the
-/// interesting cases — walking in at an angle, standing something in
-/// front of it — can all be tried without a restart.
+/// open, where you are looking — so the interesting cases (walking in at
+/// an angle, standing something in front of it, closing one behind you)
+/// can all be tried without a restart.
 #[allow(clippy::too_many_arguments)]
-fn open_portal(
+fn toggle_portal(
     mut commands: Commands,
-    mut far: ResMut<FarLevel>,
+    mut far: ResMut<ExtraLevel>,
     camera: Query<&GlobalTransform, With<crate::FreeCamera>>,
-    mut portal: Query<(Entity, &mut Portal)>,
+    portal: Query<Entity, With<Portal>>,
     keys: Res<ButtonInput<KeyCode>>,
     // OPTIONAL: the queue only exists when the remote server is running,
     // and the keybind must work without it. Requiring it panicked the
@@ -444,7 +473,7 @@ fn open_portal(
     let Ok(eye) = camera.single() else {
         return;
     };
-    let Some(far_world) = ensure_far_world(&mut far, &mut loader, &mut scenes) else {
+    let Some(far_world) = ensure_loaded(&mut far, &mut loader, &mut scenes) else {
         return;
     };
 
@@ -452,30 +481,32 @@ fn open_portal(
     let at = eye.translation() + forward * 14.0;
     let placement = Transform::from_translation(at).looking_to(-forward, Vec3::Y);
 
-    // Already open: MOVE the opening ON THE SIDE YOU ARE STANDING ON.
+    // Already open: CLOSE it. Pressing again opens a fresh one wherever
+    // you are then standing.
     //
-    // A portal has a placement per world. Moving `near` whatever world
-    // the camera is in put world 0's opening at a coordinate in world 1
-    // — which is why pressing F7 after stepping through logged "portal
-    // moved" and produced nothing you could see.
-    //
-    // Never stack a second one: two portals make `portals.single()` fail,
-    // which silently stops the far view and traversal dead rather than
-    // erroring. Despawning strays is self-healing, where `single_mut()`
-    // would itself fail once a duplicate existed and leave it wedged.
-    let mut open = portal.iter_mut();
-    if let Some((_, mut existing)) = open.next() {
-        existing.at = placement;
-        existing.worlds = (camera_world.0, far_world);
-        for (stray, _) in open {
-            warn!("portal: despawning a duplicate opening");
-            commands.entity(stray).despawn();
+    // Every opening goes, not just the first. Two portals make
+    // `portals.single()` fail, which stops the far view and traversal
+    // dead rather than erroring, so closing is also how a duplicate
+    // heals — the next press starts from nothing.
+    if !portal.is_empty() {
+        for entity in &portal {
+            commands.entity(entity).despawn();
         }
-        info!("portal moved to {at:?} in world {}", camera_world.0);
+        // The far world stays loaded and streaming. It cost a slab budget
+        // and a planning graph to admit; reopening onto it should be
+        // instant, and nothing about a closed opening makes the world on
+        // the other side stop existing.
+        info!("portal closed");
         return;
     }
 
     let near_world = camera_world.0;
+    // Standing IN the far level, the way out is back to the level the app
+    // launched with. Without this, closing a portal from the far side and
+    // opening a new one would join world 1 to world 1 — an opening onto
+    // the world you are already in, which shows nothing and leads
+    // nowhere.
+    let far_world = if near_world == far_world { 0 } else { far_world };
     commands.spawn(Portal {
         at: placement,
         worlds: (near_world, far_world),
@@ -509,7 +540,15 @@ fn sync_backdrops(
     assets: Option<Res<PortalAssets>>,
     mut quads: Query<(Entity, &PortalBackdrop, &mut Transform)>,
 ) {
-    let (Ok(portal), Some(assets)) = (portals.single(), assets) else {
+    let Some(assets) = assets else {
+        return;
+    };
+    let Ok(portal) = portals.single() else {
+        // Closed: the surfaces go with it, or a hole hangs in the air
+        // showing the last thing the far camera rendered.
+        for (entity, _, _) in &quads {
+            commands.entity(entity).despawn();
+        }
         return;
     };
     let placement = portal.at;
@@ -529,7 +568,7 @@ fn sync_backdrops(
                     // NOT the world's own layer: the far camera draws
                     // that world, and would draw this quad sampling the
                     // image it is writing.
-                    voxel_render::portal_layer(world),
+                    portal_layer(world),
                 ));
             }
         }
@@ -565,11 +604,18 @@ fn drive_portal(
     if render_worlds.iter().any(|w| !w.clip.is_empty()) {
         render_worlds.clear_clips();
     }
-    let Ok(portal) = portals.single() else {
+    // Closed, or open between two worlds neither of which is the one you
+    // are standing in: there is nothing to look through, so the far view
+    // stops costing a pass.
+    let showing = portals
+        .single()
+        .ok()
+        .and_then(|portal| portal.other(camera_world.0));
+    let (Ok(portal), Some(showing)) = (portals.single(), showing) else {
+        for (entity, _, _, _) in &portal_cams {
+            commands.entity(entity).despawn();
+        }
         return;
-    };
-    let Some(showing) = portal.other(camera_world.0) else {
-        return; // this portal does not touch the world you are in
     };
     let Some(assets) = assets else {
         return;

@@ -26,9 +26,9 @@ struct ChunkDrawUniform {
     offset: vec4<f32>,
     // x = number of active clip planes, y = which world this chunk is in.
     head: vec4<u32>,
-    // World-space half-spaces; a fragment survives where it is inside all
-    // of them. A portal masks the far world with the pyramid from the eye
-    // through its opening, plus the opening's own plane.
+    // World-space half-spaces; a fragment survives where it is inside
+    // all of them. What they are for is the host's business — showing one
+    // world through an opening in another is the case they exist for.
     clip: array<vec4<f32>, 5>,
 }
 @group(2) @binding(0) var<uniform> chunk: ChunkDrawUniform;
@@ -62,7 +62,7 @@ struct VoxelMaterialBindings {
 ///
 /// Per world: a material id is level data, so planet's 1 and the
 /// megastructure's 1 are different recipes that have to coexist while a
-/// portal shows both. Twin of `material_slot_index`.
+/// both are loaded at once. Twin of `material_slot_index`.
 fn material_for(id: u32) -> WorldMaterial {
     let i = chunk.head.y * 8u + min(id, 7u);
     let slot = env.material_slots[i / 4u][i % 4u];
@@ -207,10 +207,8 @@ fn fragment(in: VsOut) -> @location(0) vec4<f32> {
         view.world_position.y + in.cam_rel.y,
         view.world_position.z + in.cam_rel.z,
     );
-    // A world seen through a portal exists only inside the opening. The
-    // planes are the pyramid from the eye through it, plus the opening's
-    // own plane, so this is the stencil we cannot have — exact, because
-    // the opening is convex.
+    // The stencil we cannot have (no stencil aspect on the depth
+    // texture), and exact for planar boundaries.
     let clips = chunk.head.x;
     for (var i = 0u; i < clips; i++) {
         let plane = chunk.clip[i];

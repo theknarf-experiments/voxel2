@@ -47,7 +47,7 @@ mod props;
 mod ribbons;
 mod surface_paint;
 mod water;
-use portal::{FarLevel, PortalPlugin};
+use portal::{ExtraLevel, PortalPlugin};
 use props::PropsPlugin;
 use grass::GrassPlugin;
 use ribbons::RibbonsPlugin;
@@ -223,7 +223,7 @@ fn main() {
     } else {
         "levels/megastructure.json"
     };
-    app.insert_resource(FarLevel {
+    app.insert_resource(ExtraLevel {
         path: far_path.to_string(),
         loaded: None,
         scene: scene_for(std::path::Path::new(far_path)),
