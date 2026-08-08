@@ -19,6 +19,14 @@ use voxel_debug::{remote::VoxelRemotePlugin, viz::VoxelVizPlugin};
 use voxel_engine::level::LevelReloaded;
 use voxel_engine::{LevelDef, LevelPlugin, VoxelStreamSource};
 
+/// Which world a piece of the demo's scene content belongs to.
+///
+/// Scene content is not global: a portal shows another level's trees and
+/// rocks, so each spawned thing carries the world it decorates and the
+/// render layer that goes with it.
+#[derive(Component, Clone, Copy)]
+pub struct OfWorld(pub voxel_engine::WorldId);
+
 /// The world this host decorates.
 ///
 /// The engine streams any number of worlds; grass, props, water, ribbons
@@ -26,6 +34,12 @@ use voxel_engine::{LevelDef, LevelPlugin, VoxelStreamSource};
 /// are written for ONE of them. Naming it beats leaving `0` in a dozen
 /// systems: decorating a second world becomes "run these for another id",
 /// and until then every place that assumes one world says so.
+/// The props each loaded world scatters, keyed by world id — the
+/// companion to [`WorldScenes`]. A tree is dressed by the level it grows
+/// in, which is not necessarily the level you are standing in.
+#[derive(Resource, Default)]
+pub struct WorldProps(pub bevy::platform::collections::HashMap<voxel_engine::WorldId, props::PropTable>);
+
 /// How each loaded world is dressed: background, sun, ambient, haze.
 ///
 /// One place that answers "how does world W look", because five systems
@@ -224,7 +238,11 @@ fn main() {
         }))
         .insert_resource(HostScene(scene))
         .init_resource::<HostWorld>()
-        .insert_resource(props::PropTable::for_level(std::path::Path::new(&path)))
+        .insert_resource(WorldProps(
+            [(0, props::PropTable::for_level(std::path::Path::new(&path)))]
+                .into_iter()
+                .collect(),
+        ))
         .insert_resource(WorldScenes(
             [(0, scene_for(std::path::Path::new(&path)))].into_iter().collect(),
         ))

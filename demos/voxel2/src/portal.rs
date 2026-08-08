@@ -144,6 +144,7 @@ fn ensure_loaded(
     far: &mut ExtraLevel,
     loader: &mut WorldLoader,
     scenes: &mut crate::WorldScenes,
+    props: &mut crate::WorldProps,
 ) -> Option<u8> {
     if let Some(id) = far.world {
         return Some(id);
@@ -163,6 +164,10 @@ fn ensure_loaded(
     // far as it has to — which is the mechanism that cap was guessing at.
     let id = loader.load(level.clone(), 0, LodConfig::from(&level.lod));
     scenes.0.insert(id, far.scene.clone());
+    props.0.insert(
+        id,
+        crate::props::PropTable::for_level(std::path::Path::new(&far.path)),
+    );
     far.loaded = Some(level);
     far.world = Some(id);
     info!("portal: '{}' opened as world {id}", far.path);
@@ -486,6 +491,7 @@ fn toggle_portal(
     camera_world: Res<voxel_render::CameraWorld>,
     mut loader: WorldLoader,
     mut scenes: ResMut<crate::WorldScenes>,
+    mut props: ResMut<crate::WorldProps>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut images: ResMut<Assets<Image>>,
     mut portal_materials: ResMut<Assets<PortalViewMaterial>>,
@@ -545,7 +551,9 @@ fn toggle_portal(
         }
     }
 
-    let Some(far_world) = ensure_loaded(&mut levels.0[slot], &mut loader, &mut scenes) else {
+    let Some(far_world) =
+        ensure_loaded(&mut levels.0[slot], &mut loader, &mut scenes, &mut props)
+    else {
         return;
     };
 

@@ -184,9 +184,8 @@ pub struct PropsPlugin;
 
 impl Plugin for PropsPlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<PropTable>()
-            .init_resource::<PropAssets>()
-            .add_systems(Startup, build_prop_assets)
+        app.init_resource::<PropAssets>()
+            .add_systems(Update, build_prop_assets)
             .add_systems(
                 Update,
                 (
@@ -204,20 +203,42 @@ type VariantParts = Vec<(Handle<Mesh>, Handle<StandardMaterial>)>;
 /// Meshes and materials per class variant, built once from [`PropTable`].
 #[derive(Resource, Default)]
 struct PropAssets {
-    /// class -> variant -> parts.
-    classes: HashMap<String, Vec<VariantParts>>,
-    impostors: HashMap<String, Vec<Option<Impostor>>>,
+    /// (world, class) -> variant -> parts.
+    ///
+    /// Keyed by WORLD too, because a class name is level data: the
+    /// planet's "boulder" and purgatory's "boulder" are different rocks,
+    /// and one map keyed by name alone would hand whichever built first
+    /// to both.
+    classes: HashMap<(voxel_engine::WorldId, String), Vec<VariantParts>>,
+    impostors: HashMap<(voxel_engine::WorldId, String), Vec<Option<Impostor>>>,
+    /// Worlds whose props have been built already.
+    built: std::collections::HashSet<voxel_engine::WorldId>,
     impostor_mat: Handle<StandardMaterial>,
     blob_mesh: Handle<Mesh>,
     blob_mat: Handle<StandardMaterial>,
 }
 
+/// Build each world's prop meshes once, as its table appears.
+///
+/// Not a one-shot at startup: a world can arrive when a portal opens, and
+/// its props have to be built then.
 fn build_prop_assets(
-    table: Res<PropTable>,
+    tables: Res<crate::WorldProps>,
     mut assets: ResMut<PropAssets>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
+    if !tables.is_changed() {
+        return;
+    }
+    let pending: Vec<(voxel_engine::WorldId, PropTable)> = tables
+        .0
+        .iter()
+        .filter(|(world, _)| !assets.built.contains(world))
+        .map(|(world, table)| (*world, table.clone()))
+        .collect();
+    for (world, table) in pending {
+    assets.built.insert(world);
     let mat = |base_color: Color, rough: f32| StandardMaterial {
         base_color,
         perceptual_roughness: rough,
@@ -258,8 +279,9 @@ fn build_prop_assets(
             variants.push(parts);
             impostors.push(variant.impostor.clone());
         }
-        assets.classes.insert(class.clone(), variants);
-        assets.impostors.insert(class.clone(), impostors);
+        assets.classes.insert((world, class.clone()), variants);
+        assets.impostors.insert((world, class.clone()), impostors);
+    }
     }
     assets.impostor_mat = materials.add(StandardMaterial {
         base_color: Color::WHITE,
@@ -282,14 +304,13 @@ fn build_prop_assets(
 fn dress_scatter(
     mut commands: Commands,
     assets: Res<PropAssets>,
-    table: Res<PropTable>,
     worlds: Res<voxel_engine::Worlds>,
-    host: Res<crate::HostWorld>,
-    new: Query<(Entity, &ScatterInstance, &Transform), Added<ScatterInstance>>,
+    tables: Res<crate::WorldProps>,
+    new: Query<
+        (Entity, &ScatterInstance, &Transform, &crate::OfWorld),
+        Added<ScatterInstance>,
+    >,
 ) {
-    let Some(query) = worlds.query(host.0) else {
-        return;
-    };
     // EVERY command here is fallible, because the entity may be gone by
     // the time they apply. `Added<ScatterInstance>` hands out entities
     // the engine's scatter layer owns, and a tile created and released
@@ -298,8 +319,15 @@ fn dress_scatter(
     // `commands.entity(..).insert(..)` panics on that; `try_insert` and
     // `queue_silenced` drop the work for an instance that no longer
     // exists, which is exactly right: there is nothing left to dress.
-    for (entity, instance, transform) in &new {
-        let Some(variants) = assets.classes.get(&*instance.class) else {
+    for (entity, instance, transform, of_world) in &new {
+        // ITS world's table and ITS world's sun: a tree through a portal
+        // is dressed by the level it grows in, not by the one you are
+        // standing in.
+        let Some(query) = worlds.query(of_world.0) else {
+            continue;
+        };
+        let table = tables.0.get(&of_world.0).cloned().unwrap_or_default();
+        let Some(variants) = assets.classes.get(&(of_world.0, instance.class.to_string())) else {
             continue;
         };
         let Some(parts) = variants.get(instance.variant as usize) else {
@@ -497,7 +525,13 @@ fn reconcile_far_forest(
             continue;
         }
         let Some(props) = sink.get(part) else { continue };
-        spawned.insert(part, build_super_tile(&mut commands, &mut meshes, &assets, &props));
+        // The merged far forest is still the HOST world's only: its
+        // sink, its super-tiles and its silhouettes are all singular.
+        // Near trees are per world; the distant ones are not yet.
+        spawned.insert(
+            part,
+            build_super_tile(&mut commands, &mut meshes, &assets, host.0, &props),
+        );
     }
 }
 
@@ -506,9 +540,10 @@ fn build_super_tile(
     commands: &mut Commands,
     meshes: &mut Assets<Mesh>,
     assets: &PropAssets,
+    world: voxel_engine::WorldId,
     props: &[FarProp],
 ) -> Option<Entity> {
-    let impostors = assets.impostors.get(FOREST_CLASS)?;
+    let impostors = assets.impostors.get(&(world, FOREST_CLASS.to_string()))?;
     let mut b = MeshBuilder::default();
     for prop in props {
         let Some(Some(imp)) = impostors.get(prop.variant as usize) else {

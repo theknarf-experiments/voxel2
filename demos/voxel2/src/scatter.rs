@@ -183,6 +183,10 @@ impl LayerChunk for ScatterDrawChunk {
 pub struct Populations(pub Vec<PopulationHandle>);
 
 pub struct PopulationHandle {
+    /// The world this population decorates. Scatter is scene content and
+    /// scene content belongs to a world — a portal shows another level's
+    /// trees, not this one's moved sideways.
+    pub world: voxel_engine::WorldId,
     pub class: Arc<str>,
     pub output: ScatterOutput,
     pub sink: Sink<Placement>,
@@ -241,6 +245,9 @@ pub fn register(
             IVec3::new((2.0 * reach) as i32, 0, (2.0 * reach) as i32),
         ));
         handles.push(PopulationHandle {
+            // Stamped when the world adopts them; the planner that built
+            // these does not know which world it belongs to.
+            world: 0,
             class: Arc::from(def.class.as_str()),
             output: def.output,
             sink,
@@ -311,6 +318,10 @@ fn reconcile(
                                         scale: p.scale,
                                         seed: p.seed,
                                     },
+                                    // Only visible from its own world,
+                                    // and from a far view of it.
+                                    crate::OfWorld(population.world),
+                                    voxel_render::world_layer(population.world),
                                 ))
                                 .id()
                         })
@@ -334,24 +345,31 @@ impl Plugin for ScatterPlugin {
 
 /// The planner builds the populations while the level plugin builds; this
 /// picks them up once the world query exists.
+/// Adopt the populations of EVERY loaded world, once each.
+///
+/// Not a one-shot: a world can arrive long after startup — opening a
+/// portal loads one on the spot — and a `taken` flag meant only the
+/// launched level was ever decorated. Its trees showed through a portal
+/// and the other level's did not.
 fn adopt_populations(
     worlds: Res<voxel_engine::Worlds>,
-    host: Res<crate::HostWorld>,
     mut populations: ResMut<Populations>,
-    mut taken: Local<bool>,
+    mut adopted: Local<std::collections::HashSet<voxel_engine::WorldId>>,
 ) {
-    if *taken {
-        return;
-    }
-    let Some(world) = worlds.query(host.0) else {
-        return;
-    };
-    let Some(ctx) = world.host_ctx::<WorldCtx>() else {
-        return;
-    };
-    let found = ctx.populations.lock().unwrap().take();
-    if let Some(found) = found {
-        *populations = found;
-        *taken = true;
+    for world in worlds.iter() {
+        if adopted.contains(&world.id) {
+            continue;
+        }
+        let Some(ctx) = world.query.host_ctx::<WorldCtx>() else {
+            continue;
+        };
+        let found = ctx.populations.lock().unwrap().take();
+        if let Some(found) = found {
+            populations.0.extend(found.0.into_iter().map(|mut p| {
+                p.world = world.id;
+                p
+            }));
+            adopted.insert(world.id);
+        }
     }
 }
