@@ -583,10 +583,15 @@ pub(crate) struct GpuWorldOp {
     p2: Vec4,
 }
 
-/// How many worlds one program buffer can describe. Fixed because
-/// `encase` allows a single runtime-sized array per struct, and that one
-/// is the ops.
-pub const MAX_WORLDS: usize = 4;
+/// How many worlds one program buffer can describe.
+///
+/// Fixed because `encase` allows a single runtime-sized array per struct,
+/// and that one is the ops. Raising it costs a `GpuWorldHeader` (32 B)
+/// and eight material slots per world in a uniform — nothing — so the
+/// real ceiling on loaded worlds is the slab budget they are admitted
+/// against, not this. Twin of the `array<WorldHeader, N>` in the density
+/// and mesh shaders.
+pub const MAX_WORLDS: usize = 8;
 
 /// One world's slice of the shared program buffer.
 /// `count = (op offset, op count, height ops, seed)`.

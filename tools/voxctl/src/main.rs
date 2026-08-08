@@ -114,7 +114,14 @@ fn main() {
         // Opens (or moves) the portal in front of the camera. The engine
         // carries the command without knowing what a portal is; the host
         // decides.
-        ["portal"] => call("voxel/host", json!({"cmd": "portal"})),
+        // Toggles the opening onto level N (default 0), the same as the
+        // F7/F8/... keys. The engine carries the command without knowing
+        // what a portal is; the host reads the queue.
+        ["portal"] => call("voxel/host", json!({"cmd": "portal", "level": 0})),
+        ["portal", n] => call(
+            "voxel/host",
+            json!({"cmd": "portal", "level": n.parse::<u64>().unwrap_or(0)}),
+        ),
         ["world", w] => call("voxel/world", json!({"world": parse_f64(w) as u64})),
         ["raw", method] => call(method, Value::Null),
         ["raw", method, params] => match serde_json::from_str(params) {
@@ -125,7 +132,7 @@ fn main() {
             eprintln!(
                 "usage: voxctl status | goto X Y Z [DX DY DZ] | ribbons X Z [R] | \
                  markers X Z [R] [KIND] | scan X Z [R] [STEP] | shot PATH [--window] | \
-                 portal | world N | raw METHOD [JSON]"
+                 portal [N] | world N | raw METHOD [JSON]"
             );
             std::process::exit(2);
         }

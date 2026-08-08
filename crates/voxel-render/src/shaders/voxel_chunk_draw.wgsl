@@ -73,7 +73,7 @@ fn material_for(id: u32) -> WorldMaterial {
 struct EnvParams {
     flags: vec4<f32>,                    // x = coverage-eval mode
     // (world, material id) -> bindless slab slot, world-major.
-    material_slots: array<vec4<u32>, 8>,
+    material_slots: array<vec4<u32>, 16>,
 }
 @group(2) @binding(1) var<uniform> env: EnvParams;
 

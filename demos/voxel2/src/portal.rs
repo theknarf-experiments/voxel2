@@ -17,6 +17,7 @@
 //! because there is nothing to pair — both openings are the same opening.
 
 use bevy::asset::embedded_asset;
+use serde_json::Value;
 use bevy::prelude::*;
 use bevy::camera::visibility::RenderLayers;
 use bevy::render::render_resource::AsBindGroup;
@@ -36,7 +37,30 @@ use voxel_engine::{LevelDef, LodConfig, WorldLoader};
 /// world roughly doubles the meshed working set and caps what the first
 /// can stream — see `WorldLoader::load`. But "on demand" means "when the
 /// host asks", and a portal is only one thing that might ask.
-#[derive(Resource)]
+/// Every other level this demo can open onto, in button order: F7 is the
+/// first, F8 the second, and so on.
+///
+/// A list, not a pair. Nothing here is limited to two — the engine loads
+/// as many worlds as the slab will admit (`MAX_WORLDS` is the program
+/// buffer's bound and is cheap to raise), and which of them exist is a
+/// host's list of level files.
+#[derive(Resource, Default)]
+pub struct ExtraLevels(pub Vec<ExtraLevel>);
+
+
+impl ExtraLevels {
+    /// The key that opens onto level `slot`.
+    fn key(slot: usize) -> Option<KeyCode> {
+        Some(match slot {
+            0 => KeyCode::F7,
+            1 => KeyCode::F8,
+            2 => KeyCode::F9,
+            3 => KeyCode::F10,
+            _ => return None,
+        })
+    }
+}
+
 pub struct ExtraLevel {
     pub path: String,
     pub loaded: Option<LevelDef>,
@@ -443,9 +467,9 @@ pub struct PortalCamera(pub Entity);
 #[allow(clippy::too_many_arguments)]
 fn toggle_portal(
     mut commands: Commands,
-    mut far: ResMut<ExtraLevel>,
+    mut levels: ResMut<ExtraLevels>,
     camera: Query<&GlobalTransform, With<crate::FreeCamera>>,
-    portal: Query<Entity, With<Portal>>,
+    portal: Query<(Entity, &Portal)>,
     keys: Res<ButtonInput<KeyCode>>,
     // OPTIONAL: the queue only exists when the remote server is running,
     // and the keybind must work without it. Requiring it panicked the
@@ -460,36 +484,48 @@ fn toggle_portal(
     mut portal_materials: ResMut<Assets<PortalViewMaterial>>,
     windows: Query<&Window, With<bevy::window::PrimaryWindow>>,
 ) {
-    let asked = keys.just_pressed(KeyCode::F7)
-        || host.is_some_and(|mut host| {
-            let n = host.0.len();
-            host.0
-                .retain(|c| c.get("cmd").and_then(|c| c.as_str()) != Some("portal"));
-            host.0.len() != n
+    // Which destination was asked for: a key per level, or
+    // `voxctl portal [n]`.
+    let mut asked: Option<usize> = (0..levels.0.len())
+        .find(|&slot| ExtraLevels::key(slot).is_some_and(|k| keys.just_pressed(k)));
+    if let Some(mut host) = host {
+        let before = host.0.len();
+        let mut requested = None;
+        host.0.retain(|c| {
+            if c.get("cmd").and_then(|c| c.as_str()) != Some("portal") {
+                return true;
+            }
+            requested = Some(c.get("level").and_then(Value::as_u64).unwrap_or(0) as usize);
+            false
         });
-    if !asked {
+        if host.0.len() != before {
+            asked = requested;
+        }
+    }
+    let Some(slot) = asked else {
+        return;
+    };
+    if slot >= levels.0.len() {
+        warn!("portal: no level {slot}; {} loadable", levels.0.len());
         return;
     }
     let Ok(eye) = camera.single() else {
         return;
     };
-    let Some(far_world) = ensure_loaded(&mut far, &mut loader, &mut scenes) else {
-        return;
-    };
 
-    let forward = eye.forward().as_vec3();
-    let at = eye.translation() + forward * 14.0;
-    let placement = Transform::from_translation(at).looking_to(-forward, Vec3::Y);
-
-    // Already open: CLOSE it. Pressing again opens a fresh one wherever
-    // you are then standing.
+    // Already open: CLOSE it. Pressing the SAME level's key again closes;
+    // a different level's key closes this one and opens onto that one, so
+    // there is only ever one opening and one far view.
     //
     // Every opening goes, not just the first. Two portals make
     // `portals.single()` fail, which stops the far view and traversal
     // dead rather than erroring, so closing is also how a duplicate
     // heals — the next press starts from nothing.
     if !portal.is_empty() {
-        for entity in &portal {
+        let already = levels.0[slot].world.is_some_and(|w| {
+            portal.iter().any(|(_, p)| p.worlds.0 == w || p.worlds.1 == w)
+        });
+        for (entity, _) in &portal {
             commands.entity(entity).despawn();
         }
         // The far world stays loaded and streaming. It cost a slab budget
@@ -497,8 +533,18 @@ fn toggle_portal(
         // instant, and nothing about a closed opening makes the world on
         // the other side stop existing.
         info!("portal closed");
-        return;
+        if already {
+            return;
+        }
     }
+
+    let Some(far_world) = ensure_loaded(&mut levels.0[slot], &mut loader, &mut scenes) else {
+        return;
+    };
+
+    let forward = eye.forward().as_vec3();
+    let at = eye.translation() + forward * 14.0;
+    let placement = Transform::from_translation(at).looking_to(-forward, Vec3::Y);
 
     let near_world = camera_world.0;
     // Standing IN the far level, the way out is back to the level the app

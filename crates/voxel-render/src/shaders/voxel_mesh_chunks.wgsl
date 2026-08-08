@@ -79,7 +79,7 @@ struct WorldHeader {
     sun: vec4<f32>,
 }
 struct WorldProgram {
-    worlds: array<WorldHeader, 4>,
+    worlds: array<WorldHeader, 8>,
     ops: array<WorldOp>,
 }
 @group(0) @binding(6) var<storage, read> prog: WorldProgram;

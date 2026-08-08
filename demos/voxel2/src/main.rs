@@ -48,6 +48,14 @@ mod ribbons;
 mod surface_paint;
 mod water;
 use portal::{ExtraLevel, PortalPlugin};
+
+/// The levels this binary ships. A real game has one world, or its own
+/// list; this demo exists to show several loaded at once.
+const SHIPPED_LEVELS: &[&str] = &[
+    "levels/planet.json",
+    "levels/megastructure.json",
+    "levels/purgatory.json",
+];
 use props::PropsPlugin;
 use grass::GrassPlugin;
 use ribbons::RibbonsPlugin;
@@ -169,7 +177,6 @@ fn main() {
             std::process::exit(1);
         }
     };
-    let is_mega = path.contains("megastructure");
     let scene = scene_for(std::path::Path::new(&path));
     let title = format!(
         "voxel2 — {}",
@@ -237,7 +244,7 @@ fn main() {
                 // A game picks this at new-game time and restores it
                 // from its save; the demo just wants a stable world.
                 seed: 0,
-                source: Some(path.into()),
+                source: Some(path.clone().into()),
                 hole_eval,
                 remote_port: None,
                 // This demo authors its layers as JSON; a game with
@@ -245,19 +252,25 @@ fn main() {
                 planner: Some(std::sync::Arc::new(planning::StackPlanning)),
             },
         ));
-    // Where F7 / `voxctl portal` opens onto: the other shipped level.
-    // Nothing is loaded until a portal is actually opened.
-    let far_path = if is_mega {
-        "levels/planet.json"
-    } else {
-        "levels/megastructure.json"
-    };
-    app.insert_resource(ExtraLevel {
-        path: far_path.to_string(),
-        loaded: None,
-        scene: scene_for(std::path::Path::new(far_path)),
-        world: None,
-    })
+    // What the portal keys open onto: every other shipped level, in key
+    // order. A level is loaded the first time something asks for it and
+    // stays loaded after — see `ExtraLevels`.
+    let others: Vec<&str> = SHIPPED_LEVELS
+        .iter()
+        .copied()
+        .filter(|p| !path.ends_with(p.trim_start_matches("levels/")))
+        .collect();
+    app.insert_resource(portal::ExtraLevels(
+        others
+            .iter()
+            .map(|p| ExtraLevel {
+                path: (*p).to_string(),
+                loaded: None,
+                scene: scene_for(std::path::Path::new(p)),
+                world: None,
+            })
+            .collect(),
+    ))
     .add_plugins(PortalPlugin);
     app
         .add_systems(Startup, setup_scene)
