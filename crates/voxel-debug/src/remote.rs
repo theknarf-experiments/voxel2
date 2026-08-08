@@ -135,6 +135,7 @@ fn status(
             "mesh_started": s.mesh_started,
             "reported_ready": s.reported_ready,
             "gen_starved": s.gen_starved,
+            "drawn_per_world": s.drawn_per_world,
             "tracked": s.tracked,
             "meshed": s.meshed,
             "awaiting": s.awaiting,

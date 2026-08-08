@@ -210,6 +210,8 @@ pub struct RenderStats {
     /// was built with — ground truth for seam validation (the ready
     /// channel reports held meshes before they swap in).
     pub drawn_masks: Vec<(ChunkKey, u32)>,
+    /// Draw-list length per world — is a world being drawn at all?
+    pub drawn_per_world: Vec<usize>,
     pub tracked: usize,
     pub meshed: usize,
     pub empty_classified: usize,
@@ -632,7 +634,7 @@ fn sync_terrain_materials(
     recipes: Res<WorldMaterials>,
     mut materials: ResMut<TerrainMaterials>,
     mut assets: ResMut<Assets<VoxelSurfaceMaterial>>,
-    marker: Query<Entity, With<VoxelTerrainMarker>>,
+    markers: Query<Entity, With<VoxelTerrainMarker>>,
 ) {
     if !recipes.is_changed() && materials.0.len() == recipes.0.len() {
         return;
@@ -647,21 +649,22 @@ fn sync_terrain_materials(
     }
     // The marker's material only decides which slab the draw binds; every
     // recipe of this world lives in that same slab.
-    if let (Ok(entity), Some(first)) = (marker.single(), materials.0.first()) {
-        commands
-            .entity(entity)
-            .insert(MeshMaterial3d(first.clone()));
+    if let Some(first) = materials.0.first() {
+        for entity in &markers {
+            commands
+                .entity(entity)
+                .insert(MeshMaterial3d(first.clone()));
+        }
     }
 }
 
+/// The anchor the chunk phase item hangs off — not content. Visible from
+/// every world's camera; which world's chunks get drawn is decided per
+/// chunk by `key.world`. On layer 0 alone, a camera in world 1 drew no
+/// terrain at all because it could not see the anchor.
 fn spawn_terrain_marker(mut commands: Commands) {
     commands.spawn((
         VoxelTerrainMarker,
-        // Visible from EVERY world's camera. This entity is not content,
-        // it is the anchor the chunk phase item hangs off, and which
-        // world's chunks get drawn is decided per chunk by `key.world`.
-        // Leaving it on layer 0 made a camera in world 1 draw no terrain
-        // at all — it could not see the anchor.
         bevy::camera::visibility::RenderLayers::from_layers(&[0, 1, 2, 3]),
         Visibility::default(),
         Transform::default(),
@@ -1948,6 +1951,7 @@ fn plan_frame(
         counts.insert("total_ops", total_ops);
         s.state_counts = counts.into_iter().collect();
         s.drawn = draw_lists.total();
+        s.drawn_per_world = draw_lists.0.iter().map(Vec::len).collect();
         s.culled = culled;
     }
 }

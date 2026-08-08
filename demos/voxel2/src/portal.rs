@@ -205,6 +205,26 @@ type NearViews<'w, 's> = Query<
     (With<Camera3d>, Without<PortalCamera>),
 >;
 
+/// Whether to render the far world through the opening.
+///
+/// OFF, because the portal is BROKEN and this at least keeps the far
+/// view's cost off the frame while it is. Opening a portal makes the near
+/// world's terrain stop drawing — the ground vanishes, leaving grass and
+/// trees, which hang off their own draw paths.
+///
+/// The reproducer is camera-free: merely REGISTERING a second world does
+/// it. World 0's draw list still holds all 271 entries afterwards, so the
+/// list is right and the draw is being suppressed downstream. Ruled out,
+/// each by experiment rather than by reading: the portal camera (fails
+/// with no portal camera at all), `ViewWorld` (correct per entity in the
+/// main world), the clip planes, the material slab (slots byte-identical
+/// before and after), the backdrop quad, tonemapping, `PendingQueues`
+/// (per view in Bevy), and one anchor per world (which made it worse and
+/// was reverted).
+fn far_view_enabled() -> bool {
+    std::env::var_os("VOXEL_PORTAL_VIEW").is_some()
+}
+
 /// The quad painted with the far world's background, behind the opening.
 #[derive(Component)]
 pub struct PortalBackdrop;
@@ -239,7 +259,7 @@ fn open_portal(
     mut far: ResMut<FarLevel>,
     near: Res<LevelDef>,
     camera: Query<&GlobalTransform, With<crate::FreeCamera>>,
-    mut portal: Query<&mut Portal>,
+    mut portal: Query<(Entity, &mut Portal)>,
     mut backdrop: Query<&mut Transform, With<PortalBackdrop>>,
     keys: Res<ButtonInput<KeyCode>>,
     // OPTIONAL: the queue only exists when the remote server is running,
@@ -282,11 +302,22 @@ fn open_portal(
     let at = eye.translation() + forward * 14.0;
     let placement = Transform::from_translation(at).looking_to(-forward, Vec3::Y);
 
-    // Already open: move it rather than stacking a second one, which
-    // would make `portals.single()` fail and stop the far view dead.
-    if let (Ok(mut portal), Ok(mut quad)) = (portal.single_mut(), backdrop.single_mut()) {
-        portal.near = placement;
-        *quad = placement;
+    // Already open: MOVE it. Never stack a second one — two portals make
+    // `portals.single()` fail, which silently stops the far view and
+    // traversal dead rather than erroring. `iter_mut().next()` plus
+    // despawning any strays is self-healing, where `single_mut()` would
+    // itself fail once a duplicate existed and leave it wedged.
+    let mut open = portal.iter_mut();
+    if let Some((_, mut existing)) = open.next() {
+        existing.near = placement;
+        for (stray, _) in open {
+            warn!("portal: despawning a duplicate opening");
+            commands.entity(stray).despawn();
+        }
+        let mut quads = backdrop.iter_mut();
+        if let Some(mut quad) = quads.next() {
+            *quad = placement;
+        }
         info!("portal moved to {at:?}");
         return;
     }
@@ -366,6 +397,7 @@ fn drive_portal(
                 *transform = placement;
                 // Just after the view it pairs, into the same target.
                 cam.order = camera.order + 1;
+                cam.is_active = far_view_enabled();
                 let mut cmd = commands.entity(entity);
                 cmd.insert(voxel_render::ViewWorld(showing))
                     .insert(RenderLayers::layer(usize::from(showing)));
@@ -374,6 +406,9 @@ fn drive_portal(
                 }
             }
             None => {
+                if !far_view_enabled() {
+                    continue;
+                }
                 let mut spawned = commands.spawn((
                     PortalCamera(source),
                     // "Not the player camera." Without it the streamer
@@ -393,6 +428,13 @@ fn drive_portal(
                     placement,
                     voxel_render::ViewWorld(showing),
                     RenderLayers::layer(usize::from(showing)),
+                    // No second tonemap. Cameras sharing a target each run
+                    // their own post-processing over the WHOLE image, so a
+                    // portal view re-tonemapped the near world that was
+                    // already composited — the ground washed out to pale
+                    // grey the moment a portal opened.
+                    bevy::core_pipeline::tonemapping::Tonemapping::None,
+                    bevy::core_pipeline::tonemapping::DebandDither::Disabled,
                 ));
                 if let Some(target) = target {
                     spawned.insert(target.clone());
@@ -430,9 +472,7 @@ fn drive_portal(
         ahead = -ahead;
     }
     planes.push(ahead.extend(-ahead.dot(to.translation)));
-    if std::env::var_os("PORTAL_NOCLIP").is_none() {
-        clips.0[usize::from(showing)] = planes;
-    }
+    clips.0[usize::from(showing)] = planes;
 }
 
 /// Step through: crossing the opening moves you by the pairing and swaps
