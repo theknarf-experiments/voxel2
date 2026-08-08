@@ -16,8 +16,11 @@
 //! position, same heading, same velocity. There is no pairing transform
 //! because there is nothing to pair — both openings are the same opening.
 
+use bevy::asset::embedded_asset;
 use bevy::prelude::*;
 use bevy::camera::visibility::RenderLayers;
+use bevy::render::render_resource::AsBindGroup;
+use bevy::shader::ShaderRef;
 use voxel_engine::{LevelDef, LodConfig, WorldLoader};
 
 /// The far side: which level file to open onto, and — once opened — the
@@ -42,6 +45,9 @@ pub struct PortalPlugin;
 
 impl Plugin for PortalPlugin {
     fn build(&self, app: &mut App) {
+        embedded_asset!(app, "voxel_portal.wgsl");
+        app.add_plugins(MaterialPlugin::<PortalViewMaterial>::default())
+            .add_systems(Update, size_portal_target);
         app.add_systems(
                 Update,
                 (
@@ -231,17 +237,6 @@ impl Portal {
         }
     }
 
-    /// The opening's four corners.
-    fn corners(&self) -> [Vec3; 4] {
-        let x = self.at.rotation * Vec3::X * self.half.x;
-        let y = self.at.rotation * Vec3::Y * self.half.y;
-        [
-            self.at.translation - x - y,
-            self.at.translation + x - y,
-            self.at.translation + x + y,
-            self.at.translation - x + y,
-        ]
-    }
 }
 
 /// Near-side views: every camera that is not itself a portal camera.
@@ -286,10 +281,79 @@ pub struct PortalBackdrop {
     world: voxel_engine::WorldId,
 }
 
-/// Shared handles for the backdrop quads, made once.
+/// The opening's surface: the far view, sampled in screen space.
+#[derive(Asset, AsBindGroup, TypePath, Clone)]
+pub struct PortalViewMaterial {
+    #[texture(0)]
+    #[sampler(1)]
+    far_view: Handle<Image>,
+}
+
+impl Material for PortalViewMaterial {
+    fn vertex_shader() -> ShaderRef {
+        "embedded://voxel2/voxel_portal.wgsl".into()
+    }
+    fn fragment_shader() -> ShaderRef {
+        "embedded://voxel2/voxel_portal.wgsl".into()
+    }
+}
+
+/// Shared handles for the opening's quads, made once.
 #[derive(Resource)]
 struct PortalAssets {
     quad: Handle<Mesh>,
+    /// What the far camera renders into, and what the opening samples.
+    /// One image, because only one view of the far world exists at a
+    /// time; a second portal onto the same world would need its own.
+    target: Handle<Image>,
+    material: Handle<PortalViewMaterial>,
+}
+
+/// Size the far view's target to the window, and keep it there.
+///
+/// Sampling is by fragment position, so the two images must be the same
+/// size or the far world slides against the opening as the window
+/// changes.
+fn size_portal_target(
+    assets: Option<Res<PortalAssets>>,
+    windows: Query<&Window, With<bevy::window::PrimaryWindow>>,
+    mut images: ResMut<Assets<Image>>,
+) {
+    let (Some(assets), Ok(window)) = (assets, windows.single()) else {
+        return;
+    };
+    let want = bevy::render::render_resource::Extent3d {
+        width: window.physical_width().max(1),
+        height: window.physical_height().max(1),
+        depth_or_array_layers: 1,
+    };
+    let Some(mut image) = images.get_mut(&assets.target) else {
+        return;
+    };
+    if image.texture_descriptor.size != want {
+        image.resize(want);
+    }
+}
+
+fn far_view_image(width: u32, height: u32) -> Image {
+    use bevy::render::render_resource::{
+        Extent3d, TextureDimension, TextureFormat, TextureUsages,
+    };
+    let mut image = Image::new_fill(
+        Extent3d {
+            width: width.max(1),
+            height: height.max(1),
+            depth_or_array_layers: 1,
+        },
+        TextureDimension::D2,
+        &[0, 0, 0, 255],
+        TextureFormat::Rgba8UnormSrgb,
+        bevy::asset::RenderAssetUsages::RENDER_WORLD,
+    );
+    image.texture_descriptor.usage = TextureUsages::TEXTURE_BINDING
+        | TextureUsages::COPY_DST
+        | TextureUsages::RENDER_ATTACHMENT;
+    image
 }
 
 /// Marks a camera that renders the far side FOR a particular near-side
@@ -332,6 +396,9 @@ fn open_portal(
     mut loader: WorldLoader,
     mut scenes: ResMut<crate::WorldScenes>,
     mut meshes: ResMut<Assets<Mesh>>,
+    mut images: ResMut<Assets<Image>>,
+    mut portal_materials: ResMut<Assets<PortalViewMaterial>>,
+    windows: Query<&Window, With<bevy::window::PrimaryWindow>>,
 ) {
     let asked = keys.just_pressed(KeyCode::F7)
         || host.is_some_and(|mut host| {
@@ -383,25 +450,32 @@ fn open_portal(
         worlds: (near_world, far_world),
         half: Vec2::new(4.0, 3.0),
     });
+    let size = windows.single().map_or((1280, 720), |w| {
+        (w.physical_width(), w.physical_height())
+    });
+    let target = images.add(far_view_image(size.0, size.1));
     commands.insert_resource(PortalAssets {
         quad: meshes.add(Rectangle::new(8.0, 6.0)),
+        material: portal_materials.add(PortalViewMaterial {
+            far_view: target.clone(),
+        }),
+        target,
     });
     info!("portal opened at {at:?} in world {near_world}");
 }
 
-/// Keep one backdrop quad per side, in that side's world.
+/// Keep one surface per side, in that side's world.
 ///
-/// Synced every frame rather than moved when the portal moves: the quads
-/// then follow whatever the portal says, including the side that did not
-/// exist yet, and a stray or missing one heals itself instead of leaving
-/// an opening you cannot see.
-#[allow(clippy::too_many_arguments)]
+/// Synced every frame rather than moved when the portal moves, so the
+/// side that did not exist yet gets one and a stray heals itself.
+///
+/// Both sides share one material, and so one image: only one far view
+/// exists at a time — whichever world the camera is NOT in. A second
+/// portal onto a third world would need a target of its own.
 fn sync_backdrops(
     mut commands: Commands,
     portals: Query<&Portal>,
     assets: Option<Res<PortalAssets>>,
-    scenes: Res<crate::WorldScenes>,
-    mut materials_assets: ResMut<Assets<StandardMaterial>>,
     mut quads: Query<(Entity, &PortalBackdrop, &mut Transform)>,
 ) {
     let (Ok(portal), Some(assets)) = (portals.single(), assets) else {
@@ -416,32 +490,16 @@ fn sync_backdrops(
                 }
             }
             None => {
-                // Painted with the background of the world it looks INTO,
-                // looked up by that world — not by which side of the pair
-                // it happens to be, which is only right when the portal
-                // was opened from world 0.
-                let into = portal.other(world).and_then(|w| scenes.0.get(&w));
-                let material = materials_assets.add(StandardMaterial {
-                    base_color: into.map_or(Color::BLACK, |s| s.clear_color),
-                    unlit: true,
-                    // Both faces: an opening is approachable from either
-                    // side, and a one-sided quad silently vanishes from
-                    // whichever side it is not facing.
-                    double_sided: true,
-                    cull_mode: None,
-                    ..default()
-                });
                 commands.spawn((
                     PortalBackdrop { world },
                     Mesh3d(assets.quad.clone()),
-                    MeshMaterial3d(material),
+                    MeshMaterial3d(assets.material.clone()),
                     placement,
                     voxel_render::world_layer(world),
                 ));
             }
         }
     }
-    // A side that moved to another world leaves its old quad behind.
     for (entity, backdrop, _) in &quads {
         if portal.other(backdrop.world).is_none() {
             commands.entity(entity).despawn();
@@ -454,6 +512,7 @@ fn sync_backdrops(
 ///
 /// The far view is the near view moved by the pairing, so the two line up
 /// at the opening by construction rather than by tuning.
+#[allow(clippy::too_many_arguments)]
 fn drive_portal(
     mut commands: Commands,
     portals: Query<&Portal>,
@@ -462,6 +521,8 @@ fn drive_portal(
     mut render_worlds: ResMut<voxel_render::RenderWorlds>,
     mut focus: ResMut<voxel_engine::WorldFocus>,
     camera_world: Res<voxel_render::CameraWorld>,
+    assets: Option<Res<PortalAssets>>,
+    scenes: Res<crate::WorldScenes>,
 ) {
     // Republished when it changes, NOT every frame: taking `RenderWorlds`
     // mutably marks it changed, and everything downstream that reacts to
@@ -477,33 +538,44 @@ fn drive_portal(
         return; // this portal does not touch the world you are in
     };
 
-    for (source, eye, camera, target) in &sources {
+    let Some(assets) = assets else {
+        return;
+    };
+    let sky = scenes
+        .0
+        .get(&showing)
+        .map_or(Color::BLACK, |s| s.clear_color);
+
+    for (source, eye, camera, _) in &sources {
         let existing = portal_cams
             .iter_mut()
             .find(|(_, paired, _, _)| paired.0 == source);
         // The SAME eye. Both worlds occupy the same coordinates, so the
-        // view of the other one through the opening is this view — there
-        // is nothing to transform and so nothing that can fail to line up
-        // at the edges.
+        // view of the other one through the opening IS this view — which
+        // is what lets the opening sample it by fragment position and
+        // line up pixel for pixel, with nothing to tune.
         let placement = Transform::from_matrix(eye.to_matrix());
         match existing {
             Some((entity, _, mut transform, mut cam)) => {
                 *transform = placement;
-                // Just after the view it pairs, into the same target.
-                cam.order = camera.order + 1;
+                // BEFORE the view it pairs, so the image is ready when
+                // the opening samples it.
+                cam.order = camera.order - 1;
                 cam.is_active = far_view_enabled();
-                let mut cmd = commands.entity(entity);
-                cmd.insert(voxel_render::ViewWorld(showing))
-                    .insert(voxel_render::far_view_layers(showing));
-                if let Some(target) = target {
-                    cmd.insert(target.clone());
-                }
+                cam.clear_color = bevy::camera::ClearColorConfig::Custom(sky);
+                commands
+                    .entity(entity)
+                    .insert(voxel_render::ViewWorld(showing))
+                    // The WHOLE world, scene content included. The image
+                    // is confined to the opening by the quad that samples
+                    // it, so nothing here has to be clipped.
+                    .insert(voxel_render::world_layer(showing));
             }
             None => {
                 if !far_view_enabled() {
                     continue;
                 }
-                let mut spawned = commands.spawn((
+                commands.spawn((
                     PortalCamera(source),
                     // "Not the player camera." Without it the streamer
                     // can pick THIS one as the eye, and generation
@@ -511,60 +583,35 @@ fn drive_portal(
                     voxel_render::HelperCamera,
                     Camera3d::default(),
                     Camera {
-                        order: camera.order + 1,
-                        // Keep what the near view already drew: the far
-                        // world appears INTO it.
-                        clear_color: bevy::camera::ClearColorConfig::None,
+                        order: camera.order - 1,
+                        // The far world's own sky, wherever it is empty.
+                        clear_color: bevy::camera::ClearColorConfig::Custom(sky),
                         ..default()
                     },
+                    bevy::camera::RenderTarget::Image(assets.target.clone().into()),
                     placement,
                     voxel_render::ViewWorld(showing),
-                    // Terrain and the shown world's lights: the clip
-                    // planes mask chunks, and nothing masks entities.
-                    voxel_render::far_view_layers(showing),
-                    // No second tonemap. Cameras sharing a target each run
-                    // their own post-processing over the WHOLE image, so a
-                    // portal view re-tonemapped the near world that was
-                    // already composited — the ground washed out to pale
-                    // grey the moment a portal opened.
-                    bevy::core_pipeline::tonemapping::Tonemapping::None,
-                    bevy::core_pipeline::tonemapping::DebandDither::Disabled,
+                    voxel_render::world_layer(showing),
                 ));
-                if let Some(target) = target {
-                    spawned.insert(target.clone());
-                }
             }
         }
     }
 
-    // The mask: the pyramid from the eye through the opening, plus the
-    // opening's own plane so nothing between it and the eye leaks in.
-    // One set of coordinates, so these are the eye and the opening as they
-    // already are.
+    // The only mask left is the opening's own PLANE: the far world must
+    // appear beyond the opening, not between it and the eye. The four
+    // pyramid planes are gone — the quad does that, exactly, for
+    // everything the far camera drew rather than for chunks alone.
     let Some((_, eye, _, _)) = sources.iter().next() else {
         return;
     };
     let eye = eye.translation();
-    // The far world streams around the SAME point the camera is at: it is
-    // the same place, in another dimension. Nothing to relocate.
     focus.0.clear();
     focus.0.resize(voxel_render::MAX_WORLDS, None);
-    let corners = portal.corners();
-    let mut planes = Vec::with_capacity(voxel_render::MAX_CLIP_PLANES);
-    for i in 0..4 {
-        let a = corners[i];
-        let b = corners[(i + 1) % 4];
-        let mut n = (a - eye).cross(b - eye).normalize_or_zero();
-        if n.dot(corners[(i + 2) % 4] - a) < 0.0 {
-            n = -n;
-        }
-        planes.push(n.extend(-n.dot(a)));
-    }
     let mut ahead = portal.at.rotation * Vec3::Z;
     if ahead.dot(portal.at.translation - eye) < 0.0 {
         ahead = -ahead;
     }
-    planes.push(ahead.extend(-ahead.dot(portal.at.translation)));
+    let planes = vec![ahead.extend(-ahead.dot(portal.at.translation))];
     if render_worlds.clip(showing) != planes {
         if let Some(world) = render_worlds.get_mut(showing) {
             world.clip = planes;
