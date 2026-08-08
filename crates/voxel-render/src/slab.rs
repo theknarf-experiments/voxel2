@@ -126,6 +126,18 @@ impl SlabAllocator {
         None
     }
 
+    /// Could `alloc` succeed right now? A HINT, not a reservation:
+    /// another chunk can take the slot first, and the caller simply
+    /// defers again. Used to decide which deferred chunks are worth
+    /// re-running density for.
+    pub fn would_fit(&self, vertex_count: u32, index_count: u32) -> bool {
+        CLASS_VERTS.iter().enumerate().any(|(class, &class_verts)| {
+            vertex_count <= class_verts
+                && index_count <= class_verts * INDEX_FACTOR
+                && !self.free[class].is_empty()
+        })
+    }
+
     /// Free slots per class. Zero is normal for a class at its working
     /// set; it only matters alongside [`SlabPressure`].
     pub fn free_slots(&self) -> [u32; 4] {

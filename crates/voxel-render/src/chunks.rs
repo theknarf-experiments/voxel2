@@ -90,6 +90,11 @@ const COUNTS_SLOTS: u32 = 512;
 // ~8 ms vsync slot (spiky batches read as missed-vsync 17 ms frames even
 // when average load is fine).
 const GEN_BUDGET: usize = 320;
+/// Deferred chunks re-admitted per frame. Each one costs a density pass
+/// it has already paid once, so recovery is deliberately gradual: the
+/// alternative is a frame that regenerates everything the slab just
+/// rejected and rejects it again.
+const RETRY_BUDGET: usize = 32;
 const MESH_BUDGET: usize = 320;
 const STAGING_BUFFERS: usize = 3;
 
@@ -838,8 +843,16 @@ enum ChunkState {
     CountsInFlight { slot: u32 },
     /// Freed while counts were in flight; readback must recycle the slot.
     Cancelled { slot: u32 },
-    /// Counts known but the slab had no space; retry allocation.
-    AwaitingAlloc { slot: u32, verts: u32, indices: u32 },
+    /// Arena slot AND slab space both in hand; the mesh dispatch is next.
+    ///
+    /// A chunk never holds an arena slot without somewhere to put the
+    /// result. That is the whole wedge: waiting here for a slab slot held
+    /// the arena slot, the arena starved, no chunk could generate, so
+    /// nothing was ever freed to release a slab slot.
+    ReadyToMesh { slot: u32, alloc: SlabAlloc, index_count: u32 },
+    /// Counted, but the slab had no room. Holds NOTHING — retried when
+    /// space frees, at the cost of re-running density.
+    Deferred { verts: u32, indices: u32 },
     /// Classified all-air/all-solid: drawable as nothing.
     Empty,
     /// In the slab and drawable.
@@ -875,7 +888,10 @@ struct RenderChunk {
 enum Pending {
     Queued,
     CountsInFlight { slot: u32 },
-    AwaitingAlloc { slot: u32, verts: u32, indices: u32 },
+    ReadyToMesh { slot: u32, alloc: SlabAlloc, index_count: u32 },
+    /// Counted, but the slab had no room. Holds nothing; the OLD mesh
+    /// keeps drawing, so this costs a stale seam rather than a hole.
+    Deferred { verts: u32, indices: u32 },
     /// Regen meshed but held: the old mesh keeps drawing until Commit.
     Held { alloc: SlabAlloc, index_count: u32 },
     /// Regen classified empty but held: emptiness applies at Commit.
@@ -1424,6 +1440,39 @@ fn make_params(
     }
 }
 
+/// Where a counted chunk goes next.
+///
+/// The one place the slab is consulted, and it is consulted the moment
+/// the counts land — NOT later, from a queue of chunks sitting on arena
+/// slots. Deciding here is what makes "holds an arena slot" and "can
+/// still finish" the same condition.
+enum Placement {
+    /// Space reserved. Dispatch the mesh.
+    Mesh(SlabAlloc),
+    /// Nothing to draw here.
+    Empty,
+    /// Bigger than the largest class can ever hold.
+    TooBig,
+    /// No room right now. Release everything and retry when the slab
+    /// drains; never wait holding a resource somebody else needs.
+    Defer,
+}
+
+fn place(slab: &mut crate::slab::SlabAllocator, verts: u32, quads: u32) -> Placement {
+    if verts == 0 || quads == 0 {
+        return Placement::Empty;
+    }
+    let indices = quads.saturating_mul(6);
+    let max_verts = *crate::slab::CLASS_VERTS.last().unwrap();
+    if verts > max_verts || indices > max_verts * crate::slab::INDEX_FACTOR {
+        return Placement::TooBig;
+    }
+    match slab.alloc(verts, indices) {
+        Some(alloc) => Placement::Mesh(alloc),
+        None => Placement::Defer,
+    }
+}
+
 /// One chunk's draw data: where it is relative to the eye that sees it,
 /// which world it belongs to, and the planes masking that world.
 ///
@@ -1582,7 +1631,7 @@ fn plan_frame(
                             match chunk.pending.take() {
                                 Some(Pending::Held { alloc, .. }) => gpu.slab.free(alloc),
                                 Some(p @ (Pending::CountsInFlight { .. }
-                                | Pending::AwaitingAlloc { .. })) => {
+                                | Pending::ReadyToMesh { .. })) => {
                                     // The in-flight regen carries the OLD
                                     // mask; without a requeue its report
                                     // never matches the new request and
@@ -1628,13 +1677,19 @@ fn plan_frame(
                 let mut inflight_slot = None;
                 match chunk.pending {
                     Some(Pending::CountsInFlight { slot }) => inflight_slot = Some(slot),
-                    Some(Pending::AwaitingAlloc { slot, .. }) => gpu.arena_free.push(slot),
+                    Some(Pending::ReadyToMesh { slot, alloc, .. }) => {
+                        gpu.arena_free.push(slot);
+                        gpu.slab.free(alloc);
+                    }
                     Some(Pending::Held { alloc, .. }) => gpu.slab.free(alloc),
                     _ => {}
                 }
                 match chunk.state {
                     ChunkState::CountsInFlight { slot } => inflight_slot = Some(slot),
-                    ChunkState::AwaitingAlloc { slot, .. } => gpu.arena_free.push(slot),
+                    ChunkState::ReadyToMesh { slot, alloc, .. } => {
+                        gpu.arena_free.push(slot);
+                        gpu.slab.free(alloc);
+                    }
                     ChunkState::Meshed { alloc, .. } => gpu.slab.free(alloc),
                     _ => {}
                 }
@@ -1679,35 +1734,50 @@ fn plan_frame(
             };
             // A pending regen's counts route to the pending track.
             if let Some(Pending::CountsInFlight { slot }) = chunk.pending {
-                let max_verts = *crate::slab::CLASS_VERTS.last().unwrap();
-                let max_indices = max_verts * crate::slab::INDEX_FACTOR;
-                if verts > max_verts || quads * 6 > max_indices {
-                    warn!("chunk {key:?} regen exceeds largest slab class; kept old mesh");
-                    gpu.arena_free.push(slot);
-                    chunk.pending = None;
-                    // Report anyway so an epoch waiting on this chunk can
-                    // complete instead of wedging on a pathological mesh.
-                    let _ = ready_tx.0.send((*key, chunk.gen_mask));
-                    readies += 1;
-                } else if verts == 0 || quads == 0 {
-                    gpu.arena_free.push(slot);
-                    if chunk.hold {
-                        chunk.pending = Some(Pending::HeldEmpty);
-                    } else {
+                match place(&mut gpu.slab, verts, quads) {
+                    Placement::TooBig => {
+                        warn!("chunk {key:?} regen exceeds largest slab class; kept old mesh");
+                        gpu.arena_free.push(slot);
                         chunk.pending = None;
-                        if let ChunkState::Meshed { alloc, .. } = chunk.state {
-                            gpu.slab.free(alloc);
-                        }
-                        chunk.state = ChunkState::Empty;
+                        // Report anyway so an epoch waiting on this chunk
+                        // can complete instead of wedging on a
+                        // pathological mesh.
+                        let _ = ready_tx.0.send((*key, chunk.gen_mask));
+                        readies += 1;
                     }
-                    let _ = ready_tx.0.send((*key, u32::MAX));
-                    readies += 1;
-                } else {
-                    chunk.pending = Some(Pending::AwaitingAlloc {
-                        slot,
-                        verts,
-                        indices: quads * 6,
-                    });
+                    Placement::Empty => {
+                        gpu.arena_free.push(slot);
+                        if chunk.hold {
+                            chunk.pending = Some(Pending::HeldEmpty);
+                        } else {
+                            chunk.pending = None;
+                            if let ChunkState::Meshed { alloc, .. } = chunk.state {
+                                gpu.slab.free(alloc);
+                            }
+                            chunk.state = ChunkState::Empty;
+                        }
+                        let _ = ready_tx.0.send((*key, u32::MAX));
+                        readies += 1;
+                    }
+                    Placement::Mesh(alloc) => {
+                        chunk.pending = Some(Pending::ReadyToMesh {
+                            slot,
+                            alloc,
+                            index_count: quads * 6,
+                        });
+                    }
+                    Placement::Defer => {
+                        // The OLD mesh keeps drawing, so this costs a
+                        // stale seam, not a hole. Report it: a waiter
+                        // blocking here would hold the whole pass.
+                        gpu.arena_free.push(slot);
+                        chunk.pending = Some(Pending::Deferred {
+                            verts,
+                            indices: quads * 6,
+                        });
+                        let _ = ready_tx.0.send((*key, chunk.gen_mask));
+                        readies += 1;
+                    }
                 }
                 // Superseded mid-flight: the result above belongs to the
                 // old request — drop it and regenerate with the stored
@@ -1716,8 +1786,14 @@ fn plan_frame(
                 if chunk.requeue {
                     chunk.requeue = false;
                     match chunk.pending.take() {
-                        Some(Pending::AwaitingAlloc { slot, .. }) => gpu.arena_free.push(slot),
-                        Some(Pending::HeldEmpty) | Some(Pending::Queued) | None => {}
+                        Some(Pending::ReadyToMesh { slot, alloc, .. }) => {
+                            gpu.arena_free.push(slot);
+                            gpu.slab.free(alloc);
+                        }
+                        Some(Pending::Deferred { .. })
+                        | Some(Pending::HeldEmpty)
+                        | Some(Pending::Queued)
+                        | None => {}
                         Some(other) => chunk.pending = Some(other),
                     }
                     chunk.pending = Some(Pending::Queued);
@@ -1736,27 +1812,42 @@ fn plan_frame(
                         table.chunks.remove(key);
                     }
                 }
-                ChunkState::CountsInFlight { slot } => {
-                    let max_verts = *crate::slab::CLASS_VERTS.last().unwrap();
-                    let max_indices = max_verts * crate::slab::INDEX_FACTOR;
-                    let too_big = verts > max_verts || quads * 6 > max_indices;
-                    if too_big {
+                ChunkState::CountsInFlight { slot } => match place(&mut gpu.slab, verts, quads) {
+                    Placement::TooBig => {
                         warn!("chunk {key:?} exceeds largest slab class ({verts} verts); dropped");
-                    }
-                    if too_big || verts == 0 || quads == 0 {
                         gpu.arena_free.push(slot);
                         table.empty_classified += 1;
                         chunk.state = ChunkState::Empty;
                         let _ = ready_tx.0.send((*key, u32::MAX));
                         readies += 1;
-                    } else {
-                        chunk.state = ChunkState::AwaitingAlloc {
+                    }
+                    Placement::Empty => {
+                        gpu.arena_free.push(slot);
+                        table.empty_classified += 1;
+                        chunk.state = ChunkState::Empty;
+                        let _ = ready_tx.0.send((*key, u32::MAX));
+                        readies += 1;
+                    }
+                    Placement::Mesh(alloc) => {
+                        chunk.state = ChunkState::ReadyToMesh {
                             slot,
+                            alloc,
+                            index_count: quads * 6,
+                        };
+                    }
+                    Placement::Defer => {
+                        // A hole, and reported as one so the pass that
+                        // asked for it completes. Blocking here is what
+                        // turned slab pressure into a frozen world.
+                        gpu.arena_free.push(slot);
+                        chunk.state = ChunkState::Deferred {
                             verts,
                             indices: quads * 6,
                         };
+                        let _ = ready_tx.0.send((*key, u32::MAX));
+                        readies += 1;
                     }
-                }
+                },
                 _ => {}
             }
         }
@@ -1776,8 +1867,8 @@ fn plan_frame(
             .chunks
             .iter()
             .filter(|(_, c)| {
-                matches!(c.state, ChunkState::AwaitingAlloc { .. })
-                    || matches!(c.pending, Some(Pending::AwaitingAlloc { .. }))
+                matches!(c.state, ChunkState::ReadyToMesh { .. })
+                    || matches!(c.pending, Some(Pending::ReadyToMesh { .. }))
             })
             .map(|(k, _)| *k)
             .take(MESH_BUDGET.min((COUNTS_SLOTS as usize).saturating_sub(GEN_BUDGET)))
@@ -1788,28 +1879,26 @@ fn plan_frame(
     }
     for key in mesh_keys {
         let chunk = table.chunks.get_mut(&key).unwrap();
-        let (slot, verts, indices, is_pending) = match (&chunk.state, &chunk.pending) {
+        // Space was reserved when the counts landed, so this cannot fail
+        // and there is nothing here to wait on.
+        let (slot, alloc, indices, is_pending) = match (&chunk.state, &chunk.pending) {
             (
                 _,
-                Some(Pending::AwaitingAlloc {
+                Some(Pending::ReadyToMesh {
                     slot,
-                    verts,
-                    indices,
+                    alloc,
+                    index_count,
                 }),
-            ) => (*slot, *verts, *indices, true),
+            ) => (*slot, *alloc, *index_count, true),
             (
-                ChunkState::AwaitingAlloc {
+                ChunkState::ReadyToMesh {
                     slot,
-                    verts,
-                    indices,
+                    alloc,
+                    index_count,
                 },
                 _,
-            ) => (*slot, *verts, *indices, false),
+            ) => (*slot, *alloc, *index_count, false),
             _ => unreachable!(),
-        };
-        let Some(alloc) = gpu.slab.alloc(verts, indices) else {
-            // Slab full: keep waiting (arena slot stays held; visible in HUD).
-            continue;
         };
         mesh_counts_slot -= 1;
         let offset = gpu.gen_uniforms.push(&make_params(
@@ -1872,6 +1961,35 @@ fn plan_frame(
             index_count: indices,
         };
         freed_slots.push(slot);
+    }
+
+    // 3b. Deferred chunks retry once the slab can hold them again.
+    //
+    //     A retry costs a full density pass — the arena slot was released
+    //     rather than held, which is the point — so this is bounded and
+    //     nearest-first. Under sustained pressure the frame must not be
+    //     spent re-running work that will defer again.
+    {
+        let mut retry: Vec<(ChunkKey, f64)> = table
+            .chunks
+            .iter()
+            .filter_map(|(key, chunk)| match (&chunk.state, &chunk.pending) {
+                (_, Some(Pending::Deferred { verts, indices }))
+                | (ChunkState::Deferred { verts, indices }, _) => Some((*key, *verts, *indices)),
+                _ => None,
+            })
+            .filter(|(_, verts, indices)| gpu.slab.would_fit(*verts, *indices))
+            .map(|(key, _, _)| (key, gen_priority(key, camera.0)))
+            .collect();
+        retry.sort_by(|a, b| a.1.total_cmp(&b.1));
+        for (key, _) in retry.into_iter().take(RETRY_BUDGET) {
+            let chunk = table.chunks.get_mut(&key).unwrap();
+            if matches!(chunk.pending, Some(Pending::Deferred { .. })) {
+                chunk.pending = Some(Pending::Queued);
+            } else {
+                chunk.state = ChunkState::QueuedGen;
+            }
+        }
     }
 
     // 4. Schedule new density+count work if a staging buffer is available,
@@ -2068,7 +2186,8 @@ fn plan_frame(
                 ChunkState::QueuedGen => "queued_gen",
                 ChunkState::CountsInFlight { .. } => "counts_in_flight",
                 ChunkState::Cancelled { .. } => "cancelled",
-                ChunkState::AwaitingAlloc { .. } => "awaiting_alloc",
+                ChunkState::ReadyToMesh { .. } => "ready_to_mesh",
+                ChunkState::Deferred { .. } => "deferred",
                 ChunkState::Empty => "empty",
                 ChunkState::Meshed { .. } => "meshed",
             };
@@ -2077,7 +2196,8 @@ fn plan_frame(
                 None => None,
                 Some(Pending::Queued) => Some("p_queued"),
                 Some(Pending::CountsInFlight { .. }) => Some("p_counts_in_flight"),
-                Some(Pending::AwaitingAlloc { .. }) => Some("p_awaiting_alloc"),
+                Some(Pending::ReadyToMesh { .. }) => Some("p_ready_to_mesh"),
+                Some(Pending::Deferred { .. }) => Some("p_deferred"),
                 Some(Pending::Held { .. }) => Some("p_held"),
                 Some(Pending::HeldEmpty) => Some("p_held_empty"),
             };
@@ -2422,6 +2542,131 @@ const MESHED_BY_LEVEL: [&str; 16] = [
     "mesh_L6", "mesh_L7", "mesh_L8", "mesh_L9", "mesh_L10", "mesh_L11",
     "mesh_L12", "mesh_L13", "mesh_L14", "mesh_L15",
 ];
+
+/// Slab exhaustion must degrade, never wedge.
+#[cfg(test)]
+mod slab_pressure_tests {
+    use super::*;
+    use crate::slab::{SlabAllocator, CLASS_SLOTS, CLASS_VERTS, INDEX_FACTOR};
+
+    /// Counts that land in class 0.
+    const SMALL: (u32, u32) = (100, 100);
+
+    #[test]
+    fn placement_reads_the_counts_the_way_the_pipeline_does() {
+        let mut slab = SlabAllocator::new();
+        assert!(matches!(place(&mut slab, 0, 10), Placement::Empty));
+        assert!(matches!(place(&mut slab, 10, 0), Placement::Empty));
+        assert!(matches!(place(&mut slab, 100, 100), Placement::Mesh(_)));
+        // Past the largest class in either dimension.
+        let max = *CLASS_VERTS.last().unwrap();
+        assert!(matches!(place(&mut slab, max + 1, 1), Placement::TooBig));
+        assert!(matches!(
+            place(&mut slab, 1, max * INDEX_FACTOR / 6 + 1),
+            Placement::TooBig
+        ));
+    }
+
+    /// A deferral must take NOTHING. If it consumed a slot the retry
+    /// would leak one per attempt and the slab would drain itself.
+    #[test]
+    fn a_deferral_holds_no_slab_slot() {
+        let mut slab = SlabAllocator::new();
+        let mut held = Vec::new();
+        while let Placement::Mesh(alloc) = place(&mut slab, SMALL.0, SMALL.1) {
+            held.push(alloc);
+        }
+        let exhausted = slab.free_slots();
+        assert_eq!(exhausted, [0; 4], "the fixture must exhaust every class");
+        for _ in 0..100 {
+            assert!(matches!(place(&mut slab, SMALL.0, SMALL.1), Placement::Defer));
+        }
+        assert_eq!(slab.free_slots(), exhausted, "deferring must take nothing");
+        // And freeing one makes exactly one placement possible again.
+        slab.free(held.pop().unwrap());
+        assert!(matches!(place(&mut slab, SMALL.0, SMALL.1), Placement::Mesh(_)));
+        assert!(matches!(place(&mut slab, SMALL.0, SMALL.1), Placement::Defer));
+    }
+
+    #[test]
+    fn would_fit_agrees_with_alloc() {
+        let mut slab = SlabAllocator::new();
+        let mut held = Vec::new();
+        loop {
+            let fits = slab.would_fit(SMALL.0, SMALL.1);
+            match slab.alloc(SMALL.0, SMALL.1) {
+                Some(a) => {
+                    assert!(fits, "would_fit said no and alloc succeeded");
+                    held.push(a);
+                }
+                None => {
+                    assert!(!fits, "would_fit said yes and alloc failed");
+                    break;
+                }
+            }
+        }
+        // Oversized requests are never claimed to fit.
+        assert!(!slab.would_fit(*CLASS_VERTS.last().unwrap() + 1, 1));
+    }
+
+    /// THE WEDGE, reproduced against the real allocator and the real
+    /// placement rule.
+    ///
+    /// Demand far past slab capacity. Every chunk takes an arena slot to
+    /// generate density, and what it does when the slab says no is the
+    /// whole question: holding the slot to wait for space starves the
+    /// arena, so no chunk can generate, so nothing is ever freed to make
+    /// space — a cycle that only a 10-second timeout broke, once per
+    /// pass, forever.
+    ///
+    /// The invariant: **every arena slot comes back**, whatever the slab
+    /// says. A chunk holds an arena slot only while it can still finish.
+    #[test]
+    fn slab_exhaustion_returns_every_arena_slot() {
+        let mut slab = SlabAllocator::new();
+        let arena_capacity = 512usize;
+        let mut arena_free = arena_capacity;
+        let mut meshed: Vec<SlabAlloc> = Vec::new();
+        let mut deferred = 0usize;
+
+        // Ten times more chunks than the slab can ever hold.
+        let demand: usize = CLASS_SLOTS.iter().map(|&s| s as usize).sum::<usize>() * 10;
+        for _ in 0..demand {
+            // Density needs an arena slot.
+            if arena_free == 0 {
+                panic!("arena starved: a chunk is holding a slot it cannot use");
+            }
+            arena_free -= 1;
+            // Counts land; the slab decides.
+            match place(&mut slab, SMALL.0, SMALL.1) {
+                Placement::Mesh(alloc) => {
+                    meshed.push(alloc);
+                    arena_free += 1; // dispatched; slot recycled
+                }
+                Placement::Empty | Placement::TooBig => arena_free += 1,
+                Placement::Defer => {
+                    arena_free += 1; // holds NOTHING — this is the fix
+                    deferred += 1;
+                }
+            }
+        }
+
+        assert_eq!(arena_free, arena_capacity, "every arena slot came back");
+        assert!(deferred > 0, "the fixture must actually exhaust the slab");
+        assert_eq!(
+            meshed.len(),
+            CLASS_SLOTS.iter().map(|&s| s as usize).sum::<usize>(),
+            "and the slab was filled to capacity, not left short",
+        );
+        assert_eq!(slab.pressure().failed as usize, deferred);
+
+        // Freeing the resident set lets the deferred work through.
+        for alloc in meshed.drain(..) {
+            slab.free(alloc);
+        }
+        assert!(slab.would_fit(SMALL.0, SMALL.1), "recovery is possible");
+    }
+}
 
 #[cfg(test)]
 mod surface_map_tests {
