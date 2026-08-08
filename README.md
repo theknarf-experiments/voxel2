@@ -84,11 +84,16 @@ scenic spots (steep, high terrain) from the CPU world mirror. In-game overlays: 
 boundaries by LOD, F9 planning layers (markers, clearance, ribbons, biome
 field).
 
-**Portals**: `portal` (or **F7**) opens a window onto the other shipped level 14 m
-ahead of you, loading it as a second world the first time — both then stream and
-render at once, and walking through swaps which one you are in. `world N` switches
-the camera's world without moving it. Nothing is loaded until you ask: a second
-world roughly doubles the meshed working set.
+**Portals**: `portal [N]` (or **F1**, **F2**, … — one key per other shipped
+level, avoiding the F8/F9 overlays) opens a window onto that level 14 m ahead of
+you, loading it as another world the first time. All of them then stream and
+render at once, and walking through swaps which one you are in; pressing a
+level's own key again closes the opening, and a different level's key switches
+where it looks. `world N` switches the camera's world without moving it.
+
+A LOADED LEVEL AND AN OPENING ARE DIFFERENT THINGS: closing a portal leaves the
+world loaded and streaming. Nothing is loaded until you ask, because each world
+is admitted against the slab budget and caps what the others can stream.
 
 ## How it works
 

@@ -115,7 +115,7 @@ fn main() {
         // carries the command without knowing what a portal is; the host
         // decides.
         // Toggles the opening onto level N (default 0), the same as the
-        // F7/F8/... keys. The engine carries the command without knowing
+        // F1/F2/... keys. The engine carries the command without knowing
         // what a portal is; the host reads the queue.
         ["portal"] => call("voxel/host", json!({"cmd": "portal", "level": 0})),
         ["portal", n] => call(

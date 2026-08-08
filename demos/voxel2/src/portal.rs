@@ -37,8 +37,12 @@ use voxel_engine::{LevelDef, LodConfig, WorldLoader};
 /// world roughly doubles the meshed working set and caps what the first
 /// can stream — see `WorldLoader::load`. But "on demand" means "when the
 /// host asks", and a portal is only one thing that might ask.
-/// Every other level this demo can open onto, in button order: F7 is the
-/// first, F8 the second, and so on.
+/// Every other level this demo can open onto, one key each: F1 is the
+/// first, F2 the second, and so on.
+///
+/// F1 upward rather than F7 upward because F8 and F9 are the chunk and
+/// layer debug overlays, and a contiguous block that has to skip two keys
+/// in the middle is a block nobody can remember.
 ///
 /// A list, not a pair. Nothing here is limited to two — the engine loads
 /// as many worlds as the slab will admit (`MAX_WORLDS` is the program
@@ -52,10 +56,13 @@ impl ExtraLevels {
     /// The key that opens onto level `slot`.
     fn key(slot: usize) -> Option<KeyCode> {
         Some(match slot {
-            0 => KeyCode::F7,
-            1 => KeyCode::F8,
-            2 => KeyCode::F9,
-            3 => KeyCode::F10,
+            0 => KeyCode::F1,
+            1 => KeyCode::F2,
+            2 => KeyCode::F3,
+            3 => KeyCode::F4,
+            4 => KeyCode::F5,
+            5 => KeyCode::F6,
+            // F7 up is spoken for: F8 and F9 are the debug overlays.
             _ => return None,
         })
     }
@@ -454,7 +461,7 @@ fn far_view_image(width: u32, height: u32) -> Image {
 #[derive(Component)]
 pub struct PortalCamera(pub Entity);
 
-/// Toggle the opening, on F7 or `voxctl portal`.
+/// Toggle the opening, on the level's own key or `voxctl portal [N]`.
 ///
 /// Open, close, open again somewhere else. Positioned from where the
 /// camera ACTUALLY is rather than from the level's declared start, so

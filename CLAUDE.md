@@ -22,10 +22,11 @@ architecture. Design plan: `~/.claude/plans/binary-twirling-brooks.md`.
   serves the BRP, so just drive it via `cargo run -p voxctl -q -- status | goto X Y Z [DIR] |
   ribbons/markers/ops X Z [R] | scan X Z [R] [STEP] | shot PATH`
   (offscreen screenshots; wait ~1 s for the file, ~10-15 s after a goto
-  for streaming). `scan` ranks scenic spots; `portal`/F7 opens a
-  window onto a second level (loaded on demand) and `world N` switches
-  which world the camera is in; F8/F9 (or `raw voxel/viz`)
-  toggle chunk/layer debug overlays.
+  for streaming). `scan` ranks scenic spots; `portal [N]`/F1,F2,… (one key
+  per other shipped level) opens a window onto it, loaded on demand and
+  left loaded when the opening closes, and `world N` switches which world
+  the camera is in; F8/F9 (or `raw voxel/viz`) toggle chunk/layer debug
+  overlays — do not reuse those two.
 - Zero `Validation Error` lines in the log is part of "verified".
 - Kill running app processes before spawning another and after each
   capture.
