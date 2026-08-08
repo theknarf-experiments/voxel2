@@ -106,6 +106,11 @@ fn main() {
             )
         }
         ["shot", path] => call("voxel/screenshot", json!({"path": path})),
+        // What the PLAYER sees, not the offscreen mirror — a different
+        // render path, and black while the window is backgrounded.
+        ["shot", path, "--window"] => {
+            call("voxel/screenshot", json!({"path": path, "window": true}))
+        }
         // Opens (or moves) the portal in front of the camera. The engine
         // carries the command without knowing what a portal is; the host
         // decides.
@@ -119,7 +124,7 @@ fn main() {
         _ => {
             eprintln!(
                 "usage: voxctl status | goto X Y Z [DX DY DZ] | ribbons X Z [R] | \
-                 markers X Z [R] [KIND] | scan X Z [R] [STEP] | shot PATH | \
+                 markers X Z [R] [KIND] | scan X Z [R] [STEP] | shot PATH [--window] | \
                  portal | world N | raw METHOD [JSON]"
             );
             std::process::exit(2);

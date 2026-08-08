@@ -379,8 +379,15 @@ fn screenshot(
         .get("path")
         .and_then(Value::as_str)
         .ok_or_else(|| err("missing param \"path\""))?;
-    requests.0.push(path.to_string());
-    Ok(json!({"queued": path}))
+    let window = params
+        .get("window")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    requests.0.push(crate::ScreenshotWant {
+        path: path.to_string(),
+        window,
+    });
+    Ok(json!({"queued": path, "window": window}))
 }
 
 #[cfg(test)]

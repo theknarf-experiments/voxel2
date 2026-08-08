@@ -376,6 +376,12 @@ fn drive_portal(
             None => {
                 let mut spawned = commands.spawn((
                     PortalCamera(source),
+                    // "Not the player camera." Without it the streamer
+                    // can pick THIS one as the eye, and generation
+                    // priority is then computed from a point in the other
+                    // world — the chunks under your feet go to the back
+                    // of the queue and the ground appears to break.
+                    voxel_render::HelperCamera,
                     Camera3d::default(),
                     Camera {
                         order: camera.order + 1,

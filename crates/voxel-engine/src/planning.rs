@@ -322,6 +322,15 @@ pub fn ops_provider(world: &WorldQuery) -> crate::chunkgen::ChunkOpsProvider {
         if key.edge_m() as f32 > OPS_HORIZON_EDGE_M {
             return Vec::new();
         }
+        // This planner belongs to the level `LevelPlugin` loaded, which is
+        // world 0. Serving it to every world asked world 0's planning
+        // graph about coordinates in another world, where nothing is
+        // resident: 40,474 `reads_missed` the moment a portal opened, and
+        // world 0's roads and ruins carved into the far world. A world
+        // with its own planning will bring its own provider.
+        if key.world != 0 {
+            return Vec::new();
+        }
         world.wait_idle();
         world.chunk_ops(key)
     })))

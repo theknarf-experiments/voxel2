@@ -106,7 +106,19 @@ struct ScreenshotTarget {
 /// One-shot screenshot requests (paths), served by the same offscreen
 /// mirror as `VOXEL_SCREENSHOT` — remote tooling pushes here.
 #[derive(Resource, Default)]
-pub struct ScreenshotRequest(pub Vec<String>);
+pub struct ScreenshotRequest(pub Vec<ScreenshotWant>);
+
+/// A queued capture: where to write it, and whether to grab the WINDOW
+/// rather than the offscreen mirror.
+///
+/// The two are different render paths — the mirror is its own camera —
+/// so a fault that only affects what the player sees is invisible in a
+/// mirror capture. Worth being able to ask for the real thing, even
+/// though it comes back black while the window is backgrounded.
+pub struct ScreenshotWant {
+    pub path: String,
+    pub window: bool,
+}
 
 /// `VOXEL_SCREENSHOT=path[,interval_secs]`: periodically dump the rendered
 /// frame to `path` (default every 10 s, overwriting). Renders through a
@@ -170,10 +182,13 @@ fn auto_screenshot(
     }
 
     // One-shot requests from remote tooling.
-    for path in requests.0.drain(..) {
-        commands
-            .spawn(Screenshot::image(target.image.clone()))
-            .observe(save_to_disk(path));
+    for want in requests.0.drain(..) {
+        let shot = if want.window {
+            Screenshot::primary_window()
+        } else {
+            Screenshot::image(target.image.clone())
+        };
+        commands.spawn(shot).observe(save_to_disk(want.path));
     }
 
     // Periodic env-driven dump.
@@ -239,7 +254,9 @@ fn spawn_hud(mut commands: Commands) {
 
 fn update_hud(
     mut text_query: Query<&mut Text, With<DebugHudText>>,
-    camera_query: Query<&Transform, With<Camera3d>>,
+    // The player's camera specifically: with a portal open there are
+    // several, and `With<Camera3d>` reported whichever came first.
+    camera_query: Query<&Transform, (With<Camera3d>, With<FreeCamera>)>,
     diagnostics: Res<DiagnosticsStore>,
     mut extra: ResMut<DebugHudExtra>,
 ) {
