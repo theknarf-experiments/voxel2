@@ -36,7 +36,14 @@ impl Plugin for PortalPlugin {
     fn build(&self, app: &mut App) {
         app.add_systems(
                 Update,
-                (open_portal, traverse_portal, follow_camera_world, drive_portal).chain(),
+                (
+                    open_portal,
+                    traverse_portal,
+                    follow_camera_world,
+                    sync_backdrops,
+                    drive_portal,
+                )
+                    .chain(),
             );
     }
 }
@@ -178,33 +185,43 @@ type NearViews<'w, 's> = Query<
     (With<Camera3d>, Without<PortalCamera>),
 >;
 
-/// Whether to render the far world through the opening.
+/// Whether to render the far world through the opening. ON — without it
+/// a portal is a coloured rectangle you can walk through.
 ///
-/// Still behind an env var, and NOT because the far view itself is in
-/// doubt: registering a second world used to make the near world's
-/// terrain stop drawing, and until that is confirmed fixed on a screen
-/// this keeps the far view's cost off the frame.
+/// It was off while the near world's terrain vanished whenever a second
+/// world was registered. That is fixed and understood: a material asset
+/// touched every frame never settles, so its bind group was rebuilt under
+/// the draw and `SetMaterialBindGroup` skipped the whole terrain. Nothing
+/// about it was the portal's doing — the reproducer needed no portal
+/// camera at all.
 ///
-/// The reproducer was camera-free — merely REGISTERING a second world did
-/// it — which is what turned the search from the portal to the
-/// architecture. What that turned up, now fixed and pinned by tests:
-/// world 0's material assets were re-inserted on the terrain anchor
-/// whenever any world's recipes changed (registering world 1 changed
-/// them), one global material table meant two levels shared an 8-id
-/// namespace, one global surface map painted world 0's rivers onto every
-/// world, and `FieldParams` was a global LOD anchor written whenever any
-/// world re-centred. Any of those could present as "the ground is gone".
-///
-/// Ruled out earlier, each by experiment: the portal camera, `ViewWorld`,
-/// the clip planes, the backdrop quad, tonemapping, `PendingQueues`, and
-/// one terrain anchor per world (which made it worse and was reverted).
+/// `VOXEL_PORTAL_VIEW=0` turns it off again, because the far view is the
+/// expensive half (a second pass over a second world) and it is worth
+/// being able to take it off the frame when measuring something else.
 fn far_view_enabled() -> bool {
-    std::env::var_os("VOXEL_PORTAL_VIEW").is_some()
+    std::env::var("VOXEL_PORTAL_VIEW").as_deref() != Ok("0")
 }
 
-/// The quad painted with the far world's background, behind the opening.
+/// The quad filling the opening with the OTHER world's background.
+///
+/// ONE PER SIDE. An opening is a hole in both worlds, so each side needs
+/// its own quad, in its own world, on its own layer — a single backdrop
+/// on the near world's layer is simply not there when you look back from
+/// the far side.
 #[derive(Component)]
-pub struct PortalBackdrop;
+pub struct PortalBackdrop {
+    /// The world this quad lives in.
+    world: voxel_engine::WorldId,
+}
+
+/// Shared handles for the backdrop quads, made once.
+#[derive(Resource)]
+struct PortalAssets {
+    quad: Handle<Mesh>,
+    /// Indexed by the world the quad lives IN; it is painted with the
+    /// background of the world you are looking THROUGH to.
+    material: [Handle<StandardMaterial>; 2],
+}
 
 /// Marks a camera that renders the far side FOR a particular near-side
 /// camera.
@@ -236,7 +253,6 @@ fn open_portal(
     mut far: ResMut<FarLevel>,
     camera: Query<&GlobalTransform, With<crate::FreeCamera>>,
     mut portal: Query<(Entity, &mut Portal)>,
-    mut backdrop: Query<&mut Transform, With<PortalBackdrop>>,
     keys: Res<ButtonInput<KeyCode>>,
     // OPTIONAL: the queue only exists when the remote server is running,
     // and the keybind must work without it. Requiring it panicked the
@@ -245,6 +261,7 @@ fn open_portal(
     host: Option<ResMut<voxel_debug::remote::HostCommands>>,
     camera_world: Res<voxel_render::CameraWorld>,
     mut loader: WorldLoader,
+    scene: Res<crate::HostScene>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials_assets: ResMut<Assets<StandardMaterial>>,
 ) {
@@ -269,37 +286,33 @@ fn open_portal(
     let at = eye.translation() + forward * 14.0;
     let placement = Transform::from_translation(at).looking_to(-forward, Vec3::Y);
 
-    // Already open: MOVE it. Never stack a second one — two portals make
-    // `portals.single()` fail, which silently stops the far view and
-    // traversal dead rather than erroring. `iter_mut().next()` plus
-    // despawning any strays is self-healing, where `single_mut()` would
-    // itself fail once a duplicate existed and leave it wedged.
+    // Already open: MOVE the opening ON THE SIDE YOU ARE STANDING ON.
+    //
+    // A portal has a placement per world. Moving `near` whatever world
+    // the camera is in put world 0's opening at a coordinate in world 1
+    // — which is why pressing F7 after stepping through logged "portal
+    // moved" and produced nothing you could see.
+    //
+    // Never stack a second one: two portals make `portals.single()` fail,
+    // which silently stops the far view and traversal dead rather than
+    // erroring. Despawning strays is self-healing, where `single_mut()`
+    // would itself fail once a duplicate existed and leave it wedged.
     let mut open = portal.iter_mut();
     if let Some((_, mut existing)) = open.next() {
-        existing.near = placement;
+        if camera_world.0 == existing.far_world {
+            existing.far = placement;
+        } else {
+            existing.near = placement;
+            existing.near_world = camera_world.0;
+        }
         for (stray, _) in open {
             warn!("portal: despawning a duplicate opening");
             commands.entity(stray).despawn();
         }
-        let mut quads = backdrop.iter_mut();
-        if let Some(mut quad) = quads.next() {
-            *quad = placement;
-        }
-        info!("portal moved to {at:?}");
+        info!("portal moved to {at:?} in world {}", camera_world.0);
         return;
     }
 
-    let quad = meshes.add(Rectangle::new(8.0, 6.0));
-    let quad_mat = materials_assets.add(StandardMaterial {
-        base_color: far.clear_color,
-        unlit: true,
-        // Both faces: an opening is approachable from either side, and a
-        // one-sided quad silently vanishes from whichever side it is not
-        // facing — which reads as "the backdrop does not work".
-        double_sided: true,
-        cull_mode: None,
-        ..default()
-    });
     // The opening is cut in the world the camera is standing in.
     let near_world = camera_world.0;
     commands.spawn(Portal {
@@ -310,19 +323,69 @@ fn open_portal(
         far_world,
         half: Vec2::new(4.0, 3.0),
     });
-    // The opening's backdrop, in the NEAR world at the opening: the far
-    // camera cannot clear only the opening, so without this you see the
-    // near world wherever the far world is empty. Being in the near world
-    // is the point — anything in FRONT of the opening still occludes it.
-    commands.spawn((
-        PortalBackdrop,
-        Mesh3d(quad),
-        MeshMaterial3d(quad_mat),
-        placement,
-        // The backdrop is in the NEAR world, at the opening.
-        voxel_render::world_layer(near_world),
-    ));
-    info!("portal opened at {at:?}");
+    let mut backdrop = |color: Color| {
+        materials_assets.add(StandardMaterial {
+            base_color: color,
+            unlit: true,
+            // Both faces: an opening is approachable from either side,
+            // and a one-sided quad silently vanishes from whichever side
+            // it is not facing — which reads as "the backdrop is gone".
+            double_sided: true,
+            cull_mode: None,
+            ..default()
+        })
+    };
+    // Each side is painted with the background of the world it looks INTO.
+    commands.insert_resource(PortalAssets {
+        quad: meshes.add(Rectangle::new(8.0, 6.0)),
+        material: [backdrop(far.clear_color), backdrop(scene.0.clear_color)],
+    });
+    info!("portal opened at {at:?} in world {near_world}");
+}
+
+/// Keep one backdrop quad per side, in that side's world.
+///
+/// Synced every frame rather than moved when the portal moves: the quads
+/// then follow whatever the portal says, including the side that did not
+/// exist yet, and a stray or missing one heals itself instead of leaving
+/// an opening you cannot see.
+fn sync_backdrops(
+    mut commands: Commands,
+    portals: Query<&Portal>,
+    assets: Option<Res<PortalAssets>>,
+    mut quads: Query<(Entity, &PortalBackdrop, &mut Transform)>,
+) {
+    let (Ok(portal), Some(assets)) = (portals.single(), assets) else {
+        return;
+    };
+    let sides = [
+        (portal.near_world, portal.near, 0usize),
+        (portal.far_world, portal.far, 1usize),
+    ];
+    for (world, placement, material) in sides {
+        match quads.iter_mut().find(|(_, b, _)| b.world == world) {
+            Some((_, _, mut transform)) => {
+                if *transform != placement {
+                    *transform = placement;
+                }
+            }
+            None => {
+                commands.spawn((
+                    PortalBackdrop { world },
+                    Mesh3d(assets.quad.clone()),
+                    MeshMaterial3d(assets.material[material].clone()),
+                    placement,
+                    voxel_render::world_layer(world),
+                ));
+            }
+        }
+    }
+    // A side that moved to another world leaves its old quad behind.
+    for (entity, backdrop, _) in &quads {
+        if backdrop.world != portal.near_world && backdrop.world != portal.far_world {
+            commands.entity(entity).despawn();
+        }
+    }
 }
 
 /// Pair every near-side view with a far-side one, aim it, and hand the
@@ -375,7 +438,7 @@ fn drive_portal(
                 cam.is_active = far_view_enabled();
                 let mut cmd = commands.entity(entity);
                 cmd.insert(voxel_render::ViewWorld(showing))
-                    .insert(voxel_render::world_layer(showing));
+                    .insert(voxel_render::terrain_only_layer());
                 if let Some(target) = target {
                     cmd.insert(target.clone());
                 }
@@ -402,7 +465,9 @@ fn drive_portal(
                     },
                     placement,
                     voxel_render::ViewWorld(showing),
-                    voxel_render::world_layer(showing),
+                    // Terrain only: the clip planes mask chunks, and
+                    // nothing masks entities.
+                    voxel_render::terrain_only_layer(),
                     // No second tonemap. Cameras sharing a target each run
                     // their own post-processing over the WHOLE image, so a
                     // portal view re-tonemapped the near world that was

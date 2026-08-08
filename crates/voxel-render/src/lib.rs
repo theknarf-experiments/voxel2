@@ -44,17 +44,35 @@ pub fn world_layer(world: voxel_core::WorldId) -> bevy::camera::visibility::Rend
 
 /// Visible from every world. For content that is not IN a world: the
 /// terrain draw's anchor entity, and lights, which have to reach whichever
-/// world is being viewed.
+/// world is being viewed — including a [`terrain_only_layer`] view.
 pub fn all_world_layers() -> bevy::camera::visibility::RenderLayers {
-    (0..MAX_WORLDS).fold(
+    (0..=TERRAIN_LAYER).fold(
         bevy::camera::visibility::RenderLayers::none(),
         |layers, world| layers.with(world),
     )
 }
 
+/// Terrain and lights, and nothing a host put in a world.
+///
+/// A portal masks the far world with clip planes, and those live in the
+/// per-chunk draw uniform — so they mask CHUNKS. Grass, trees, props and
+/// water are ordinary entities with their own pipelines and nothing
+/// clips them, so a far view that could see them painted the near view's
+/// meadow over the entire screen rather than through the opening.
+///
+/// Until entities can be masked too, the far view draws terrain only.
+/// That is a visible limitation, not a wrong picture.
+pub fn terrain_only_layer() -> bevy::camera::visibility::RenderLayers {
+    bevy::camera::visibility::RenderLayers::layer(TERRAIN_LAYER)
+}
+
+/// Shared by the terrain anchor and by lights, so a view can ask for
+/// terrain without asking for any world's scene content.
+pub const TERRAIN_LAYER: usize = MAX_WORLDS;
+
 /// First render layer a host may use for its own purposes. See
 /// [`world_layer`].
-pub const FIRST_HOST_LAYER: usize = MAX_WORLDS;
+pub const FIRST_HOST_LAYER: usize = TERRAIN_LAYER + 1;
 
 /// Marker for helper cameras (offscreen screenshot mirrors, etc.) that
 /// gameplay/streaming systems must ignore when looking for "the player
