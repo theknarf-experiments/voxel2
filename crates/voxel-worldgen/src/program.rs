@@ -427,6 +427,13 @@ pub fn mega_program() -> Vec<WorldOp> {
             .material(2)
             .p0([3.0, 2.2, 1.0, 0.7])
             .p1([6.0, 0.0, 0.0, 0.0]),
+        // Districts: everything structural is material 2, so one band at
+        // the end divides the whole interior.
+        WorldOp::new(WOP_MATERIAL_BAND)
+            .material(7)
+            .p0([0.0, 0.46, 0.0, 1.0])
+            .p1([1.3e-3, 1.7e-3, 2.0, 4.0])
+            .p2([2100.0, -880.0, -5400.0, 3300.0]),
     ]
 }
 

@@ -553,7 +553,7 @@
           ]
         }
       ],
-      "gate": "biomes:meadow"
+      "gate": "biomes:tundra"
     },
     {
       "class": "groundcover",
@@ -574,15 +574,22 @@
       {
         "kind": "biomes",
         "name": "biomes",
-        "cell_m": 2048,
         "table": [
           [
             "forest",
-            2.0
+            1
           ],
           [
-            "meadow",
-            1.0
+            "desert",
+            2
+          ],
+          [
+            "tundra",
+            5
+          ],
+          [
+            "wetland",
+            6
           ]
         ]
       },

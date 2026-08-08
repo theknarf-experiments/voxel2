@@ -40,10 +40,9 @@ pub struct ScatterPopulation {
     def: ScatterDef,
     /// Emit instances whose carved ground and clearance gate placement.
     emit_sources: Vec<String>,
-    /// (instance, biome name, biome count) this population is gated on.
-    biome: Option<(String, String, usize)>,
-    /// That biome's position in its field's table, resolved once.
-    biome_index: Option<usize>,
+    /// The material of the region this population is gated on, resolved
+    /// from the stack's name table once. `None` grows anywhere.
+    biome: Option<u32>,
 }
 
 #[derive(Default)]
@@ -61,16 +60,14 @@ impl Layer for ScatterPopulation {
 
     fn dependencies(&self) -> Vec<Dep> {
         let pad = IVec3::new(GATE_PAD_M, GATE_Y_M, GATE_PAD_M);
-        let mut deps: Vec<Dep> = self
+        let deps: Vec<Dep> = self
             .emit_sources
             .iter()
             .map(|name| Dep::named(name, pad))
             .collect();
-        if let Some((instance, _, _)) = &self.biome {
-            // Biome weights blend across a wide influence window.
-            let biome_pad = crate::planning::layers::BIOME_INFLUENCE_CELLS;
-            deps.push(Dep::named(instance, IVec3::new(biome_pad, 0, biome_pad)));
-        }
+        // A region gate reads no layer: the bands are in the generator
+        // program, so the weight costs a couple of noise samples and no
+        // residency at all.
         deps
     }
 }
@@ -94,29 +91,19 @@ impl LayerChunk for ScatterChunk {
                 });
         }
 
-        let biome_sites = layer.biome.as_ref().map(|(instance, _, _)| {
-            let biome_pad = crate::planning::layers::BIOME_INFLUENCE_CELLS;
-            let mut sites = Vec::new();
-            ctx.get_named::<crate::planning::layers::BiomeField>(
-                instance,
-                voxel_layers::dep_bounds(own, IVec3::new(biome_pad, 0, biome_pad)),
-            )
-            .for_each(|_, c| sites.push((c.site, c.biome)));
-            sites
-        });
+        let world = ctx.context::<WorldCtx>();
+        // The region gate and the ground colour are the same ops, so a
+        // population that grows in the forest grows exactly where the
+        // ground is forest-coloured.
+        let gate_generator = world.generator.clone();
+        let gate_material = layer.biome;
         let gate_weight = move |xz: Vec2| -> f32 {
-            let (Some(sites), Some((_, name, count))) = (&biome_sites, &layer.biome) else {
-                return 1.0;
-            };
-            let _ = name;
-            let weights = crate::planning::layers::gate_weights_from(sites, *count, xz);
-            layer
-                .biome_index
-                .and_then(|i| weights.get(i).copied())
-                .unwrap_or(1.0)
+            match gate_material {
+                Some(m) => gate_generator.surface_material_weight(xz, 8.0, m),
+                None => 1.0,
+            }
         };
 
-        let world = ctx.context::<WorldCtx>();
         let inputs = PlacementInputs {
             generator: &world.generator,
             clearance,
@@ -201,7 +188,7 @@ pub fn register(
     graph: &mut LayerGraph,
     level: &LevelDef,
     emit_sources: Vec<String>,
-    biome_tables: &[(String, Vec<String>)],
+    biome_tables: &[(String, Vec<(String, u32)>)],
 ) -> (Vec<TopDep>, Populations) {
     let mut tops = Vec::new();
     let mut handles = Vec::new();
@@ -209,20 +196,13 @@ pub fn register(
         let biome = def.gate.as_ref().and_then(|reference| {
             let (instance, name) = reference.rsplit_once(':')?;
             let table = biome_tables.iter().find(|(n, _)| n == instance)?;
-            Some((instance.to_string(), name.to_string(), table.1.len()))
-        });
-        let biome_index = biome.as_ref().and_then(|(instance, name, _)| {
-            biome_tables
-                .iter()
-                .find(|(n, _)| n == instance)
-                .and_then(|(_, table)| table.iter().position(|b| b == name))
+            table.1.iter().find(|(n, _)| n == name).map(|(_, m)| *m)
         });
         let sink = Sink::default();
         let population = ScatterPopulation {
             def: def.clone(),
             emit_sources: emit_sources.clone(),
             biome,
-            biome_index,
         };
         // The population's own radius, as declared in the level, becomes
         // the size of its top dependency — the one number that decides how

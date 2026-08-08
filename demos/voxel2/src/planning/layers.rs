@@ -100,13 +100,10 @@ impl Layer for ScatterSites {
             let cell = self.cfg.cell_m;
             return vec![Dep::named(&relax.instance, IVec3::new(cell, 0, cell))];
         }
-        match &self.cfg.biome {
-            Some(gate) => vec![Dep::named(
-                &gate.instance,
-                IVec3::new(BIOME_INFLUENCE_CELLS, 0, BIOME_INFLUENCE_CELLS),
-            )],
-            None => Vec::new(),
-        }
+        // A region gate reads no layer at all: the bands live in the
+        // generator program, so the weight is a pure function of the
+        // point and costs no residency.
+        Vec::new()
     }
 
 }
@@ -186,12 +183,7 @@ impl ScatterSites {
             return SitesChunk { sites: Vec::new() };
         }
         if let Some(gate) = &self.cfg.biome {
-            let pad = IVec3::new(BIOME_INFLUENCE_CELLS, 0, BIOME_INFLUENCE_CELLS);
-            let view = ctx.get_named::<BiomeField>(&gate.instance, ctx.chunk_bounds().inflate(pad));
-            let sites: Vec<(Vec2, u32)> =
-                view.iter().map(|(_, c)| (c.site, c.biome)).collect();
-            let w = gate_weights_from(&sites, gate.n_biomes, p);
-            if rng.next_f32() > w[gate.biome as usize] {
+            if rng.next_f32() > generator.surface_material_weight(p, 8.0, gate.material) {
                 return SitesChunk { sites: Vec::new() };
             }
         }
@@ -199,127 +191,15 @@ impl ScatterSites {
     }
 }
 
-/// Configuration of a `biomes` stack layer: a coarse field of biome
-/// regions with smooth blending. Every cell hosts one seed site whose
-/// biome is a weighted pick from the table; weights at any point are
-/// inverse-square falloffs over nearby sites (partition of unity).
-#[derive(Clone, Debug)]
-pub struct BiomeCfg {
-    pub cell_m: i32,
-    /// (biome name, selection weight).
-    pub table: Vec<(String, f32)>,
-}
-
-impl Default for BiomeCfg {
-    fn default() -> Self {
-        Self {
-            cell_m: 2048,
-            table: Vec::new(),
-        }
-    }
-}
-
-#[derive(Clone)]
-pub struct BiomeField {
-    pub cfg: BiomeCfg,
-}
-
-#[derive(Default)]
-pub struct BiomeChunk {
-    /// Seed site and its index into the cfg table.
-    pub site: Vec2,
-    pub biome: u32,
-}
-
-impl Layer for BiomeField {
-    type Chunk = BiomeChunk;
-    const NAME: &'static str = "stack/biomes";
-
-    fn chunk_extent(&self) -> DVec3 {
-        DVec3::new(self.cfg.cell_m as f64, 0.0, self.cfg.cell_m as f64)
-    }
-
-}
-
-impl BiomeField {
-    fn build(&self, ctx: &ChunkCtx<'_, Self>) -> BiomeChunk {
-        let mut rng = ctx.rng();
-        let b = ctx.chunk_bounds();
-        let cell = self.cfg.cell_m as f32;
-        let site = Vec2::new(
-            b.min.x as f32 + rng.next_f32() * cell,
-            b.min.z as f32 + rng.next_f32() * cell,
-        );
-        let total: f32 = self.cfg.table.iter().map(|(_, w)| w).sum();
-        let mut roll = rng.next_f32() * total.max(1.0e-6);
-        let mut biome = 0u32;
-        for (i, (_, w)) in self.cfg.table.iter().enumerate() {
-            if roll < *w {
-                biome = i as u32;
-                break;
-            }
-            roll -= w;
-        }
-        BiomeChunk { site, biome }
-    }
-}
-
-/// Blended biome weights at `p` from the seed sites of the 3x3 cell
-/// neighborhood: inverse-square falloff, normalized (sums to 1 wherever
-/// at least one site exists — they always do).
-pub fn gate_weights_from(sites: &[(Vec2, u32)], n_biomes: usize, p: Vec2) -> Vec<f32> {
-    let mut w = vec![0.0f32; n_biomes];
-    let mut total = 0.0f32;
-    for &(site, biome) in sites {
-        let contribution = 1.0 / (site.distance_squared(p) + 1.0);
-        if (biome as usize) < n_biomes {
-            w[biome as usize] += contribution;
-            total += contribution;
-        }
-    }
-    if total > 0.0 {
-        for v in &mut w {
-            *v /= total;
-        }
-    }
-    w
-}
-
-/// Biome weights at `p`, read through a manager (facade queries).
-pub fn gate_weights_at(
-    mgr: &LayerGraph,
-    instance: &str,
-    n_biomes: usize,
-    p: Vec2,
-) -> Vec<f32> {
-    // 3x3 neighborhood: bounds one point inflated by 1.5 cells would need
-    // the cell size; a point query with generous pad covers it because the
-    // view granularity is whole cells anyway.
-    let pad = BIOME_INFLUENCE_CELLS;
-    let bounds = IAabb::new(
-        IVec3::new(p.x as i32 - pad, 0, p.y as i32 - pad),
-        IVec3::new(p.x as i32 + pad, 1, p.y as i32 + pad),
-    );
-    let sites: Vec<(Vec2, u32)> = mgr
-        .view::<BiomeField>(instance, bounds)
-        .iter()
-        .map(|(_, c)| (c.site, c.biome))
-        .collect();
-    gate_weights_from(&sites, n_biomes, p)
-}
-
-/// Padding (meters) guaranteeing the 3x3 biome-cell neighborhood is in
-/// view for any query point, for the largest supported biome cell.
-pub const BIOME_INFLUENCE_CELLS: i32 = 3 * 2048;
-
-/// A biome gate on a scatter layer: sites are accepted with probability
-/// equal to the named biome's blended weight (soft borders).
+/// A region gate on a scatter layer: sites are accepted with probability
+/// equal to how firmly the generator paints that region here, so a
+/// population thins out across a border instead of stopping on a line.
 #[derive(Clone, Debug)]
 pub struct BiomeGate {
-    pub instance: String,
-    /// Index into the biome layer's table (resolved by the level builder).
-    pub biome: u32,
-    pub n_biomes: usize,
+    /// The material the gated region paints. Resolved from the stack's
+    /// name table at build time; the weight itself comes from the
+    /// generator, which owns the bands.
+    pub material: u32,
 }
 
 /// Configuration of a `scatter3` stack layer: volumetric sites for
@@ -372,13 +252,10 @@ impl Layer for Scatter3Sites {
     }
 
     fn dependencies(&self) -> Vec<Dep> {
-        match &self.cfg.biome {
-            Some(gate) => vec![Dep::named(
-                &gate.instance,
-                IVec3::new(BIOME_INFLUENCE_CELLS, 0, BIOME_INFLUENCE_CELLS),
-            )],
-            None => Vec::new(),
-        }
+        // A region gate reads no layer at all: the bands live in the
+        // generator program, so the weight is a pure function of the
+        // point and costs no residency.
+        Vec::new()
     }
 
 }
@@ -404,12 +281,9 @@ impl Scatter3Sites {
             y = y.clamp(b.min.y as f32, max_snapped.max(b.min.y as f32));
         }
         if let Some(gate) = &self.cfg.biome {
-            let pad = IVec3::new(BIOME_INFLUENCE_CELLS, 0, BIOME_INFLUENCE_CELLS);
-            let view = ctx.get_named::<BiomeField>(&gate.instance, ctx.chunk_bounds().inflate(pad));
-            let sites: Vec<(Vec2, u32)> =
-                view.iter().map(|(_, c)| (c.site, c.biome)).collect();
-            let w = gate_weights_from(&sites, gate.n_biomes, Vec2::new(x, z));
-            if rng.next_f32() > w[gate.biome as usize] {
+            let generator = &ctx.context::<crate::planning::world::WorldCtx>().generator;
+            let w = generator.surface_material_weight(Vec2::new(x, z), 8.0, gate.material);
+            if rng.next_f32() > w {
                 return Sites3Chunk { sites: Vec::new() };
             }
         }
@@ -1266,18 +1140,6 @@ impl LayerChunk for SitesChunk {
     }
 }
 
-impl LayerChunk for BiomeChunk {
-    type Layer = BiomeField;
-
-    fn create(&mut self, ctx: &ChunkCtx<'_, BiomeField>) {
-        *self = ctx.layer().build(ctx);
-    }
-
-    fn destroy(&mut self, _ctx: &ChunkCtx<'_, BiomeField>) {
-        *self = Self::default();
-    }
-}
-
 impl LayerChunk for Sites3Chunk {
     type Layer = Scatter3Sites;
 
@@ -2107,90 +1969,52 @@ mod tests {
         assert_eq!(sites, sites2);
     }
 
+    /// Region weights come from the generator's own bands, so they
+    /// partition the plane and every declared region is reachable.
     #[test]
-    fn gate_weights_partition_and_blend() {
-        // The probe sweep below spans ~60 km of x and ~40 km of z.
-        let mut mgr = test_manager(11).around(
-            IVec3::new(768, 0, -20672),
-            IVec3::new(86016, 0, 61440),
-        );
-        mgr.register_as(
-            "biomes",
-            BiomeField {
-                cfg: BiomeCfg {
-                    cell_m: 2048,
-                    table: vec![("forest".into(), 2.0), ("meadow".into(), 1.0)],
-                },
-            },
-        );
-        // Partition of unity across arbitrary probe points.
-        let mut seen = [false; 2];
-        for i in 0..64 {
-            let p = Vec2::new(-30000.0 + 977.0 * i as f32, -40000.0 + 613.0 * i as f32);
-            let w = gate_weights_at(mgr.graph(), "biomes", 2, p);
-            let sum: f32 = w.iter().sum();
-            assert!((sum - 1.0).abs() < 1e-4, "weights sum {sum}");
-            for (b, &v) in w.iter().enumerate() {
-                assert!((0.0..=1.0).contains(&v));
-                if v > 0.9 {
-                    seen[b] = true;
-                }
-            }
-        }
-        assert!(seen[0] && seen[1], "no dominant region per biome: {seen:?}");
-        // Weights match a direct site query and blend near a site: at the
-        // seed itself its biome dominates.
-        let b = IAabb::new(IVec3::new(-8192, 0, -8192), IVec3::new(8192, 1, 8192));
-        for (_, c) in mgr.graph().view::<BiomeField>("biomes", b).iter() {
-            let w = gate_weights_at(mgr.graph(), "biomes", 2, c.site);
-            assert!(
-                w[c.biome as usize] > 0.9,
-                "seed site not dominated by its own biome"
+    fn region_weights_partition_and_every_region_is_reachable() {
+        let generator = generator(3);
+        let mats = [1u32, 2, 5, 6];
+        let mut dominant = [false; 4];
+        for i in 0..400 {
+            let p = Vec2::new(
+                LAND.x as f32 + (i % 20) as f32 * 1700.0,
+                LAND.z as f32 + (i / 20) as f32 * 1700.0,
             );
+            let w: Vec<f32> = mats
+                .iter()
+                .map(|&m| generator.surface_material_weight(p, 8.0, m))
+                .collect();
+            let sum: f32 = w.iter().sum();
+            assert!(
+                (sum - 1.0).abs() < 1.0e-3,
+                "weights must partition: {w:?} sums to {sum}"
+            );
+            let best = w
+                .iter()
+                .enumerate()
+                .max_by(|a, b| a.1.total_cmp(b.1))
+                .map(|(i, _)| i)
+                .unwrap();
+            dominant[best] = true;
         }
-        // Determinism.
-        let mut mgr2 = test_manager(11).around(
-            IVec3::new(768, 0, -20672),
-            IVec3::new(86016, 0, 61440),
-        );
-        mgr2.register_as(
-            "biomes",
-            BiomeField {
-                cfg: BiomeCfg {
-                    cell_m: 2048,
-                    table: vec![("forest".into(), 2.0), ("meadow".into(), 1.0)],
-                },
-            },
-        );
-        let p = Vec2::new(-27000.0, -38000.0);
-        assert_eq!(
-            gate_weights_at(mgr.graph(), "biomes", 2, p),
-            gate_weights_at(mgr2.graph(), "biomes", 2, p)
+        assert!(
+            dominant.iter().all(|&d| d),
+            "some region is never dominant: {dominant:?}"
         );
     }
 
     #[test]
     fn biome_gated_scatter_concentrates_in_its_biome() {
         let mut mgr = test_manager(11).around(LAND, IVec3::new(17408, 0, 17408));
-        mgr.register_as(
-            "biomes",
-            BiomeField {
-                cfg: BiomeCfg {
-                    cell_m: 2048,
-                    table: vec![("a".into(), 1.0), ("b".into(), 1.0)],
-                },
-            },
-        );
+        // Gate on the forest region — material 1, the one the planet's
+        // `height_surface` lays down and no band repaints.
         mgr.register_as(
             "sites:gated",
             ScatterSites {
                 cfg: ScatterCfg {
                     chance: 1.0,
-                    biome: Some(BiomeGate {
-                        instance: "biomes".into(),
-                        biome: 0,
-                        n_biomes: 2,
-                    }),
+                    biome: Some(BiomeGate { material: 1 }),
                     ..Default::default()
                 },
             },
@@ -2200,9 +2024,10 @@ mod tests {
         assert!(!sites.is_empty(), "gate rejected everything");
         // Accepted sites average a high weight of their biome; the
         // probabilistic gate keeps some low-weight border sites (blending).
+        let generator = generator(11);
         let mean: f32 = sites
             .iter()
-            .map(|&p| gate_weights_at(mgr.graph(), "biomes", 2, p)[0])
+            .map(|&p| generator.surface_material_weight(p, 8.0, 1))
             .sum::<f32>()
             / sites.len() as f32;
         // Acceptance probability = weight, so the accepted mean is

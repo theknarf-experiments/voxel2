@@ -387,12 +387,18 @@ pub enum StackLayerDef {
     },
     /// A coarse blended-region field; other layers and spawners gate on
     /// its named biomes.
+    /// Names for the regions the GENERATOR paints, so the rest of the
+    /// stack can gate on them.
+    ///
+    /// It defines nothing itself: a region is a `material_band` op and
+    /// the ground colour is the definition. This is the dictionary from
+    /// a name to the material that region paints, which is what stops
+    /// "where trees grow" and "what colour the ground is" from being two
+    /// descriptions that can disagree.
     Biomes {
         name: String,
-        #[serde(default = "d_biome_cell")]
-        cell_m: i32,
-        /// (biome name, selection weight) — order defines indices.
-        table: Vec<(String, f32)>,
+        /// (region name, the material its band paints).
+        table: Vec<(String, u32)>,
     },
     /// Volumetric sites for interior worlds (no terrain filters).
     Scatter3 {
@@ -587,10 +593,6 @@ fn d_tube_bore() -> f32 {
 fn d_tube_lift() -> f32 {
     3.0
 }
-fn d_biome_cell() -> i32 {
-    2048
-}
-
 impl EmitDef {
     fn to_kind(
         &self,
@@ -850,16 +852,12 @@ impl StackLayerDef {
         for def in stack {
             if let StackLayerDef::Biomes { name, table, .. } = def {
                 if name == instance {
-                    let Some(biome) = table.iter().position(|(n, _)| n == biome_name) else {
+                    let Some(&(_, material)) = table.iter().find(|(n, _)| n == biome_name) else {
                         return Err(format!(
-                            "layer {owner:?}: biome {biome_name:?} not in layer {instance:?}"
+                            "layer {owner:?}: region {biome_name:?} not in layer {instance:?}"
                         ));
                     };
-                    return Ok(layers::BiomeGate {
-                        instance: instance.to_string(),
-                        biome: biome as u32,
-                        n_biomes: table.len(),
-                    });
+                    return Ok(layers::BiomeGate { material });
                 }
             }
         }
@@ -876,13 +874,11 @@ impl StackLayerDef {
     ) {
         use layers::*;
         match self.clone() {
-            StackLayerDef::Biomes {
-                name,
-                cell_m,
-                table,
-            } => mgr.register_as(&name, BiomeField {
-                cfg: BiomeCfg { cell_m, table },
-            }),
+            // Names only — there is no layer to register. A region is a
+            // `material_band` op in the generator; this block is the
+            // dictionary the stack's gates resolve through, and it is
+            // consumed at validation time.
+            StackLayerDef::Biomes { .. } => {}
             StackLayerDef::Scatter {
                 name,
                 cell_m,

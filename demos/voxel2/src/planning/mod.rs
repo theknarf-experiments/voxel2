@@ -53,7 +53,9 @@ pub struct StackPlanner {
     /// Emit instances and what each one can produce.
     emitters: Vec<Emitter>,
     /// Biome layers: (instance name, ordered biome names).
-    biome_tables: Vec<(String, Vec<String>)>,
+    /// Region dictionaries: (instance, [(region name, its material)]).
+    /// A region IS a generator band; this only names them.
+    biome_tables: Vec<(String, Vec<(String, u32)>)>,
     /// A real camera position has been published at least once. Before
     /// that the graph is idle only because nothing has been asked of it.
     focused: Arc<std::sync::atomic::AtomicBool>,
@@ -342,17 +344,23 @@ impl StackPlanner {
     }
 
     pub fn weights_at(&self, instance: &str, p: bevy::math::Vec2) -> Vec<(String, f32)> {
-        let Some(rt) = &self.stack else {
+        let (Some(ctx), Some(table)) = (
+            self.ctx.as_ref(),
+            self.biome_tables
+                .iter()
+                .find_map(|(n, t)| (n == instance).then_some(t)),
+        ) else {
             return Vec::new();
         };
-        let mgr = rt.graph();
-        let Some(table) = self.biome_tables.iter().find_map(|(n, t)| {
-            (n == instance).then_some(t)
-        }) else {
-            return Vec::new();
-        };
-        let w = layers::gate_weights_at(mgr, instance, table.len(), p);
-        table.iter().cloned().zip(w).collect()
+        table
+            .iter()
+            .map(|(name, material)| {
+                (
+                    name.clone(),
+                    ctx.generator.surface_material_weight(p, 8.0, *material),
+                )
+            })
+            .collect()
     }
 
     pub fn markers_in(
@@ -437,14 +445,13 @@ impl StackPlanner {
                 ));
             }
         }
-        let biome_tables: Vec<(String, Vec<String>)> = def
+        let biome_tables: Vec<(String, Vec<(String, u32)>)> = def
             .stack
             .iter()
             .filter_map(|d| match d {
-                StackLayerDef::Biomes { name, table, .. } => Some((
-                    name.clone(),
-                    table.iter().map(|(n, _)| n.clone()).collect(),
-                )),
+                StackLayerDef::Biomes { name, table, .. } => {
+                    Some((name.clone(), table.clone()))
+                }
                 _ => None,
             })
             .collect();
@@ -702,7 +709,7 @@ mod tests {
             ),
             // Biome name missing from the table.
             (
-                r#"[{"kind":"biomes","name":"b","table":[["forest",1.0]]},
+                r#"[{"kind":"biomes","name":"b","table":[["forest",1]]},
                     {"kind":"scatter","name":"s","chance":1.0,"biome":"b:desert"}]"#,
                 "not in layer",
             ),
@@ -788,13 +795,13 @@ mod tests {
         );
         // Biomes blend through the facade: partition of unity, both
         // regions dominant somewhere across a wide sweep.
-        let mut dominant = [false; 2];
+        let mut dominant = [false; 4];
         for gz in 0..12 {
             for gx in 0..12 {
                 let t = bevy::math::Vec2::new(gx as f32 / 11.0, gz as f32 / 11.0);
                 let p = min2 + (max2 - min2) * t;
                 let w = planner.weights_at("biomes", p);
-                assert_eq!(w.len(), 2);
+                assert_eq!(w.len(), 4, "planet declares four regions");
                 let sum: f32 = w.iter().map(|(_, v)| v).sum();
                 assert!((sum - 1.0).abs() < 1e-4);
                 for (b, (_, v)) in w.iter().enumerate() {
@@ -804,7 +811,10 @@ mod tests {
                 }
             }
         }
-        assert!(dominant[0] && dominant[1], "biomes not regional: {dominant:?}");
+        assert!(
+            dominant.iter().all(|&d| d),
+            "every region must dominate somewhere: {dominant:?}"
+        );
         // Determinism across a fresh build.
         let world2 = world_at(&planet, 0, Vec3::new(-27000.0, 0.0, -38000.0));
         assert_eq!(fine, world2.ops_in(min, max, 12.8));

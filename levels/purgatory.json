@@ -147,6 +147,30 @@
     {
       "type": "height_surface",
       "material": 1
+    },
+    {
+      "type": "material_band",
+      "from": 1,
+      "material": 3,
+      "a": [
+        0.54,
+        1.0
+      ],
+      "b": [
+        0.0,
+        1.0
+      ],
+      "scale": [
+        9e-05,
+        0.00012
+      ],
+      "offset": [
+        6100.0,
+        -2400.0,
+        -15500.0,
+        9800.0
+      ],
+      "octaves": 5
     }
   ],
   "materials": [
@@ -363,15 +387,14 @@
       {
         "kind": "biomes",
         "name": "biomes",
-        "cell_m": 3072,
         "table": [
           [
             "ashfield",
-            2.0
+            1
           ],
           [
             "boneyard",
-            1.0
+            3
           ]
         ]
       },
