@@ -73,6 +73,12 @@ use crate::slab::{SlabAlloc, SlabAllocator};
 /// Density samples per axis: 33 corners + apron covering corners -2..=35
 /// (one extra low corner for coarse-parity stitching).
 const SAMPLES: u32 = 38;
+
+/// Samples one density invocation walks down its column. Twin of
+/// `Y_PER_THREAD` in `voxel_world_density.wgsl`: the height chain is
+/// evaluated once per run, so this trades redundant work against how
+/// many threads are in flight.
+const DENSITY_Y_PER_THREAD: u32 = 4;
 const CELLS: u32 = 32;
 /// Compressed vertex: 12 bytes (unorm16 pos ×4 incl. pad, snorm16 oct normal).
 const VERTEX_BYTES: u64 = 12;
@@ -2367,7 +2373,10 @@ fn dispatch_chunk_work(
             ..default()
         });
 
-        let gen_groups = SAMPLES.div_ceil(6);
+        // Density walks a RUN of y per invocation: a grid over xz, and
+        // one layer of it per run. Twin of Y_PER_THREAD in the shader.
+        let gen_groups = SAMPLES.div_ceil(8);
+        let gen_y_groups = SAMPLES.div_ceil(DENSITY_Y_PER_THREAD);
         // Count and vertex passes cover the extended cell range -1..=32.
         let ext_groups = (CELLS + 2).div_ceil(4);
 
@@ -2375,7 +2384,7 @@ fn dispatch_chunk_work(
         pass.set_pipeline(density);
         for entry in &batches.gen {
             pass.set_bind_group(0, &gen_bg, &[entry.uniform_offset]);
-            pass.dispatch_workgroups(gen_groups, gen_groups, gen_groups);
+            pass.dispatch_workgroups(gen_groups, gen_groups, gen_y_groups);
         }
         pass.set_pipeline(count);
         for entry in &batches.gen {

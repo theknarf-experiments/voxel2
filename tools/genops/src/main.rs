@@ -3,12 +3,16 @@
 //! Run from the workspace root: `mise run genops`. A guard test in
 //! voxel-render fails when the spliced text goes stale.
 
-use voxel_core::opgen::{wgsl_arms, wgsl_helpers, Ctx};
+use voxel_core::opgen::{wgsl_arms, wgsl_column_arms, wgsl_helpers, Ctx};
 
 const HELPERS_BEGIN: &str = "// GENOPS HELPERS BEGIN";
 const HELPERS_END: &str = "// GENOPS HELPERS END";
 const ARMS_BEGIN: &str = "// GENOPS ARMS BEGIN";
 const ARMS_END: &str = "// GENOPS ARMS END";
+/// The height chain, spliced separately where an evaluator runs it once
+/// per column instead of once per sample.
+const COLUMN_BEGIN: &str = "// GENOPS COLUMN ARMS BEGIN";
+const COLUMN_END: &str = "// GENOPS COLUMN ARMS END";
 
 fn splice(text: &str, begin: &str, end: &str, content: &str, indent: &str) -> String {
     let b = text.find(begin).expect("begin marker");
@@ -29,27 +33,42 @@ fn splice(text: &str, begin: &str, end: &str, content: &str, indent: &str) -> St
 }
 
 fn main() {
+    // (path, helper dialect, arms ctx, column arms ctx if the file has a
+    // separate column pass).
     let targets = [
         (
             "crates/voxel-render/src/shaders/voxel_world_density.wgsl",
             Ctx::Full,
+            Ctx::Sample,
+            Some(Ctx::Height),
             "            ",
         ),
         (
             "crates/voxel-render/src/shaders/voxel_mesh_chunks.wgsl",
             Ctx::Height,
+            Ctx::Height,
+            None,
             "            ",
         ),
         (
             "demos/voxel2/src/voxel_water.wgsl",
             Ctx::Height,
+            Ctx::Height,
+            None,
             "            ",
         ),
     ];
-    for (path, ctx, arm_indent) in targets {
+    for (path, helpers, arms, column, arm_indent) in targets {
         let text = std::fs::read_to_string(path).unwrap_or_else(|e| panic!("{path}: {e}"));
-        let text = splice(&text, HELPERS_BEGIN, HELPERS_END, &wgsl_helpers(ctx), "");
-        let text = splice(&text, ARMS_BEGIN, ARMS_END, &wgsl_arms(ctx), arm_indent);
+        let text = splice(&text, HELPERS_BEGIN, HELPERS_END, &wgsl_helpers(helpers), "");
+        let text = splice(&text, ARMS_BEGIN, ARMS_END, &wgsl_arms(arms), arm_indent);
+        let text = match column {
+            // The column pass runs the height chain, but inside the
+            // volumetric evaluator — so it keeps the full dialect's
+            // vs-aware FBM, not the replay shells'.
+            Some(_) => splice(&text, COLUMN_BEGIN, COLUMN_END, &wgsl_column_arms(), arm_indent),
+            None => text,
+        };
         std::fs::write(path, text).unwrap();
         println!("spliced {path}");
     }

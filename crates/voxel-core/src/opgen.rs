@@ -300,18 +300,26 @@ if abs(level - round_half_up(level / n) * n) < 0.5 {
 pub enum Ctx {
     Full,
     Height,
+    /// Everything the height replay does NOT do.
+    ///
+    /// The height chain depends only on xz, so a volumetric evaluator can
+    /// run it once per COLUMN and this per sample. The split is exactly
+    /// `OpDef::height`, and it is sound because no `height: false` arm
+    /// reads a register the height arms own except `h`, `ta` and `tb`,
+    /// which the column pass hands over.
+    Sample,
 }
 
 fn substitute(body: &str, ctx: Ctx, wgsl: bool) -> String {
     let mut s = body.to_string();
     // FBM entry point + optional vs argument.
     let fbm = match (ctx, wgsl) {
-        (Ctx::Full, false) => "fbm_mode",
-        (Ctx::Full, true) => "fbm",
+        (Ctx::Full | Ctx::Sample, false) => "fbm_mode",
+        (Ctx::Full | Ctx::Sample, true) => "fbm",
         (Ctx::Height, _) => "hfbm",
     };
     s = s.replace("@FBM", fbm);
-    s = s.replace("@VS@", if ctx == Ctx::Full { "vs, " } else { "" });
+    s = s.replace("@VS@", if ctx == Ctx::Height { "" } else { "vs, " });
     s = s.replace("@mat", if wgsl { "op.head.z" } else { "op.material" });
     // Param tokens, longest suffix first.
     for reg in ["p0", "p1", "p2"] {
@@ -360,7 +368,11 @@ fn indent(text: &str, by: &str) -> String {
 }
 
 fn ops_for(ctx: Ctx) -> impl Iterator<Item = &'static OpDef> {
-    OPS.iter().filter(move |op| ctx == Ctx::Full || op.height)
+    OPS.iter().filter(move |op| match ctx {
+        Ctx::Full => true,
+        Ctx::Height => op.height,
+        Ctx::Sample => !op.height,
+    })
 }
 
 /// The Rust `match op.kind { ... }` statement for `include!`.
@@ -424,6 +436,22 @@ pub fn wgsl_arms(ctx: Ctx) -> String {
 /// Module-level WGSL helper shims the generated arms call. `Height`
 /// contexts additionally need the vs-less `hfbm` wrapper, whose body
 /// differs per shader (coarse_fbm), so shells define that one.
+/// The height arms in the FULL dialect, for a volumetric evaluator that
+/// runs the height chain once per column. Same ops as `Ctx::Height`, but
+/// the vs-aware FBM the density shader has rather than the replay shells'.
+pub fn wgsl_column_arms() -> String {
+    let mut out = String::new();
+    for op in OPS.iter().filter(|op| op.height) {
+        out.push_str(&format!(
+            "case {}u: {{ // {}\n{}\n}}\n",
+            op.kind,
+            op.name,
+            indent(&substitute(op.body, Ctx::Full, true), "    ")
+        ));
+    }
+    out
+}
+
 pub fn wgsl_helpers(ctx: Ctx) -> String {
     let mut out = String::from(
         "\
@@ -432,7 +460,7 @@ fn to_i(x: f32) -> i32 { return i32(x); }
 fn to_u(x: f32) -> u32 { return u32(x); }
 ",
     );
-    if ctx == Ctx::Full {
+    if ctx != Ctx::Height {
         out.push_str(
             "\
 fn v3(x: f32, y: f32, z: f32) -> vec3<f32> { return vec3<f32>(x, y, z); }

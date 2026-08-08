@@ -3,12 +3,32 @@
 //! generated arms must be valid, well-typed WGSL. Run `mise run genops`
 //! after editing the op table to refresh the shaders.
 
-use voxel_core::opgen::{wgsl_arms, wgsl_helpers, Ctx};
+use voxel_core::opgen::{wgsl_arms, wgsl_column_arms, wgsl_helpers, Ctx};
 
-const SHADERS: &[(&str, Ctx)] = &[
-    ("src/shaders/voxel_world_density.wgsl", Ctx::Full),
-    ("src/shaders/voxel_mesh_chunks.wgsl", Ctx::Height),
-    ("../../demos/voxel2/src/voxel_water.wgsl", Ctx::Height),
+/// (path, helper dialect, arms ctx, has a separate column block).
+///
+/// The density shader splits the program: the height chain runs once per
+/// COLUMN and the rest per sample, so its arms are `Ctx::Sample` and its
+/// column block is the height ops in the full dialect.
+const SHADERS: &[(&str, Ctx, Ctx, bool)] = &[
+    (
+        "src/shaders/voxel_world_density.wgsl",
+        Ctx::Full,
+        Ctx::Sample,
+        true,
+    ),
+    (
+        "src/shaders/voxel_mesh_chunks.wgsl",
+        Ctx::Height,
+        Ctx::Height,
+        false,
+    ),
+    (
+        "../../demos/voxel2/src/voxel_water.wgsl",
+        Ctx::Height,
+        Ctx::Height,
+        false,
+    ),
 ];
 
 fn region<'a>(text: &'a str, begin: &str, end: &str) -> &'a str {
@@ -34,18 +54,47 @@ fn indented(content: &str, indent: &str) -> String {
 
 #[test]
 fn spliced_shader_regions_match_the_op_table() {
-    for (path, ctx) in SHADERS {
+    for (path, helpers, arms, column) in SHADERS {
         let full = format!("{}/{}", env!("CARGO_MANIFEST_DIR"), path);
         let text = std::fs::read_to_string(&full).unwrap();
         assert_eq!(
             region(&text, "// GENOPS HELPERS BEGIN", "// GENOPS HELPERS END"),
-            indented(&wgsl_helpers(*ctx), ""),
+            indented(&wgsl_helpers(*helpers), ""),
             "{path}: helpers stale — run `mise run genops`"
         );
         assert_eq!(
             region(&text, "// GENOPS ARMS BEGIN", "// GENOPS ARMS END"),
-            indented(&wgsl_arms(*ctx), "            "),
+            indented(&wgsl_arms(*arms), "            "),
             "{path}: arms stale — run `mise run genops`"
+        );
+        if *column {
+            assert_eq!(
+                region(
+                    &text,
+                    "// GENOPS COLUMN ARMS BEGIN",
+                    "// GENOPS COLUMN ARMS END"
+                ),
+                indented(&wgsl_column_arms(), "            "),
+                "{path}: column arms stale — run `mise run genops`"
+            );
+        }
+    }
+}
+
+/// Every op is in exactly one of the density shader's two passes, or a
+/// program would silently skip it.
+#[test]
+fn the_two_passes_partition_the_op_table() {
+    let height = wgsl_column_arms();
+    let sample = wgsl_arms(Ctx::Sample);
+    let full = wgsl_arms(Ctx::Full);
+    for line in full.lines().filter(|l| l.starts_with("case ")) {
+        let in_height = height.lines().any(|h| h == line);
+        let in_sample = sample.lines().any(|s| s == line);
+        assert!(
+            in_height != in_sample,
+            "{line} is in {} passes, must be exactly one",
+            u8::from(in_height) + u8::from(in_sample)
         );
     }
 }

@@ -10,6 +10,12 @@
 // (cutoff at 4 m voxels) so coarse LODs read as solid mass with voids.
 
 const SAMPLES: u32 = 38u;
+/// Samples one density invocation walks down its column. Trades the
+/// redundant height chain against thread count; see `density_main`.
+///
+/// Measured on the planet, settle in seconds: 1 -> 2.40, 2 -> 2.11,
+/// 4 -> 1.85, 6 -> 1.86, 8 -> 1.95, 12 -> 2.07, whole column -> 3.50.
+const Y_PER_THREAD: u32 = 4u;
 const SLOT_STRIDE: u32 = 54872u; // 38^3
 const BIG: f32 = 1.0e6;
 const SOLID: f32 = -1.0e5;
@@ -213,29 +219,32 @@ struct WorldSample {
     mat: u32,
 }
 
-fn eval_program(p: vec3<f32>, vs: f32) -> WorldSample {
+/// What the height chain produces for one column. Everything in it
+/// depends on xz alone, which is why it is computed once per column
+/// rather than once per sample — on a heightfield world that IS the
+/// program, evaluated 38 times over for every column before this split.
+struct Column {
+    h: f32,
+    ta: f32,
+    tb: f32,
+}
+
+fn eval_column(pxz: vec2<f32>, vs: f32) -> Column {
     let coarse = vs >= COARSE_VOXEL_M;
     var h = 0.0;
-    var d = BIG;
-    var mat = 1u;
-    var level = 0.0;
-    var fy = p.y;
-    var sxz = vec2<f32>(0.0);
-    var sr = 0.0;
-    var shaft = BIG;
     var warp = vec2<f32>(0.0);
-    // Region axes, filled by WOP_REGION_AXES and read by the band ops.
     var ta = 0.0;
     var tb = 0.0;
-    let pxz = p.xz;
-
     let w = world_header();
     for (var i = 0u; i < w.count.y; i++) {
         let op = prog.ops[w.count.x + i];
+        // The same LOD gating the sample pass applies: a height op can
+        // be fine- or coarse-only too, and the two passes must agree
+        // about which ops exist or the column is not the column.
         if (coarse && (op.head.y & 1u) != 0u) { continue; }
         if (!coarse && (op.head.y & 2u) != 0u) { continue; }
         switch op.head.x {
-// GENOPS ARMS BEGIN (generated from voxel-core::opgen — run `mise run genops` after editing the op table)
+// GENOPS COLUMN ARMS BEGIN (generated from voxel-core::opgen — run `mise run genops` after editing the op table)
             case 0u: { // WOP_HEIGHT_FBM
                 h += fbm(pxz + warp + op.p0.xy, op.p0.z, to_i(op.p1.x), vs, to_u(op.p1.y)) * op.p0.w;
             }
@@ -251,6 +260,44 @@ fn eval_program(p: vec3<f32>, vs: f32) -> WorldSample {
                 warp.x += fbm(q, op.p0.x, oct, vs, 0) * op.p0.y;
                 warp.y += fbm(q + v2(713.0, -337.0), op.p0.x, oct, vs, 0) * op.p0.y;
             }
+            case 19u: { // WOP_REGION_AXES
+                ta = fbm(pxz + op.p0.xy, op.p0.z, to_i(op.p1.z), vs, 0) + 0.5;
+                tb = fbm(pxz + op.p1.xy, op.p0.w, to_i(op.p1.z), vs, 0) + 0.5;
+            }
+            case 20u: { // WOP_HEIGHT_BAND_FBM
+                let fa = op.p1.z;
+                let wa = smoothstep(op.p2.x - fa, op.p2.x + fa, ta) * (1.0 - smoothstep(op.p2.y - fa, op.p2.y + fa, ta));
+                let wb = smoothstep(op.p2.z - fa, op.p2.z + fa, tb) * (1.0 - smoothstep(op.p2.w - fa, op.p2.w + fa, tb));
+                h += min(wa, wb) * (op.p1.w + fbm(pxz + warp + op.p0.xy, op.p0.z, to_i(op.p1.x), vs, to_u(op.p1.y)) * op.p0.w);
+            }
+// GENOPS COLUMN ARMS END
+            default: {}
+        }
+    }
+    return Column(h, ta, tb);
+}
+
+fn eval_program(p: vec3<f32>, vs: f32, col: Column) -> WorldSample {
+    let coarse = vs >= COARSE_VOXEL_M;
+    let h = col.h;
+    let ta = col.ta;
+    let tb = col.tb;
+    var d = BIG;
+    var mat = 1u;
+    var level = 0.0;
+    var fy = p.y;
+    var sxz = vec2<f32>(0.0);
+    var sr = 0.0;
+    var shaft = BIG;
+    let pxz = p.xz;
+
+    let w = world_header();
+    for (var i = 0u; i < w.count.y; i++) {
+        let op = prog.ops[w.count.x + i];
+        if (coarse && (op.head.y & 1u) != 0u) { continue; }
+        if (!coarse && (op.head.y & 2u) != 0u) { continue; }
+        switch op.head.x {
+// GENOPS ARMS BEGIN (generated from voxel-core::opgen — run `mise run genops` after editing the op table)
             case 15u: { // WOP_FBM3
                 let q = p + op.p1.xyz;
                 let n = fbm3(q, op.p0.x, op.p0.y, to_i(op.p2.x), vs);
@@ -264,16 +311,6 @@ fn eval_program(p: vec3<f32>, vs: f32) -> WorldSample {
             case 2u: { // WOP_HEIGHT_SURFACE
                 let nd = p.y - h;
                 if nd < d { d = nd; mat = op.head.z; }
-            }
-            case 19u: { // WOP_REGION_AXES
-                ta = fbm(pxz + op.p0.xy, op.p0.z, to_i(op.p1.z), vs, 0) + 0.5;
-                tb = fbm(pxz + op.p1.xy, op.p0.w, to_i(op.p1.z), vs, 0) + 0.5;
-            }
-            case 20u: { // WOP_HEIGHT_BAND_FBM
-                let fa = op.p1.z;
-                let wa = smoothstep(op.p2.x - fa, op.p2.x + fa, ta) * (1.0 - smoothstep(op.p2.y - fa, op.p2.y + fa, ta));
-                let wb = smoothstep(op.p2.z - fa, op.p2.z + fa, tb) * (1.0 - smoothstep(op.p2.w - fa, op.p2.w + fa, tb));
-                h += min(wa, wb) * (op.p1.w + fbm(pxz + warp + op.p0.xy, op.p0.z, to_i(op.p1.x), vs, to_u(op.p1.y)) * op.p0.w);
             }
             case 18u: { // WOP_MATERIAL_BAND
                 if mat == to_u(op.p1.z) && ta >= op.p0.x && ta < op.p0.y && tb >= op.p0.z && tb < op.p0.w { mat = op.head.z; }
@@ -375,30 +412,47 @@ fn apply_csg(d_in: f32, mat_in: u32, p: vec3<f32>) -> vec2<f32> {
     return vec2<f32>(d_m, bitcast<f32>(mat));
 }
 
-@compute @workgroup_size(6, 6, 6)
+/// One invocation per RUN of Y_PER_THREAD samples down a column.
+///
+/// The height chain is xz-only, so evaluating it per sample re-did it
+/// for all 38 layers of every column — and on a heightfield world it is
+/// the entire program. But a whole column per thread is 1444 heavy
+/// threads where there were 54872 light ones, and the occupancy loss
+/// cost more than the redundancy did (measured: 2.40 s -> 3.50 s to
+/// settle the planet). A short run amortises the column over several
+/// samples while keeping enough threads in flight to hide latency.
+@compute @workgroup_size(8, 8, 1)
 fn density_main(@builtin(global_invocation_id) id: vec3<u32>) {
-    if (any(id >= vec3<u32>(SAMPLES))) {
+    let y0 = id.z * Y_PER_THREAD;
+    if (id.x >= SAMPLES || id.y >= SAMPLES || y0 >= SAMPLES) {
         return;
     }
     let vs = params.origin.w;
     // Sample i holds cell corner i - 2 (apron covers coarse-parity cells).
-    let c = vec3<i32>(id) - vec3<i32>(2);
+    let cx = i32(id.x) - 2;
+    let cz = i32(id.y) - 2;
     // Exact integer world-voxel index -> one rounding, identical for
     // every chunk (and LOD: (2k)*(vs/2) == k*vs bit-exactly) that
     // evaluates this world sample.
-    let p = vec3<f32>(params.origin_voxels.xyz + c) * vs;
+    let ox = params.origin_voxels.xyz;
+    let pxz = vec2<f32>(f32(ox.x + cx), f32(ox.z + cz)) * vs;
+    let col = eval_column(pxz, vs);
 
-    let s = eval_program(p, vs);
-    var d_m = s.d;
-    var mat = s.mat;
-    let fine = apply_csg(d_m, mat, p);
-    d_m = fine.x;
-    mat = bitcast<u32>(fine.y);
-
-    // SDF stored in voxel-size units, narrow band ±4.
-    let sdf = clamp(d_m / vs, -4.0, 4.0);
-    let material = select(0u, mat, sdf < 0.0);
-    let packed = (pack2x16float(vec2<f32>(sdf, 0.0)) & 0xFFFFu) | (material << 16u);
     let base = params.slot * SLOT_STRIDE;
-    density[base + id.x + SAMPLES * (id.y + SAMPLES * id.z)] = packed;
+    let y1 = min(y0 + Y_PER_THREAD, SAMPLES);
+    for (var iy = y0; iy < y1; iy++) {
+        let p = vec3<f32>(pxz.x, f32(ox.y + i32(iy) - 2) * vs, pxz.y);
+        let s = eval_program(p, vs, col);
+        var d_m = s.d;
+        var mat = s.mat;
+        let fine = apply_csg(d_m, mat, p);
+        d_m = fine.x;
+        mat = bitcast<u32>(fine.y);
+
+        // SDF stored in voxel-size units, narrow band ±4.
+        let sdf = clamp(d_m / vs, -4.0, 4.0);
+        let material = select(0u, mat, sdf < 0.0);
+        let packed = (pack2x16float(vec2<f32>(sdf, 0.0)) & 0xFFFFu) | (material << 16u);
+        density[base + id.x + SAMPLES * (iy + SAMPLES * id.y)] = packed;
+    }
 }
