@@ -359,10 +359,11 @@ fn sync_world_suns(
                 };
                 commands.spawn((
                     LevelSun(world.id),
-                    // Its world AND its own light layer, so a portal
-                    // looking into this world can be lit by this sun
-                    // without also seeing this world's trees.
-                    voxel_render::lighting_layers(world.id),
+                    // Its world's layer. A far view of this world is on
+                    // that layer too, so it is lit by this sun; casters
+                    // are on it and no other world's, so this sun's
+                    // shadow map holds only its own world's trees.
+                    voxel_render::world_layer(world.id),
                     DirectionalLight {
                         illuminance,
                         shadow_maps_enabled: true,
