@@ -140,7 +140,7 @@ fn follow_camera_world(
             clear.0 = here.clear_color;
         }
     }
-    let want = voxel_render::world_layer(camera_world.0);
+    let want = voxel_render::near_view_layers(camera_world.0);
     for (entity, layers) in &mut cameras {
         // The layer filters scene ENTITIES; `ViewWorld` tells the chunk
         // draw which world's list to render. Both, because chunks are not
@@ -338,6 +338,7 @@ fn size_portal_target(
     assets: Option<Res<PortalAssets>>,
     windows: Query<&Window, With<bevy::window::PrimaryWindow>>,
     mut images: ResMut<Assets<Image>>,
+    mut materials: ResMut<Assets<PortalViewMaterial>>,
 ) {
     let (Some(assets), Ok(window)) = (assets, windows.single()) else {
         return;
@@ -347,12 +348,22 @@ fn size_portal_target(
         height: window.physical_height().max(1),
         depth_or_array_layers: 1,
     };
-    let Some(mut image) = images.get_mut(&assets.target) else {
+    // `get` first. `get_mut` marks the asset modified whether or not
+    // anything is written, and an image touched every frame never
+    // settles: its GPU texture is rebuilt under the camera rendering into
+    // it and under the material sampling it. Same failure as a material
+    // rewritten every frame — no error, just a picture that never
+    // updates.
+    if images
+        .get(&assets.target)
+        .is_none_or(|image| image.texture_descriptor.size == want)
+    {
         return;
-    };
-    if image.texture_descriptor.size != want {
+    }
+    if let Some(mut image) = images.get_mut(&assets.target) {
         image.resize(want);
     }
+    let _ = materials.get_mut(&assets.material);
 }
 
 fn far_view_image(width: u32, height: u32) -> Image {
@@ -368,7 +379,7 @@ fn far_view_image(width: u32, height: u32) -> Image {
         TextureDimension::D2,
         &[0, 0, 0, 255],
         TextureFormat::Rgba8UnormSrgb,
-        bevy::asset::RenderAssetUsages::RENDER_WORLD,
+        bevy::asset::RenderAssetUsages::default(),
     );
     image.texture_descriptor.usage = TextureUsages::TEXTURE_BINDING
         | TextureUsages::COPY_DST
@@ -515,7 +526,10 @@ fn sync_backdrops(
                     Mesh3d(assets.quad.clone()),
                     MeshMaterial3d(assets.material.clone()),
                     placement,
-                    voxel_render::world_layer(world),
+                    // NOT the world's own layer: the far camera draws
+                    // that world, and would draw this quad sampling the
+                    // image it is writing.
+                    voxel_render::portal_layer(world),
                 ));
             }
         }
@@ -557,7 +571,6 @@ fn drive_portal(
     let Some(showing) = portal.other(camera_world.0) else {
         return; // this portal does not touch the world you are in
     };
-
     let Some(assets) = assets else {
         return;
     };
@@ -612,6 +625,7 @@ fn drive_portal(
                     placement,
                     voxel_render::ViewWorld(showing),
                     voxel_render::world_layer(showing),
+                    // No MSAA on a render-to-texture view.
                 ));
             }
         }

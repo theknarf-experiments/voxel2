@@ -44,7 +44,7 @@ pub fn world_layer(world: voxel_core::WorldId) -> bevy::camera::visibility::Rend
 
 /// Visible from every world. For content that is not IN a world: the
 /// terrain draw's anchor entity, and lights, which have to reach whichever
-/// world is being viewed — including a [`terrain_only_layer`] view.
+/// world is being viewed.
 pub fn all_world_layers() -> bevy::camera::visibility::RenderLayers {
     (0..=TERRAIN_LAYER).fold(
         bevy::camera::visibility::RenderLayers::none(),
@@ -52,56 +52,35 @@ pub fn all_world_layers() -> bevy::camera::visibility::RenderLayers {
     )
 }
 
-/// Terrain and lights, and nothing a host put in a world.
-///
-/// A portal masks the far world with clip planes, and those live in the
-/// per-chunk draw uniform — so they mask CHUNKS. Grass, trees, props and
-/// water are ordinary entities with their own pipelines and nothing
-/// clips them, so a far view that could see them painted the near view's
-/// meadow over the entire screen rather than through the opening.
-///
-/// Until entities can be masked too, the far view draws terrain only.
-/// That is a visible limitation, not a wrong picture.
-pub fn terrain_only_layer() -> bevy::camera::visibility::RenderLayers {
-    bevy::camera::visibility::RenderLayers::layer(TERRAIN_LAYER)
-}
-
-/// Shared by the terrain anchor, so a view can ask for terrain without
-/// asking for any world's scene content.
+/// The terrain anchor's layer. It is not IN a world — which world's
+/// chunks a view draws is `ViewWorld`, not a layer — so it is visible to
+/// every view.
 pub const TERRAIN_LAYER: usize = MAX_WORLDS;
 
-/// A world's LIGHTS, on a layer of their own.
+/// A world's PORTAL SURFACES — the quads an opening is drawn on.
 ///
-/// Lighting needs a second axis. Render layers are one intersection test,
-/// so a view cannot say "world N's lights but not world N's trees" with a
-/// single set — and a far view needs exactly that: it draws terrain only,
-/// and unlit terrain is not a picture of anything.
-///
-/// So a light carries [`lighting_layers`] (its world AND this), while
-/// casters carry only their world layer. A light's shadow pass sees the
-/// casters of its own world and no other's, and a far view can subscribe
-/// to the light without subscribing to what it shines on.
-pub fn light_layer(world: voxel_core::WorldId) -> bevy::camera::visibility::RenderLayers {
-    bevy::camera::visibility::RenderLayers::layer(FIRST_LIGHT_LAYER + usize::from(world))
+/// They cannot live on the world's own layer. A portal surface samples
+/// the image the far camera renders, and that camera draws the world it
+/// is showing; if the surface shared that world's layer the far camera
+/// would draw the quad that samples its own target. A texture read while
+/// it is being written is undefined, and it presents as an image that
+/// updates sometimes — which is a great deal harder to recognise than
+/// one that never updates at all.
+pub fn portal_layer(world: voxel_core::WorldId) -> bevy::camera::visibility::RenderLayers {
+    bevy::camera::visibility::RenderLayers::layer(FIRST_PORTAL_LAYER + usize::from(world))
 }
 
-/// What to put ON a light belonging to `world`: visible to that world's
-/// cameras, and to a far view of it.
-pub fn lighting_layers(world: voxel_core::WorldId) -> bevy::camera::visibility::RenderLayers {
-    world_layer(world).union(&light_layer(world))
+/// What a camera standing IN `world` sees: its content, its lights, and
+/// the portal surfaces cut into it.
+pub fn near_view_layers(world: voxel_core::WorldId) -> bevy::camera::visibility::RenderLayers {
+    world_layer(world).union(&portal_layer(world))
 }
 
-/// What to put on a camera showing `world` THROUGH a portal: that world's
-/// terrain and its lights, and no world's scene content.
-pub fn far_view_layers(world: voxel_core::WorldId) -> bevy::camera::visibility::RenderLayers {
-    terrain_only_layer().union(&light_layer(world))
-}
-
-pub const FIRST_LIGHT_LAYER: usize = TERRAIN_LAYER + 1;
+pub const FIRST_PORTAL_LAYER: usize = TERRAIN_LAYER + 1;
 
 /// First render layer a host may use for its own purposes. See
 /// [`world_layer`].
-pub const FIRST_HOST_LAYER: usize = FIRST_LIGHT_LAYER + MAX_WORLDS;
+pub const FIRST_HOST_LAYER: usize = FIRST_PORTAL_LAYER + MAX_WORLDS;
 
 /// Marker for helper cameras (offscreen screenshot mirrors, etc.) that
 /// gameplay/streaming systems must ignore when looking for "the player
