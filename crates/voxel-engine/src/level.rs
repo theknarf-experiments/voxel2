@@ -116,9 +116,13 @@ pub struct ScatterDef {
     /// Density from a generator field register.
     #[serde(default)]
     pub density: Option<FieldDensityDef>,
-    /// `"instance:biome"` gate.
+    /// An opaque `"instance:member"` reference to a host weight source,
+    /// gating placement by its blended weight at the point. The engine
+    /// never interprets either half — what a "member" of a host field
+    /// means is the host's business (this demo's are biomes; another
+    /// game's could be factions or pollution).
     #[serde(default)]
-    pub biome: Option<String>,
+    pub gate: Option<String>,
     /// Respect planning clearance (roadbeds, riverbeds).
     #[serde(default = "d_true")]
     pub clearance: bool,

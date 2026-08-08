@@ -150,11 +150,11 @@ impl WorldPlanner for StackPlanner {
         out
     }
 
-    fn biome_fields(&self) -> Vec<String> {
+    fn weight_fields(&self) -> Vec<String> {
         self.biome_tables.iter().map(|(n, _)| n.clone()).collect()
     }
 
-    fn biomes_at(&self, instance: &str, p: bevy::math::Vec2) -> Vec<(String, f32)> {
+    fn weights_at(&self, instance: &str, p: bevy::math::Vec2) -> Vec<(String, f32)> {
         let Some(rt) = &self.stack else {
             return Vec::new();
         };
@@ -164,7 +164,7 @@ impl WorldPlanner for StackPlanner {
         }) else {
             return Vec::new();
         };
-        let w = layers::biome_weights_at(mgr, instance, table.len(), p);
+        let w = layers::gate_weights_at(mgr, instance, table.len(), p);
         table.iter().cloned().zip(w).collect()
     }
 
@@ -604,7 +604,7 @@ mod tests {
         let mut planet = shipped("planet.json");
         validate_level(&planet).unwrap();
         if let Some(def) = planet.scatter.first_mut() {
-            def.biome = Some("biomes:forrest".into());
+            def.gate = Some("biomes:forrest".into());
         }
         let err = validate_level(&planet).unwrap_err();
         assert!(err.contains("forrest"), "typo not caught: {err}");
@@ -647,7 +647,7 @@ mod tests {
             for gx in 0..12 {
                 let t = bevy::math::Vec2::new(gx as f32 / 11.0, gz as f32 / 11.0);
                 let p = min2 + (max2 - min2) * t;
-                let w = world.biomes_at("biomes", p);
+                let w = world.weights_at("biomes", p);
                 assert_eq!(w.len(), 2);
                 let sum: f32 = w.iter().map(|(_, v)| v).sum();
                 assert!((sum - 1.0).abs() < 1e-4);

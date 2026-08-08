@@ -689,7 +689,7 @@ pub fn validate_level(level: &LevelDef) -> Result<(), String> {
         ))
     };
     for def in &level.scatter {
-        if let Some(reference) = &def.biome {
+        if let Some(reference) = &def.gate {
             biome_ref(&def.class, reference)?;
         }
         if def.output == voxel_engine::level::ScatterOutput::Entities && def.variants.is_empty() {

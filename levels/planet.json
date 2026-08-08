@@ -301,7 +301,6 @@
       "density": {
         "field": 0
       },
-      "biome": "biomes:forest",
       "placement": {
         "tilt_deg": 4.0,
         "altitude_falloff": 25.0
@@ -330,7 +329,8 @@
             1.7
           ]
         }
-      ]
+      ],
+      "gate": "biomes:forest"
     },
     {
       "class": "boulder",
@@ -341,7 +341,6 @@
         800.0
       ],
       "min_up": 0.55,
-      "biome": "biomes:meadow",
       "placement": {
         "align": "normal",
         "tilt_deg": 8.0
@@ -355,7 +354,8 @@
             2.6
           ]
         }
-      ]
+      ],
+      "gate": "biomes:meadow"
     },
     {
       "class": "groundcover",

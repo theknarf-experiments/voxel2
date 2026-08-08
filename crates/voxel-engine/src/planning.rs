@@ -85,14 +85,15 @@ pub trait WorldPlanner: Send + Sync + 'static {
         Vec::new()
     }
 
-    /// Names of the biome fields this planner answers `biomes_at` for.
-    fn biome_fields(&self) -> Vec<String> {
+    /// Names of the host weight fields this planner answers
+    /// `weights_at` for. What they classify is the host's concept.
+    fn weight_fields(&self) -> Vec<String> {
         Vec::new()
     }
 
-    /// Blended weights at a point for a named biome field: (name, weight).
+    /// Blended weights at a point for a named field: (member, weight).
     /// Empty if the planner has no such field.
-    fn biomes_at(&self, _field: &str, _p: Vec2) -> Vec<(String, f32)> {
+    fn weights_at(&self, _field: &str, _p: Vec2) -> Vec<(String, f32)> {
         Vec::new()
     }
 
@@ -284,16 +285,16 @@ impl WorldQuery {
             .map_or_else(Vec::new, |p| p.markers_in(min, max, kind))
     }
 
-    pub fn biome_fields(&self) -> Vec<String> {
+    pub fn weight_fields(&self) -> Vec<String> {
         self.planner
             .as_ref()
-            .map_or_else(Vec::new, |p| p.biome_fields())
+            .map_or_else(Vec::new, |p| p.weight_fields())
     }
 
-    pub fn biomes_at(&self, field: &str, p: Vec2) -> Vec<(String, f32)> {
+    pub fn weights_at(&self, field: &str, p: Vec2) -> Vec<(String, f32)> {
         self.planner
             .as_ref()
-            .map_or_else(Vec::new, |p2| p2.biomes_at(field, p))
+            .map_or_else(Vec::new, |p2| p2.weights_at(field, p))
     }
 
 }

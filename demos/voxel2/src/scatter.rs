@@ -104,12 +104,12 @@ impl LayerChunk for ScatterChunk {
             .for_each(|_, c| sites.push((c.site, c.biome)));
             sites
         });
-        let biome_weight = move |xz: Vec2| -> f32 {
+        let gate_weight = move |xz: Vec2| -> f32 {
             let (Some(sites), Some((_, name, count))) = (&biome_sites, &layer.biome) else {
                 return 1.0;
             };
             let _ = name;
-            let weights = crate::planning::layers::biome_weights_from(sites, *count, xz);
+            let weights = crate::planning::layers::gate_weights_from(sites, *count, xz);
             layer
                 .biome_index
                 .and_then(|i| weights.get(i).copied())
@@ -121,7 +121,7 @@ impl LayerChunk for ScatterChunk {
             generator: &world.generator,
             clearance,
             cut_ops,
-            biome_weight: Box::new(biome_weight),
+            gate_weight: Box::new(gate_weight),
         };
         let tile = IVec2::new(ctx.coord().x, ctx.coord().z);
         self.placements = tile_placements(&layer.def, &inputs, tile);
@@ -206,7 +206,7 @@ pub fn register(
     let mut tops = Vec::new();
     let mut handles = Vec::new();
     for def in &level.scatter {
-        let biome = def.biome.as_ref().and_then(|reference| {
+        let biome = def.gate.as_ref().and_then(|reference| {
             let (instance, name) = reference.rsplit_once(':')?;
             let table = biome_tables.iter().find(|(n, _)| n == instance)?;
             Some((instance.to_string(), name.to_string(), table.1.len()))

@@ -8,7 +8,7 @@
 //!
 //! Placement is gated by the world the engine already knows: terrain
 //! height and slope, altitude bands with soft falloff, generator field
-//! registers, blended biome weights, coherent patch noise, planning
+//! registers, blended host gate weights, coherent patch noise, planning
 //! clearance (paths, ribbon beds) and carved ground (cave mouths).
 
 use std::sync::Arc;
@@ -81,8 +81,9 @@ pub struct PlacementInputs<'a> {
     pub clearance: Vec<[Vec2; 2]>,
     /// Carved voids props must not float over.
     pub cut_ops: Vec<voxel_core::csg::CsgOp>,
-    /// Blended weight of this population's biome reference at a point.
-    pub biome_weight: Box<dyn Fn(Vec2) -> f32 + 'a>,
+    /// Blended weight of this population's host gate at a point. What
+    /// the gate classifies is the host's business; this is only a number.
+    pub gate_weight: Box<dyn Fn(Vec2) -> f32 + 'a>,
 }
 
 /// Clearance the planning stack reserved (path and ribbon beds).
@@ -158,7 +159,7 @@ pub fn tile_placements(def: &ScatterDef, inputs: &PlacementInputs<'_>, tile: IVe
     let mut out = Vec::new();
     for _ in 0..attempts {
         let xz = origin + Vec2::new(rng.next_f32(), rng.next_f32()) * size;
-        if rng.next_f32() > field_gate(generator, &def.density, xz) * (inputs.biome_weight)(xz) {
+        if rng.next_f32() > field_gate(generator, &def.density, xz) * (inputs.gate_weight)(xz) {
             continue;
         }
         if def.clearance && on_clearance(clearance, xz) {

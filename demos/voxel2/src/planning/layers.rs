@@ -190,7 +190,7 @@ impl ScatterSites {
             let view = ctx.get_named::<BiomeField>(&gate.instance, ctx.chunk_bounds().inflate(pad));
             let sites: Vec<(Vec2, u32)> =
                 view.iter().map(|(_, c)| (c.site, c.biome)).collect();
-            let w = biome_weights_from(&sites, gate.n_biomes, p);
+            let w = gate_weights_from(&sites, gate.n_biomes, p);
             if rng.next_f32() > w[gate.biome as usize] {
                 return SitesChunk { sites: Vec::new() };
             }
@@ -267,7 +267,7 @@ impl BiomeField {
 /// Blended biome weights at `p` from the seed sites of the 3x3 cell
 /// neighborhood: inverse-square falloff, normalized (sums to 1 wherever
 /// at least one site exists — they always do).
-pub fn biome_weights_from(sites: &[(Vec2, u32)], n_biomes: usize, p: Vec2) -> Vec<f32> {
+pub fn gate_weights_from(sites: &[(Vec2, u32)], n_biomes: usize, p: Vec2) -> Vec<f32> {
     let mut w = vec![0.0f32; n_biomes];
     let mut total = 0.0f32;
     for &(site, biome) in sites {
@@ -286,7 +286,7 @@ pub fn biome_weights_from(sites: &[(Vec2, u32)], n_biomes: usize, p: Vec2) -> Ve
 }
 
 /// Biome weights at `p`, read through a manager (facade queries).
-pub fn biome_weights_at(
+pub fn gate_weights_at(
     mgr: &LayerGraph,
     instance: &str,
     n_biomes: usize,
@@ -305,7 +305,7 @@ pub fn biome_weights_at(
         .iter()
         .map(|(_, c)| (c.site, c.biome))
         .collect();
-    biome_weights_from(&sites, n_biomes, p)
+    gate_weights_from(&sites, n_biomes, p)
 }
 
 /// Padding (meters) guaranteeing the 3x3 biome-cell neighborhood is in
@@ -408,7 +408,7 @@ impl Scatter3Sites {
             let view = ctx.get_named::<BiomeField>(&gate.instance, ctx.chunk_bounds().inflate(pad));
             let sites: Vec<(Vec2, u32)> =
                 view.iter().map(|(_, c)| (c.site, c.biome)).collect();
-            let w = biome_weights_from(&sites, gate.n_biomes, Vec2::new(x, z));
+            let w = gate_weights_from(&sites, gate.n_biomes, Vec2::new(x, z));
             if rng.next_f32() > w[gate.biome as usize] {
                 return Sites3Chunk { sites: Vec::new() };
             }
@@ -2108,7 +2108,7 @@ mod tests {
     }
 
     #[test]
-    fn biome_weights_partition_and_blend() {
+    fn gate_weights_partition_and_blend() {
         // The probe sweep below spans ~60 km of x and ~40 km of z.
         let mut mgr = test_manager(11).around(
             IVec3::new(768, 0, -20672),
@@ -2127,7 +2127,7 @@ mod tests {
         let mut seen = [false; 2];
         for i in 0..64 {
             let p = Vec2::new(-30000.0 + 977.0 * i as f32, -40000.0 + 613.0 * i as f32);
-            let w = biome_weights_at(mgr.graph(), "biomes", 2, p);
+            let w = gate_weights_at(mgr.graph(), "biomes", 2, p);
             let sum: f32 = w.iter().sum();
             assert!((sum - 1.0).abs() < 1e-4, "weights sum {sum}");
             for (b, &v) in w.iter().enumerate() {
@@ -2142,7 +2142,7 @@ mod tests {
         // seed itself its biome dominates.
         let b = IAabb::new(IVec3::new(-8192, 0, -8192), IVec3::new(8192, 1, 8192));
         for (_, c) in mgr.graph().view::<BiomeField>("biomes", b).iter() {
-            let w = biome_weights_at(mgr.graph(), "biomes", 2, c.site);
+            let w = gate_weights_at(mgr.graph(), "biomes", 2, c.site);
             assert!(
                 w[c.biome as usize] > 0.9,
                 "seed site not dominated by its own biome"
@@ -2164,8 +2164,8 @@ mod tests {
         );
         let p = Vec2::new(-27000.0, -38000.0);
         assert_eq!(
-            biome_weights_at(mgr.graph(), "biomes", 2, p),
-            biome_weights_at(mgr2.graph(), "biomes", 2, p)
+            gate_weights_at(mgr.graph(), "biomes", 2, p),
+            gate_weights_at(mgr2.graph(), "biomes", 2, p)
         );
     }
 
@@ -2202,7 +2202,7 @@ mod tests {
         // probabilistic gate keeps some low-weight border sites (blending).
         let mean: f32 = sites
             .iter()
-            .map(|&p| biome_weights_at(mgr.graph(), "biomes", 2, p)[0])
+            .map(|&p| gate_weights_at(mgr.graph(), "biomes", 2, p)[0])
             .sum::<f32>()
             / sites.len() as f32;
         // Acceptance probability = weight, so the accepted mean is

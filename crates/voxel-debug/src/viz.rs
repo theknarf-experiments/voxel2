@@ -4,8 +4,9 @@
 //! - F8 toggles chunk boundaries (drawn LOD leaves near the camera,
 //!   colored by level).
 //! - F9 cycles planning layers: off -> near -> far. Markers (by kind),
-//!   clearance segments, ribbon segments, and a biome sample grid colored
-//!   by dominant biome. "Far" is the whole streamed world, which is how
+//!   clearance segments, ribbon segments, and a sample grid of each
+//!   planner weight field, colored by its dominant member. "Far" is the
+//!   whole streamed world, which is how
 //!   you see what a coarse planning layer reaches; it costs a lot of
 //!   gizmo lines, so the near range stays for close work.
 
@@ -164,26 +165,26 @@ pub fn draw_debug_viz(
             planning.line(a, b, color);
         }
 
-        // Biome sample grid: a stake per cell colored by dominant biome.
-        for name in world.biome_fields() {
+        // Weight fields: a stake per cell, colored by dominant member.
+        for name in world.weight_fields() {
             // A 17x17 sample of the near range, whatever that is: this
             // is a field readout, not a feature set. At the near range it
             // spans 10 km with a stake every 625 m, which resolves 2 km
-            // biome cells; at the far range one stake per 5 km would
+            // field cells; at the far range one stake per 5 km would
             // alias them into noise, so it does not follow that far.
             let step = LAYER_VIZ_NEAR_M / 8.0;
             for gz in -8..=8 {
                 for gx in -8..=8 {
                     let p = c2 + Vec2::new(gx as f32, gz as f32) * step;
-                    let weights = world.biomes_at(&name, p);
-                    let Some((i, (biome, w))) = weights
+                    let weights = world.weights_at(&name, p);
+                    let Some((i, (member, w))) = weights
                         .iter()
                         .enumerate()
                         .max_by(|a, b| a.1 .1.total_cmp(&b.1 .1))
                     else {
                         continue;
                     };
-                    let _ = biome;
+                    let _ = member;
                     let y = world.generator().height(p, 8.0) + 2.0;
                     let color = Color::hsl(i as f32 * 137.5 % 360.0, 0.8, 0.5);
                     planning.line(
