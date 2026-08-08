@@ -234,9 +234,13 @@ fn dress_scatter(
     mut commands: Commands,
     assets: Res<PropAssets>,
     table: Res<PropTable>,
-    query: Res<voxel_engine::WorldQuery>,
+    worlds: Res<voxel_engine::Worlds>,
+    host: Res<crate::HostWorld>,
     new: Query<(Entity, &ScatterInstance, &Transform), Added<ScatterInstance>>,
 ) {
+    let Some(query) = worlds.query(host.0) else {
+        return;
+    };
     for (entity, instance, transform) in &new {
         let Some(variants) = assets.classes.get(&*instance.class) else {
             continue;
@@ -393,12 +397,13 @@ fn reconcile_far_forest(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     assets: Res<PropAssets>,
-    world: Option<Res<voxel_engine::WorldQuery>>,
+    worlds: Res<voxel_engine::Worlds>,
+    host: Res<crate::HostWorld>,
     mut spawned: Local<HashMap<crate::planning::world::PartKey, Option<Entity>>>,
     mut seen: Local<u64>,
 ) {
-    let Some(sink) = world
-        .as_ref()
+    let Some(sink) = worlds
+        .query(host.0)
         .and_then(|w| w.host_ctx::<WorldCtx>())
         .map(|c| c.far_props.clone())
     else {

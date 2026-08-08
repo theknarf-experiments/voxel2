@@ -335,14 +335,17 @@ impl Plugin for ScatterPlugin {
 /// The planner builds the populations while the level plugin builds; this
 /// picks them up once the world query exists.
 fn adopt_populations(
-    world: Option<Res<voxel_engine::WorldQuery>>,
+    worlds: Res<voxel_engine::Worlds>,
+    host: Res<crate::HostWorld>,
     mut populations: ResMut<Populations>,
     mut taken: Local<bool>,
 ) {
     if *taken {
         return;
     }
-    let Some(world) = world else { return };
+    let Some(world) = worlds.query(host.0) else {
+        return;
+    };
     let Some(ctx) = world.host_ctx::<WorldCtx>() else {
         return;
     };

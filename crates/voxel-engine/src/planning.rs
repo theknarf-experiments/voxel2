@@ -308,12 +308,17 @@ impl WorldQuery {
 ///
 /// This runs in the async planning task, never on a frame, and the wait is
 /// one atomic load once residency has caught up.
-pub fn ops_provider(world: &WorldQuery) -> crate::chunkgen::ChunkOpsProvider {
+/// The per-chunk ops provider for ONE world's query, or `None` when that
+/// world has nothing to plan.
+///
+/// The provider is reached by `key.world`, so it never has to check which
+/// world it is being asked about: it only ever sees its own.
+pub fn ops_provider(world: &WorldQuery) -> Option<crate::chunkgen::OpsFn> {
     if world.is_empty() {
-        return crate::chunkgen::ChunkOpsProvider(None);
+        return None;
     }
     let world = world.clone();
-    crate::chunkgen::ChunkOpsProvider(Some(Arc::new(move |key: ChunkKey| {
+    Some(Arc::new(move |key: ChunkKey| {
         // Past the ops horizon `chunk_ops` returns nothing whatever
         // planning says, so waiting for residency is waiting to be told
         // the answer is empty — and on a cold start that wait IS the cold
@@ -322,26 +327,25 @@ pub fn ops_provider(world: &WorldQuery) -> crate::chunkgen::ChunkOpsProvider {
         if key.edge_m() as f32 > OPS_HORIZON_EDGE_M {
             return Vec::new();
         }
-        // This planner belongs to the level `LevelPlugin` loaded, which is
-        // world 0. Serving it to every world asked world 0's planning
-        // graph about coordinates in another world, where nothing is
-        // resident: 40,474 `reads_missed` the moment a portal opened, and
-        // world 0's roads and ruins carved into the far world. A world
-        // with its own planning will bring its own provider.
-        if key.world != 0 {
-            return Vec::new();
-        }
         world.wait_idle();
         world.chunk_ops(key)
-    })))
+    }))
 }
 
-/// Publish the streaming source's position to the world's planner every
+/// Publish the streaming source's position to every world's planner each
 /// frame. The planner's own quantization decides whether that is a change
 /// worth acting on, so this is a store, never a wait.
-pub fn follow_stream_source(world: Res<WorldQuery>, sources: crate::StreamSourceQuery) {
+///
+/// Every world, because a world seen only through a portal still plans:
+/// the LOD graph will ask it for ops the moment the opening shows any of
+/// it. Where each world is looked at FROM is a separate question, and
+/// `WorldFocus` answers it — this is only the streaming source.
+pub fn follow_stream_source(worlds: Res<crate::Worlds>, sources: crate::StreamSourceQuery) {
     let Ok(source) = sources.single() else {
         return; // no streaming source tagged yet
     };
-    world.set_focus(source.translation().as_ivec3());
+    let focus = source.translation().as_ivec3();
+    for world in worlds.iter() {
+        world.query.set_focus(focus);
+    }
 }

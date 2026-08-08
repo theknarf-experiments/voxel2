@@ -19,6 +19,18 @@ use voxel_debug::{remote::VoxelRemotePlugin, viz::VoxelVizPlugin};
 use voxel_engine::level::LevelReloaded;
 use voxel_engine::{LevelDef, LevelPlugin, VoxelStreamSource};
 
+/// The world this host decorates.
+///
+/// The engine streams any number of worlds; grass, props, water, ribbons
+/// and the painted surface map are this demo's scene content, and they
+/// are written for ONE of them. Naming it beats leaving `0` in a dozen
+/// systems: decorating a second world becomes "run these for another id",
+/// and until then every place that assumes one world says so.
+/// Defaults to 0: the level the app was launched with. A portal's far
+/// side is streamed and drawn, but this demo puts no grass in it.
+#[derive(Resource, Clone, Copy, Default)]
+pub struct HostWorld(pub voxel_engine::WorldId);
+
 mod grass;
 mod planning;
 mod portal;
@@ -168,6 +180,7 @@ fn main() {
             ..default()
         }))
         .insert_resource(HostScene(scene))
+        .init_resource::<HostWorld>()
         .add_plugins((
             VoxelDebugPlugin,
             VoxelVizPlugin,
@@ -250,8 +263,8 @@ fn setup_scene(mut commands: Commands, scene: Res<HostScene>, level: Res<LevelDe
         commands.spawn((
             LevelSun,
             // The sun lights whichever world is being viewed: a light
-            // confined to layer 0 would leave world 1 black.
-            bevy::camera::visibility::RenderLayers::from_layers(&[0, 1, 2, 3]),
+            // confined to one world's layer leaves the others black.
+            voxel_render::all_world_layers(),
             DirectionalLight {
                 illuminance,
                 shadow_maps_enabled: true,
@@ -287,7 +300,7 @@ fn setup_scene(mut commands: Commands, scene: Res<HostScene>, level: Res<LevelDe
     let mut camera = commands.spawn((
         Camera3d::default(),
         // World 0 to begin with; `follow_camera_world` moves it.
-        bevy::camera::visibility::RenderLayers::layer(0),
+        voxel_render::world_layer(0),
         Transform::from_translation(start).looking_at(start + look * 1000.0, up_for(look)),
         // The engine streams around whatever carries this.
         VoxelStreamSource,

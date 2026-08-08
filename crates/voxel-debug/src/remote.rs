@@ -9,7 +9,6 @@ use bevy::prelude::*;
 use bevy::remote::{error_codes, http::RemoteHttpPlugin, BrpError, BrpResult, RemotePlugin};
 use serde_json::{json, Value};
 
-use voxel_engine::WorldQuery;
 
 pub struct VoxelRemotePlugin {
     pub port: u16,
@@ -82,7 +81,8 @@ fn status(
     cams: PlayerCamera<&Transform>,
     stats: Option<Res<voxel_render::SharedRenderStats>>,
     probe: Option<Res<voxel_engine::streaming::StreamProbe>>,
-    world: Option<Res<voxel_engine::WorldQuery>>,
+    worlds: Option<Res<voxel_engine::Worlds>>,
+    camera_world: Res<voxel_render::CameraWorld>,
     diagnostics: Res<bevy::diagnostic::DiagnosticsStore>,
 ) -> BrpResult {
     let t = cams.single().map_err(|_| err("no player camera"))?;
@@ -109,7 +109,9 @@ fn status(
             "worst_settle_s": p.worst_settle_s,
         });
     }
-    if let Some(world) = world {
+    // The world the camera is in: its planning is the one whose residency
+    // and missed reads say whether what you are looking at is covered.
+    if let Some(world) = worlds.as_ref().and_then(|w| w.query(camera_world.0)) {
         let planning = world.stats();
         out["planning"] = json!({
             "resident_chunks": planning.resident_chunks,
@@ -174,9 +176,30 @@ fn teleport(In(params): In<Option<Value>>, mut cams: PlayerCamera<&mut Transform
     Ok(json!({"ok": true}))
 }
 
+
+/// The world the player is standing in.
+///
+/// Every introspection command answers about THAT world: `voxctl ribbons`
+/// after stepping through a portal must describe where you are, not the
+/// level the app was launched with. Worlds share coordinates, so a
+/// command answering from the wrong one looks plausible and is wrong.
+fn here<'a>(
+    worlds: &'a voxel_engine::Worlds,
+    camera: &voxel_render::CameraWorld,
+) -> Result<&'a voxel_engine::WorldQuery, BrpError> {
+    worlds
+        .query(camera.0)
+        .ok_or_else(|| err("no world loaded"))
+}
+
 /// `{"center": [x, z], "radius": r}` — planning ribbon segments near a
 /// point (find a level's ribbon surfaces).
-fn ribbons(In(params): In<Option<Value>>, world: Res<WorldQuery>) -> BrpResult {
+fn ribbons(
+    In(params): In<Option<Value>>,
+    worlds: Res<voxel_engine::Worlds>,
+    camera: Res<voxel_render::CameraWorld>,
+) -> BrpResult {
+    let world = here(&worlds, &camera)?;
     let params = params.ok_or_else(|| err("params required"))?;
     let c = f32s(&params, "center", 2)?;
     let r = radius(&params, 512.0);
@@ -199,7 +222,12 @@ fn ribbons(In(params): In<Option<Value>>, world: Res<WorldQuery>) -> BrpResult {
 
 /// `{"center": [x, z], "radius": r, "kind": "ruin"?}` — stack markers
 /// near a point (findable content).
-fn markers(In(params): In<Option<Value>>, world: Res<WorldQuery>) -> BrpResult {
+fn markers(
+    In(params): In<Option<Value>>,
+    worlds: Res<voxel_engine::Worlds>,
+    camera: Res<voxel_render::CameraWorld>,
+) -> BrpResult {
+    let world = here(&worlds, &camera)?;
     let params = params.ok_or_else(|| err("params required"))?;
     let c = f32s(&params, "center", 2)?;
     let r = radius(&params, 2048.0);
@@ -216,7 +244,12 @@ fn markers(In(params): In<Option<Value>>, world: Res<WorldQuery>) -> BrpResult {
 
 /// `{"center": [x, y, z], "radius": r, "edge": chunk_edge_m?}` — CSG ops
 /// the provider would serve around a point (debugging what a chunk sees).
-fn ops(In(params): In<Option<Value>>, world: Res<WorldQuery>) -> BrpResult {
+fn ops(
+    In(params): In<Option<Value>>,
+    worlds: Res<voxel_engine::Worlds>,
+    camera: Res<voxel_render::CameraWorld>,
+) -> BrpResult {
+    let world = here(&worlds, &camera)?;
     let params = params.ok_or_else(|| err("params required"))?;
     let c = f32s(&params, "center", 3)?;
     let r = radius(&params, 40.0);
@@ -346,7 +379,12 @@ fn scan_terrain(
 /// `{"center": [x, z], "radius": r?, "step": s?, "top": n?}` — scan the
 /// terrain mirror for scenic spots (steep, high ground), ranked. The
 /// offline scout binary's job, minus the hand-copied level config.
-fn scan(In(params): In<Option<Value>>, world: Res<voxel_engine::WorldQuery>) -> BrpResult {
+fn scan(
+    In(params): In<Option<Value>>,
+    worlds: Res<voxel_engine::Worlds>,
+    camera: Res<voxel_render::CameraWorld>,
+) -> BrpResult {
+    let world = here(&worlds, &camera)?;
     let params = params.ok_or_else(|| err("params required"))?;
     let c = f32s(&params, "center", 2)?;
     let r = radius(&params, 4_096.0);

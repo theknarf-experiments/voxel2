@@ -21,11 +21,6 @@ use voxel_render::{ChunkCommand, ChunkCommandQueue, ChunkReadyChannel, ChunkWait
 /// Planning-layer CSG ops for one chunk, already AABB-culled to it.
 pub type OpsFn = Arc<dyn Fn(ChunkKey) -> Vec<CsgOp> + Send + Sync>;
 
-/// Optional hook supplying planning-layer CSG ops for a requested chunk.
-/// Installed by the app/worldgen; the service picks it up when it changes.
-#[derive(Resource, Default)]
-pub struct ChunkOpsProvider(pub Option<OpsFn>);
-
 /// Handle to the chunk generation service. See the module docs.
 #[derive(Resource, Clone)]
 pub struct ChunkGen(Arc<Service>);
@@ -34,7 +29,11 @@ struct Service {
     queue: ChunkCommandQueue,
     ready_rx: crossbeam_channel::Receiver<(ChunkKey, u32)>,
     waiters: ChunkWaiters,
-    ops: Mutex<Option<OpsFn>>,
+    /// One provider per world, indexed by `ChunkKey::world`. A world with
+    /// nothing to plan has `None`; it does NOT fall back to world 0's,
+    /// which would answer about coordinates in a world it knows nothing
+    /// about (worlds share coordinates, so it always answers something).
+    ops: Mutex<Vec<Option<OpsFn>>>,
 }
 
 impl ChunkGen {
@@ -47,24 +46,27 @@ impl ChunkGen {
             queue,
             ready_rx,
             waiters,
-            ops: Mutex::new(None),
+            ops: Mutex::new(Vec::new()),
         }))
     }
 
     // --- ops ---------------------------------------------------------------
 
-    pub fn set_ops_provider(&self, ops: Option<OpsFn>) {
+    /// Install one provider per world, indexed by world id.
+    pub fn set_ops_providers(&self, ops: Vec<Option<OpsFn>>) {
         *self.0.ops.lock().unwrap() = ops;
     }
 
-    /// Resolve `key`'s ops now. Empty is `None`: the density pass binds a
-    /// dummy op buffer rather than an empty one.
+    /// Resolve `key`'s ops now, from ITS world's provider. Empty is
+    /// `None`: the density pass binds a dummy op buffer rather than an
+    /// empty one.
     pub fn ops_for(&self, key: ChunkKey) -> Option<Arc<Vec<CsgOp>>> {
         self.0
             .ops
             .lock()
             .unwrap()
-            .as_ref()
+            .get(usize::from(key.world))
+            .and_then(Option::as_ref)
             .map(|f| f(key))
             .filter(|v| !v.is_empty())
             .map(Arc::new)
@@ -216,16 +218,7 @@ impl Plugin for ChunkGenPlugin {
         let ready_rx = app.world().resource::<ChunkReadyChannel>().rx.clone();
         let waiters = app.world().resource::<ChunkWaiters>().clone();
         app.insert_resource(ChunkGen::new(queue, ready_rx, waiters))
-            .init_resource::<ChunkOpsProvider>()
-            .add_systems(PreUpdate, (sync_ops_provider, pump_ready).chain());
-    }
-}
-
-/// The host declares its provider as a resource; the service holds it, so
-/// a generation thread can resolve ops without touching the world.
-fn sync_ops_provider(provider: Res<ChunkOpsProvider>, chunks: Res<ChunkGen>) {
-    if provider.is_changed() {
-        chunks.set_ops_provider(provider.0.clone());
+            .add_systems(PreUpdate, pump_ready);
     }
 }
 
@@ -329,14 +322,37 @@ mod tests {
     fn ops_resolve_through_the_provider() {
         let (chunks, _tx, _queue) = service();
         assert!(chunks.ops_for(key()).is_none());
-        chunks.set_ops_provider(Some(Arc::new(|k: ChunkKey| {
+        chunks.set_ops_providers(vec![Some(Arc::new(|k: ChunkKey| {
             if k.level == 2 {
                 vec![CsgOp::boxy(Vec3::ZERO, Vec3::ONE, 0.0, 0, false)]
             } else {
                 Vec::new()
             }
-        })));
+        }))]);
         assert_eq!(chunks.ops_for(key()).map(|o| o.len()), Some(1));
         assert!(chunks.ops_for(ChunkKey::new(3, IVec3::ZERO)).is_none());
+    }
+
+    /// A provider serves ITS world and no other. Worlds share
+    /// coordinates, so a provider reached by anything but the key's world
+    /// answers confidently about a place it has never heard of.
+    #[test]
+    fn a_provider_serves_only_its_own_world() {
+        let (chunks, _tx, _queue) = service();
+        let op = |material: u32| {
+            let ops = vec![CsgOp::boxy(Vec3::ZERO, Vec3::ONE, 0.0, material, false)];
+            Some(Arc::new(move |_: ChunkKey| ops.clone()) as OpsFn)
+        };
+        // World 1 has no planning at all; world 2 has its own.
+        chunks.set_ops_providers(vec![op(7), None, op(9)]);
+        let at = |world| ChunkKey::in_world(world, 2, IVec3::ZERO);
+        assert_eq!(chunks.ops_for(at(0)).unwrap()[0].material, 7);
+        assert!(
+            chunks.ops_for(at(1)).is_none(),
+            "world 1 plans nothing and must not inherit world 0's planner"
+        );
+        assert_eq!(chunks.ops_for(at(2)).unwrap()[0].material, 9);
+        // A world past the end is unregistered, not world 0.
+        assert!(chunks.ops_for(at(3)).is_none());
     }
 }

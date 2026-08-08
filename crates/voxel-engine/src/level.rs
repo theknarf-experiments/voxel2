@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 use voxel_core::csg::CsgOp;
 use voxel_core::worldop::*;
 
-use crate::planning::{ops_provider, HostPlanning, OpsSource, WorldQuery};
+use crate::planning::{HostPlanning, OpsSource, WorldQuery};
 use crate::streaming::StreamingRebuild;
 use crate::{LodConfig, VoxelEnginePlugin};
 
@@ -978,7 +978,7 @@ pub(crate) static HOLE_EVAL: std::sync::atomic::AtomicBool =
 
 /// Build both twins of the level's generator: the GPU upload and the
 /// CPU-side [`voxel_worldgen::Generator`] every mirror samples.
-fn apply_generator(
+pub(crate) fn build_generator(
     level: &LevelDef,
     seed: u64,
 ) -> (voxel_render::WorldProgram, Arc<voxel_worldgen::Generator>) {
@@ -995,20 +995,6 @@ fn apply_generator(
     )
 }
 
-
-/// Pack the level's material table, ordered by material id.
-fn material_table(level: &LevelDef) -> voxel_render::WorldMaterials {
-    let mut table = vec![voxel_render::WorldMaterial::default(); voxel_render::MATERIAL_SLOTS];
-    for def in &level.materials {
-        let id = def.id() as usize;
-        if id < table.len() {
-            table[id] = def.pack();
-        } else {
-            warn!("material id {id} out of range (max {})", table.len() - 1);
-        }
-    }
-    voxel_render::WorldMaterials(table)
-}
 
 fn env_params(_level: &LevelDef) -> voxel_render::EnvParams {
     voxel_render::EnvParams {
@@ -1097,28 +1083,19 @@ impl Plugin for LevelPlugin {
             .add_systems(Update, reload_level);
         }
 
-        let (program, generator) = apply_generator(&level, self.seed);
         if let Some(host) = &self.planner {
             if let Err(e) = host.validate(&level) {
                 panic!("level has invalid planning data: {e}");
             }
         }
-        let world_query =
-            build_ops_provider(&level, self.seed, &generator, self.planner.as_ref());
-        // World 0: the level this plugin loaded. A host that wants a
-        // second level (a portal's far side) registers it on
-        // `StreamedWorlds` and the streamer picks it up.
-        let mut worlds = crate::StreamedWorlds::default();
-        worlds.add(LodConfig::from(&level.lod), generator.clone());
-        app.insert_resource(worlds)
-            .insert_resource(voxel_render::WorldPrograms(vec![program]))
-            .insert_resource(crate::planning::ops_provider(&world_query))
-            .insert_resource(material_table(&level))
-            .insert_resource(env_params(&level))
-            .insert_resource(LodConfig::from(&level.lod))
-            .insert_resource(world_query)
+        app.insert_resource(env_params(&level))
             .insert_resource(level.clone())
             .add_plugins(VoxelEnginePlugin)
+            // World 0 is loaded through the SAME path as any other world.
+            // It used to be assembled here, by hand, out of five separate
+            // resources — which is why a host adding a second world had to
+            // rediscover which five, and got three of them.
+            .add_systems(Startup, load_initial_world)
             .add_systems(Update, crate::planning::follow_stream_source);
 
         if let Some(port) = self.remote_port {
@@ -1127,7 +1104,20 @@ impl Plugin for LevelPlugin {
     }
 }
 
-fn build_ops_provider(
+/// Register the level this plugin loaded as world 0.
+///
+/// In `Startup` rather than at plugin build so it goes through
+/// [`crate::WorldLoader`] like every other world. A second world (a
+/// portal's far side) arrives long after startup, so the path that loads
+/// one has to work at any time — and the only way to be sure it does is
+/// for the first world to use it too.
+fn load_initial_world(mut loader: crate::WorldLoader, level: Res<LevelDef>, seed: Res<WorldSeed>) {
+    let config = LodConfig::from(&level.lod);
+    let id = loader.load(level.clone(), seed.0, config);
+    assert_eq!(id, 0, "the level plugin's own level must be world 0");
+}
+
+pub(crate) fn build_world_query(
     level: &LevelDef,
     seed: u64,
     generator: &Arc<voxel_worldgen::Generator>,
@@ -1200,17 +1190,15 @@ fn build_ops_provider(
 /// world in place — including swapping in a completely different world.
 #[allow(clippy::too_many_arguments)]
 fn reload_level(
-    mut commands: Commands,
     time: Res<Time>,
     mut source: ResMut<LevelSource>,
     mut level: ResMut<LevelDef>,
     seed: Res<WorldSeed>,
     planner: Res<HostPlanner>,
-    mut lod: ResMut<LodConfig>,
     mut rebuild: ResMut<StreamingRebuild>,
     mut reloaded: MessageWriter<LevelReloaded>,
-    programs: Res<voxel_render::WorldPrograms>,
-    mut worlds: ResMut<crate::StreamedWorlds>,
+    mut worlds: ResMut<crate::Worlds>,
+    mut render: ResMut<voxel_render::RenderWorlds>,
 ) {
     if !source.poll.tick(time.delta()).just_finished() {
         return;
@@ -1241,32 +1229,27 @@ fn reload_level(
             return;
         }
     }
+    // Only the world this plugin loaded reloads. A portal's far side was
+    // loaded from its own file and is nobody's business here.
+    let (Some(world), Some(render)) = (worlds.get_mut(0), render.get_mut(0)) else {
+        return;
+    };
 
-    // Engine-owned presentation: the material table and the chunk
-    // shader's environment uniform.
     if new.materials != level.materials {
-        commands.insert_resource(material_table(&new));
+        render.materials =
+            voxel_render::material_table(new.materials.iter().map(|m| (m.id(), m.pack())));
     }
-    if new.environment != level.environment {
-        commands.insert_resource(env_params(&new));
-    }
-    lod.split_k = new.lod.split_k;
-    lod.merge_k = new.lod.merge_k;
+    world.config.split_k = new.lod.split_k;
+    world.config.merge_k = new.lod.merge_k;
 
     // Generation-affecting changes rebuild the streamed world.
     let sun_changed = sun_dir(&new) != sun_dir(level.as_ref());
     let generator_changed = new.generator != level.generator || sun_changed;
     // Rebuilt whether or not the program changed: the planning stack and
     // the facade below need one either way.
-    let (program, generator) = apply_generator(&new, seed.0);
+    let (program, generator) = build_generator(&new, seed.0);
     if generator_changed {
-        let mut updated = programs.0.clone();
-        if updated.is_empty() {
-            updated.push(program);
-        } else {
-            updated[0] = program;
-        }
-        commands.insert_resource(voxel_render::WorldPrograms(updated));
+        render.program = program;
     }
     let regen = generator_changed
         || new.planning != level.planning
@@ -1276,18 +1259,12 @@ fn reload_level(
         || new.lod.top_radius != level.lod.top_radius
         || new.lod.top_y != level.lod.top_y;
     if regen {
-        lod.max_level = new.lod.max_level;
-        lod.top_radius = new.lod.top_radius;
-        lod.top_y = new.lod.top_y;
-        // World 0's registered generator and field go stale otherwise:
-        // the graphs are about to be rebuilt from this registry.
-        if let Some(world) = worlds.0.first_mut() {
-            world.generator = generator.clone();
-            world.config = LodConfig::from(&new.lod);
-        }
-        let world_query = build_ops_provider(&new, seed.0, &generator, planner.0.as_ref());
-        commands.insert_resource(ops_provider(&world_query));
-        commands.insert_resource(world_query);
+        world.config.max_level = new.lod.max_level;
+        world.config.top_radius = new.lod.top_radius;
+        world.config.top_y = new.lod.top_y;
+        world.generator = generator.clone();
+        world.query = build_world_query(&new, seed.0, &generator, planner.0.as_ref());
+        world.level = new.clone();
         rebuild.0 = true;
         info!("level reload: generation changed — rebuilding world");
     }

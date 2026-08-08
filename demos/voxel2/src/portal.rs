@@ -13,11 +13,9 @@
 
 use bevy::prelude::*;
 use bevy::camera::visibility::RenderLayers;
-use voxel_engine::{LevelDef, StreamedWorlds};
-use voxel_render::WorldPrograms;
+use voxel_engine::{LevelDef, LodConfig, WorldLoader};
 
-/// Coarsest level the far world streams while it has no portal to be
-/// seen through. See `register_far_world`.
+/// Coarsest level the far world streams. See `ensure_far_world`.
 const FAR_MAX_LEVEL: u8 = 5;
 
 /// The far side: which level file to open onto, and — once opened — the
@@ -51,13 +49,14 @@ impl Plugin for PortalPlugin {
 /// Returns the world id, or `None` if it could not be read — a portal to
 /// a level that will not parse should say so rather than open onto
 /// nothing.
-fn ensure_far_world(
-    far: &mut FarLevel,
-    worlds: &mut StreamedWorlds,
-    programs: &mut WorldPrograms,
-    materials: &mut voxel_render::WorldMaterials,
-    near: &LevelDef,
-) -> Option<u8> {
+///
+/// One call. Everything a world needs — generator, program, materials,
+/// planning, ops provider, LOD config — is registered together by
+/// [`WorldLoader`], so a second world is not a reduced version of the
+/// first. It gets its own material ids (planet's 1 and the
+/// megastructure's 1 no longer collide), its own planning graph, and its
+/// own painted surface map.
+fn ensure_far_world(far: &mut FarLevel, loader: &mut WorldLoader) -> Option<u8> {
     if let Some(id) = far.world {
         return Some(id);
     }
@@ -68,36 +67,17 @@ fn ensure_far_world(
         .inspect_err(|e| error!("portal: cannot parse '{}': {e}", far.path))
         .ok()?;
 
-    let generator = std::sync::Arc::new(level.generator(0));
     // INTERIM: a second world roughly doubles the meshed working set and
     // the slab is one fixed GPU allocation sized for one, so at the far
     // level's own config every class hit 100% and chunks wedged in
     // AwaitingAlloc. Now that the far world streams around the PORTAL
     // rather than the camera its working set is much smaller, so this cap
     // is probably droppable — but on evidence, not on assumption.
-    let mut config = voxel_engine::LodConfig::from(&level.lod);
+    let mut config = LodConfig::from(&level.lod);
     config.max_level = config.max_level.min(FAR_MAX_LEVEL);
     config.top_radius = 1;
-    let id = worlds.add(config, generator.clone());
-    programs.0.push(voxel_render::WorldProgram {
-        ops: std::sync::Arc::new(generator.ops().to_vec()),
-        seed: generator.seed(),
-        sun_dir: generator.sun_direction(),
-    });
-    // One material table serves every world. It is INDEXED by the id a
-    // chunk's vertex carries, and ids are level data, so two levels that
-    // coexist simply must not reuse one — planet is 1/3/4, the
-    // megastructure is 2. A collision would silently repaint one world
-    // with the other's recipe.
-    for def in &level.materials {
-        let mid = def.id() as usize;
-        assert!(mid < materials.0.len(), "far material id {mid} out of range");
-        assert!(
-            !near.materials.iter().any(|n| n.id() == def.id()),
-            "far level reuses material id {mid}, which the near level defines",
-        );
-        materials.0[mid] = def.pack();
-    }
+
+    let id = loader.load(level.clone(), 0, config);
     far.loaded = Some(level);
     far.world = Some(id);
     info!("portal: '{}' opened as world {id}", far.path);
@@ -141,7 +121,7 @@ fn follow_camera_world(
     if clear.0 != want_clear {
         clear.0 = want_clear;
     }
-    let want = RenderLayers::layer(usize::from(camera_world.0));
+    let want = voxel_render::world_layer(camera_world.0);
     for (entity, layers) in &mut cameras {
         // The layer filters scene ENTITIES; `ViewWorld` tells the chunk
         // draw which world's list to render. Both, because chunks are not
@@ -207,20 +187,24 @@ type NearViews<'w, 's> = Query<
 
 /// Whether to render the far world through the opening.
 ///
-/// OFF, because the portal is BROKEN and this at least keeps the far
-/// view's cost off the frame while it is. Opening a portal makes the near
-/// world's terrain stop drawing — the ground vanishes, leaving grass and
-/// trees, which hang off their own draw paths.
+/// Still behind an env var, and NOT because the far view itself is in
+/// doubt: registering a second world used to make the near world's
+/// terrain stop drawing, and until that is confirmed fixed on a screen
+/// this keeps the far view's cost off the frame.
 ///
-/// The reproducer is camera-free: merely REGISTERING a second world does
-/// it. World 0's draw list still holds all 271 entries afterwards, so the
-/// list is right and the draw is being suppressed downstream. Ruled out,
-/// each by experiment rather than by reading: the portal camera (fails
-/// with no portal camera at all), `ViewWorld` (correct per entity in the
-/// main world), the clip planes, the material slab (slots byte-identical
-/// before and after), the backdrop quad, tonemapping, `PendingQueues`
-/// (per view in Bevy), and one anchor per world (which made it worse and
-/// was reverted).
+/// The reproducer was camera-free — merely REGISTERING a second world did
+/// it — which is what turned the search from the portal to the
+/// architecture. What that turned up, now fixed and pinned by tests:
+/// world 0's material assets were re-inserted on the terrain anchor
+/// whenever any world's recipes changed (registering world 1 changed
+/// them), one global material table meant two levels shared an 8-id
+/// namespace, one global surface map painted world 0's rivers onto every
+/// world, and `FieldParams` was a global LOD anchor written whenever any
+/// world re-centred. Any of those could present as "the ground is gone".
+///
+/// Ruled out earlier, each by experiment: the portal camera, `ViewWorld`,
+/// the clip planes, the backdrop quad, tonemapping, `PendingQueues`, and
+/// one terrain anchor per world (which made it worse and was reverted).
 fn far_view_enabled() -> bool {
     std::env::var_os("VOXEL_PORTAL_VIEW").is_some()
 }
@@ -257,7 +241,6 @@ pub struct PortalCamera(pub Entity);
 fn open_portal(
     mut commands: Commands,
     mut far: ResMut<FarLevel>,
-    near: Res<LevelDef>,
     camera: Query<&GlobalTransform, With<crate::FreeCamera>>,
     mut portal: Query<(Entity, &mut Portal)>,
     mut backdrop: Query<&mut Transform, With<PortalBackdrop>>,
@@ -267,11 +250,8 @@ fn open_portal(
     // whole schedule on every plain `cargo run` — the remote was on in
     // every test I did, so nothing caught it.
     host: Option<ResMut<voxel_debug::remote::HostCommands>>,
-    (mut worlds, mut programs, mut materials): (
-        ResMut<StreamedWorlds>,
-        ResMut<WorldPrograms>,
-        ResMut<voxel_render::WorldMaterials>,
-    ),
+    camera_world: Res<voxel_render::CameraWorld>,
+    mut loader: WorldLoader,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials_assets: ResMut<Assets<StandardMaterial>>,
 ) {
@@ -288,13 +268,7 @@ fn open_portal(
     let Ok(eye) = camera.single() else {
         return;
     };
-    let Some(far_world) = ensure_far_world(
-        &mut far,
-        &mut worlds,
-        &mut programs,
-        &mut materials,
-        &near,
-    ) else {
+    let Some(far_world) = ensure_far_world(&mut far, &mut loader) else {
         return;
     };
 
@@ -333,11 +307,13 @@ fn open_portal(
         cull_mode: None,
         ..default()
     });
+    // The opening is cut in the world the camera is standing in.
+    let near_world = camera_world.0;
     commands.spawn(Portal {
         near: placement,
         // Room to stand inside the far level.
         far: Transform::from_translation(Vec3::new(0.0, 22.0, 0.0)),
-        near_world: 0,
+        near_world,
         far_world,
         half: Vec2::new(4.0, 3.0),
     });
@@ -350,7 +326,8 @@ fn open_portal(
         Mesh3d(quad),
         MeshMaterial3d(quad_mat),
         placement,
-        RenderLayers::layer(0),
+        // The backdrop is in the NEAR world, at the opening.
+        voxel_render::world_layer(near_world),
     ));
     info!("portal opened at {at:?}");
 }
@@ -365,12 +342,13 @@ fn drive_portal(
     portals: Query<&Portal>,
     sources: NearViews,
     mut portal_cams: Query<(Entity, &PortalCamera, &mut Transform, &mut Camera)>,
-    mut clips: ResMut<voxel_render::WorldClips>,
+    mut render_worlds: ResMut<voxel_render::RenderWorlds>,
     mut focus: ResMut<voxel_engine::WorldFocus>,
     camera_world: Res<voxel_render::CameraWorld>,
 ) {
-    clips.0.clear();
-    clips.0.resize(voxel_render::MAX_WORLDS, Vec::new());
+    // Republished every frame: a portal that closed or moved must stop
+    // masking with last frame's opening.
+    render_worlds.clear_clips();
     let Ok(portal) = portals.single() else {
         return;
     };
@@ -400,7 +378,7 @@ fn drive_portal(
                 cam.is_active = far_view_enabled();
                 let mut cmd = commands.entity(entity);
                 cmd.insert(voxel_render::ViewWorld(showing))
-                    .insert(RenderLayers::layer(usize::from(showing)));
+                    .insert(voxel_render::world_layer(showing));
                 if let Some(target) = target {
                     cmd.insert(target.clone());
                 }
@@ -427,7 +405,7 @@ fn drive_portal(
                     },
                     placement,
                     voxel_render::ViewWorld(showing),
-                    RenderLayers::layer(usize::from(showing)),
+                    voxel_render::world_layer(showing),
                     // No second tonemap. Cameras sharing a target each run
                     // their own post-processing over the WHOLE image, so a
                     // portal view re-tonemapped the near world that was
@@ -472,7 +450,9 @@ fn drive_portal(
         ahead = -ahead;
     }
     planes.push(ahead.extend(-ahead.dot(to.translation)));
-    clips.0[usize::from(showing)] = planes;
+    if let Some(world) = render_worlds.get_mut(showing) {
+        world.clip = planes;
+    }
 }
 
 /// Step through: crossing the opening moves you by the pairing and swaps

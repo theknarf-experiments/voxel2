@@ -519,7 +519,7 @@ fn refresh_masks(shared: &LodShared) {
 /// rebuild them when a hot reload changes generation.
 fn build_lod_layers(
     mut layers: ResMut<LodLayers>,
-    worlds: Res<crate::StreamedWorlds>,
+    worlds: Res<crate::Worlds>,
     chunks: Res<ChunkGen>,
     mut rebuild: ResMut<StreamingRebuild>,
 ) {
@@ -535,7 +535,7 @@ fn build_lod_layers(
     // the set once: a world can arrive long after startup — opening a
     // portal loads the far level on the spot — and a one-shot build would
     // register it, stream nothing, and show an empty opening.
-    for world in &worlds.0 {
+    for world in worlds.iter() {
         if layers.worlds.iter().any(|w| w.shared.world == world.id) {
             continue;
         }
@@ -554,7 +554,7 @@ fn follow_lod_focus(
     mut layers: ResMut<LodLayers>,
     focus: Res<WorldFocus>,
     mut probe: ResMut<StreamProbe>,
-    world: Res<crate::planning::WorldQuery>,
+    worlds: Res<crate::Worlds>,
     sources: crate::StreamSourceQuery,
     stats: Res<voxel_render::SharedRenderStats>,
     time: Res<Time>,
@@ -569,7 +569,10 @@ fn follow_lod_focus(
     probe.resident = layers.resident();
     probe.generating = layers.is_generating();
     probe.stalled = layers.stalled();
-    probe.reads_missed = world.reads_missed();
+    // Summed over worlds: a miss in ANY of them is a consumer reading
+    // outside what a top dependency covers, and the number has to stay 0
+    // whichever world it happened in.
+    probe.reads_missed = worlds.iter().map(|w| w.query.reads_missed()).sum();
 
     // Settled: residency agrees with the focus AND the pipeline has
     // drained. Either half alone lies — the graph is idle the moment it

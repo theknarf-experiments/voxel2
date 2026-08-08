@@ -12,7 +12,6 @@
 use bevy::gizmos::config::{GizmoConfigGroup, GizmoConfigStore};
 use bevy::prelude::*;
 
-use voxel_engine::WorldQuery;
 
 /// The planning overlay's own gizmo group, so it can draw IN FRONT of the
 /// world while chunk boundaries stay depth-tested.
@@ -84,14 +83,20 @@ const CHUNK_VIZ_RADIUS_M: f32 = 400.0;
 /// one thing this view exists to tell apart.
 const LAYER_VIZ_MAX_LINES: usize = 200_000;
 
+#[allow(clippy::too_many_arguments)]
 pub fn draw_debug_viz(
     mut viz: ResMut<DebugViz>,
-    world: Res<WorldQuery>,
+    worlds: Res<voxel_engine::Worlds>,
+    camera_world: Res<voxel_render::CameraWorld>,
     stats: Option<Res<voxel_render::SharedRenderStats>>,
     sources: voxel_engine::StreamSourceQuery,
     mut gizmos: Gizmos,
     mut planning: Gizmos<PlanningGizmos>,
 ) {
+    // The overlay describes the world you are standing in.
+    let Some(world) = worlds.query(camera_world.0) else {
+        return;
+    };
     let Ok(source) = sources.single() else {
         return;
     };

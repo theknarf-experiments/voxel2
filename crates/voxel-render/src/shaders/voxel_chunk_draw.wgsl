@@ -24,8 +24,8 @@
 struct ChunkDrawUniform {
     // xyz = chunk minimum corner relative to the camera (m), w = voxel size.
     offset: vec4<f32>,
-    // x = number of active clip planes.
-    clip_count: vec4<f32>,
+    // x = number of active clip planes, y = which world this chunk is in.
+    head: vec4<u32>,
     // World-space half-spaces; a fragment survives where it is inside all
     // of them. A portal masks the far world with the pyramid from the eye
     // through its opening, plus the opening's own plane.
@@ -58,9 +58,13 @@ struct VoxelMaterialBindings {
 @group(3) @binding(1) var<storage> material_array: array<WorldMaterial>;
 
 /// The recipe a per-vertex material id selects, via the engine's
-/// id → slab-slot map.
+/// (world, id) → slab-slot map.
+///
+/// Per world: a material id is level data, so planet's 1 and the
+/// megastructure's 1 are different recipes that have to coexist while a
+/// portal shows both. Twin of `material_slot_index`.
 fn material_for(id: u32) -> WorldMaterial {
-    let i = min(id, 7u);
+    let i = chunk.head.y * 8u + min(id, 7u);
     let slot = env.material_slots[i / 4u][i % 4u];
     return material_array[material_indices[slot].material];
 }
@@ -68,7 +72,8 @@ fn material_for(id: u32) -> WorldMaterial {
 // Engine render flags. Lighting is Bevy's.
 struct EnvParams {
     flags: vec4<f32>,                    // x = coverage-eval mode
-    material_slots: array<vec4<u32>, 2>, // material id -> bindless slab slot
+    // (world, material id) -> bindless slab slot, world-major.
+    material_slots: array<vec4<u32>, 8>,
 }
 @group(2) @binding(1) var<uniform> env: EnvParams;
 
@@ -206,7 +211,7 @@ fn fragment(in: VsOut) -> @location(0) vec4<f32> {
     // planes are the pyramid from the eye through it, plus the opening's
     // own plane, so this is the stencil we cannot have — exact, because
     // the opening is convex.
-    let clips = u32(chunk.clip_count.x);
+    let clips = chunk.head.x;
     for (var i = 0u; i < clips; i++) {
         let plane = chunk.clip[i];
         if (dot(plane.xyz, world) + plane.w < 0.0) {

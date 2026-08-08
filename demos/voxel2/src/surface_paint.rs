@@ -19,7 +19,6 @@
 //! of it — on the order of once per kilometre, never per frame.
 
 use bevy::prelude::*;
-use voxel_render::SurfaceMap;
 
 use crate::planning::world::WorldCtx;
 
@@ -91,17 +90,28 @@ fn levelled_handover_voxel_m(lod: &voxel_engine::streaming::LodConfig) -> f32 {
 }
 
 fn repaint(
-    world: Res<voxel_engine::WorldQuery>,
+    worlds: Res<voxel_engine::Worlds>,
+    host: Res<crate::HostWorld>,
     sources: voxel_engine::StreamSourceQuery,
-    lod: Res<voxel_engine::streaming::LodConfig>,
-    mut map: ResMut<SurfaceMap>,
+    mut render: ResMut<voxel_render::RenderWorlds>,
     mut painted_at: Local<Option<Vec2>>,
     mut seen: Local<u64>,
 ) {
     let Ok(source) = sources.single() else {
         return;
     };
-    let Some(ctx) = world.host_ctx::<WorldCtx>() else {
+    // The map is indexed by world-space xz and says nothing about which
+    // world it belongs to, so it is held BY the world it paints: worlds
+    // share coordinates, and one global raster painted this level's
+    // rivers onto whatever else was loaded.
+    let (Some(world), Some(map)) = (
+        worlds.get(host.0),
+        render.get_mut(host.0).map(|w| &mut w.surface_map),
+    ) else {
+        return;
+    };
+    let lod = &world.config;
+    let Some(ctx) = world.query.host_ctx::<WorldCtx>() else {
         return;
     };
     let eye = source.translation();
@@ -126,8 +136,8 @@ fn repaint(
     // Read the plan, not a render buffer: these carry the material the
     // level asked for and whether they are ground at all. Introspection,
     // so the empty distance is not charged to `reads_missed`.
-    let _peek = world.peek();
-    for seg in world.ribbons_in(origin, origin + Vec2::splat(span)) {
+    let _peek = world.query.peek();
+    for seg in world.query.ribbons_in(origin, origin + Vec2::splat(span)) {
         // A seated ribbon IS the ground, so its footprint is the whole
         // capsule. A levelled one is a water surface at a height the plan
         // decided: it covers its own course, and then only as much of the
@@ -139,7 +149,7 @@ fn repaint(
         // from the plan rather than named here: the level decides which
         // materials are water, this only notices which ones arrive levelled.
         if under.is_some() && !coarse_from.iter().any(|&(id, _)| id == seg.material) {
-            coarse_from.push((seg.material, levelled_handover_voxel_m(&lod)));
+            coarse_from.push((seg.material, levelled_handover_voxel_m(lod)));
         }
         painted += stroke(
             &mut texels,

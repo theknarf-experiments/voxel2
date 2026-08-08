@@ -251,10 +251,82 @@ pub struct WorldProgram {
     pub sun_dir: Vec3,
 }
 
-/// Every loaded world's program. Index IS the world id, so the GPU
-/// header array and `ChunkKey::world` agree by construction.
-#[derive(Resource, Default)]
-pub struct WorldPrograms(pub Vec<WorldProgram>);
+/// Everything the renderer knows about ONE loaded world.
+///
+/// One record rather than a resource per aspect. Four parallel `Vec`s
+/// indexed by world id is four chances to push to three of them: the
+/// portal did exactly that, registering a program and a config while the
+/// material table stayed global, and the only thing standing between two
+/// levels and each other's shading was an `assert!` in the host asking
+/// them not to reuse a material id.
+#[derive(Clone, Default)]
+pub struct RenderWorld {
+    pub program: WorldProgram,
+    /// This world's recipes, indexed by the material ids ITS generator
+    /// ops emit. Per world because ids are level data: two levels
+    /// authored apart both use id 1 and mean different things by it.
+    pub materials: Vec<WorldMaterial>,
+    /// What this world's host painted on its own ground.
+    pub surface_map: SurfaceMap,
+    /// Half-spaces masking this world to a portal opening; empty when it
+    /// is being seen directly.
+    pub clip: Vec<Vec4>,
+}
+
+/// Every loaded world, indexed BY world id.
+///
+/// The index is the id — `ChunkKey::world`, the GPU header array slot and
+/// this vector are the same number by construction, which is the whole
+/// reason a chunk needs to carry nothing but its key.
+#[derive(Resource, Default, Clone)]
+pub struct RenderWorlds(Vec<RenderWorld>);
+
+impl RenderWorlds {
+    /// Register a world and return its id. The ONE way to grow the set:
+    /// everything per-world arrives together or not at all.
+    pub fn register(&mut self, world: RenderWorld) -> voxel_core::WorldId {
+        let id = self.0.len();
+        assert!(
+            id < MAX_WORLDS,
+            "at most {MAX_WORLDS} worlds fit one program buffer",
+        );
+        self.0.push(world);
+        id as voxel_core::WorldId
+    }
+
+    pub fn get(&self, id: voxel_core::WorldId) -> Option<&RenderWorld> {
+        self.0.get(usize::from(id))
+    }
+
+    pub fn get_mut(&mut self, id: voxel_core::WorldId) -> Option<&mut RenderWorld> {
+        self.0.get_mut(usize::from(id))
+    }
+
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = &RenderWorld> {
+        self.0.iter()
+    }
+
+    /// Clip planes for a world, empty when it has none or does not exist.
+    pub fn clip(&self, id: voxel_core::WorldId) -> &[Vec4] {
+        self.get(id).map_or(&[], |w| &w.clip[..])
+    }
+
+    /// Drop every world's clip planes. The host republishes the ones that
+    /// still apply each frame, so a portal that closed stops masking.
+    pub fn clear_clips(&mut self) {
+        for world in &mut self.0 {
+            world.clip.clear();
+        }
+    }
+}
 
 /// Which world the camera is in. The host sets it; it drives the main
 /// view's [`ViewWorld`] and render layer.
@@ -285,8 +357,8 @@ impl Default for WorldProgram {
 const SURFACE_MAP_THRESHOLDS: usize = 8;
 const SURFACE_MAP_MATERIALS: usize = 256;
 
-/// Words of [`SurfaceMap`] header before the texels. Twin of the mesh
-/// shader's `SURFACE_MAP_HEADER`.
+/// Words of one world's [`SurfaceMap`] header before its texels. Twin of
+/// the mesh shader's `SURFACE_MAP_HEADER`.
 const SURFACE_MAP_HEADER: usize = SURFACE_MAP_THRESHOLDS + SURFACE_MAP_MATERIALS;
 
 /// A raster of surface material ids the mesh pass paints onto up-facing
@@ -335,9 +407,10 @@ pub struct SurfaceMap {
 }
 
 impl SurfaceMap {
-    /// Header + payload, as the shader reads it. The placement travels in
-    /// the buffer rather than in a uniform so that no layout twin grows a
-    /// field: `ChunkParams` is already mirrored in two shaders and Rust.
+    /// Header + payload, as the shader reads one world's section. The
+    /// placement travels in the buffer rather than in a uniform so that no
+    /// layout twin grows a field: `ChunkParams` is already mirrored in two
+    /// shaders and Rust.
     fn to_words(&self) -> Vec<u32> {
         let mut out = Vec::with_capacity(SURFACE_MAP_HEADER + self.texels.len());
         out.push(self.size);
@@ -356,6 +429,41 @@ impl SurfaceMap {
         out.extend_from_slice(&self.texels);
         out
     }
+}
+
+/// Every world's surface map in ONE buffer: a table of per-world offsets,
+/// then the sections themselves.
+///
+/// Per world because the map is painted in world-space xz and nothing in
+/// it says which world it belongs to. One global raster meant the near
+/// level's rivers and roads were painted onto the far level's ground
+/// wherever their coordinates happened to overlap — and worlds share
+/// coordinates by design, so that is everywhere.
+///
+/// Offset 0 means "this world paints nothing": the table itself occupies
+/// word 0, so no real section can start there.
+fn surface_map_words(worlds: &RenderWorlds) -> Vec<u32> {
+    let mut offsets = vec![0u32; MAX_WORLDS];
+    let mut sections: Vec<u32> = Vec::new();
+    for (id, world) in worlds.iter().enumerate().take(MAX_WORLDS) {
+        if world.surface_map.size == 0 {
+            continue;
+        }
+        offsets[id] = (MAX_WORLDS + sections.len()) as u32;
+        sections.extend(world.surface_map.to_words());
+    }
+    offsets.extend(sections);
+    offsets
+}
+
+/// Bumped whenever any world's raster changes, so the GPU copy is rebuilt
+/// only then. Summed rather than compared per world: generations only ever
+/// increase, so a change in any of them changes the sum.
+fn surface_map_generation(worlds: &RenderWorlds) -> u64 {
+    worlds
+        .iter()
+        .map(|w| w.surface_map.generation)
+        .fold(0u64, u64::wrapping_add)
 }
 
 /// Renders a uniform base color modulated by grain, pour/mortar bands,
@@ -382,7 +490,7 @@ pub const MAT_KIND_CANOPY: u32 = 2;
 /// `zoned`: c0..c3 = low/mid/high/peak rgb | (mid start, high start, peak
 /// start, border amp), p0 = mid-b rgb | mid width, p1 = high-b rgb | high
 /// width, p2 = (peak width, steep hi, steep lo, detail fade).
-#[derive(ShaderType, Clone, Copy)]
+#[derive(ShaderType, Clone, Copy, Debug, PartialEq)]
 pub struct WorldMaterial {
     /// kind, unused ×3
     pub head: UVec4,
@@ -415,10 +523,20 @@ impl Default for WorldMaterial {
 /// slot map the shader indirects through, not a GPU table.
 pub const MATERIAL_SLOTS: usize = 8;
 
-/// The level's material table, indexed by the material ids its generator
-/// ops emit. Extracted every frame so hot-reloads apply.
-#[derive(Resource, Clone, Default)]
-pub struct WorldMaterials(pub Vec<WorldMaterial>);
+/// A world's material table, indexed by material id and padded to
+/// [`MATERIAL_SLOTS`] so the id → slot arithmetic is uniform.
+pub fn material_table(recipes: impl IntoIterator<Item = (u32, WorldMaterial)>) -> Vec<WorldMaterial> {
+    let mut table = vec![WorldMaterial::default(); MATERIAL_SLOTS];
+    for (id, recipe) in recipes {
+        let id = id as usize;
+        if id < MATERIAL_SLOTS {
+            table[id] = recipe;
+        } else {
+            warn!("material id {id} out of range (max {})", MATERIAL_SLOTS - 1);
+        }
+    }
+    table
+}
 
 /// Per-view render flags the voxel shaders still need from the engine.
 /// Lighting and atmosphere are NOT here: voxel surfaces shade through
@@ -428,9 +546,23 @@ pub struct WorldMaterials(pub Vec<WorldMaterial>);
 pub struct EnvParams {
     /// x = coverage-eval mode (monotone geometry over a magenta clear).
     pub flags: Vec4,
-    /// Material id → slot in the bindless material slab, one id per
-    /// component. Filled in the render world, where the slots are known.
-    pub material_slots: [UVec4; 2],
+    /// `(world, material id)` → slot in the bindless material slab, one id
+    /// per component, world-major. Filled in the render world, where the
+    /// slots are known.
+    ///
+    /// Indexed by world because a material id means whatever its own level
+    /// says: planet's 1 and megastructure's 1 are different recipes that
+    /// must be able to coexist.
+    pub material_slots: [UVec4; MATERIAL_SLOT_VEC4S],
+}
+
+/// `vec4`s needed to hold one slot per (world, material id) pair.
+pub const MATERIAL_SLOT_VEC4S: usize = MAX_WORLDS * MATERIAL_SLOTS / 4;
+
+/// Where a world's material id lands in [`EnvParams::material_slots`].
+/// Twin of the draw shader's `material_for`.
+pub fn material_slot_index(world: voxel_core::WorldId, id: u32) -> usize {
+    usize::from(world) * MATERIAL_SLOTS + (id as usize).min(MATERIAL_SLOTS - 1)
 }
 
 /// GPU layout twin of `voxel_core::worldop::WorldOp` (64 B).
@@ -472,10 +604,15 @@ pub struct GpuWorldProgram {
 }
 
 impl GpuWorldProgram {
-    fn from_programs(programs: &[WorldProgram]) -> Self {
+    fn from_worlds(render_worlds: &RenderWorlds) -> Self {
         let mut gpu_ops: Vec<GpuWorldOp> = Vec::new();
         let mut worlds = [GpuWorldHeader::default(); MAX_WORLDS];
-        for (world, program) in programs.iter().take(MAX_WORLDS).enumerate() {
+        for (world, program) in render_worlds
+            .iter()
+            .map(|w| &w.program)
+            .take(MAX_WORLDS)
+            .enumerate()
+        {
             let offset = gpu_ops.len() as u32;
             let height_ops = program.ops.iter().filter(|op| op.is_height_op()).count() as u32;
             gpu_ops.extend(program.ops.iter().map(|op| GpuWorldOp {
@@ -516,12 +653,9 @@ impl Plugin for VoxelChunksPlugin {
         embedded_asset!(app, "shaders/voxel_chunk_draw.wgsl");
 
         let (ready_tx, ready_rx) = crossbeam_channel::unbounded();
-        app.init_resource::<WorldPrograms>()
+        app.init_resource::<RenderWorlds>()
             .init_resource::<CameraWorld>()
-            .init_resource::<WorldClips>();
-        app.init_resource::<SurfaceMap>();
-        app.init_resource::<WorldMaterials>();
-        app.init_resource::<EnvParams>();
+            .init_resource::<EnvParams>();
         app.init_resource::<ChunkCommandQueue>()
             .init_resource::<SharedRenderStats>()
             .insert_resource(ChunkReadyChannel { rx: ready_rx })
@@ -543,12 +677,9 @@ impl Plugin for VoxelChunksPlugin {
             return;
         };
         render_app
-            .init_resource::<WorldPrograms>()
+            .init_resource::<RenderWorlds>()
             .init_resource::<CameraWorld>()
-            .init_resource::<WorldClips>()
             .init_resource::<WorldViews>()
-            .init_resource::<SurfaceMap>()
-            .init_resource::<WorldMaterials>()
             .init_resource::<EnvParams>()
             .insert_resource(stats)
             .insert_resource(ChunkReadySender(ready_tx))
@@ -572,7 +703,7 @@ impl Plugin for VoxelChunksPlugin {
                 (
                     extract_chunk_commands,
                     extract_camera_pos,
-                    extract_program,
+                    extract_worlds,
                     extract_terrain_materials,
                 ),
             )
@@ -593,34 +724,48 @@ impl Plugin for VoxelChunksPlugin {
     }
 }
 
-/// The world's surface materials, one asset per material id. Held so the
-/// render world can look up which slab slot each id landed in.
+/// Surface materials as assets: one per (world, material id). Held so the
+/// render world can look up which slab slot each landed in.
 #[derive(Resource, Default, Clone)]
-pub struct TerrainMaterials(pub Vec<Handle<VoxelSurfaceMaterial>>);
+pub struct TerrainMaterials(pub Vec<Vec<Handle<VoxelSurfaceMaterial>>>);
 
 /// Publish the level's recipes as assets, one per id. Handles are reused
 /// across reloads so re-shading never respawns anything.
 fn sync_terrain_materials(
     mut commands: Commands,
-    recipes: Res<WorldMaterials>,
+    worlds: Res<RenderWorlds>,
     mut materials: ResMut<TerrainMaterials>,
     mut assets: ResMut<Assets<VoxelSurfaceMaterial>>,
     markers: Query<Entity, With<VoxelTerrainMarker>>,
 ) {
-    if !recipes.is_changed() && materials.0.len() == recipes.0.len() {
+    if !worlds.is_changed() && materials.0.len() == worlds.len() {
         return;
     }
-    materials.0.resize_with(recipes.0.len(), || {
-        assets.add(VoxelSurfaceMaterial::default())
-    });
-    for (handle, recipe) in materials.0.iter().zip(&recipes.0) {
-        if let Some(mut material) = assets.get_mut(handle) {
-            material.recipe = *recipe;
+    // Handles are created once per (world, id) and reused: re-adding a
+    // material component is not free — it re-specializes the phase item
+    // the whole terrain draw hangs off — so a world arriving must not
+    // disturb the worlds already drawing.
+    let had = materials.0.len();
+    materials.0.resize_with(worlds.len(), Vec::new);
+    for (slot, world) in materials.0.iter_mut().zip(worlds.iter()) {
+        slot.resize_with(world.materials.len(), || {
+            assets.add(VoxelSurfaceMaterial::default())
+        });
+        for (handle, recipe) in slot.iter().zip(&world.materials) {
+            if let Some(mut material) = assets.get_mut(handle) {
+                material.recipe = *recipe;
+            }
         }
     }
-    // The marker's material only decides which slab the draw binds; every
-    // recipe of this world lives in that same slab.
-    if let Some(first) = materials.0.first() {
+    // The marker's material only decides which slab the draw binds; the
+    // per-vertex id picks the recipe out of it. Inserted ONCE, on the
+    // frame the first world appears — re-inserting it whenever any world's
+    // recipes changed made registering a second world re-specialize the
+    // anchor of every world's terrain draw.
+    if had > 0 {
+        return;
+    }
+    if let Some(first) = materials.0.first().and_then(|w| w.first()) {
         for entity in &markers {
             commands
                 .entity(entity)
@@ -636,7 +781,7 @@ fn sync_terrain_materials(
 fn spawn_terrain_marker(mut commands: Commands) {
     commands.spawn((
         VoxelTerrainMarker,
-        bevy::camera::visibility::RenderLayers::from_layers(&[0, 1, 2, 3]),
+        crate::all_world_layers(),
         Visibility::default(),
         Transform::default(),
         // Effectively infinite: chunk-level culling is a later milestone.
@@ -808,26 +953,26 @@ struct ChunkParams {
 /// per-view bind group.
 struct ChunkDrawUniform {
     offset: Vec4,
-    /// x = how many of `clip` are active.
-    clip_count: Vec4,
+    /// x = how many of `clip` are active, y = which WORLD this chunk is
+    /// in. The fragment shader needs the world to pick a material table:
+    /// a material id means whatever the chunk's own level says it means.
+    head: UVec4,
     /// World-space half-spaces this chunk is clipped to; a fragment
     /// survives where `dot(n, p) + d >= 0` for all of them. This is how a
-    /// portal masks the far world to its own opening — see [`WorldClips`].
+    /// portal masks the far world to its own opening — see
+    /// [`RenderWorld::clip`].
+    ///
+    /// A portal is a hole: the far world must appear only within the
+    /// opening, and only beyond it. Bevy's depth texture is
+    /// `Depth32Float` with no stencil aspect, so the mask cannot be a
+    /// stencil; for a convex opening, clipping against the pyramid's side
+    /// planes is exactly equivalent.
     clip: [Vec4; MAX_CLIP_PLANES],
 }
 
 /// Four sides of the pyramid from the eye through the portal, plus the
 /// portal's own plane.
 pub const MAX_CLIP_PLANES: usize = 5;
-
-/// Clip planes applied to a world's chunks, in THAT world's coordinates.
-///
-/// A portal is a hole: the far world must appear only within the opening,
-/// and only beyond it. Bevy's depth texture is `Depth32Float` with no
-/// stencil aspect, so the mask cannot be a stencil; for a convex opening,
-/// clipping against the pyramid's side planes is exactly equivalent.
-#[derive(Resource, Default, Clone)]
-pub struct WorldClips(pub Vec<Vec<Vec4>>);
 
 enum StagingState {
     Free,
@@ -973,7 +1118,7 @@ fn init_chunk_resources(
         surface_map: None,
         surface_map_dummy: render_device.create_buffer_with_data(&BufferInitDescriptor {
             label: Some("voxel_surface_map_dummy"),
-            contents: bytemuck::cast_slice(&[0u32; SURFACE_MAP_HEADER]),
+            contents: bytemuck::cast_slice(&[0u32; MAX_WORLDS]),
             usage: BufferUsages::STORAGE,
         }),
         env_uniform: UniformBuffer::default(),
@@ -1147,48 +1292,72 @@ fn extract_chunk_commands(
 
 /// Asset ids of the world's surface materials, in material-id order.
 #[derive(Resource, Default)]
-struct ExtractedTerrainMaterials(Vec<AssetId<VoxelSurfaceMaterial>>);
+struct ExtractedTerrainMaterials(Vec<Vec<AssetId<VoxelSurfaceMaterial>>>);
 
 fn extract_terrain_materials(
     materials: Extract<Res<TerrainMaterials>>,
     mut extracted: ResMut<ExtractedTerrainMaterials>,
 ) {
     extracted.0.clear();
-    extracted.0.extend(materials.0.iter().map(|h| h.id()));
+    extracted.0.extend(
+        materials
+            .0
+            .iter()
+            .map(|world| world.iter().map(|h| h.id()).collect()),
+    );
 }
 
-/// Resolve material id → slab slot. Bindless packs every recipe into one
-/// slab, so the shader needs the slot to pick one per vertex; the mapping
+/// Resolve (world, material id) → slab slot. Bindless packs recipes into
+/// slabs, so the shader needs the slot to pick one per vertex; the mapping
 /// is only knowable here, after Bevy has prepared the materials.
 fn resolve_material_slots(
     extracted: Res<ExtractedTerrainMaterials>,
     prepared: Res<bevy::render::erased_render_asset::ErasedRenderAssets<bevy::pbr::PreparedMaterial>>,
     mut env: ResMut<EnvParams>,
+    mut warned: Local<bool>,
 ) {
-    let mut slots = [UVec4::ZERO; 2];
-    for (id, asset_id) in extracted.0.iter().enumerate().take(MATERIAL_SLOTS) {
-        let Some(material) = prepared.get(*asset_id) else {
-            continue;
-        };
-        slots[id / 4][id % 4] = *material.binding.slot;
+    let mut slots = [UVec4::ZERO; MATERIAL_SLOT_VEC4S];
+    // The draw binds ONE bind group — the marker material's — and every
+    // slot is an index into it. Recipes landing in different groups would
+    // shade the terrain with whatever occupies that slot in the bound
+    // one: wrong colours, no error. Per-world tables multiplied the recipe
+    // count by the number of loaded worlds, so say so rather than let it
+    // present as "the far world looks odd".
+    let mut group = None;
+    for (world, ids) in extracted.0.iter().enumerate().take(MAX_WORLDS) {
+        for (id, asset_id) in ids.iter().enumerate().take(MATERIAL_SLOTS) {
+            let Some(material) = prepared.get(*asset_id) else {
+                continue;
+            };
+            let i = material_slot_index(world as voxel_core::WorldId, id as u32);
+            slots[i / 4][i % 4] = *material.binding.slot;
+            let group = group.get_or_insert(material.binding.group);
+            if *group != material.binding.group && !*warned {
+                *warned = true;
+                error!(
+                    "terrain materials split across bindless groups ({:?} and {:?}): \
+                     world {world} material {id} will shade with another recipe. \
+                     Too many (world, material) pairs for one slab.",
+                    *group, material.binding.group,
+                );
+            }
+        }
     }
     env.material_slots = slots;
 }
 
-fn extract_program(
-    programs: Extract<Res<WorldPrograms>>,
-    clips: Extract<Res<WorldClips>>,
+/// One clone per frame, so hot reloads and portal masks apply. Cheap: the
+/// ops and the surface raster are behind `Arc`s, and the rest is a handful
+/// of `vec4`s per world.
+fn extract_worlds(
+    worlds: Extract<Res<RenderWorlds>>,
     camera_world: Extract<Res<CameraWorld>>,
     env: Extract<Res<EnvParams>>,
-    surface_map: Extract<Res<SurfaceMap>>,
     mut commands: Commands,
 ) {
-    commands.insert_resource(WorldPrograms(programs.0.clone()));
-    commands.insert_resource((**clips).clone());
+    commands.insert_resource((**worlds).clone());
     commands.insert_resource(**camera_world);
     commands.insert_resource(**env);
-    // Cheap: an Arc of the raster, not the raster.
-    commands.insert_resource((**surface_map).clone());
 }
 
 fn extract_camera_pos(
@@ -1246,6 +1415,30 @@ fn make_params(
     }
 }
 
+/// One chunk's draw data: where it is relative to the eye that sees it,
+/// which world it belongs to, and the planes masking that world.
+///
+/// The clip belongs to the WORLD, not the chunk — a world seen through a
+/// portal is masked to the opening wherever it is drawn — and the world
+/// travels with the chunk because one draw list can only be bound to one
+/// material table otherwise.
+fn draw_uniform(key: ChunkKey, eye: DVec3, planes: &[Vec4]) -> ChunkDrawUniform {
+    let rel = key.min_corner_m() - eye;
+    let count = planes.len().min(MAX_CLIP_PLANES);
+    let mut clip = [Vec4::ZERO; MAX_CLIP_PLANES];
+    clip[..count].copy_from_slice(&planes[..count]);
+    ChunkDrawUniform {
+        offset: Vec4::new(
+            rel.x as f32,
+            rel.y as f32,
+            rel.z as f32,
+            key.voxel_size_m() as f32,
+        ),
+        head: UVec4::new(count as u32, u32::from(key.world), 0, 0),
+        clip,
+    }
+}
+
 /// Generation priority: distance to the chunk's AABB normalized by its edge
 /// length — coarse chunks and near chunks first, uniformly across levels.
 fn gen_priority(key: ChunkKey, camera: DVec3) -> f64 {
@@ -1269,9 +1462,8 @@ fn plan_frame(
     mut draw_lists: ResMut<VoxelDrawLists>,
     camera: Res<ExtractedCameraPos>,
     // Grouped: Bevy caps a system at 16 parameters.
-    (world_views, clips): (Res<WorldViews>, Res<WorldClips>),
-    (programs, env): (Res<WorldPrograms>, Res<EnvParams>),
-    surface_map: Res<SurfaceMap>,
+    (world_views, worlds): (Res<WorldViews>, Res<RenderWorlds>),
+    env: Res<EnvParams>,
     frustum: Res<ExtractedFrustum>,
     stats: Res<SharedRenderStats>,
     ready_tx: Res<ChunkReadySender>,
@@ -1797,25 +1989,9 @@ fn plan_frame(
                 continue;
             }
         }
-        let rel = key.min_corner_m() - eye;
-        // The clip belongs to the WORLD, not the chunk: a world seen
-        // through a portal is masked to the opening wherever it is drawn.
-        let planes = clips.0.get(usize::from(key.world));
-        let mut clip = [Vec4::ZERO; MAX_CLIP_PLANES];
-        let count = planes.map_or(0, |p| p.len().min(MAX_CLIP_PLANES));
-        if let Some(planes) = planes {
-            clip[..count].copy_from_slice(&planes[..count]);
-        }
-        let offset = gpu.draw_uniforms.push(&ChunkDrawUniform {
-            offset: Vec4::new(
-                rel.x as f32,
-                rel.y as f32,
-                rel.z as f32,
-                key.voxel_size_m() as f32,
-            ),
-            clip_count: Vec4::new(count as f32, 0.0, 0.0, 0.0),
-            clip,
-        });
+        let offset = gpu
+            .draw_uniforms
+            .push(&draw_uniform(*key, eye, worlds.clip(key.world)));
         draw_lists.0[usize::from(key.world)].push(DrawEntry {
             uniform_offset: offset,
             base_vertex: alloc.base_vertex,
@@ -1827,8 +2003,7 @@ fn plan_frame(
     gpu.gen_uniforms.write_buffer(&render_device, &render_queue);
     gpu.draw_uniforms
         .write_buffer(&render_device, &render_queue);
-    gpu.program_buffer
-        .set(GpuWorldProgram::from_programs(&programs.0));
+    gpu.program_buffer.set(GpuWorldProgram::from_worlds(&worlds));
     gpu.program_buffer
         .write_buffer(&render_device, &render_queue);
     gpu.env_uniform.set(*env);
@@ -1837,19 +2012,20 @@ fn plan_frame(
     // The surface map is rebuilt wholesale when the host repaints it,
     // which is on the order of once per kilometre of travel — not per
     // frame, and never per chunk.
-    if surface_map.size > 0
+    let generation = surface_map_generation(&worlds);
+    if generation > 0
         && gpu
             .surface_map
             .as_ref()
-            .is_none_or(|(_, generation)| *generation != surface_map.generation)
+            .is_none_or(|(_, uploaded)| *uploaded != generation)
     {
-        let words = surface_map.to_words();
+        let words = surface_map_words(&worlds);
         let buffer = render_device.create_buffer_with_data(&BufferInitDescriptor {
             label: Some("voxel_surface_map"),
             contents: bytemuck::cast_slice(&words),
             usage: BufferUsages::STORAGE,
         });
-        gpu.surface_map = Some((buffer, surface_map.generation));
+        gpu.surface_map = Some((buffer, generation));
     }
 
     // 7. HUD stats.
@@ -2286,5 +2462,268 @@ mod surface_map_tests {
         assert_eq!(at(3), 3.2, "an unnamed material keeps the default");
         assert_eq!(at(4), 6.4, "a named one takes over only when coarser");
         assert_eq!(at(255), 3.2, "the table covers every id a texel can hold");
+    }
+}
+
+/// Worlds coexist without touching each other.
+///
+/// Every defect these pin was live at once, and none of them failed a
+/// test, because not one test loaded a second world. Two worlds share
+/// coordinates and one set of GPU resources by design, so anything the
+/// renderer keeps globally is silently shared between levels that have
+/// never heard of each other.
+#[cfg(test)]
+mod multi_world_tests {
+    use super::*;
+    use voxel_core::worldop::WorldOp;
+
+    fn world(ops: usize, seed: u32) -> RenderWorld {
+        RenderWorld {
+            program: WorldProgram {
+                ops: std::sync::Arc::new((0..ops).map(|i| WorldOp::new(i as u32)).collect()),
+                seed,
+                sun_dir: Vec3::new(0.0, 1.0, 0.0),
+            },
+            materials: material_table([]),
+            ..Default::default()
+        }
+    }
+
+    fn painted(material: u32) -> SurfaceMap {
+        SurfaceMap {
+            size: 2,
+            texel_m: 4.0,
+            min_voxel_m: 1.0,
+            texels: std::sync::Arc::new(vec![material]),
+            generation: 1,
+            ..Default::default()
+        }
+    }
+
+    /// Ids are handed out in order and are the index in both directions.
+    /// The GPU header array, `ChunkKey::world` and this vector are the
+    /// same number, which is the only reason a chunk can carry nothing but
+    /// its key.
+    #[test]
+    fn registration_hands_out_the_index_as_the_id() {
+        let mut worlds = RenderWorlds::default();
+        assert_eq!(worlds.register(world(1, 10)), 0);
+        assert_eq!(worlds.register(world(2, 20)), 1);
+        assert_eq!(worlds.len(), 2);
+        assert_eq!(worlds.get(1).unwrap().program.seed, 20);
+        assert!(worlds.get(2).is_none(), "an unregistered world is absent");
+    }
+
+    #[test]
+    #[should_panic(expected = "at most")]
+    fn registering_past_the_program_buffer_says_so() {
+        let mut worlds = RenderWorlds::default();
+        for _ in 0..=MAX_WORLDS {
+            worlds.register(world(1, 0));
+        }
+    }
+
+    /// A world arriving must not disturb the worlds already drawing.
+    ///
+    /// This is the shape of the bug that made opening a portal wipe the
+    /// near world's ground: registering world 1 reached global state that
+    /// world 0 was already using.
+    #[test]
+    fn a_new_world_leaves_the_others_untouched() {
+        let mut worlds = RenderWorlds::default();
+        worlds.register(world(3, 7));
+        worlds.get_mut(0).unwrap().surface_map = painted(4);
+        worlds.get_mut(0).unwrap().clip = vec![Vec4::X];
+        let before = worlds.get(0).unwrap().clone();
+
+        worlds.register(world(5, 9));
+
+        let after = worlds.get(0).unwrap();
+        assert_eq!(after.program.seed, before.program.seed);
+        assert_eq!(after.program.ops.len(), before.program.ops.len());
+        assert_eq!(after.clip, before.clip);
+        assert_eq!(after.surface_map.size, before.surface_map.size);
+        assert_eq!(after.materials, before.materials);
+        // And the packed GPU program still gives world 0 its own ops.
+        let gpu = GpuWorldProgram::from_worlds(&worlds);
+        assert_eq!(gpu.worlds[0].count.x, 0, "world 0 still starts at 0");
+        assert_eq!(gpu.worlds[0].count.y, 3);
+    }
+
+    /// Worlds are concatenated into one op buffer and addressed by
+    /// (offset, count). A world reading another's range renders the wrong
+    /// level's terrain with no error anywhere.
+    #[test]
+    fn the_program_buffer_gives_each_world_its_own_range() {
+        let mut worlds = RenderWorlds::default();
+        worlds.register(world(3, 7));
+        worlds.register(world(5, 9));
+        let gpu = GpuWorldProgram::from_worlds(&worlds);
+
+        assert_eq!((gpu.worlds[0].count.x, gpu.worlds[0].count.y), (0, 3));
+        assert_eq!((gpu.worlds[1].count.x, gpu.worlds[1].count.y), (3, 5));
+        assert_eq!(gpu.worlds[0].count.w, 7, "each world keeps its own seed");
+        assert_eq!(gpu.worlds[1].count.w, 9);
+        assert_eq!(gpu.ops.len(), 8);
+        // Ranges do not overlap and cover the buffer.
+        assert_eq!(gpu.ops[3].meta.x, 0, "world 1's ops start over at kind 0");
+        // An unregistered world is empty, not a view of world 0.
+        assert_eq!(gpu.worlds[2].count.y, 0);
+    }
+
+    /// A material id means whatever ITS level says. Planet's 1 and the
+    /// megastructure's 1 are different recipes, and before the tables were
+    /// per world the only thing keeping two levels apart was an assert in
+    /// the host asking them not to collide.
+    #[test]
+    fn a_material_id_means_something_different_in_each_world() {
+        let red = WorldMaterial {
+            c0: Vec4::new(1.0, 0.0, 0.0, 0.0),
+            ..Default::default()
+        };
+        let blue = WorldMaterial {
+            c0: Vec4::new(0.0, 0.0, 1.0, 0.0),
+            ..Default::default()
+        };
+
+        let mut worlds = RenderWorlds::default();
+        worlds.register(RenderWorld {
+            materials: material_table([(1, red)]),
+            ..world(1, 0)
+        });
+        worlds.register(RenderWorld {
+            materials: material_table([(1, blue)]),
+            ..world(1, 0)
+        });
+
+        assert_eq!(worlds.get(0).unwrap().materials[1].c0, red.c0);
+        assert_eq!(worlds.get(1).unwrap().materials[1].c0, blue.c0);
+        // Every id answers, so an unassigned one is neutral gray rather
+        // than whatever the other world put there.
+        assert_eq!(
+            worlds.get(1).unwrap().materials[3],
+            WorldMaterial::default()
+        );
+    }
+
+    /// The (world, id) → slab slot map is a layout twin: Rust fills it,
+    /// the draw shader indexes it. Drift compiles and shades the terrain
+    /// with another world's recipe.
+    #[test]
+    fn the_slot_index_matches_the_draw_shader() {
+        let src = include_str!("shaders/voxel_chunk_draw.wgsl");
+        assert!(
+            src.contains("let i = chunk.head.y * 8u + min(id, 7u);"),
+            "material_for must index (world, id) world-major with {MATERIAL_SLOTS} \
+             ids per world — twin of material_slot_index",
+        );
+        assert!(
+            src.contains(&format!("array<vec4<u32>, {MATERIAL_SLOT_VEC4S}>")),
+            "the shader's material_slots must hold {MATERIAL_SLOT_VEC4S} vec4s",
+        );
+        assert_eq!(MATERIAL_SLOTS, 8, "the shader hardcodes 8 ids per world");
+        assert_eq!(material_slot_index(0, 0), 0);
+        assert_eq!(material_slot_index(0, 7), 7);
+        assert_eq!(material_slot_index(1, 0), 8);
+        assert_eq!(material_slot_index(3, 7), 31);
+        // Out-of-range ids clamp INTO their own world, never into the next.
+        assert_eq!(material_slot_index(1, 99), 15);
+    }
+
+    /// Each world's painted raster lives in its own section, found through
+    /// the offset table. One global raster painted this level's rivers
+    /// onto every other loaded level, because worlds share coordinates.
+    #[test]
+    fn each_world_finds_its_own_surface_map() {
+        let mut worlds = RenderWorlds::default();
+        worlds.register(world(1, 0));
+        worlds.register(world(1, 0));
+        worlds.register(world(1, 0));
+        worlds.get_mut(0).unwrap().surface_map = painted(0xAA);
+        // World 1 paints nothing.
+        worlds.get_mut(2).unwrap().surface_map = painted(0xBB);
+
+        let words = surface_map_words(&worlds);
+        let base = |world: usize| words[world] as usize;
+        assert_eq!(base(0), MAX_WORLDS, "the first section follows the table");
+        assert_eq!(base(1), 0, "0 means this world paints nothing");
+        assert_ne!(base(2), 0);
+        assert_ne!(base(0), base(2), "sections must not overlap");
+        // Each section starts with its own size and holds its own texels.
+        assert_eq!(words[base(0)], 2);
+        assert_eq!(words[base(0) + SURFACE_MAP_HEADER], 0xAA);
+        assert_eq!(words[base(2) + SURFACE_MAP_HEADER], 0xBB);
+        // An unregistered world reads the table's zero, so the shader's
+        // "base == 0 means nothing painted" covers it.
+        assert_eq!(words[3], 0);
+    }
+
+    /// The mesh shader indexes the offset table by the chunk's world, and
+    /// treats 0 as "nothing painted". Both halves are load-bearing.
+    #[test]
+    fn the_surface_map_table_matches_the_mesh_shader() {
+        let src = include_str!("shaders/voxel_mesh_chunks.wgsl");
+        assert!(
+            src.contains("return surface_map[u32(params.origin_voxels.w)];"),
+            "surface_map_base must index the table by the chunk's world",
+        );
+        assert!(
+            src.contains("if (base == 0u) {"),
+            "offset 0 must mean this world paints nothing",
+        );
+        // The table has to be long enough for every world an id can name.
+        let worlds = RenderWorlds::default();
+        assert_eq!(surface_map_words(&worlds).len(), MAX_WORLDS);
+    }
+
+    /// Only a world that was given planes is masked. A portal masks the
+    /// world it shows; the world you are standing in must keep drawing
+    /// everywhere.
+    #[test]
+    fn a_clip_masks_only_the_world_it_was_set_for() {
+        let mut worlds = RenderWorlds::default();
+        worlds.register(world(1, 0));
+        worlds.register(world(1, 0));
+        worlds.get_mut(1).unwrap().clip = vec![Vec4::X, Vec4::Y];
+
+        assert!(worlds.clip(0).is_empty(), "the near world is unmasked");
+        assert_eq!(worlds.clip(1).len(), 2);
+        assert!(worlds.clip(9).is_empty(), "an absent world clips nothing");
+
+        let near = draw_uniform(ChunkKey::new(0, IVec3::ZERO), DVec3::ZERO, worlds.clip(0));
+        assert_eq!(near.head.x, 0);
+        let far = draw_uniform(
+            ChunkKey::in_world(1, 0, IVec3::ZERO),
+            DVec3::ZERO,
+            worlds.clip(1),
+        );
+        assert_eq!(far.head.x, 2);
+
+        // Closing the portal stops the mask: republished every frame.
+        worlds.clear_clips();
+        assert!(worlds.clip(1).is_empty());
+    }
+
+    /// A chunk's draw carries its own world, because one draw list is
+    /// bound to one material table and the fragment shader has no other
+    /// way to know which level it is shading.
+    #[test]
+    fn a_chunk_draw_carries_its_world() {
+        let key = ChunkKey::in_world(2, 3, IVec3::new(1, 0, -1));
+        let uniform = draw_uniform(key, DVec3::ZERO, &[]);
+        assert_eq!(uniform.head.y, 2);
+        // And the offset is relative to the eye that sees THAT world, not
+        // to a single global camera: two worlds are viewed from different
+        // points in the same frame.
+        let eye = key.min_corner_m();
+        assert_eq!(draw_uniform(key, eye, &[]).offset.truncate(), Vec3::ZERO);
+    }
+
+    /// More planes than the uniform holds must truncate, not overrun.
+    #[test]
+    fn clip_planes_saturate_at_the_uniform_size() {
+        let planes = vec![Vec4::X; MAX_CLIP_PLANES + 3];
+        let uniform = draw_uniform(ChunkKey::new(0, IVec3::ZERO), DVec3::ZERO, &planes);
+        assert_eq!(uniform.head.x as usize, MAX_CLIP_PLANES);
     }
 }

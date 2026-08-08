@@ -160,8 +160,16 @@ pub fn register(
 }
 
 /// Rebuild the water pipeline's buffer when the resident set changed.
-fn publish_ribbons(world: Res<voxel_engine::WorldQuery>, mut rivers: ResMut<RiverWater>) {
-    let Some(sink) = world.host_ctx::<WorldCtx>().map(|c| c.ribbons.clone()) else {
+fn publish_ribbons(
+    worlds: Res<voxel_engine::Worlds>,
+    host: Res<crate::HostWorld>,
+    mut rivers: ResMut<RiverWater>,
+) {
+    let Some(sink) = worlds
+        .query(host.0)
+        .and_then(|w| w.host_ctx::<WorldCtx>())
+        .map(|c| c.ribbons.clone())
+    else {
         return;
     };
     let generation = sink.generation();
