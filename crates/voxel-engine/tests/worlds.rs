@@ -37,6 +37,7 @@ fn app() -> App {
     let mut app = App::new();
     app.init_resource::<Worlds>()
         .init_resource::<RenderWorlds>()
+        .init_resource::<voxel_engine::streaming::StreamingRebuild>()
         .insert_resource(HostPlanner(None));
     app
 }
@@ -244,34 +245,76 @@ fn an_absent_world_is_absent() {
     assert!(empty.query(0).is_none(), "and to nothing when none exist");
 }
 
-/// The slab is one fixed allocation shared by every world, so what a
-/// world may stream depends on what else is loaded. Checked BEFORE it
-/// streams: the alternative is discovering the shortfall as chunks pile
-/// up with nowhere to go, which is what `FAR_MAX_LEVEL` was a hand-tuned
-/// patch for.
+/// The slab is ONE allocation shared by every world, so loading a second
+/// re-divides it rather than handing over the leftovers. First-come
+/// admission gave the launched level everything it asked for and the next
+/// one the scraps — with three loaded, the third got 173 of 3656 slots
+/// and streamed a horizon and nothing else.
 #[test]
-fn a_second_world_is_admitted_against_what_the_first_left() {
+fn the_slab_is_shared_between_worlds_not_claimed_in_order() {
     let mut app = app();
     let planet = shipped("planet.json");
-    let full = LodConfig::from(&planet.lod);
+    let mega = shipped("megastructure.json");
+    let purgatory = shipped("purgatory.json");
     load_in(
         &mut app,
         vec![
-            (planet.clone(), full.clone()),
-            (planet.clone(), full.clone()),
+            (planet.clone(), LodConfig::from(&planet.lod)),
+            (mega.clone(), LodConfig::from(&mega.lod)),
+            (purgatory.clone(), LodConfig::from(&purgatory.lod)),
         ],
     );
 
     let worlds = app.world().resource::<Worlds>();
     let capacity = voxel_render::SlabAllocator::capacity_slots();
+    // Over-committing a little is the FLOOR, by design: a world dense
+    // enough to want more than its share even at `MIN_STREAMED_LEVEL` is
+    // admitted anyway rather than refused, and the excess is absorbed by
+    // deferral, which no longer wedges. Bounded, though — this is the
+    // difference between "slightly oversubscribed" and "pretending".
     let committed: usize = worlds.iter().map(|w| w.slab_demand).sum();
     assert!(
-        committed <= capacity,
-        "two worlds committed {committed} of {capacity} slab slots",
+        committed <= capacity * 3 / 2,
+        "three worlds committed {committed}, more than half again the {capacity} available",
     );
-    // The first world gets the whole budget, so the second is the one
-    // that has to give — it cannot be streaming MORE than the first.
-    assert!(worlds.get(1).unwrap().config.max_level <= worlds.get(0).unwrap().config.max_level);
+    // The point: NONE of them is starved down to a token horizon. An
+    // equal share of the slab is capacity/3; every world gets within
+    // reach of that or its full authored demand, whichever is smaller.
+    let floor = capacity / 3 / 4;
+    for world in worlds.iter() {
+        assert!(
+            world.slab_demand >= floor,
+            "world {} got {} slots, under a quarter of an equal share ({floor})",
+            world.id,
+            world.slab_demand,
+        );
+    }
+}
+
+/// Re-fitting is from the AUTHORED config, so a world capped while
+/// others were loaded is not permanently ratcheted down by it.
+#[test]
+fn capping_is_recomputed_from_what_the_host_asked_for() {
+    let mut app = app();
+    let planet = shipped("planet.json");
+    let mega = shipped("megastructure.json");
+    load_in(
+        &mut app,
+        vec![
+            (planet.clone(), LodConfig::from(&planet.lod)),
+            (mega.clone(), LodConfig::from(&mega.lod)),
+        ],
+    );
+    let worlds = app.world().resource::<Worlds>();
+    for world in worlds.iter() {
+        assert_eq!(
+            world.authored.max_level,
+            LodConfig::from(&world.level.lod).max_level,
+            "world {} forgot what it was asked for",
+            world.id,
+        );
+        assert!(world.config.max_level <= world.authored.max_level);
+    }
 }
 
 /// One world alone must not be capped: the shipped level has to look the

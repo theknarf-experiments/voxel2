@@ -69,6 +69,11 @@ pub struct World {
     /// can diff against it.
     pub level: LevelDef,
     pub seed: u64,
+    /// What the host ASKED for. Kept because the slab is shared: when
+    /// another world loads, this one is re-fitted from its authored
+    /// detail rather than from whatever it was last capped to, so
+    /// capping never ratchets downwards.
+    pub authored: LodConfig,
     pub config: LodConfig,
     pub generator: std::sync::Arc<voxel_worldgen::Generator>,
     /// Heights, fields, shadows and the host's planning, for THIS world.
@@ -140,6 +145,7 @@ pub struct WorldLoader<'w> {
     worlds: ResMut<'w, Worlds>,
     render: ResMut<'w, voxel_render::RenderWorlds>,
     planner: Res<'w, level::HostPlanner>,
+    rebuild: ResMut<'w, streaming::StreamingRebuild>,
 }
 
 impl WorldLoader<'_> {
@@ -151,7 +157,6 @@ impl WorldLoader<'_> {
     pub fn load(&mut self, level: LevelDef, seed: u64, config: LodConfig) -> WorldId {
         let (program, generator) = level::build_generator(&level, seed);
         let query = level::build_world_query(&level, seed, &generator, self.planner.0.as_ref());
-        let (config, slab_demand) = self.admit(&config, &generator);
 
         let render_id = self.render.register(voxel_render::RenderWorld {
             program,
@@ -169,49 +174,102 @@ impl WorldLoader<'_> {
             id,
             level,
             seed,
+            authored: config.clone(),
             config,
             generator,
             query,
-            slab_demand,
+            slab_demand: 0,
         });
+        // A new world changes everyone's share, so everyone is re-fitted.
+        if self.rebalance() {
+            self.rebuild.0 = true;
+        }
         id
     }
 
-    /// Cap a world's detail to what the slab can still hold.
+    /// Divide the slab between the loaded worlds and re-fit each to its
+    /// share. Returns true if a world ALREADY streaming had to change,
+    /// which needs its LOD graph rebuilt.
     ///
-    /// Demand is checked BEFORE the world streams, because the slab is
-    /// one fixed allocation shared by every world and the alternative is
-    /// discovering the shortfall as chunks pile up with nowhere to go.
-    /// Deferral is safe now, but a world whose working set simply does
-    /// not fit would defer and retry forever, generating density passes
-    /// it can never place.
+    /// Shared, not first-come-first-served. Admitting each world against
+    /// "whatever the last one left" gave the launched level its full
+    /// authored detail and the next one the scraps — with three levels
+    /// loaded the third got 173 of 3656 slots and streamed 22 chunks,
+    /// which is a horizon and nothing else. Every world now gets an equal
+    /// share, and a world that needs less than its share hands the
+    /// surplus to the ones that need more.
     ///
-    /// The anchor is the world's own origin: residency is radial and
-    /// recentres on the camera, so the count barely moves with it.
-    fn admit(
-        &self,
-        config: &LodConfig,
-        generator: &std::sync::Arc<voxel_worldgen::Generator>,
-    ) -> (LodConfig, usize) {
+    /// Re-fitting is from the AUTHORED config every time, so a world that
+    /// was capped while three were loaded goes back up when one is
+    /// dropped, and repeated loads cannot ratchet it down.
+    fn rebalance(&mut self) -> bool {
         let capacity = voxel_render::SlabAllocator::capacity_slots();
-        let committed: usize = self.worlds.iter().map(|w| w.slab_demand).sum();
-        let available = capacity.saturating_sub(committed);
         let anchor = bevy::math::DVec3::ZERO;
-        let (fitted, demand) =
-            streaming::fit_to_budget(config, generator, anchor, available, MIN_STREAMED_LEVEL);
-        if fitted.max_level != config.max_level {
-            warn!(
-                "world capped to L{} (from L{}): {demand} meshable chunks fit the \
-                 {available} slab slots left of {capacity}",
-                fitted.max_level, config.max_level,
-            );
-        } else {
-            info!(
-                "world admitted at L{}: {demand} meshable chunks of {available} slots free",
-                fitted.max_level,
-            );
+        let n = self.worlds.0.len().max(1);
+        let mut budget = vec![capacity / n; n];
+
+        // Water-fill: whoever wants less than an equal share releases the
+        // difference to whoever wants more. Twice is enough for the sizes
+        // in play and cannot loop.
+        let full: Vec<usize> = self
+            .worlds
+            .0
+            .iter()
+            .map(|w| streaming::meshable_count(&w.authored, &w.generator, anchor))
+            .collect();
+        for _ in 0..2 {
+            // TAKE the surplus back before handing it out, or the budgets
+            // sum to more than the slab and every world is "admitted"
+            // into space that does not exist.
+            let mut surplus = 0;
+            for i in 0..n {
+                if full[i] < budget[i] {
+                    surplus += budget[i] - full[i];
+                    budget[i] = full[i];
+                }
+            }
+            let hungry: Vec<usize> = (0..n).filter(|&i| full[i] > budget[i]).collect();
+            if surplus == 0 || hungry.is_empty() {
+                break;
+            }
+            let each = surplus / hungry.len();
+            for i in hungry {
+                budget[i] += each;
+            }
         }
-        (fitted, demand)
+        debug_assert!(
+            budget.iter().sum::<usize>() <= capacity,
+            "shares {budget:?} exceed the {capacity} slots they divide",
+        );
+
+        let mut disturbed = false;
+        for (i, world) in self.worlds.0.iter_mut().enumerate() {
+            let (fitted, demand) = streaming::fit_to_budget(
+                &world.authored,
+                &world.generator,
+                anchor,
+                budget[i],
+                MIN_STREAMED_LEVEL,
+            );
+            let was = world.config.max_level;
+            if world.slab_demand != 0 && fitted.max_level != was {
+                disturbed = true;
+            }
+            if fitted.max_level == world.authored.max_level {
+                info!(
+                    "world {i} at its authored L{}: {demand} of {} slots",
+                    fitted.max_level, budget[i],
+                );
+            } else {
+                info!(
+                    "world {i} capped to L{} (from L{}): {demand} of {} slots",
+                    fitted.max_level, world.authored.max_level, budget[i],
+                );
+            }
+            world.config = fitted;
+            world.slab_demand = demand;
+        }
+        disturbed
     }
 }
 
