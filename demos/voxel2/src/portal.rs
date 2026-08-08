@@ -20,16 +20,23 @@ use voxel_render::WorldPrograms;
 /// seen through. See `register_far_world`.
 const FAR_MAX_LEVEL: u8 = 5;
 
-/// Level file for the far side, if the host asked for one.
+/// The far side, if the host asked for one: its level and its own
+/// background, which the opening shows wherever the far world is empty.
 #[derive(Resource)]
-pub struct FarLevel(pub LevelDef);
+pub struct FarLevel {
+    pub level: LevelDef,
+    pub clear_color: Color,
+}
 
 pub struct PortalPlugin;
 
 impl Plugin for PortalPlugin {
     fn build(&self, app: &mut App) {
         app.add_systems(Startup, register_far_world)
-            .add_systems(Update, (spawn_portal, follow_camera_world, drive_portal).chain());
+            .add_systems(
+                Update,
+                (spawn_portal, traverse_portal, follow_camera_world, drive_portal).chain(),
+            );
     }
 }
 
@@ -45,7 +52,7 @@ fn register_far_world(
     let Some(far) = far else {
         return;
     };
-    let level = &far.0;
+    let level = &far.level;
     let generator = std::sync::Arc::new(level.generator(0));
     // INTERIM, and the number that matters most here: a second world
     // roughly doubles the meshed working set, and the slab is one fixed
@@ -97,6 +104,9 @@ fn register_far_world(
 fn follow_camera_world(
     mut commands: Commands,
     camera_world: Res<voxel_render::CameraWorld>,
+    far: Option<Res<FarLevel>>,
+    scene: Res<crate::HostScene>,
+    mut clear: ResMut<ClearColor>,
     // `Option`, because not every camera carries the component: the
     // offscreen mirror camera `voxctl shot` renders through is spawned
     // without one, so a query that REQUIRED it silently skipped the very
@@ -109,6 +119,16 @@ fn follow_camera_world(
     // lazily on the first request, so gating on `is_changed` left it on
     // layer 0 forever — the window showed the right world while every
     // screenshot showed the wrong one.
+    // The background belongs to the world you are in: step into an
+    // interior and the sky should stop being sky.
+    let want_clear = if camera_world.0 == 0 {
+        scene.0.clear_color
+    } else {
+        far.as_ref().map_or(scene.0.clear_color, |f| f.clear_color)
+    };
+    if clear.0 != want_clear {
+        clear.0 = want_clear;
+    }
     let want = RenderLayers::layer(usize::from(camera_world.0));
     for (entity, layers) in &mut cameras {
         // The layer filters scene ENTITIES; `ViewWorld` tells the chunk
@@ -195,6 +215,8 @@ fn spawn_portal(
     far: Option<Res<FarLevel>>,
     camera: Query<&GlobalTransform, With<crate::FreeCamera>>,
     existing: Query<(), With<Portal>>,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
     if far.is_none() || !existing.is_empty() {
         return;
@@ -202,9 +224,23 @@ fn spawn_portal(
     let Ok(eye) = camera.single() else {
         return;
     };
+    // The far level's own background, so the opening reads as somewhere
+    // else rather than as a hole with this world behind it.
+    let far_clear = far.as_ref().map_or(Color::BLACK, |f| f.clear_color);
     let forward = eye.forward().as_vec3();
     let at = eye.translation() + forward * 14.0;
     let near = Transform::from_translation(at).looking_to(-forward, Vec3::Y);
+    let backdrop = meshes.add(Rectangle::new(8.0, 6.0));
+    let backdrop_mat = materials.add(StandardMaterial {
+        base_color: far_clear,
+        unlit: true,
+        // Both faces: an opening is approachable from either side, and a
+        // one-sided quad silently vanishes from whichever side it is not
+        // facing — which reads as "the backdrop does not work".
+        double_sided: true,
+        cull_mode: None,
+        ..default()
+    });
     commands.spawn(Portal {
         near,
         // Room to stand inside the megastructure.
@@ -213,6 +249,19 @@ fn spawn_portal(
         far_world: 1,
         half: Vec2::new(4.0, 3.0),
     });
+    // The opening's backdrop, drawn in the NEAR world at the opening.
+    //
+    // The far camera cannot clear only the opening, so without this you
+    // see the near world wherever the far world happens to be empty. It
+    // belongs to the near world so that anything standing in FRONT of the
+    // opening still occludes it; the far view then draws over it, and
+    // what is left showing is the far world's own background.
+    commands.spawn((
+        Mesh3d(backdrop),
+        MeshMaterial3d(backdrop_mat),
+        near,
+        RenderLayers::layer(0),
+    ));
     info!("portal opened at {at:?}");
 }
 
@@ -319,4 +368,63 @@ fn drive_portal(
     if std::env::var_os("PORTAL_NOCLIP").is_none() {
         clips.0[usize::from(showing)] = planes;
     }
+}
+
+/// Step through: crossing the opening moves you by the pairing and swaps
+/// which world you are in.
+///
+/// Tested against the SEGMENT the camera travelled this frame, not against
+/// which side it is on now. At walking speed a frame covers centimetres,
+/// but a fast flight covers tens of metres and would step straight over a
+/// 3 m opening between two samples — the portal would work until you
+/// approached it quickly, which is the worst way for it to fail.
+fn traverse_portal(
+    portals: Query<&Portal>,
+    mut camera: Query<&mut Transform, With<crate::FreeCamera>>,
+    mut camera_world: ResMut<voxel_render::CameraWorld>,
+    mut was_at: Local<Option<Vec3>>,
+) {
+    let (Ok(portal), Ok(mut transform)) = (portals.single(), camera.single_mut()) else {
+        return;
+    };
+    let now = transform.translation;
+    let Some(before) = was_at.replace(now) else {
+        return;
+    };
+    let entering = camera_world.0 == portal.near_world;
+    let (from, to) = if entering {
+        (portal.near, portal.far)
+    } else {
+        (portal.far, portal.near)
+    };
+
+    // Signed distance to the opening's plane, before and after.
+    let normal = from.rotation * Vec3::Z;
+    let plane_d = -normal.dot(from.translation);
+    let (d0, d1) = (
+        normal.dot(before) + plane_d,
+        normal.dot(now) + plane_d,
+    );
+    if (d0 < 0.0) == (d1 < 0.0) {
+        return; // did not cross
+    }
+    // Where it crossed, and whether that is inside the opening.
+    let t = d0 / (d0 - d1);
+    let hit = before.lerp(now, t.clamp(0.0, 1.0));
+    let local = from.rotation.inverse() * (hit - from.translation);
+    if local.x.abs() > portal.half.x || local.y.abs() > portal.half.y {
+        return; // through the wall beside it, not the opening
+    }
+
+    let motion =
+        Transform::from_matrix(Mat4::from(to.compute_affine() * from.compute_affine().inverse()));
+    transform.translation = motion.transform_point(now);
+    transform.rotation = motion.rotation * transform.rotation;
+    camera_world.0 = if entering {
+        portal.far_world
+    } else {
+        portal.near_world
+    };
+    *was_at = Some(transform.translation);
+    info!("stepped into world {}", camera_world.0);
 }

@@ -143,8 +143,12 @@ fn main() {
     let far = std::env::var("VOXEL_FAR").ok().map(|p| {
         let json = std::fs::read_to_string(&p)
             .unwrap_or_else(|e| panic!("failed to read far level '{p}': {e}"));
-        LevelDef::from_json(&json)
-            .unwrap_or_else(|e| panic!("failed to parse far level '{p}': {e}"))
+        let level = LevelDef::from_json(&json)
+            .unwrap_or_else(|e| panic!("failed to parse far level '{p}': {e}"));
+        FarLevel {
+            level,
+            clear_color: scene_for(std::path::Path::new(&p)).clear_color,
+        }
     });
 
     let mut app = App::new();
@@ -200,7 +204,7 @@ fn main() {
             },
         ));
     if let Some(far) = far {
-        app.insert_resource(FarLevel(far)).add_plugins(PortalPlugin);
+        app.insert_resource(far).add_plugins(PortalPlugin);
     }
     app
         .add_systems(Startup, setup_scene)
