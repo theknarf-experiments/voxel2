@@ -122,12 +122,20 @@ world roughly doubles the meshed working set.
   set a top dependency does not cover. The level's stack builds one
   `LayerGraph` of CPU layers with declared padded dependencies; `emit`
   layers bucket their output by owning cell (a road is owned by the chunk
-  containing its midpoint) and a single `WorldQuery`
-  facade serves CSG ops to chunks (with per-emitter carve-horizon gates),
+  containing its midpoint) and a `WorldQuery`
+  facade per world serves CSG ops to chunks (with per-emitter carve-horizon gates),
   clearance to spawners, ribbon segments to the host that draws them,
   and markers to gameplay. Ops upload with the generation batch and the density shader
   applies them after the base SDF. Determinism is enforced by construction
   and by tests that race generation across thread counts.
+- **Worlds are plural.** A level is loaded as a world through one path
+  (`WorldLoader::load`), including the first one, and everything about it
+  — generator program, LOD config, material table, painted surface map,
+  planning stack, portal clip planes — is indexed by its id in `Worlds`
+  and `RenderWorlds`. Several coexist: they share one chunk service, one
+  GPU arena and one program buffer, because the world rides in
+  `ChunkKey`. They also share COORDINATES, which is why nothing per-world
+  may be stored globally — see `crates/voxel-engine/tests/worlds.rs`.
 - **CPU mirrors for gameplay.** The generator program's interpreter is
   generated from ONE op table (`voxel-core::opgen`) into both Rust and
   WGSL: vegetation placement, planning layers, and terrain queries all
