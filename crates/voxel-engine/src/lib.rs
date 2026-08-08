@@ -56,6 +56,9 @@ pub struct World {
     pub generator: std::sync::Arc<voxel_worldgen::Generator>,
     /// Heights, fields, shadows and the host's planning, for THIS world.
     pub query: WorldQuery,
+    /// Slab slots this world's residency was admitted against — what the
+    /// NEXT world's budget is reduced by.
+    pub slab_demand: usize,
 }
 
 /// Every loaded world, indexed BY world id.
@@ -131,6 +134,7 @@ impl WorldLoader<'_> {
     pub fn load(&mut self, level: LevelDef, seed: u64, config: LodConfig) -> WorldId {
         let (program, generator) = level::build_generator(&level, seed);
         let query = level::build_world_query(&level, seed, &generator, self.planner.0.as_ref());
+        let (config, slab_demand) = self.admit(&config, &generator);
 
         let render_id = self.render.register(voxel_render::RenderWorld {
             program,
@@ -151,10 +155,53 @@ impl WorldLoader<'_> {
             config,
             generator,
             query,
+            slab_demand,
         });
         id
     }
+
+    /// Cap a world's detail to what the slab can still hold.
+    ///
+    /// Demand is checked BEFORE the world streams, because the slab is
+    /// one fixed allocation shared by every world and the alternative is
+    /// discovering the shortfall as chunks pile up with nowhere to go.
+    /// Deferral is safe now, but a world whose working set simply does
+    /// not fit would defer and retry forever, generating density passes
+    /// it can never place.
+    ///
+    /// The anchor is the world's own origin: residency is radial and
+    /// recentres on the camera, so the count barely moves with it.
+    fn admit(
+        &self,
+        config: &LodConfig,
+        generator: &std::sync::Arc<voxel_worldgen::Generator>,
+    ) -> (LodConfig, usize) {
+        let capacity = voxel_render::SlabAllocator::capacity_slots();
+        let committed: usize = self.worlds.iter().map(|w| w.slab_demand).sum();
+        let available = capacity.saturating_sub(committed);
+        let anchor = bevy::math::DVec3::ZERO;
+        let (fitted, demand) =
+            streaming::fit_to_budget(config, generator, anchor, available, MIN_STREAMED_LEVEL);
+        if fitted.max_level != config.max_level {
+            warn!(
+                "world capped to L{} (from L{}): {demand} meshable chunks fit the \
+                 {available} slab slots left of {capacity}",
+                fitted.max_level, config.max_level,
+            );
+        } else {
+            info!(
+                "world admitted at L{}: {demand} meshable chunks of {available} slots free",
+                fitted.max_level,
+            );
+        }
+        (fitted, demand)
+    }
 }
+
+/// Coarsest a world may be capped to. Below this a level is a few boxes
+/// on an empty horizon and not worth loading at all — better to admit it
+/// over budget and let deferral absorb the difference, which is safe.
+const MIN_STREAMED_LEVEL: u8 = 4;
 
 /// Push each world's ops provider into the chunk service whenever the set
 /// of worlds changes. A world's planner is reached by `key.world`, so

@@ -310,6 +310,123 @@ pub fn resident_clamped(config: &LodConfig, anchor: DVec3, key: ChunkKey) -> boo
         && (key.level >= config.max_level || split_clamped(config, anchor, key.parent()))
 }
 
+/// How many chunks this configuration keeps resident, counted exactly by
+/// descending the field.
+///
+/// Residency is a pure function of (config, anchor), so this is not an
+/// estimate — it is the same set the LOD graph will ask for. That is what
+/// lets the slab be checked against demand BEFORE a world is loaded,
+/// rather than discovering the shortfall as chunks pile up with nowhere
+/// to go.
+///
+/// The count barely moves with the anchor (the field is radial and the
+/// top ring recentres), so one sample is representative.
+pub fn resident_count(config: &LodConfig, anchor: DVec3) -> usize {
+    fn descend(config: &LodConfig, anchor: DVec3, key: ChunkKey, out: &mut usize) {
+        if key.level > 0 && split_clamped(config, anchor, key) {
+            for child in key.children() {
+                descend(config, anchor, child, out);
+            }
+        } else {
+            *out += 1;
+        }
+    }
+    let top_edge = ChunkKey::new(config.max_level, IVec3::ZERO).edge_m();
+    let cx = (anchor.x / top_edge).floor() as i32;
+    let cz = (anchor.z / top_edge).floor() as i32;
+    let mut count = 0;
+    for dz in -config.top_radius..=config.top_radius {
+        for dx in -config.top_radius..=config.top_radius {
+            for y in config.top_y.0..=config.top_y.1 {
+                let cell = IVec3::new(cx + dx, y, cz + dz);
+                descend(config, anchor, ChunkKey::new(config.max_level, cell), &mut count);
+            }
+        }
+    }
+    count
+}
+
+/// How many resident chunks could actually hold a mesh.
+///
+/// Residency is not demand: on the shipped planet most resident chunks
+/// are sky or deep rock and are classified empty without ever taking a
+/// slab slot. [`can_hold_surface`] is the same conservative test the LOD
+/// graph filters with, so this is an upper bound on the slots a world
+/// will ask for — which is exactly what admission control needs.
+///
+/// Conservative in the safe direction: it can only over-count, never
+/// under.
+pub fn meshable_count(
+    config: &LodConfig,
+    generator: &voxel_worldgen::Generator,
+    anchor: DVec3,
+) -> usize {
+    fn descend(
+        config: &LodConfig,
+        generator: &voxel_worldgen::Generator,
+        anchor: DVec3,
+        key: ChunkKey,
+        out: &mut usize,
+    ) {
+        if key.level > 0 && split_clamped(config, anchor, key) {
+            for child in key.children() {
+                descend(config, generator, anchor, child, out);
+            }
+        } else if can_hold_surface(generator, key) {
+            *out += 1;
+        }
+    }
+    let top_edge = ChunkKey::new(config.max_level, IVec3::ZERO).edge_m();
+    let cx = (anchor.x / top_edge).floor() as i32;
+    let cz = (anchor.z / top_edge).floor() as i32;
+    let mut count = 0;
+    for dz in -config.top_radius..=config.top_radius {
+        for dx in -config.top_radius..=config.top_radius {
+            for y in config.top_y.0..=config.top_y.1 {
+                let cell = IVec3::new(cx + dx, y, cz + dz);
+                descend(
+                    config,
+                    generator,
+                    anchor,
+                    ChunkKey::new(config.max_level, cell),
+                    &mut count,
+                );
+            }
+        }
+    }
+    count
+}
+
+/// Cap a world's detail until the meshes it will ask for fit in the slab
+/// slots left over from the worlds already loaded.
+///
+/// This is the mechanism `FAR_MAX_LEVEL` was a hand-tuned instance of: a
+/// level seen only through a portal does not need its finest LODs, and
+/// which levels it can afford is a function of what else is loaded, not a
+/// constant somebody picked.
+///
+/// Returns the config to use and its demand. Capping the coarsest level
+/// shrinks the streamed ring, so the count falls monotonically and the
+/// loop terminates; a world that cannot fit even at `min_level` is
+/// admitted anyway, at `min_level`, because refusing to load it is worse
+/// than a few deferred chunks now that deferral is safe.
+pub fn fit_to_budget(
+    config: &LodConfig,
+    generator: &voxel_worldgen::Generator,
+    anchor: DVec3,
+    available: usize,
+    min_level: u8,
+) -> (LodConfig, usize) {
+    let mut fitted = config.clone();
+    loop {
+        let demand = meshable_count(&fitted, generator, anchor);
+        if demand <= available || fitted.max_level <= min_level {
+            return (fitted, demand);
+        }
+        fitted.max_level -= 1;
+    }
+}
+
 /// Could this chunk contain a surface at all?
 ///
 /// Evaluating the generator on the chunk's box instead of at points
@@ -1212,5 +1329,79 @@ mod pruning {
             "only {marginal} pruned chunks were near the ground; the sweep is not reaching \
              the cases where the bound is load-bearing"
         );
+    }
+}
+
+#[cfg(test)]
+mod residency_budget {
+    use super::*;
+
+    /// The count must be the residency PREDICATE's own set, or admission
+    /// control is checking a different number from the one the graph will
+    /// ask for.
+    #[test]
+    fn the_count_is_the_predicate_it_claims_to_be() {
+        let config = LodConfig {
+            max_level: 4,
+            top_radius: 1,
+            top_y: (0, 0),
+            ..Default::default()
+        };
+        let anchor = DVec3::new(120.0, 40.0, -60.0);
+        // Enumerate every key the predicate could accept, by descending
+        // the whole top ring to level 0 and testing each node.
+        fn walk(config: &LodConfig, anchor: DVec3, key: ChunkKey, out: &mut usize) {
+            if resident_clamped(config, anchor, key) {
+                *out += 1;
+            }
+            if key.level > 0 {
+                for child in key.children() {
+                    walk(config, anchor, child, out);
+                }
+            }
+        }
+        let top_edge = ChunkKey::new(config.max_level, IVec3::ZERO).edge_m();
+        let cx = (anchor.x / top_edge).floor() as i32;
+        let cz = (anchor.z / top_edge).floor() as i32;
+        let mut expected = 0;
+        for dz in -config.top_radius..=config.top_radius {
+            for dx in -config.top_radius..=config.top_radius {
+                for y in config.top_y.0..=config.top_y.1 {
+                    let cell = IVec3::new(cx + dx, y, cz + dz);
+                    walk(&config, anchor, ChunkKey::new(config.max_level, cell), &mut expected);
+                }
+            }
+        }
+        assert_eq!(resident_count(&config, anchor), expected);
+    }
+
+    /// Cheap enough to run when a world loads, on the configurations that
+    /// ship. If this ever stops being true the answer is a cached bound,
+    /// not a slower load.
+    #[test]
+    fn counting_the_shipped_configs_is_fast() {
+        let config = LodConfig::default();
+        let start = std::time::Instant::now();
+        let count = resident_count(&config, DVec3::new(0.0, 100.0, 0.0));
+        let elapsed = start.elapsed();
+        assert!(count > 1_000, "the default config is not trivial: {count}");
+        assert!(
+            elapsed < std::time::Duration::from_millis(500),
+            "counting residency took {elapsed:?} for {count} chunks",
+        );
+        println!("default config: {count} resident chunks in {elapsed:?}");
+    }
+
+    /// Fewer levels means fewer chunks — the property capping relies on.
+    #[test]
+    fn capping_the_level_reduces_the_count() {
+        let anchor = DVec3::new(0.0, 100.0, 0.0);
+        let mut last = usize::MAX;
+        for max_level in (4..=8u8).rev() {
+            let config = LodConfig { max_level, ..Default::default() };
+            let count = resident_count(&config, anchor);
+            assert!(count < last, "L{max_level} = {count} did not shrink below {last}");
+            last = count;
+        }
     }
 }

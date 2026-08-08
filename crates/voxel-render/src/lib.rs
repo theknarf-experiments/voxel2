@@ -19,6 +19,7 @@ pub use chunks::{
     MAX_WORLDS, RenderWorld, RenderWorlds, CameraWorld, ViewWorld, MAX_CLIP_PLANES,
     MAT_KIND_CANOPY, MAT_KIND_SURFACE, MAT_KIND_ZONED,
 };
+pub use slab::SlabAllocator;
 pub use scatter_points::{ScatterPoint, ScatterPoints};
 pub use material::VoxelSurfaceMaterial;
 

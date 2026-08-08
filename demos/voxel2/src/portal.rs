@@ -15,9 +15,6 @@ use bevy::prelude::*;
 use bevy::camera::visibility::RenderLayers;
 use voxel_engine::{LevelDef, LodConfig, WorldLoader};
 
-/// Coarsest level the far world streams. See `ensure_far_world`.
-const FAR_MAX_LEVEL: u8 = 5;
-
 /// The far side: which level file to open onto, and — once opened — the
 /// level itself with its own background, which the opening shows wherever
 /// the far world is empty.
@@ -67,17 +64,13 @@ fn ensure_far_world(far: &mut FarLevel, loader: &mut WorldLoader) -> Option<u8> 
         .inspect_err(|e| error!("portal: cannot parse '{}': {e}", far.path))
         .ok()?;
 
-    // INTERIM: a second world roughly doubles the meshed working set and
-    // the slab is one fixed GPU allocation sized for one, so at the far
-    // level's own config every class hit 100% and chunks wedged in
-    // AwaitingAlloc. Now that the far world streams around the PORTAL
-    // rather than the camera its working set is much smaller, so this cap
-    // is probably droppable — but on evidence, not on assumption.
-    let mut config = LodConfig::from(&level.lod);
-    config.max_level = config.max_level.min(FAR_MAX_LEVEL);
-    config.top_radius = 1;
-
-    let id = loader.load(level.clone(), 0, config);
+    // At its authored detail. There used to be a hand-picked cap here,
+    // because a second world roughly doubles the meshed working set and
+    // the slab is one fixed allocation: every class hit 100% and chunks
+    // wedged waiting for space. `WorldLoader::load` now admits a world
+    // against the slab slots the loaded ones left, and caps it only as
+    // far as it has to — which is the mechanism that cap was guessing at.
+    let id = loader.load(level.clone(), 0, LodConfig::from(&level.lod));
     far.loaded = Some(level);
     far.world = Some(id);
     info!("portal: '{}' opened as world {id}", far.path);

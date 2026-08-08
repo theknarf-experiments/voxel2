@@ -85,6 +85,12 @@ impl SlabAllocator {
         }
     }
 
+    /// Chunks that can hold a mesh at once. The number admission control
+    /// compares a world's demand against.
+    pub fn capacity_slots() -> usize {
+        CLASS_SLOTS.iter().map(|&s| s as usize).sum()
+    }
+
     /// Total vertex capacity of all classes (buffer sizing).
     pub fn total_vertices() -> u64 {
         (0..4)

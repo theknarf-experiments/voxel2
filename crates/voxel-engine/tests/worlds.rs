@@ -243,3 +243,92 @@ fn an_absent_world_is_absent() {
     let empty = Worlds::default();
     assert!(empty.query(0).is_none(), "and to nothing when none exist");
 }
+
+/// The slab is one fixed allocation shared by every world, so what a
+/// world may stream depends on what else is loaded. Checked BEFORE it
+/// streams: the alternative is discovering the shortfall as chunks pile
+/// up with nowhere to go, which is what `FAR_MAX_LEVEL` was a hand-tuned
+/// patch for.
+#[test]
+fn a_second_world_is_admitted_against_what_the_first_left() {
+    let mut app = app();
+    let planet = shipped("planet.json");
+    let full = LodConfig::from(&planet.lod);
+    load_in(
+        &mut app,
+        vec![
+            (planet.clone(), full.clone()),
+            (planet.clone(), full.clone()),
+        ],
+    );
+
+    let worlds = app.world().resource::<Worlds>();
+    let capacity = voxel_render::SlabAllocator::capacity_slots();
+    let committed: usize = worlds.iter().map(|w| w.slab_demand).sum();
+    assert!(
+        committed <= capacity,
+        "two worlds committed {committed} of {capacity} slab slots",
+    );
+    // The first world gets the whole budget, so the second is the one
+    // that has to give — it cannot be streaming MORE than the first.
+    assert!(worlds.get(1).unwrap().config.max_level <= worlds.get(0).unwrap().config.max_level);
+}
+
+/// One world alone must not be capped: the shipped level has to look the
+/// way it was authored. If this fails the budget is too small for the
+/// world it ships with, which is a sizing bug, not a policy one.
+#[test]
+fn the_first_world_streams_at_its_authored_detail() {
+    let mut app = app();
+    let planet = shipped("planet.json");
+    let full = LodConfig::from(&planet.lod);
+    load_in(&mut app, vec![(planet.clone(), full.clone())]);
+
+    let worlds = app.world().resource::<Worlds>();
+    assert_eq!(
+        worlds.get(0).unwrap().config.max_level,
+        full.max_level,
+        "the only loaded world was capped — the slab is too small for it",
+    );
+    assert!(worlds.get(0).unwrap().slab_demand > 0, "demand was measured");
+}
+
+/// Capping is monotone and bounded: it only ever reduces detail, it
+/// stops at the floor, and it terminates however small the budget is.
+///
+/// A world nobody can afford is still admitted, at the floor, rather
+/// than looping forever or refusing to load — deferral is safe now, so a
+/// few chunks with nowhere to go is a hole, not a wedge.
+#[test]
+fn admission_only_ever_reduces_detail_and_terminates() {
+    use voxel_engine::streaming::{fit_to_budget, meshable_count};
+    let anchor = bevy::math::DVec3::ZERO;
+    for name in ["planet.json", "megastructure.json"] {
+        let level = shipped(name);
+        let generator = std::sync::Arc::new(level.generator(0));
+        let authored = LodConfig::from(&level.lod);
+        for available in [0, 1, 64, 512, 100_000] {
+            let (fitted, demand) = fit_to_budget(&authored, &generator, anchor, available, 4);
+            assert!(
+                fitted.max_level <= authored.max_level,
+                "{name}: admission raised detail from L{} to L{}",
+                authored.max_level,
+                fitted.max_level,
+            );
+            assert!(fitted.max_level >= 4, "{name}: capped below the floor");
+            assert_eq!(
+                demand,
+                meshable_count(&fitted, &generator, anchor),
+                "{name}: the reported demand is not the fitted config's",
+            );
+            // Either it fits, or it is at the floor and admitted anyway.
+            assert!(
+                demand <= available || fitted.max_level == 4,
+                "{name}: {demand} chunks admitted into {available} slots above the floor",
+            );
+        }
+        // A budget that fits everything must not touch the config.
+        let (fitted, _) = fit_to_budget(&authored, &generator, anchor, usize::MAX, 4);
+        assert_eq!(fitted.max_level, authored.max_level, "{name}");
+    }
+}
