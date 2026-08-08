@@ -262,6 +262,77 @@ pub fn eval_fields(ops: &[WorldOp], seed: u32, xz: Vec2, vs: f32) -> [f32; FIELD
     fields
 }
 
+/// How firmly the program paints `material` on the ground at this column.
+///
+/// 1 well inside the region that paints it, falling through 0.5 at the
+/// edge to 0 outside — a soft read of the same `WOP_MATERIAL_BAND` chain
+/// the density interpreter applies hard. Callers that place things by
+/// region use this, so what grows somewhere and what colour the ground is
+/// there cannot drift apart: they are the same ops.
+///
+/// The material no band claims (whatever `WOP_HEIGHT_SURFACE` set) gets
+/// whatever weight the bands leave over, so the weights of all the
+/// materials in a program sum to 1.
+pub fn surface_material_weight(
+    ops: &[WorldOp],
+    seed: u32,
+    xz: Vec2,
+    vs: f32,
+    material: u32,
+) -> f32 {
+    /// Half-width of the soft edge, in band units. Wide enough that a
+    /// scatter thins out visibly across a border instead of stopping on
+    /// a line, narrow enough that the ground colour it follows is still
+    /// recognisably the same shape.
+    const FEATHER: f32 = 0.03;
+    let inside = |v: f32, lo: f32, hi: f32| {
+        smoothstep(lo - FEATHER, lo + FEATHER, v) * (1.0 - smoothstep(hi - FEATHER, hi + FEATHER, v))
+    };
+
+    let mut base = 0u32;
+    let mut claimed = 0.0f32;
+    let mut mine = 0.0f32;
+    for op in ops {
+        match op.kind {
+            WOP_HEIGHT_SURFACE | WOP_COARSE_SOLID => base = op.material,
+            WOP_MATERIAL_BAND => {
+                // Bands only repaint what an earlier op left as `from`,
+                // so a later one can only claim what is still unclaimed.
+                if op.p1[2] as u32 != base {
+                    continue;
+                }
+                let a = crate::fbm_mode(
+                    seed,
+                    xz + Vec2::new(op.p2[0], op.p2[1]),
+                    op.p1[0],
+                    op.p1[3] as i32,
+                    vs,
+                    0,
+                ) + 0.5;
+                let b = crate::fbm_mode(
+                    seed,
+                    xz + Vec2::new(op.p2[2], op.p2[3]),
+                    op.p1[1],
+                    op.p1[3] as i32,
+                    vs,
+                    0,
+                ) + 0.5;
+                let w = inside(a, op.p0[0], op.p0[1]).min(inside(b, op.p0[2], op.p0[3]))
+                    * (1.0 - claimed);
+                claimed += w;
+                if op.material == material {
+                    mine += w;
+                }
+            }
+            _ => {}
+        }
+    }
+    if material == base {
+        mine += 1.0 - claimed;
+    }
+    mine.clamp(0.0, 1.0)
+}
+
 /// WGSL-identical smoothstep (the height-op twins must agree).
 fn smoothstep(e0: f32, e1: f32, x: f32) -> f32 {
     let t = ((x - e0) / (e1 - e0)).clamp(0.0, 1.0);
@@ -295,7 +366,23 @@ pub fn planet_program() -> Vec<WorldOp> {
             .p0([-4200.0, 8800.0, 0.004, 1.6])
             .p1([3.0, 0.0, 0.0, 0.15]),
         WorldOp::new(WOP_HEIGHT_SURFACE).material(1),
+        // Regions: two noise axes, and a box in their product per region.
+        // Order is priority — each only repaints ground still left as
+        // material 1, so the first to claim a point owns it, and roads
+        // and river surfaces are never candidates at all.
+        region(5, [0.0, 0.44], [0.0, 1.0]),
+        region(2, [0.56, 1.0], [0.0, 0.47]),
+        region(6, [0.0, 1.0], [0.56, 1.0]),
     ]
+}
+
+/// One region band of the shipped planet.
+fn region(material: u32, a: [f32; 2], b: [f32; 2]) -> WorldOp {
+    WorldOp::new(WOP_MATERIAL_BAND)
+        .material(material)
+        .p0([a[0], a[1], b[0], b[1]])
+        .p1([8.0e-5, 1.1e-4, 1.0, 5.0])
+        .p2([-31000.0, 12000.0, 47000.0, -19000.0])
 }
 
 /// The shipped megastructure: shaft registers, coarse solid mass, floor
@@ -354,6 +441,7 @@ mod tests {
         // Oracle: the pre-program formula, verbatim.
         let ops = planet_program();
         let seed = 0u32;
+        let mut seen = std::collections::HashSet::new();
         for i in 0..500 {
             let p = Vec2::new((i * 37) as f32 * 13.7, (i * 91) as f32 * -7.3);
             for vs in [1.0, 8.0, 64.0] {
@@ -367,9 +455,18 @@ mod tests {
                 // bit-exact (asserted above), the SDF just subtracts it.
                 let (d, mat) = eval(&ops, seed, glam::Vec3::new(p.x, legacy - 3.0, p.y), vs);
                 assert!((d + 3.0).abs() < 1.0e-3, "d={d}");
-                assert_eq!(mat, 1);
+                // The ground is whichever region claimed it. Bands only
+                // repaint, so the HEIGHT is unaffected either way — that
+                // is asserted bit-exact above, region ops and all.
+                seen.insert(mat);
             }
         }
+        // Every region the level declares is reachable, and nothing else
+        // paints the ground. A band that never fires is a level bug the
+        // reference program should not be able to hide.
+        let mut found: Vec<u32> = seen.into_iter().collect();
+        found.sort_unstable();
+        assert_eq!(found, vec![1, 2, 5, 6], "region coverage changed");
     }
 
     #[test]

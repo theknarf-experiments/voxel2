@@ -262,6 +262,13 @@ fn eval_program(p: vec3<f32>, vs: f32) -> WorldSample {
                 let nd = p.y - h;
                 if nd < d { d = nd; mat = op.head.z; }
             }
+            case 18u: { // WOP_MATERIAL_BAND
+                if mat == to_u(op.p1.z) {
+                let ta = fbm(pxz + op.p2.xy, op.p1.x, to_i(op.p1.w), vs, 0) + 0.5;
+                let tb = fbm(pxz + op.p2.zw, op.p1.y, to_i(op.p1.w), vs, 0) + 0.5;
+                if ta >= op.p0.x && ta < op.p0.y && tb >= op.p0.z && tb < op.p0.w { mat = op.head.z; }
+                }
+            }
             case 3u: { // WOP_COARSE_SOLID
                 if SOLID < d { d = SOLID; mat = op.head.z; }
             }

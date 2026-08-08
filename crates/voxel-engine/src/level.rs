@@ -690,6 +690,34 @@ pub enum GenOpDef {
         #[serde(default)]
         bias: f32,
     },
+    /// Repaint the surface material inside a band of two noise axes.
+    ///
+    /// The engine has no idea what a region IS — it compares two numbers
+    /// against a box and swaps a material id. A level composes several of
+    /// these over one `height_surface` to divide a plane into regions,
+    /// and names them whatever it likes in its own file.
+    MaterialBand {
+        /// Material to repaint FROM: only ground the earlier ops left as
+        /// this id is affected, so roads and water are never touched.
+        from: u32,
+        /// Material to repaint TO.
+        material: u32,
+        /// Half-open band on the first axis, in 0..1.
+        a: [f32; 2],
+        /// Half-open band on the second axis, in 0..1.
+        #[serde(default = "d_full_band")]
+        b: [f32; 2],
+        /// Cycles per meter of each axis. Region scale: 1e-4 is a
+        /// ten-kilometre region.
+        #[serde(default = "d_band_scale")]
+        scale: [f32; 2],
+        /// Sample offsets, which is what makes the two axes independent
+        /// of each other and of every other band.
+        #[serde(default = "d_band_offset")]
+        offset: [f32; 4],
+        #[serde(default = "d_band_octaves")]
+        octaves: u32,
+    },
     /// Turn the accumulated height into ground.
     HeightSurface {
         #[serde(default = "mat_grass")]
@@ -783,6 +811,19 @@ pub enum NoiseModeDef {
     Billow,
 }
 
+fn d_full_band() -> [f32; 2] {
+    [0.0, 1.0]
+}
+fn d_band_scale() -> [f32; 2] {
+    [1.0e-4, 1.0e-4]
+}
+fn d_band_offset() -> [f32; 4] {
+    [0.0, 0.0, 5000.0, -3000.0]
+}
+fn d_band_octaves() -> u32 {
+    2
+}
+
 fn mat_grass() -> u32 {
     1
 }
@@ -856,6 +897,19 @@ impl GenOpDef {
             } => WorldOp::new(WOP_FIELD)
                 .p0([offset[0], offset[1], scale, amp])
                 .p1([octaves as f32, mode as u32 as f32, slot as f32, bias]),
+            GenOpDef::MaterialBand {
+                from,
+                material,
+                a,
+                b,
+                scale,
+                offset,
+                octaves,
+            } => WorldOp::new(WOP_MATERIAL_BAND)
+                .material(material)
+                .p0([a[0], a[1], b[0], b[1]])
+                .p1([scale[0], scale[1], from as f32, octaves as f32])
+                .p2(offset),
             GenOpDef::HeightSurface { material } => {
                 WorldOp::new(WOP_HEIGHT_SURFACE).material(material)
             }

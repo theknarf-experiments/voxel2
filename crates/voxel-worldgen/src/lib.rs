@@ -242,6 +242,13 @@ impl Generator {
         program::eval(&self.ops, self.seed, p, voxel_size)
     }
 
+    /// How firmly the program paints `material` on the ground here: 1
+    /// well inside the region that paints it, 0 outside, soft across the
+    /// edge. See [`program::surface_material_weight`].
+    pub fn surface_material_weight(&self, xz: Vec2, voxel_size: f32, material: u32) -> f32 {
+        program::surface_material_weight(&self.ops, self.seed, xz, voxel_size, material)
+    }
+
     /// Heightfield (meters) at a world XZ, evaluated at `voxel_size`
     /// (1.0 = full detail). Mirrors the GPU exactly.
     pub fn height(&self, xz: Vec2, voxel_size: f32) -> f32 {

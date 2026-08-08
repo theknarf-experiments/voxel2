@@ -62,6 +62,27 @@ pub const WOP_FIELD: u32 = 17;
 /// Number of field registers.
 pub const FIELD_SLOTS: usize = 4;
 
+/// Repaint the surface material where two low-frequency noise samples
+/// both fall inside a band: `if mat == from && a in [a0,a1) && b in
+/// [b0,b1) { mat = to }`.
+///
+/// The mechanism, not a use for it. Two independent noise axes and a box
+/// in their product is enough to carve a plane into regions, and a level
+/// that wants regions named after climate, faction or fallout writes the
+/// bands and the names in its own file — the interpreter only ever sees
+/// numbers.
+///
+/// Self-contained on purpose: it samples its own noise rather than
+/// reading a field register, because the field registers are CPU-only
+/// (see `eval_fields`) and giving the density shader a register file it
+/// otherwise has no use for would cost every sample, not just the ones
+/// that repaint.
+///
+/// `head.z = to material`, `p0 = (a0, a1, b0, b1)`,
+/// `p1 = (a_cycles_per_m, b_cycles_per_m, from material, octaves)`,
+/// `p2 = (a_offset_x, a_offset_z, b_offset_x, b_offset_z)`.
+pub const WOP_MATERIAL_BAND: u32 = 18;
+
 /// Cliff step: adds `amp * smoothstep(start, end, h)` to the height
 /// register — terrain crossing the band grows a wall (iq's Rainforest
 /// cliff term). `p0 = (start_m, end_m, amp_m)`.

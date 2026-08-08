@@ -138,6 +138,21 @@ if nd < d { d = nd; mat = @mat; }",
             d = d.min(py - h);"),
     },
     OpDef {
+        name: "WOP_MATERIAL_BAND",
+        kind: WOP_MATERIAL_BAND,
+        height: false,
+        body: "\
+if mat == to_u(@p1.z) {
+let ta = @FBM(pxz + @p2.xy, @p1.x, to_i(@p1.w), @VS@0) + 0.5;
+let tb = @FBM(pxz + @p2.zw, @p1.y, to_i(@p1.w), @VS@0) + 0.5;
+if ta >= @p0.x && ta < @p0.y && tb >= @p0.z && tb < @p0.w { mat = @mat; }
+}",
+        // Repaints only; the SDF and the height are untouched, so a box
+        // containing one of these is bounded exactly as it would be
+        // without it.
+        range: Some("// material only"),
+    },
+    OpDef {
         name: "WOP_COARSE_SOLID",
         kind: WOP_COARSE_SOLID,
         height: false,
