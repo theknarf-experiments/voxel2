@@ -169,7 +169,7 @@ struct LodChunk {
 impl LayerChunk for LodChunk {
     type Layer = VoxelLod;
 
-    fn create(&mut self, ctx: &ChunkCtx<'_, VoxelLod>, _level: u32) {
+    fn create(&mut self, ctx: &ChunkCtx<'_, VoxelLod>) {
         let shared = &ctx.layer().shared;
         let key = ChunkKey::in_world(shared.world, ctx.layer().level, ctx.coord());
         let ops = shared.chunks.ops_for(key);
@@ -207,7 +207,7 @@ impl LayerChunk for LodChunk {
         self.key = Some(key);
     }
 
-    fn destroy(&mut self, ctx: &ChunkCtx<'_, VoxelLod>, _level: u32) {
+    fn destroy(&mut self, ctx: &ChunkCtx<'_, VoxelLod>) {
         let shared = &ctx.layer().shared;
         if let Some(key) = self.key.take() {
             shared.state.lock().unwrap().shown.remove(&key);
@@ -345,7 +345,7 @@ impl WorldLod {
                     || can_hold_surface(&at.generator, key)
             });
             tops.push(
-                TopDep::at_level(&instance(level), 0, level_span(&config, level))
+                TopDep::new(&instance(level), level_span(&config, level))
                     .with_filter(filter),
             );
         }

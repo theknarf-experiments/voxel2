@@ -292,6 +292,33 @@ impl PartDef {
 /// (scatter/connect/flow/worm/emit) every planned feature is expressed
 /// in. Layers register in author order into ONE LayerManager per level;
 /// `source` references an earlier layer by instance name.
+/// Relaxation on a `scatter` layer: how hard to push sites apart, and how
+/// many times.
+///
+/// Each iteration is a SEPARATE LAYER INSTANCE reading the one before —
+/// `name:scattered` for the raw pass, `name:relax1`… for the middle ones,
+/// and `name` itself for the last, so nothing that consumes the sites
+/// changes or even notices. LayerProcGen would spell this as internal
+/// levels of one layer; instances keep each stage's reads inside a
+/// declared dependency, which is checked.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct RelaxDef {
+    /// Fraction of the wanted correction applied per iteration. Above
+    /// ~0.5 a site tends to overshoot into the neighbour that pushed it.
+    #[serde(default = "d_relax_strength")]
+    pub strength: f32,
+    #[serde(default = "d_relax_iterations")]
+    pub iterations: u32,
+}
+
+fn d_relax_strength() -> f32 {
+    0.35
+}
+
+fn d_relax_iterations() -> u32 {
+    1
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum StackLayerDef {
@@ -311,6 +338,9 @@ pub enum StackLayerDef {
         /// biome's blended weight.
         #[serde(default)]
         biome: Option<String>,
+        /// Push sites apart from their neighbours after scattering.
+        #[serde(default)]
+        relax: Option<RelaxDef>,
     },
     /// Pathfound links between sites of a scatter instance.
     Connect {
@@ -861,22 +891,51 @@ impl StackLayerDef {
                 altitude,
                 up,
                 biome,
-            } => mgr.register_as(
-                &name,
-                ScatterSites {
-                    cfg: ScatterCfg {
-                        cell_m,
-                        chance,
-                        margin_m,
-                        altitude,
-                        up,
-                        biome: biome.map(|r| {
-                            Self::biome_gate(&[], stack, &name, &r)
-                                .expect("stack validated before registration")
-                        }),
-                    },
-                },
-            ),
+                relax,
+            } => {
+                let base = ScatterCfg {
+                    cell_m,
+                    chance,
+                    margin_m,
+                    altitude,
+                    up,
+                    biome: biome.map(|r| {
+                        Self::biome_gate(&[], stack, &name, &r)
+                            .expect("stack validated before registration")
+                    }),
+                    relax_from: None,
+                };
+                let Some(relax) = relax.filter(|r| r.iterations > 0 && r.strength > 0.0) else {
+                    return mgr.register_as(&name, ScatterSites { cfg: base });
+                };
+                // A chain of instances, each reading the one before. The
+                // LAST one takes the public name, so consumers are
+                // untouched — they declared a dependency on `name` and
+                // still get sites from `name`, just better spaced.
+                let raw = format!("{name}:scattered");
+                mgr.register_as(&raw, ScatterSites { cfg: base.clone() });
+                let mut source = raw;
+                for i in 1..=relax.iterations {
+                    let stage = if i == relax.iterations {
+                        name.clone()
+                    } else {
+                        format!("{name}:relax{i}")
+                    };
+                    mgr.register_as(
+                        &stage,
+                        ScatterSites {
+                            cfg: ScatterCfg {
+                                relax_from: Some(RelaxFrom {
+                                    instance: source,
+                                    strength: relax.strength,
+                                }),
+                                ..base.clone()
+                            },
+                        },
+                    );
+                    source = stage;
+                }
+            }
             StackLayerDef::Connect {
                 name,
                 source,

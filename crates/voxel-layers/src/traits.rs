@@ -11,18 +11,17 @@ use glam::{DVec3, IVec3};
 
 use crate::layer::{layer_key, LayerKey};
 
-/// A dependency on a level of another layer.
+/// A dependency on another layer instance.
 ///
-/// The `level` is the point of the whole mechanism: a layer exposes
-/// partial states, and different consumers depend on different ones. That
-/// is how a graph that would otherwise be circular — locations need paths,
-/// paths need locations — is expressed as a DAG.
+/// A layer that wants to expose partial states publishes each as its own
+/// INSTANCE, and different consumers depend on different ones — which is
+/// how a graph that would otherwise be circular (locations need paths,
+/// paths need locations) is expressed as a DAG. There used to be a second
+/// mechanism for this, internal levels within one layer; see
+/// [`crate`] docs for why it is gone.
 pub struct Dep {
     /// Instance key (hashed instance name) of the depended-on layer.
     pub key: LayerKey,
-    /// Which level of that layer is required. Layers with one level always
-    /// use 0.
-    pub level: u32,
     /// How far outside its own chunk bounds (meters, per axis) the
     /// dependent may read. Declared, not inferred: a wider padding costs
     /// residency, so it should be a decision.
@@ -30,34 +29,19 @@ pub struct Dep {
 }
 
 impl Dep {
-    /// Depend on the final level of `L`'s default instance.
+    /// Depend on `L`'s default instance.
     pub fn of<L: Layer>(padding: IVec3) -> Self {
         Self::named(L::NAME, padding)
     }
 
-    /// Depend on the final level of a named instance. Resolved to the
-    /// instance's top level at registration, when the level count is known.
+    /// Depend on a named instance.
     pub fn named(name: &str, padding: IVec3) -> Self {
         Self {
             key: layer_key(name),
-            level: FINAL_LEVEL,
-            padding,
-        }
-    }
-
-    /// Depend on a specific level of a named instance.
-    pub fn named_at(name: &str, level: u32, padding: IVec3) -> Self {
-        Self {
-            key: layer_key(name),
-            level,
             padding,
         }
     }
 }
-
-/// `Dep::level` sentinel meaning "whatever the instance's top level is",
-/// resolved at registration.
-pub const FINAL_LEVEL: u32 = u32::MAX;
 
 /// One data layer of the procedural world.
 ///
@@ -77,23 +61,10 @@ pub trait Layer: Send + Sync + 'static {
     /// layer that owns one voxel chunk per cell has to sit on that grid.
     fn chunk_extent(&self) -> DVec3;
 
-    /// Generation levels within this layer. Each is a separate create /
-    /// destroy pass over the same chunk, and other layers can depend on
-    /// any of them.
-    fn levels(&self) -> u32 {
-        1
-    }
-
-    /// What `level` of this layer reads. Dependencies must already be
-    /// registered, which makes the graph a DAG by construction.
-    fn dependencies(&self, _level: u32) -> Vec<Dep> {
+    /// What this layer reads. Dependencies must already be registered,
+    /// which makes the graph a DAG by construction.
+    fn dependencies(&self) -> Vec<Dep> {
         Vec::new()
-    }
-
-    /// Padded reach of level `level`'s reads into level `level - 1` of
-    /// this same layer.
-    fn level_padding(&self, _level: u32) -> IVec3 {
-        IVec3::ZERO
     }
 }
 
@@ -106,14 +77,14 @@ pub trait Layer: Send + Sync + 'static {
 pub trait LayerChunk: Default + Send + Sync + 'static {
     type Layer: Layer<Chunk = Self>;
 
-    /// Generate `level` of this chunk. Every dependency declared for this
-    /// level is already resident, so reads through `ctx` cannot fail.
-    fn create(&mut self, ctx: &ChunkCtx<'_, Self::Layer>, level: u32);
+    /// Generate this chunk. Every declared dependency is already
+    /// resident, so reads through `ctx` cannot fail.
+    fn create(&mut self, ctx: &ChunkCtx<'_, Self::Layer>);
 
-    /// Release `level` of this chunk: clear data, despawn entities, free
-    /// GPU slots. Called exactly once per `create`, before the chunk's own
-    /// providers are released.
-    fn destroy(&mut self, _ctx: &ChunkCtx<'_, Self::Layer>, _level: u32) {}
+    /// Release this chunk: clear data, despawn entities, free GPU slots.
+    /// Called exactly once per `create`, before the chunk's own providers
+    /// are released.
+    fn destroy(&mut self, _ctx: &ChunkCtx<'_, Self::Layer>) {}
 }
 
 pub use crate::graph::ChunkCtx;

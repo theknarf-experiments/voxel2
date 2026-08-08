@@ -27,6 +27,35 @@ pub struct ScatterCfg {
     pub up: [f32; 2],
     /// Accept sites with probability = the biome's blended weight.
     pub biome: Option<BiomeGate>,
+    /// Relax this cell's site away from its neighbours' instead of
+    /// generating one. See [`RelaxFrom`].
+    pub relax_from: Option<RelaxFrom>,
+}
+
+/// Push a site away from the ones around it, reading a SOURCE instance.
+///
+/// One cell hosts at most one site, so a plain scatter can put two of
+/// them a few metres apart across a cell border — two ossuaries in each
+/// other's laps while the cell interiors are empty. This is the classic
+/// relaxation pass: read the source's 3x3 neighbourhood and move own
+/// site away from the others.
+///
+/// **A separate instance, not an internal layer level.** LayerProcGen
+/// offers levels for exactly this shape (its `LocationLayer` places at
+/// level 0 and relaxes at level 1), and a level would work — but a level
+/// shares one chunk struct across stages, so the framework cannot check
+/// which stage may read what. As an instance the read goes through a
+/// declared `Dep` and the padding assert applies, and iterating twice is
+/// a second instance rather than a third level.
+#[derive(Clone, Debug)]
+pub struct RelaxFrom {
+    /// Instance to read unrelaxed sites from. Must have the same
+    /// `cell_m`, so cell N of the source is cell N here.
+    pub instance: String,
+    /// How far to move, as a fraction of the distance still wanted
+    /// between two sites. 0 does nothing; 1 is a full correction and
+    /// tends to overshoot into a neighbour.
+    pub strength: f32,
 }
 
 impl Default for ScatterCfg {
@@ -38,6 +67,7 @@ impl Default for ScatterCfg {
             altitude: [f32::MIN, f32::MAX],
             up: [0.0, 1.0],
             biome: None,
+            relax_from: None,
         }
     }
 }
@@ -62,7 +92,14 @@ impl Layer for ScatterSites {
         DVec3::new(self.cfg.cell_m as f64, 0.0, self.cfg.cell_m as f64)
     }
 
-    fn dependencies(&self, _level: u32) -> Vec<Dep> {
+    fn dependencies(&self) -> Vec<Dep> {
+        // Relaxing reads the source's 3x3, which is one cell of padding.
+        // A relaxed instance does no terrain or biome gating of its own —
+        // the source already did it — so the two are exclusive.
+        if let Some(relax) = &self.cfg.relax_from {
+            let cell = self.cfg.cell_m;
+            return vec![Dep::named(&relax.instance, IVec3::new(cell, 0, cell))];
+        }
         match &self.cfg.biome {
             Some(gate) => vec![Dep::named(
                 &gate.instance,
@@ -75,7 +112,60 @@ impl Layer for ScatterSites {
 }
 
 impl ScatterSites {
+    /// Move this cell's site away from the ones in the 3x3 around it.
+    ///
+    /// A site stays inside its OWN cell, clamped to the same margin the
+    /// scatter used. That is not cosmetic: consumers read sites by
+    /// iterating the cells overlapping their bounds, several of them with
+    /// no padding at all, so a site that wandered into the next cell
+    /// would simply stop being found. Relaxation improves spacing within
+    /// that constraint rather than breaking every reader.
+    fn relax(&self, ctx: &ChunkCtx<'_, Self>, relax: &RelaxFrom) -> SitesChunk {
+        let cell = self.cfg.cell_m as f32;
+        let pad = IVec3::new(self.cfg.cell_m, 0, self.cfg.cell_m);
+        let own = ctx.chunk_bounds();
+        let view = ctx.get_named::<Self>(&relax.instance, own.inflate(pad));
+
+        // Own cell's site, and everyone else's.
+        let mut mine: Option<Vec2> = None;
+        let mut others: Vec<Vec2> = Vec::new();
+        view.for_each(|coord, chunk| {
+            if coord == ctx.coord() {
+                mine = chunk.sites.first().copied();
+            } else {
+                others.extend(chunk.sites.iter().copied());
+            }
+        });
+        let Some(mut p) = mine else {
+            return SitesChunk { sites: Vec::new() };
+        };
+
+        // Wanted spacing: one cell. Closer than that and a neighbour
+        // pushes, proportionally to how much closer.
+        let mut push = Vec2::ZERO;
+        for other in &others {
+            let delta = p - *other;
+            let d = delta.length();
+            if d >= cell || d <= 1e-3 {
+                continue;
+            }
+            push += delta / d * (cell - d);
+        }
+        p += push * relax.strength;
+
+        // Back inside its own cell.
+        let m = self.cfg.margin_m.clamp(0.0, cell * 0.45);
+        let lo = Vec2::new(own.min.x as f32 + m, own.min.z as f32 + m);
+        let hi = Vec2::new(own.max.x as f32 - m, own.max.z as f32 - m);
+        SitesChunk {
+            sites: vec![p.clamp(lo, hi.max(lo))],
+        }
+    }
+
     fn build(&self, ctx: &ChunkCtx<'_, Self>) -> SitesChunk {
+        if let Some(relax) = &self.cfg.relax_from {
+            return self.relax(ctx, relax);
+        }
         let generator = &ctx.context::<crate::planning::world::WorldCtx>().generator;
         let mut rng = ctx.rng();
         if rng.next_f32() > self.cfg.chance {
@@ -281,7 +371,7 @@ impl Layer for Scatter3Sites {
         DVec3::new(self.cfg.cell_m as f64, self.cfg.cell_y_m as f64, self.cfg.cell_m as f64)
     }
 
-    fn dependencies(&self, _level: u32) -> Vec<Dep> {
+    fn dependencies(&self) -> Vec<Dep> {
         match &self.cfg.biome {
             Some(gate) => vec![Dep::named(
                 &gate.instance,
@@ -367,7 +457,7 @@ impl Layer for Connect3Paths {
         DVec3::new(self.cell_m as f64, self.cell_y_m as f64, self.cell_m as f64)
     }
 
-    fn dependencies(&self, _level: u32) -> Vec<Dep> {
+    fn dependencies(&self) -> Vec<Dep> {
         let pad = self.cfg.reach_m as i32;
         vec![Dep::named(&self.cfg.source, IVec3::splat(pad))]
     }
@@ -477,7 +567,7 @@ impl Layer for ConnectPaths {
         DVec3::new(self.cell_m as f64, 0.0, self.cell_m as f64)
     }
 
-    fn dependencies(&self, _level: u32) -> Vec<Dep> {
+    fn dependencies(&self) -> Vec<Dep> {
         let pad = (self.cfg.reach_m + self.cfg.corridor_m) as i32;
         vec![Dep::named(
             &self.cfg.source,
@@ -582,7 +672,7 @@ impl Layer for FlowCourses {
         DVec3::new(self.cell_m as f64, 0.0, self.cell_m as f64)
     }
 
-    fn dependencies(&self, _level: u32) -> Vec<Dep> {
+    fn dependencies(&self) -> Vec<Dep> {
         vec![Dep::named(&self.cfg.source, IVec3::ZERO)]
     }
 
@@ -674,7 +764,7 @@ impl Layer for WormBurrows {
         DVec3::new(self.cell_m as f64, 0.0, self.cell_m as f64)
     }
 
-    fn dependencies(&self, _level: u32) -> Vec<Dep> {
+    fn dependencies(&self) -> Vec<Dep> {
         vec![Dep::named(&self.cfg.source, IVec3::ZERO)]
     }
 
@@ -819,7 +909,7 @@ impl Layer for EmitPatches {
         DVec3::new(self.cell_m as f64, self.cell_y_m as f64, self.cell_m as f64)
     }
 
-    fn dependencies(&self, _level: u32) -> Vec<Dep> {
+    fn dependencies(&self) -> Vec<Dep> {
         let pad = self.cfg.pad_m as i32;
         // Volumetric sources reach vertically too (a link's vertical leg
         // spans rows far from the owning cell); planar emits keep y
@@ -1167,11 +1257,11 @@ pub fn patches_in(
 impl LayerChunk for SitesChunk {
     type Layer = ScatterSites;
 
-    fn create(&mut self, ctx: &ChunkCtx<'_, ScatterSites>, _level: u32) {
+    fn create(&mut self, ctx: &ChunkCtx<'_, ScatterSites>) {
         *self = ctx.layer().build(ctx);
     }
 
-    fn destroy(&mut self, _ctx: &ChunkCtx<'_, ScatterSites>, _level: u32) {
+    fn destroy(&mut self, _ctx: &ChunkCtx<'_, ScatterSites>) {
         self.sites.clear();
     }
 }
@@ -1179,11 +1269,11 @@ impl LayerChunk for SitesChunk {
 impl LayerChunk for BiomeChunk {
     type Layer = BiomeField;
 
-    fn create(&mut self, ctx: &ChunkCtx<'_, BiomeField>, _level: u32) {
+    fn create(&mut self, ctx: &ChunkCtx<'_, BiomeField>) {
         *self = ctx.layer().build(ctx);
     }
 
-    fn destroy(&mut self, _ctx: &ChunkCtx<'_, BiomeField>, _level: u32) {
+    fn destroy(&mut self, _ctx: &ChunkCtx<'_, BiomeField>) {
         *self = Self::default();
     }
 }
@@ -1191,11 +1281,11 @@ impl LayerChunk for BiomeChunk {
 impl LayerChunk for Sites3Chunk {
     type Layer = Scatter3Sites;
 
-    fn create(&mut self, ctx: &ChunkCtx<'_, Scatter3Sites>, _level: u32) {
+    fn create(&mut self, ctx: &ChunkCtx<'_, Scatter3Sites>) {
         *self = ctx.layer().build(ctx);
     }
 
-    fn destroy(&mut self, _ctx: &ChunkCtx<'_, Scatter3Sites>, _level: u32) {
+    fn destroy(&mut self, _ctx: &ChunkCtx<'_, Scatter3Sites>) {
         self.sites.clear();
     }
 }
@@ -1203,11 +1293,11 @@ impl LayerChunk for Sites3Chunk {
 impl LayerChunk for Paths3Chunk {
     type Layer = Connect3Paths;
 
-    fn create(&mut self, ctx: &ChunkCtx<'_, Connect3Paths>, _level: u32) {
+    fn create(&mut self, ctx: &ChunkCtx<'_, Connect3Paths>) {
         *self = ctx.layer().build(ctx);
     }
 
-    fn destroy(&mut self, _ctx: &ChunkCtx<'_, Connect3Paths>, _level: u32) {
+    fn destroy(&mut self, _ctx: &ChunkCtx<'_, Connect3Paths>) {
         self.paths.clear();
     }
 }
@@ -1215,11 +1305,11 @@ impl LayerChunk for Paths3Chunk {
 impl LayerChunk for PathsChunk {
     type Layer = ConnectPaths;
 
-    fn create(&mut self, ctx: &ChunkCtx<'_, ConnectPaths>, _level: u32) {
+    fn create(&mut self, ctx: &ChunkCtx<'_, ConnectPaths>) {
         *self = ctx.layer().build(ctx);
     }
 
-    fn destroy(&mut self, _ctx: &ChunkCtx<'_, ConnectPaths>, _level: u32) {
+    fn destroy(&mut self, _ctx: &ChunkCtx<'_, ConnectPaths>) {
         self.paths.clear();
     }
 }
@@ -1227,11 +1317,11 @@ impl LayerChunk for PathsChunk {
 impl LayerChunk for CoursesChunk {
     type Layer = FlowCourses;
 
-    fn create(&mut self, ctx: &ChunkCtx<'_, FlowCourses>, _level: u32) {
+    fn create(&mut self, ctx: &ChunkCtx<'_, FlowCourses>) {
         *self = ctx.layer().build(ctx);
     }
 
-    fn destroy(&mut self, _ctx: &ChunkCtx<'_, FlowCourses>, _level: u32) {
+    fn destroy(&mut self, _ctx: &ChunkCtx<'_, FlowCourses>) {
         self.courses.clear();
     }
 }
@@ -1239,11 +1329,11 @@ impl LayerChunk for CoursesChunk {
 impl LayerChunk for WormsChunk {
     type Layer = WormBurrows;
 
-    fn create(&mut self, ctx: &ChunkCtx<'_, WormBurrows>, _level: u32) {
+    fn create(&mut self, ctx: &ChunkCtx<'_, WormBurrows>) {
         *self = ctx.layer().build(ctx);
     }
 
-    fn destroy(&mut self, _ctx: &ChunkCtx<'_, WormBurrows>, _level: u32) {
+    fn destroy(&mut self, _ctx: &ChunkCtx<'_, WormBurrows>) {
         self.worms.clear();
     }
 }
@@ -1251,11 +1341,11 @@ impl LayerChunk for WormsChunk {
 impl LayerChunk for PatchChunk {
     type Layer = EmitPatches;
 
-    fn create(&mut self, ctx: &ChunkCtx<'_, EmitPatches>, _level: u32) {
+    fn create(&mut self, ctx: &ChunkCtx<'_, EmitPatches>) {
         *self = ctx.layer().build(ctx);
     }
 
-    fn destroy(&mut self, _ctx: &ChunkCtx<'_, EmitPatches>, _level: u32) {
+    fn destroy(&mut self, _ctx: &ChunkCtx<'_, EmitPatches>) {
         self.patches.ops.clear();
         self.patches.ribbons.clear();
         self.patches.clearance.clear();
@@ -1330,7 +1420,7 @@ mod tests {
                     let tops = graph
                         .instances()
                         .iter()
-                        .map(|name| TopDep::at_level(name, 0, self.size))
+                        .map(|name| TopDep::new(name, self.size))
                         .collect();
                     let runtime =
                         std::sync::Arc::new(LayerRuntime::start(std::sync::Arc::new(graph), tops));
@@ -1446,6 +1536,117 @@ mod tests {
             },
         );
         assert_eq!(common, sites_in(mgr2.graph(), "sites:common", bounds(4096)));
+    }
+
+    /// Relaxation is the pattern LayerProcGen offers internal levels
+    /// for. Done as a second INSTANCE it has to actually improve
+    /// spacing, stay deterministic, and — the constraint that keeps
+    /// every existing consumer working — leave each site in its own cell.
+    #[test]
+    fn relaxing_sites_spreads_them_without_leaving_their_cells() {
+        let cell = 256;
+        let scattered = |mgr: &mut TestWorld| {
+            mgr.register_as(
+                "sites:raw",
+                ScatterSites {
+                    cfg: ScatterCfg {
+                        cell_m: cell,
+                        chance: 1.0,
+                        margin_m: 8.0,
+                        ..Default::default()
+                    },
+                },
+            );
+        };
+
+        let mut plain = test_manager(3);
+        scattered(&mut plain);
+        let before = sites_in(plain.graph(), "sites:raw", bounds(4096));
+
+        let mut relaxed = test_manager(3);
+        scattered(&mut relaxed);
+        relaxed.register_as(
+            "sites",
+            ScatterSites {
+                cfg: ScatterCfg {
+                    cell_m: cell,
+                    margin_m: 8.0,
+                    relax_from: Some(RelaxFrom {
+                        instance: "sites:raw".into(),
+                        strength: 0.35,
+                    }),
+                    ..Default::default()
+                },
+            },
+        );
+        let after = sites_in(relaxed.graph(), "sites", bounds(4096));
+
+        assert_eq!(before.len(), after.len(), "relaxing must not add or drop sites");
+        assert!(!after.is_empty(), "the fixture must produce sites");
+
+        // Every site stays in the cell that owns it, or consumers that
+        // read without padding would stop finding it.
+        for p in &after {
+            let cx = (p.x / cell as f32).floor() as i32;
+            let cz = (p.y / cell as f32).floor() as i32;
+            let owner = before
+                .iter()
+                .filter(|q| {
+                    (q.x / cell as f32).floor() as i32 == cx
+                        && (q.y / cell as f32).floor() as i32 == cz
+                })
+                .count();
+            assert_eq!(owner, 1, "site {p:?} is not alone in cell ({cx},{cz})");
+        }
+
+        // The point of the exercise: the crowded pairs get less crowded.
+        let closest = |sites: &[Vec2]| {
+            let mut d: Vec<f32> = sites
+                .iter()
+                .map(|a| {
+                    sites
+                        .iter()
+                        .filter(|b| *b != a)
+                        .map(|b| a.distance(*b))
+                        .fold(f32::MAX, f32::min)
+                })
+                .collect();
+            d.sort_by(f32::total_cmp);
+            d
+        };
+        let (d0, d1) = (closest(&before), closest(&after));
+        assert!(
+            d1[0] > d0[0],
+            "worst pair got no better: {} -> {}",
+            d0[0],
+            d1[0]
+        );
+        let mean = |d: &[f32]| d.iter().sum::<f32>() / d.len() as f32;
+        assert!(
+            mean(&d1) > mean(&d0),
+            "mean spacing got no better: {} -> {}",
+            mean(&d0),
+            mean(&d1)
+        );
+
+        // Same inputs, same output.
+        let mut again = test_manager(3);
+        scattered(&mut again);
+        again.register_as(
+            "sites",
+            ScatterSites {
+                cfg: ScatterCfg {
+                    cell_m: cell,
+                    margin_m: 8.0,
+                    relax_from: Some(RelaxFrom {
+                        instance: "sites:raw".into(),
+                        strength: 0.35,
+                    }),
+                    ..Default::default()
+                },
+            },
+        );
+        assert_eq!(after, sites_in(again.graph(), "sites", bounds(4096)));
     }
 
     #[test]

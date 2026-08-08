@@ -3,7 +3,7 @@
 //! algorithms whatsoever. Concrete layers are the game's code.
 //!
 //! - **Lifetime is reference-counted through the dependency graph.** Every
-//!   chunk level records what it was generated from and how many things
+//!   chunk records what it was generated from and how many things
 //!   need it. The resident set is exactly the transitive closure of the
 //!   active [`TopDep`]s, not an approximation kept by an eviction pass.
 //! - **Top dependencies are the only thing that generates**, and they
@@ -12,8 +12,16 @@
 //!   reports the padding that would have covered it.
 //! - **`create` and `destroy` are symmetric**, so a chunk can own entities,
 //!   GPU slots or pooled buffers and give them back at a defined moment.
-//! - **Dependencies name a level**, so a layer publishes partial states and
-//!   a graph that would otherwise be circular stays a DAG.
+//! - **A partial state is its own INSTANCE**, so a graph that would
+//!   otherwise be circular stays a DAG: place sites in one instance,
+//!   relax them against their neighbours in a second that depends on it,
+//!   and let each consumer name the stage it wants. LayerProcGen offers a
+//!   second mechanism for this — internal levels within one layer — and
+//!   this crate had it and never used it. A level shares one chunk struct
+//!   across stages, so the framework cannot check which stage may read
+//!   what; an instance's reads go through a declared `Dep` and are
+//!   asserted. Rune lists exactly that as the trade, and the other Rust
+//!   port dropped levels for the same reason.
 //!
 //! Determinism rests on one rule: a layer writes only its own chunk and
 //! reads only what it declared, within its own bounds inflated by that
@@ -34,4 +42,4 @@ pub use graph::{
 pub use layer::{layer_key, IAabb, LayerKey};
 pub use runtime::{BetweenPasses, LayerRuntime, TopHandle};
 pub use store::Usage;
-pub use traits::{Dep, Layer, LayerChunk, FINAL_LEVEL};
+pub use traits::{Dep, Layer, LayerChunk};

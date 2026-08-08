@@ -71,7 +71,7 @@ impl Layer for RibbonSurface {
         DVec3::new(self.tile_m as f64, 0.0, self.tile_m as f64)
     }
 
-    fn dependencies(&self, _level: u32) -> Vec<Dep> {
+    fn dependencies(&self) -> Vec<Dep> {
         self.sources
             .iter()
             .map(|name| Dep::named(name, IVec3::new(self.pad_m, RIBBON_Y_M, self.pad_m)))
@@ -91,7 +91,7 @@ impl RibbonSurface {
 impl LayerChunk for RibbonSurfaceChunk {
     type Layer = RibbonSurface;
 
-    fn create(&mut self, ctx: &ChunkCtx<'_, RibbonSurface>, _level: u32) {
+    fn create(&mut self, ctx: &ChunkCtx<'_, RibbonSurface>) {
         let layer = ctx.layer();
         let own = ctx.chunk_bounds();
         let pad = IVec3::new(layer.pad_m, RIBBON_Y_M, layer.pad_m);
@@ -113,7 +113,7 @@ impl LayerChunk for RibbonSurfaceChunk {
             .put(ctx.instance_key(), ctx.coord(), segs);
     }
 
-    fn destroy(&mut self, ctx: &ChunkCtx<'_, RibbonSurface>, _level: u32) {
+    fn destroy(&mut self, ctx: &ChunkCtx<'_, RibbonSurface>) {
         ctx.context::<WorldCtx>()
             .ribbons
             .take(ctx.instance_key(), ctx.coord());
@@ -152,9 +152,8 @@ pub fn register(
             pad_m: (tile_m * 2).max(RIBBON_PAD_M),
         },
     );
-    Some(TopDep::at_level(
+    Some(TopDep::new(
         instance,
-        0,
         IVec3::new(2 * view_m, 0, 2 * view_m),
     ))
 }

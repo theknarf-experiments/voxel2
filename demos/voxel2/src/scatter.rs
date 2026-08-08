@@ -59,7 +59,7 @@ impl Layer for ScatterPopulation {
         DVec3::new(self.def.tile_m as f64, 0.0, self.def.tile_m as f64)
     }
 
-    fn dependencies(&self, _level: u32) -> Vec<Dep> {
+    fn dependencies(&self) -> Vec<Dep> {
         let pad = IVec3::new(GATE_PAD_M, GATE_Y_M, GATE_PAD_M);
         let mut deps: Vec<Dep> = self
             .emit_sources
@@ -78,7 +78,7 @@ impl Layer for ScatterPopulation {
 impl LayerChunk for ScatterChunk {
     type Layer = ScatterPopulation;
 
-    fn create(&mut self, ctx: &ChunkCtx<'_, ScatterPopulation>, _level: u32) {
+    fn create(&mut self, ctx: &ChunkCtx<'_, ScatterPopulation>) {
         let layer = ctx.layer();
         let own = ctx.chunk_bounds();
         let pad = IVec3::new(GATE_PAD_M, GATE_Y_M, GATE_PAD_M);
@@ -127,7 +127,7 @@ impl LayerChunk for ScatterChunk {
         self.placements = tile_placements(&layer.def, &inputs, tile);
     }
 
-    fn destroy(&mut self, _ctx: &ChunkCtx<'_, ScatterPopulation>, _level: u32) {
+    fn destroy(&mut self, _ctx: &ChunkCtx<'_, ScatterPopulation>) {
         self.placements.clear();
     }
 }
@@ -155,7 +155,7 @@ impl Layer for ScatterDraw {
         DVec3::new(self.tile_m as f64, 0.0, self.tile_m as f64)
     }
 
-    fn dependencies(&self, _level: u32) -> Vec<Dep> {
+    fn dependencies(&self) -> Vec<Dep> {
         vec![Dep::named(&self.source, IVec3::ZERO)]
     }
 }
@@ -163,7 +163,7 @@ impl Layer for ScatterDraw {
 impl LayerChunk for ScatterDrawChunk {
     type Layer = ScatterDraw;
 
-    fn create(&mut self, ctx: &ChunkCtx<'_, ScatterDraw>, _level: u32) {
+    fn create(&mut self, ctx: &ChunkCtx<'_, ScatterDraw>) {
         let layer = ctx.layer();
         let mut placements = Vec::new();
         ctx.get_named::<ScatterPopulation>(&layer.source, ctx.chunk_bounds())
@@ -171,7 +171,7 @@ impl LayerChunk for ScatterDrawChunk {
         layer.sink.put(ctx.instance_key(), ctx.coord(), placements);
     }
 
-    fn destroy(&mut self, ctx: &ChunkCtx<'_, ScatterDraw>, _level: u32) {
+    fn destroy(&mut self, ctx: &ChunkCtx<'_, ScatterDraw>) {
         ctx.layer()
             .sink
             .take(ctx.instance_key(), ctx.coord());
@@ -239,9 +239,8 @@ pub fn register(
                 sink: sink.clone(),
             },
         );
-        tops.push(TopDep::at_level(
+        tops.push(TopDep::new(
             &draw,
-            0,
             IVec3::new((2.0 * reach) as i32, 0, (2.0 * reach) as i32),
         ));
         handles.push(PopulationHandle {

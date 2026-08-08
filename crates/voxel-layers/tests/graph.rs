@@ -21,31 +21,41 @@ const CELL: i32 = 256;
 struct Ledger {
     created: AtomicUsize,
     destroyed: AtomicUsize,
-    /// (layer, level, coord) in the order they were created.
-    events: Mutex<Vec<(&'static str, u32, IVec3)>>,
+    /// (instance, coord) in the order they were created.
+    events: Mutex<Vec<(&'static str, IVec3)>>,
 }
 
 impl Ledger {
-    fn created_at(&self, layer: &str, level: u32) -> usize {
+    fn created_at(&self, layer: &str) -> usize {
         self.events
             .lock()
             .unwrap()
             .iter()
-            .filter(|(l, lv, _)| *l == layer && *lv == level)
+            .filter(|(l, _)| *l == layer)
             .count()
     }
 }
 
 // ---------------------------------------------------------------- base layer
 
-/// Two levels, so a dependent can name one of them.
-struct Base;
+/// Two stages of the same data, as two INSTANCES.
+///
+/// This is the shape LayerProcGen spells with internal levels — place,
+/// then refine against the neighbourhood. Expressed as instances the
+/// second stage's read of the first goes through a declared `Dep`, so the
+/// padding assert applies to it like any other read.
+struct Base {
+    /// Instance to blend from. `None` is the raw stage.
+    blend_from: Option<&'static str>,
+    /// Which instance this one is, for the ledger.
+    name: &'static str,
+}
 
 #[derive(Default)]
 struct BaseChunk {
-    /// Level 0 output: a deterministic value per chunk.
+    /// Raw stage output: a deterministic value per chunk.
     seeded: u64,
-    /// Level 1 output: level 0 blended with the neighbourhood.
+    /// Blended stage output: the raw value xor'd with the neighbourhood.
     blended: u64,
 }
 
@@ -55,46 +65,47 @@ impl Layer for Base {
     fn chunk_extent(&self) -> DVec3 {
         DVec3::new(CELL as f64, 0.0, CELL as f64)
     }
-    fn levels(&self) -> u32 {
-        2
-    }
-    fn level_padding(&self, _level: u32) -> IVec3 {
-        IVec3::new(CELL, 0, CELL)
+    fn dependencies(&self) -> Vec<Dep> {
+        match self.blend_from {
+            Some(src) => vec![Dep::named(src, IVec3::new(CELL, 0, CELL))],
+            None => Vec::new(),
+        }
     }
 }
 
 impl LayerChunk for BaseChunk {
     type Layer = Base;
 
-    fn create(&mut self, ctx: &ChunkCtx<'_, Base>, level: u32) {
+    fn create(&mut self, ctx: &ChunkCtx<'_, Base>) {
         let ledger = ctx.context::<Ledger>();
         ledger.created.fetch_add(1, Ordering::Relaxed);
         ledger
             .events
             .lock()
             .unwrap()
-            .push(("base", level, ctx.coord()));
-        match level {
-            0 => self.seeded = ctx.seed(),
-            _ => {
-                // Reads its own level 0 through `self`, and its neighbours'
-                // through the framework — the internal-levels pattern.
-                let mut sum = self.seeded;
-                ctx.get_self(ctx.chunk_bounds().inflate(IVec3::new(CELL, 0, CELL)))
-                    .for_each(|_, chunk| sum ^= chunk.seeded);
-                self.blended = sum;
-            }
-        }
+            .push((ctx.layer().name, ctx.coord()));
+        let Some(src) = ctx.layer().blend_from else {
+            self.seeded = ctx.seed();
+            return;
+        };
+        // The 3x3 of the previous stage, through a declared dependency.
+        let mut sum = 0;
+        ctx.get_named::<Base>(src, ctx.chunk_bounds().inflate(IVec3::new(CELL, 0, CELL)))
+            .for_each(|coord, chunk| {
+                sum ^= chunk.seeded;
+                if coord == ctx.coord() {
+                    self.seeded = chunk.seeded;
+                }
+            });
+        self.blended = sum;
     }
 
-    fn destroy(&mut self, ctx: &ChunkCtx<'_, Base>, level: u32) {
+    fn destroy(&mut self, ctx: &ChunkCtx<'_, Base>) {
         ctx.context::<Ledger>()
             .destroyed
             .fetch_add(1, Ordering::Relaxed);
-        match level {
-            0 => self.seeded = 0,
-            _ => self.blended = 0,
-        }
+        self.seeded = 0;
+        self.blended = 0;
     }
 }
 
@@ -103,8 +114,8 @@ impl LayerChunk for BaseChunk {
 /// Holds no data of its own — it exists to declare dependencies, exactly
 /// like LayerProcGen's `PlayLayer`.
 struct Play {
-    /// Which level of `base` this instance wants.
-    base_level: u32,
+    /// Which stage of `base` this instance wants.
+    base: &'static str,
     pad: i32,
 }
 
@@ -119,34 +130,30 @@ impl Layer for Play {
     fn chunk_extent(&self) -> DVec3 {
         DVec3::new(CELL as f64, 0.0, CELL as f64)
     }
-    fn dependencies(&self, _level: u32) -> Vec<Dep> {
-        vec![Dep::named_at(
-            "base",
-            self.base_level,
-            IVec3::new(self.pad, 0, self.pad),
-        )]
+    fn dependencies(&self) -> Vec<Dep> {
+        vec![Dep::named(self.base, IVec3::new(self.pad, 0, self.pad))]
     }
 }
 
 impl LayerChunk for PlayChunk {
     type Layer = Play;
 
-    fn create(&mut self, ctx: &ChunkCtx<'_, Play>, level: u32) {
+    fn create(&mut self, ctx: &ChunkCtx<'_, Play>) {
         let ledger = ctx.context::<Ledger>();
         ledger.created.fetch_add(1, Ordering::Relaxed);
         ledger
             .events
             .lock()
             .unwrap()
-            .push(("play", level, ctx.coord()));
+            .push(("play", ctx.coord()));
         let pad = IVec3::new(ctx.layer().pad, 0, ctx.layer().pad);
         let mut sum = 0u64;
-        ctx.get_named::<Base>("base", ctx.chunk_bounds().inflate(pad))
+        ctx.get_named::<Base>(ctx.layer().base, ctx.chunk_bounds().inflate(pad))
             .for_each(|_, chunk| sum = sum.wrapping_add(chunk.seeded ^ chunk.blended));
         self.sum = sum;
     }
 
-    fn destroy(&mut self, ctx: &ChunkCtx<'_, Play>, _level: u32) {
+    fn destroy(&mut self, ctx: &ChunkCtx<'_, Play>) {
         ctx.context::<Ledger>()
             .destroyed
             .fetch_add(1, Ordering::Relaxed);
@@ -154,10 +161,23 @@ impl LayerChunk for PlayChunk {
     }
 }
 
-fn graph(ledger: Arc<Ledger>, base_level: u32, pad: i32, threads: usize) -> LayerGraph {
+fn graph(ledger: Arc<Ledger>, base: &'static str, pad: i32, threads: usize) -> LayerGraph {
     let mut graph = LayerGraph::with_context(0xBEEF, ledger).with_threads(threads);
-    graph.register(Base);
-    graph.register(Play { base_level, pad });
+    graph.register_as(
+        "base",
+        Base {
+            blend_from: None,
+            name: "base",
+        },
+    );
+    graph.register_as(
+        "base:blended",
+        Base {
+            blend_from: Some("base"),
+            name: "base:blended",
+        },
+    );
+    graph.register(Play { base, pad });
     graph
 }
 
@@ -170,10 +190,10 @@ fn graph(ledger: Arc<Ledger>, base_level: u32, pad: i32, threads: usize) -> Laye
 #[test]
 fn residency_equals_dependency_closure() {
     let ledger = Arc::new(Ledger::default());
-    let graph = graph(ledger.clone(), 1, CELL, 4);
+    let graph = graph(ledger.clone(), "base:blended", CELL, 4);
 
     // One play chunk, whose 256 m padding pulls a 3x3 of base.
-    let mut top = TopDep::new(&graph, "play", IVec3::new(1, 0, 1));
+    let mut top = TopDep::new("play", IVec3::new(1, 0, 1));
     top.set_focus(&graph, IVec3::ZERO);
     graph.process_top(&mut top);
 
@@ -186,8 +206,8 @@ fn residency_equals_dependency_closure() {
 
     // Base level 1 reads a 3x3 of base level 0, so the level-0 footprint
     // is one ring wider than the level-1 footprint.
-    assert_eq!(ledger.created_at("base", 1), 9);
-    assert_eq!(ledger.created_at("base", 0), 25, "5x5 for the level-1 ring");
+    assert_eq!(ledger.created_at("base:blended"), 9);
+    assert_eq!(ledger.created_at("base"), 25, "5x5 for the level-1 ring");
 
     // Move far enough that nothing overlaps: the old closure must be gone,
     // not lingering until an eviction pass notices.
@@ -207,9 +227,9 @@ fn residency_equals_dependency_closure() {
 #[test]
 fn every_create_is_paired_with_a_destroy() {
     let ledger = Arc::new(Ledger::default());
-    let graph = graph(ledger.clone(), 1, CELL, 4);
+    let graph = graph(ledger.clone(), "base:blended", CELL, 4);
 
-    let mut top = TopDep::new(&graph, "play", IVec3::new(CELL * 2, 0, CELL * 2));
+    let mut top = TopDep::new("play", IVec3::new(CELL * 2, 0, CELL * 2));
     for step in 0..6 {
         top.set_focus(&graph, IVec3::new(step * CELL, 0, step * CELL / 2));
         graph.process_top(&mut top);
@@ -231,9 +251,9 @@ fn every_create_is_paired_with_a_destroy() {
 #[test]
 fn overlapping_moves_reuse_chunks() {
     let ledger = Arc::new(Ledger::default());
-    let graph = graph(ledger.clone(), 0, 0, 1);
+    let graph = graph(ledger.clone(), "base", 0, 1);
 
-    let mut top = TopDep::new(&graph, "play", IVec3::new(CELL * 8, 0, CELL * 8));
+    let mut top = TopDep::new("play", IVec3::new(CELL * 8, 0, CELL * 8));
     top.set_focus(&graph, IVec3::new(CELL / 2, 0, CELL / 2));
     graph.process_top(&mut top);
     let first = ledger.created.load(Ordering::Relaxed);
@@ -260,7 +280,7 @@ fn overlapping_moves_reuse_chunks() {
 #[test]
 fn reads_never_generate() {
     let ledger = Arc::new(Ledger::default());
-    let graph = graph(ledger.clone(), 0, 0, 1);
+    let graph = graph(ledger.clone(), "base", 0, 1);
 
     let far = IAabb::new(
         IVec3::new(CELL * 100, 0, CELL * 100),
@@ -275,42 +295,45 @@ fn reads_never_generate() {
     assert_eq!(ledger.created.load(Ordering::Relaxed), 0);
 }
 
-/// A dependency names a level, so a consumer can depend on a partial state
-/// — the mechanism that keeps an otherwise-circular graph a DAG.
+/// A consumer can depend on a partial state by naming the INSTANCE that
+/// publishes it — the mechanism that keeps an otherwise-circular graph a
+/// DAG, and the reason internal layer levels are not needed for it.
 #[test]
-fn dependency_on_a_non_final_level_stops_there() {
+fn depending_on_an_early_stage_does_not_pull_the_later_one() {
     let ledger = Arc::new(Ledger::default());
-    let graph = graph(ledger.clone(), 0, 0, 1);
+    let graph = graph(ledger.clone(), "base", 0, 1);
 
-    let mut top = TopDep::new(&graph, "play", IVec3::new(1, 0, 1));
+    let mut top = TopDep::new("play", IVec3::new(1, 0, 1));
     top.set_focus(&graph, IVec3::ZERO);
     graph.process_top(&mut top);
 
-    assert_eq!(ledger.created_at("base", 0), 1);
+    assert_eq!(ledger.created_at("base"), 1);
     assert_eq!(
-        ledger.created_at("base", 1),
+        ledger.created_at("base:blended"),
         0,
-        "depending on level 0 must not drag level 1 into existence",
+        "depending on the raw stage must not build the blended one",
     );
 }
 
-/// Reaching level N always walks 0..N: a chunk can never skip a pass.
+/// A staged refinement runs its stages in order and each exactly once —
+/// what internal layer levels used to guarantee structurally, now falling
+/// out of the ordinary dependency walk.
 #[test]
-fn levels_are_walked_in_order() {
+fn stages_are_walked_in_dependency_order() {
     let ledger = Arc::new(Ledger::default());
-    let graph = graph(ledger.clone(), 1, 0, 1);
+    let graph = graph(ledger.clone(), "base:blended", 0, 1);
 
-    let mut top = TopDep::new(&graph, "play", IVec3::new(1, 0, 1));
+    let mut top = TopDep::new("play", IVec3::new(1, 0, 1));
     top.set_focus(&graph, IVec3::ZERO);
     graph.process_top(&mut top);
 
     let events = ledger.events.lock().unwrap();
-    let origin_levels: Vec<u32> = events
+    let at_origin: Vec<&str> = events
         .iter()
-        .filter(|(l, _, c)| *l == "base" && *c == IVec3::ZERO)
-        .map(|(_, level, _)| *level)
+        .filter(|(_, c)| *c == IVec3::ZERO)
+        .map(|(l, _)| *l)
         .collect();
-    assert_eq!(origin_levels, vec![0, 1]);
+    assert_eq!(at_origin, vec!["base", "base:blended", "play"]);
 }
 
 /// Generation is a pure function of coordinates and dependencies, so the
@@ -318,8 +341,8 @@ fn levels_are_walked_in_order() {
 #[test]
 fn results_are_identical_across_thread_counts() {
     let sample = |threads: usize| -> Vec<((i32, i32, i32), u64)> {
-        let graph = graph(Arc::new(Ledger::default()), 1, CELL, threads);
-        let mut top = TopDep::new(&graph, "play", IVec3::new(CELL * 6, 0, CELL * 6));
+        let graph = graph(Arc::new(Ledger::default()), "base:blended", CELL, threads);
+        let mut top = TopDep::new("play", IVec3::new(CELL * 6, 0, CELL * 6));
         top.set_focus(&graph, IVec3::new(CELL * 3, 0, -CELL * 2));
         graph.process_top(&mut top);
         let bounds = top.bounds();
@@ -341,10 +364,10 @@ fn results_are_identical_across_thread_counts() {
 #[test]
 fn shared_chunks_survive_one_holder_leaving() {
     let ledger = Arc::new(Ledger::default());
-    let graph = graph(ledger.clone(), 0, 0, 1);
+    let graph = graph(ledger.clone(), "base", 0, 1);
 
-    let mut a = TopDep::new(&graph, "play", IVec3::new(CELL * 4, 0, CELL * 4));
-    let mut b = TopDep::new(&graph, "play", IVec3::new(CELL * 4, 0, CELL * 4));
+    let mut a = TopDep::new("play", IVec3::new(CELL * 4, 0, CELL * 4));
+    let mut b = TopDep::new("play", IVec3::new(CELL * 4, 0, CELL * 4));
     a.set_focus(&graph, IVec3::ZERO);
     b.set_focus(&graph, IVec3::ZERO);
     graph.process_top(&mut a);
@@ -374,8 +397,8 @@ fn runtime_follows_a_published_focus() {
     use voxel_layers::LayerRuntime;
 
     let ledger = Arc::new(Ledger::default());
-    let graph = Arc::new(graph(ledger.clone(), 0, 0, 2));
-    let top = TopDep::new(&graph, "play", IVec3::new(CELL * 4, 0, CELL * 4));
+    let graph = Arc::new(graph(ledger.clone(), "base", 0, 2));
+    let top = TopDep::new("play", IVec3::new(CELL * 4, 0, CELL * 4));
     let runtime = LayerRuntime::start(graph.clone(), vec![top]);
     let handle = runtime.top(0);
 
@@ -404,9 +427,9 @@ fn dropping_the_runtime_releases_everything() {
     use voxel_layers::LayerRuntime;
 
     let ledger = Arc::new(Ledger::default());
-    let graph = Arc::new(graph(ledger.clone(), 1, CELL, 2));
+    let graph = Arc::new(graph(ledger.clone(), "base:blended", CELL, 2));
     {
-        let top = TopDep::new(&graph, "play", IVec3::new(CELL * 3, 0, CELL * 3));
+        let top = TopDep::new("play", IVec3::new(CELL * 3, 0, CELL * 3));
         let runtime = LayerRuntime::start(graph.clone(), vec![top]);
         runtime.top(0).set_focus(IVec3::new(CELL / 2, 0, CELL / 2));
         runtime.wait_idle();
@@ -425,16 +448,16 @@ fn dropping_the_runtime_releases_everything() {
 #[test]
 fn invalidate_rebuilds_a_level_in_place() {
     let ledger = Arc::new(Ledger::default());
-    let graph = graph(ledger.clone(), 0, 0, 1);
+    let graph = graph(ledger.clone(), "base", 0, 1);
 
-    let mut top = TopDep::new(&graph, "play", IVec3::new(1, 0, 1));
+    let mut top = TopDep::new("play", IVec3::new(1, 0, 1));
     top.set_focus(&graph, IVec3::new(CELL / 2, 0, CELL / 2));
     graph.process_top(&mut top);
     let resident = graph.resident_chunks();
     let created = ledger.created.load(Ordering::Relaxed);
     assert!(resident > 0);
 
-    graph.invalidate("play", IVec3::ZERO, 0);
+    graph.invalidate("play", IVec3::ZERO);
 
     // Built again, destroyed exactly once for it, and still held.
     assert_eq!(ledger.created.load(Ordering::Relaxed), created + 1);
@@ -455,8 +478,8 @@ fn invalidate_rebuilds_a_level_in_place() {
 #[test]
 fn invalidate_ignores_absent_chunks() {
     let ledger = Arc::new(Ledger::default());
-    let graph = graph(ledger.clone(), 0, 0, 1);
-    graph.invalidate("play", IVec3::new(9_999, 0, 9_999), 0);
+    let graph = graph(ledger.clone(), "base", 0, 1);
+    graph.invalidate("play", IVec3::new(9_999, 0, 9_999));
     assert_eq!(graph.resident_chunks(), 0);
     assert_eq!(ledger.created.load(Ordering::Relaxed), 0);
 }
@@ -466,9 +489,9 @@ fn invalidate_ignores_absent_chunks() {
 #[test]
 fn chunk_objects_are_pooled_across_residency() {
     let ledger = Arc::new(Ledger::default());
-    let graph = graph(ledger.clone(), 0, 0, 1);
+    let graph = graph(ledger.clone(), "base", 0, 1);
 
-    let mut top = TopDep::new(&graph, "play", IVec3::new(CELL * 2, 0, CELL * 2));
+    let mut top = TopDep::new("play", IVec3::new(CELL * 2, 0, CELL * 2));
     top.set_focus(&graph, IVec3::new(CELL / 2, 0, CELL / 2));
     graph.process_top(&mut top);
     let held = graph.resident_in("play");
@@ -499,11 +522,11 @@ fn chunk_objects_are_pooled_across_residency() {
 #[test]
 fn a_top_dependency_can_be_shaped_by_a_predicate() {
     let ledger = Arc::new(Ledger::default());
-    let graph = graph(ledger.clone(), 0, 0, 1);
+    let graph = graph(ledger.clone(), "base", 0, 1);
 
     // Solid 7x7 window, then the same window with its middle 3x3 removed.
     let size = IVec3::new(CELL * 7, 0, CELL * 7);
-    let mut solid = TopDep::at_level("play", 0, size);
+    let mut solid = TopDep::new("play", size);
     solid.set_focus(&graph, IVec3::new(CELL / 2, 0, CELL / 2));
     graph.process_top(&mut solid);
     let full = graph.resident_in("play");
@@ -513,7 +536,7 @@ fn a_top_dependency_can_be_shaped_by_a_predicate() {
     graph.process_top(&mut solid);
     assert_eq!(graph.resident_chunks(), 0);
 
-    let mut shell = TopDep::at_level("play", 0, size)
+    let mut shell = TopDep::new("play", size)
         .with_filter(Arc::new(|coord: IVec3| coord.abs().max_element() > 1));
     shell.set_focus(&graph, IVec3::new(CELL / 2, 0, CELL / 2));
     graph.process_top(&mut shell);
@@ -539,13 +562,13 @@ fn a_top_dependency_can_be_shaped_by_a_predicate() {
 #[test]
 fn a_predicate_follows_the_focus_within_one_cell() {
     let ledger = Arc::new(Ledger::default());
-    let graph = graph(ledger, 0, 0, 1);
+    let graph = graph(ledger, "base", 0, 1);
 
     // Wants one cell, read from a value the test moves — the shape of a
     // filter is a function of something OUTSIDE the dependency, which is
     // why any move has to re-evaluate it.
     let wanted = Arc::new(AtomicUsize::new(0));
-    let mut top = TopDep::at_level("play", 0, IVec3::new(CELL * 7, 0, CELL * 7)).with_filter({
+    let mut top = TopDep::new("play", IVec3::new(CELL * 7, 0, CELL * 7)).with_filter({
         let wanted = wanted.clone();
         Arc::new(move |coord: IVec3| coord == IVec3::new(wanted.load(Ordering::Relaxed) as i32, 0, 0))
     });
@@ -575,7 +598,7 @@ fn a_predicate_follows_the_focus_within_one_cell() {
 fn a_region_handed_between_top_dependencies_is_never_dropped() {
     for (order, names) in [([0, 1], "grower first"), ([1, 0], "shrinker first")] {
         let ledger = Arc::new(Ledger::default());
-        let graph = graph(ledger.clone(), 0, 0, 1);
+        let graph = graph(ledger.clone(), "base", 0, 1);
 
         // Two bands abutting at the focus cell, both following the focus:
         // the left one covers the two cells below it, the right one the
@@ -592,8 +615,8 @@ fn a_region_handed_between_top_dependencies_is_never_dropped() {
             })
         };
         let mut tops = vec![
-            TopDep::at_level("play", 0, window).with_filter(band(-2, 0)),
-            TopDep::at_level("play", 0, window).with_filter(band(0, 2)),
+            TopDep::new("play", window).with_filter(band(-2, 0)),
+            TopDep::new("play", window).with_filter(band(0, 2)),
         ];
         let focus = |tops: &mut Vec<TopDep>, cell: i32| {
             center.store(cell as usize, Ordering::Relaxed);
@@ -604,7 +627,7 @@ fn a_region_handed_between_top_dependencies_is_never_dropped() {
             for i in order {
                 ordered.push(std::mem::replace(
                     &mut tops[i],
-                    TopDep::at_level("play", 0, IVec3::ZERO),
+                    TopDep::new("play", IVec3::ZERO),
                 ));
             }
             graph.process_tops(&mut ordered);

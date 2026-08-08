@@ -353,7 +353,7 @@ impl StackPlanner {
             if std::env::var_os("VOXEL_LOG_LAYERS").is_some() {
                 info!("top dep {:?}: size {size:?}", e.name);
             }
-            deps.push(TopDep::at_level(&e.name, 0, size));
+            deps.push(TopDep::new(&e.name, size));
         }
         // Presentation layers: this game's own, sitting on the emit
         // layers and turning what they plan into something it can draw.

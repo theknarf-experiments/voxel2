@@ -435,7 +435,7 @@ impl Layer for FarForest {
         DVec3::new(SUPER_M as f64, 0.0, SUPER_M as f64)
     }
 
-    fn dependencies(&self, _level: u32) -> Vec<Dep> {
+    fn dependencies(&self) -> Vec<Dep> {
         vec![Dep::named(&self.source, IVec3::ZERO)]
     }
 }
@@ -443,7 +443,7 @@ impl Layer for FarForest {
 impl LayerChunk for FarForestChunk {
     type Layer = FarForest;
 
-    fn create(&mut self, ctx: &ChunkCtx<'_, FarForest>, _level: u32) {
+    fn create(&mut self, ctx: &ChunkCtx<'_, FarForest>) {
         let layer = ctx.layer();
         let generator = &ctx.context::<WorldCtx>().generator;
         let mut props = Vec::new();
@@ -467,7 +467,7 @@ impl LayerChunk for FarForestChunk {
             .put(ctx.instance_key(), ctx.coord(), props);
     }
 
-    fn destroy(&mut self, ctx: &ChunkCtx<'_, FarForest>, _level: u32) {
+    fn destroy(&mut self, ctx: &ChunkCtx<'_, FarForest>) {
         ctx.context::<WorldCtx>()
             .far_props
             .take(ctx.instance_key(), ctx.coord());
@@ -484,9 +484,8 @@ pub fn register_far_forest(graph: &mut LayerGraph) -> Option<TopDep> {
     graph.register(FarForest {
         source: FOREST_CLASS.to_string(),
     });
-    Some(TopDep::at_level(
+    Some(TopDep::new(
         FarForest::NAME,
-        0,
         IVec3::new((2.0 * SUPER_VIEW_M) as i32, 0, (2.0 * SUPER_VIEW_M) as i32),
     ))
 }

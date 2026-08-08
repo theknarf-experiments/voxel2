@@ -383,7 +383,11 @@
         "altitude": [
           180.0,
           620.0
-        ]
+        ],
+        "relax": {
+          "strength": 0.4,
+          "iterations": 2
+        }
       },
       {
         "kind": "flow",
@@ -414,7 +418,10 @@
         "up": [
           0.88,
           1.0
-        ]
+        ],
+        "relax": {
+          "strength": 0.35
+        }
       },
       {
         "kind": "emit",

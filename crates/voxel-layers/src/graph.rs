@@ -23,10 +23,10 @@ use voxel_core::seed::{chunk_seed, Rng};
 
 use crate::layer::{layer_key, IAabb, LayerKey};
 use crate::layer::{chunk_bounds as bounds_of, chunk_range as range_of};
-use crate::traits::{Dep, Layer, LayerChunk, FINAL_LEVEL};
+use crate::traits::{Dep, Layer, LayerChunk};
 use crate::store::{ChunkSlot, ErasedChunk, Provider, Usage};
 
-type CreateFn = Box<dyn Fn(&LayerGraph, &Arc<ChunkSlot>, u32) + Send + Sync>;
+type CreateFn = Box<dyn Fn(&LayerGraph, &Arc<ChunkSlot>) + Send + Sync>;
 /// Which chunk coordinates a top dependency wants, for one focus.
 pub type CoordFilter = Arc<dyn Fn(IVec3) -> bool + Send + Sync>;
 type NewChunkFn = Box<dyn Fn() -> ErasedChunk + Send + Sync>;
@@ -35,11 +35,11 @@ struct LayerEntry {
     name: String,
     type_id: TypeId,
     extent: DVec3,
-    levels: u32,
-    /// `level_padding(l)` captured at registration.
-    level_pads: Vec<IVec3>,
+
+
+
     /// Dependencies per level, with `FINAL_LEVEL` already resolved.
-    deps: Vec<Vec<Dep>>,
+    deps: Vec<Dep>,
     grid: RwLock<HashMap<IVec3, Arc<ChunkSlot>>>,
     /// Chunk objects returned by `destroy`, ready to be filled again.
     /// Chunks are long-lived at scale and their buffers dominate; letting
@@ -49,13 +49,7 @@ struct LayerEntry {
     created: AtomicUsize,
     destroyed: AtomicUsize,
     create_nanos: AtomicU64,
-    /// Serializes creates of a level that reads its own layer across
-    /// chunks (`level_padding != 0`). Without it two neighbours can
-    /// deadlock: each holds its own chunk for writing while asking to read
-    /// the other's earlier level. Only such levels pay; level 0, which is
-    /// all any single-level layer has, is fully parallel.
-    self_reading: Vec<bool>,
-    level_locks: Vec<Mutex<()>>,
+
     new_chunk: NewChunkFn,
     create: CreateFn,
     destroy: CreateFn,
@@ -64,7 +58,7 @@ struct LayerEntry {
 thread_local! {
     /// Create stack, for cycle detection — a cycle would otherwise
     /// deadlock on a level lock.
-    static GEN_STACK: RefCell<Vec<(LayerKey, u32, IVec3)>> = const { RefCell::new(Vec::new()) };
+    static GEN_STACK: RefCell<Vec<(LayerKey, IVec3)>> = const { RefCell::new(Vec::new()) };
     /// Set while a [`Peek`] guard is alive on this thread.
     static PEEKING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
@@ -182,69 +176,45 @@ impl LayerGraph {
             extent.cmpge(DVec3::ZERO).all() && extent.is_finite(),
             "chunk_extent must be non-negative and finite"
         );
-        let levels = layer.levels();
-        assert!(levels >= 1, "a layer needs at least one level");
-
-        let mut deps = Vec::with_capacity(levels as usize);
-        for level in 0..levels {
-            let mut level_deps = layer.dependencies(level);
-            for dep in &mut level_deps {
-                let entry = self.layers.get(&dep.key).unwrap_or_else(|| {
-                    panic!(
-                        "layer {instance:?} level {level} depends on an unregistered layer; \
-                         register dependencies first"
-                    )
-                });
-                if dep.level == FINAL_LEVEL {
-                    dep.level = entry.levels - 1;
-                }
-                assert!(
-                    dep.level < entry.levels,
-                    "layer {instance:?} depends on level {} of {:?}, which has {} level(s)",
-                    dep.level,
-                    entry.name,
-                    entry.levels
-                );
-            }
-            deps.push(level_deps);
+        let deps = layer.dependencies();
+        for dep in &deps {
+            assert!(
+                self.layers.contains_key(&dep.key),
+                "layer {instance:?} depends on an unregistered layer; \
+                 register dependencies first"
+            );
         }
-        let level_pads: Vec<IVec3> = (0..levels).map(|l| layer.level_padding(l)).collect();
-        let self_reading: Vec<bool> = (0..levels as usize)
-            .map(|l| l > 0 && level_pads[l] != IVec3::ZERO)
-            .collect();
 
         let layer = Arc::new(layer);
         let create_layer = layer.clone();
         let destroy_layer = layer;
-        let create: CreateFn = Box::new(move |graph, slot, level| {
+        let create: CreateFn = Box::new(move |graph, slot| {
             let ctx = ChunkCtx {
                 graph,
                 layer: &*create_layer,
                 key,
                 coord: slot.coord,
-                level,
                 _marker: PhantomData,
             };
             let mut data = slot.data.write().unwrap();
             let chunk = data
                 .downcast_mut::<L::Chunk>()
                 .expect("layer chunk type mismatch");
-            chunk.create(&ctx, level);
+            chunk.create(&ctx);
         });
-        let destroy: CreateFn = Box::new(move |graph, slot, level| {
+        let destroy: CreateFn = Box::new(move |graph, slot| {
             let ctx = ChunkCtx {
                 graph,
                 layer: &*destroy_layer,
                 key,
                 coord: slot.coord,
-                level,
                 _marker: PhantomData,
             };
             let mut data = slot.data.write().unwrap();
             let chunk = data
                 .downcast_mut::<L::Chunk>()
                 .expect("layer chunk type mismatch");
-            chunk.destroy(&ctx, level);
+            chunk.destroy(&ctx);
         });
 
         self.layers.insert(
@@ -253,16 +223,12 @@ impl LayerGraph {
                 name: instance.to_string(),
                 type_id: TypeId::of::<L>(),
                 extent,
-                levels,
-                level_pads,
                 deps,
                 grid: RwLock::new(HashMap::new()),
                 pool: Mutex::new(Vec::new()),
                 created: AtomicUsize::new(0),
                 destroyed: AtomicUsize::new(0),
                 create_nanos: AtomicU64::new(0),
-                self_reading,
-                level_locks: (0..levels).map(|_| Mutex::new(())).collect(),
                 new_chunk: Box::new(|| Box::new(L::Chunk::default())),
                 create,
                 destroy,
@@ -282,18 +248,13 @@ impl LayerGraph {
         self.layers.values().map(|e| e.name.clone()).collect()
     }
 
-    /// Top level of a registered instance.
-    pub fn top_level(&self, instance: &str) -> u32 {
-        self.entry(layer_key(instance)).levels - 1
-    }
-
     // ---------------------------------------------------------------- ensure
 
-    /// Generate every chunk of `key` covering `bounds` up to `level`,
-    /// resolving each one's declared dependency closure first, and record
-    /// them all in `usage` — which is what keeps them resident.
-    fn ensure(&self, key: LayerKey, bounds: IAabb, level: u32, usage: &mut Usage) {
-        self.ensure_shell(key, bounds, None, level, usage);
+    /// Generate every chunk of `key` covering `bounds`, resolving each
+    /// one's declared dependency closure first, and record them all in
+    /// `usage` — which is what keeps them resident.
+    fn ensure(&self, key: LayerKey, bounds: IAabb, usage: &mut Usage) {
+        self.ensure_shell(key, bounds, None, usage);
     }
 
     /// `ensure`, minus whatever `filter` rejects. A dependency's own
@@ -303,7 +264,6 @@ impl LayerGraph {
         key: LayerKey,
         bounds: IAabb,
         filter: Option<&CoordFilter>,
-        level: u32,
         usage: &mut Usage,
     ) {
         let entry = self.entry(key);
@@ -348,7 +308,7 @@ impl LayerGraph {
                             .unwrap()
                             .pop()
                             .unwrap_or_else(|| (entry.new_chunk)());
-                        Arc::new(ChunkSlot::new(key, *coord, entry.levels as usize, data))
+                        Arc::new(ChunkSlot::new(key, *coord, data))
                     });
                     slots.push(slot.clone());
                 }
@@ -370,7 +330,7 @@ impl LayerGraph {
         );
         let mut missing: Vec<Arc<ChunkSlot>> = slots
             .iter()
-            .filter(|slot| !slot.has_level(level))
+            .filter(|slot| !slot.is_generated())
             .cloned()
             .collect();
         if !missing.is_empty() {
@@ -378,29 +338,21 @@ impl LayerGraph {
                 let d = (slot.coord - center_coord).clamp(IVec3::splat(-30_000), IVec3::splat(30_000));
                 d.x * d.x + d.y * d.y + d.z * d.z
             });
-            self.create_all(key, &missing, level);
+            self.create_all(key, &missing);
         }
 
         // 4. Everything covered is now a provider of whatever asked for it,
         //    whether this call generated it or found it.
         for slot in slots {
-            slot.add_user(level);
-            usage.providers.push((slot, level));
+            slot.add_user();
+            usage.providers.push(slot);
         }
     }
 
     /// Create `missing` in parallel when there is enough of it to pay for
     /// the threads, and when the worker budget has any left — nested
     /// ensures share one global budget.
-    fn create_all(&self, key: LayerKey, missing: &[Arc<ChunkSlot>], level: u32) {
-        let entry = self.entry(key);
-        if entry.self_reading[level as usize] {
-            let _serial = entry.level_locks[level as usize].lock().unwrap();
-            for slot in missing {
-                self.create_level(key, slot, level);
-            }
-            return;
-        }
+    fn create_all(&self, key: LayerKey, missing: &[Arc<ChunkSlot>]) {
         const PARALLEL_MIN: usize = 8;
         // The worker budget is the only cap. It used to be the smaller of
         // that and 8 per call, which is right when a create is CPU work
@@ -416,7 +368,7 @@ impl LayerGraph {
                 if self.aborting.load(Ordering::Relaxed) {
                     return;
                 }
-                self.create_level(key, slot, level);
+                self.create_chunk(key, slot);
             }
             return;
         }
@@ -428,7 +380,7 @@ impl LayerGraph {
                         if self.aborting.load(Ordering::Relaxed) {
                             return;
                         }
-                        self.create_level(key, slot, level);
+                        self.create_chunk(key, slot);
                     }
                 });
             }
@@ -436,7 +388,7 @@ impl LayerGraph {
                 if self.aborting.load(Ordering::Relaxed) {
                     break;
                 }
-                self.create_level(key, slot, level);
+                self.create_chunk(key, slot);
             }
         });
         self.free_workers.fetch_add(helpers, Ordering::Relaxed);
@@ -461,47 +413,41 @@ impl LayerGraph {
         }
     }
 
-    /// Bring one chunk up to `level`: its providers first, then the chunk.
-    fn create_level(&self, key: LayerKey, slot: &Arc<ChunkSlot>, level: u32) {
+    /// Bring one chunk into being: its providers first, then the chunk.
+    fn create_chunk(&self, key: LayerKey, slot: &Arc<ChunkSlot>) {
         let entry = self.entry(key);
-        let _guard = slot.level_locks[level as usize].lock().unwrap();
-        if slot.has_level(level) {
+        let _guard = slot.lock.lock().unwrap();
+        if slot.is_generated() {
             return; // another worker got here first
         }
 
-        let stack_key = (key, level, slot.coord);
+        let stack_key = (key, slot.coord);
         GEN_STACK.with(|stack| {
             assert!(
                 !stack.borrow().contains(&stack_key),
-                "layer dependency cycle at {:?} level {level} {}",
+                "layer dependency cycle at {:?} {}",
                 entry.name,
                 slot.coord
             );
             stack.borrow_mut().push(stack_key);
         });
 
-        // Providers, exactly as declared. The previous level of this same
-        // layer comes first: reaching level N always goes through N-1, so
-        // a chunk can never skip a generation pass.
+        // Providers, exactly as declared.
         let own = bounds_of(entry.extent, slot.coord);
         let mut providers = Usage::default();
-        if level > 0 {
-            let pad = entry.level_pads[level as usize];
-            self.ensure(key, dep_bounds(own, pad), level - 1, &mut providers);
-        }
-        for dep in &entry.deps[level as usize] {
-            self.ensure(dep.key, dep_bounds(own, dep.padding), dep.level, &mut providers);
+        for dep in &entry.deps {
+            self.ensure(dep.key, dep_bounds(own, dep.padding), &mut providers);
         }
 
         let started = std::time::Instant::now();
-        (entry.create)(self, slot, level);
+        (entry.create)(self, slot);
         entry
             .create_nanos
             .fetch_add(started.elapsed().as_nanos() as u64, Ordering::Relaxed);
         entry.created.fetch_add(1, Ordering::Relaxed);
 
-        slot.levels.lock().unwrap()[level as usize].providers = providers.providers;
-        slot.level.store(level as i32, Ordering::Release);
+        slot.state.lock().unwrap().providers = providers.providers;
+        slot.generated.store(true, Ordering::Release);
 
         GEN_STACK.with(|stack| {
             stack.borrow_mut().pop();
@@ -510,21 +456,21 @@ impl LayerGraph {
 
     // --------------------------------------------------------------- release
 
-    /// Give up a usage record. Chunk levels nothing depends on any more
-    /// are destroyed, and their own providers released in turn — the
-    /// cascade is iterative, so it holds no lock while it runs.
+    /// Give up a usage record. Chunks nothing depends on any more are
+    /// destroyed, and their own providers released in turn — the cascade
+    /// is iterative, so it holds no lock while it runs.
     pub fn release(&self, usage: Usage) {
         let mut pending: Vec<Provider> = usage.providers;
-        while let Some((slot, level)) = pending.pop() {
-            let Some(providers) = slot.drop_user(level) else {
+        while let Some(slot) = pending.pop() {
+            let Some(providers) = slot.drop_user() else {
                 continue; // still wanted by someone else
             };
-            self.destroy_level(&slot, level);
+            self.destroy_chunk(&slot);
             pending.extend(providers);
         }
     }
 
-    /// Generate `level` of a chunk again, keeping whoever depends on it.
+    /// Generate a chunk again, keeping whoever depends on it.
     ///
     /// A chunk's content is normally a pure function of its coordinate and
     /// its dependencies, and nothing here would exist if that were always
@@ -539,42 +485,40 @@ impl LayerGraph {
     /// ensure-new-then-release-old, the same rule a moving top dependency
     /// follows — so a dependency the rebuild still needs is never
     /// destroyed and immediately regenerated.
-    pub fn invalidate(&self, instance: &str, coord: IVec3, level: u32) {
+    pub fn invalidate(&self, instance: &str, coord: IVec3) {
         let key = layer_key(instance);
         let entry = self.entry(key);
         let Some(slot) = entry.grid.read().unwrap().get(&coord).cloned() else {
             return; // not resident; nothing to rebuild
         };
         let released = {
-            let _guard = slot.level_locks[level as usize].lock().unwrap();
-            if !slot.has_level(level) {
+            let _guard = slot.lock.lock().unwrap();
+            if !slot.is_generated() {
                 return; // never built, or already being rebuilt
             }
-            (entry.destroy)(self, &slot, level);
-            slot.level.store(level as i32 - 1, Ordering::Release);
-            std::mem::take(&mut slot.levels.lock().unwrap()[level as usize].providers)
+            (entry.destroy)(self, &slot);
+            slot.generated.store(false, Ordering::Release);
+            std::mem::take(&mut slot.state.lock().unwrap().providers)
         };
-        self.create_level(key, &slot, level);
+        self.create_chunk(key, &slot);
         self.release(Usage::from_providers(released));
     }
 
-    fn destroy_level(&self, slot: &Arc<ChunkSlot>, level: u32) {
+    fn destroy_chunk(&self, slot: &Arc<ChunkSlot>) {
         let entry = self.entry(slot.layer);
         {
-            let _guard = slot.level_locks[level as usize].lock().unwrap();
-            (entry.destroy)(self, slot, level);
-            slot.level.store(level as i32 - 1, Ordering::Release);
+            let _guard = slot.lock.lock().unwrap();
+            (entry.destroy)(self, slot);
+            slot.generated.store(false, Ordering::Release);
         }
         entry.destroyed.fetch_add(1, Ordering::Relaxed);
-        if level == 0 {
-            let removed = entry.grid.write().unwrap().remove(&slot.coord);
-            // Only the last holder of the slot may recycle its chunk; a
-            // reader that still has the Arc would otherwise see it refilled
-            // underneath it.
-            if let Some(slot) = removed {
-                if let Ok(slot) = Arc::try_unwrap(slot) {
-                    entry.pool.lock().unwrap().push(slot.data.into_inner().unwrap());
-                }
+        let removed = entry.grid.write().unwrap().remove(&slot.coord);
+        // Only the last holder of the slot may recycle its chunk; a
+        // reader that still has the Arc would otherwise see it refilled
+        // underneath it.
+        if let Some(slot) = removed {
+            if let Ok(slot) = Arc::try_unwrap(slot) {
+                entry.pool.lock().unwrap().push(slot.data.into_inner().unwrap());
             }
         }
     }
@@ -620,7 +564,7 @@ impl LayerGraph {
             old.extend(dep.current.take());
             if dep.active && !self.aborting.load(Ordering::Relaxed) {
                 let mut usage = Usage::default();
-                self.ensure_shell(dep.key, dep.bounds(), dep.filter.as_ref(), dep.level, &mut usage);
+                self.ensure_shell(dep.key, dep.bounds(), dep.filter.as_ref(), &mut usage);
                 dep.current = Some(usage);
             }
         }
@@ -635,11 +579,10 @@ impl LayerGraph {
     /// Chunks of a named instance covering `bounds`, at its top level.
     /// Resident chunks only — this never generates.
     pub fn view<L: Layer>(&self, instance: &str, bounds: IAabb) -> View<L> {
-        let key = layer_key(instance);
-        self.view_at(key, bounds, self.entry(key).levels - 1)
+        self.view_at(layer_key(instance), bounds)
     }
 
-    fn view_at<L: Layer>(&self, key: LayerKey, bounds: IAabb, level: u32) -> View<L> {
+    fn view_at<L: Layer>(&self, key: LayerKey, bounds: IAabb) -> View<L> {
         let entry = self.entry(key);
         assert_eq!(
             entry.type_id,
@@ -657,7 +600,7 @@ impl LayerGraph {
                 for x in lo.x..=hi.x {
                     let coord = IVec3::new(x, y, z);
                     match grid.get(&coord) {
-                        Some(slot) if slot.has_level(level) => chunks.push((coord, slot.clone())),
+                        Some(slot) if slot.is_generated() => chunks.push((coord, slot.clone())),
                         _ => missing += 1,
                     }
                 }
@@ -670,7 +613,7 @@ impl LayerGraph {
             // drown the log.
             if n < 40 && std::env::var_os("VOXEL_LOG_LAYERS").is_some() {
                 eprintln!(
-                    "read miss: {:?} level {level} wanted {:?}..{:?}, {missing} of {} chunks absent",
+                    "read miss: {:?} wanted {:?}..{:?}, {missing} of {} chunks absent",
                     entry.name,
                     bounds.min,
                     bounds.max,
@@ -742,7 +685,6 @@ impl LayerGraph {
 /// around this point". Nothing generates without one.
 pub struct TopDep {
     key: LayerKey,
-    level: u32,
     size: IVec3,
     /// Which coordinates inside `size` this dependency actually wants,
     /// re-bound to the focus on every move.
@@ -770,17 +712,11 @@ pub struct TopDep {
 }
 
 impl TopDep {
-    /// A dependency on the top level of `instance`, covering `size` meters
-    /// centered on the focus.
-    pub fn new(graph: &LayerGraph, instance: &str, size: IVec3) -> Self {
-        let level = graph.top_level(instance);
-        Self::at_level(instance, level, size)
-    }
-
-    pub fn at_level(instance: &str, level: u32, size: IVec3) -> Self {
+    /// A dependency on `instance`, covering `size` meters centered on the
+    /// focus.
+    pub fn new(instance: &str, size: IVec3) -> Self {
         Self {
             key: layer_key(instance),
-            level,
             size,
             filter: None,
             focus: IVec3::ZERO,
@@ -866,7 +802,6 @@ pub struct ChunkCtx<'a, L: Layer> {
     layer: &'a L,
     key: LayerKey,
     coord: IVec3,
-    level: u32,
     _marker: PhantomData<L>,
 }
 
@@ -891,23 +826,14 @@ impl<L: Layer> ChunkCtx<'_, L> {
         self.key
     }
 
-    /// Which level is being generated (0-based).
-    pub fn level(&self) -> u32 {
-        self.level
-    }
-
     /// World-space bounds of this chunk.
     pub fn chunk_bounds(&self) -> IAabb {
         bounds_of(self.graph.entry(self.key).extent, self.coord)
     }
 
-    /// Deterministic seed for this chunk, distinct per instance and level.
+    /// Deterministic seed for this chunk, distinct per instance.
     pub fn seed(&self) -> u64 {
-        chunk_seed(
-            self.graph.world_seed,
-            self.key ^ (self.level as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15),
-            self.coord,
-        )
+        chunk_seed(self.graph.world_seed, self.key, self.coord)
     }
 
     pub fn rng(&self) -> Rng {
@@ -939,13 +865,14 @@ impl<L: Layer> ChunkCtx<'_, L> {
     pub fn get_named<D: Layer>(&self, instance: &str, bounds: IAabb) -> View<D> {
         let entry = self.graph.entry(self.key);
         let dep_key = layer_key(instance);
-        let dep = entry.deps[self.level as usize]
+        let dep = entry
+            .deps
             .iter()
             .find(|d| d.key == dep_key)
             .unwrap_or_else(|| {
                 panic!(
-                    "layer {:?} level {} reads {instance:?} without declaring it as a dependency",
-                    entry.name, self.level,
+                    "layer {:?} reads {instance:?} without declaring it as a dependency",
+                    entry.name,
                 )
             });
         let own = self.chunk_bounds();
@@ -962,33 +889,9 @@ impl<L: Layer> ChunkCtx<'_, L> {
             bounds,
             needed_padding(own, bounds, dep.padding),
         );
-        self.graph.view_at::<D>(dep_key, bounds, dep.level)
+        self.graph.view_at::<D>(dep_key, bounds)
     }
 
-    /// Read level `level() - 1` of this same layer, EXCLUDING this chunk —
-    /// which the create method already has as `self`. Panics at level 0 or
-    /// outside the declared [`Layer::level_padding`].
-    pub fn get_self(&self, bounds: IAabb) -> View<L> {
-        assert!(
-            self.level > 0,
-            "layer {:?} level 0 has no previous level to read",
-            L::NAME
-        );
-        let own = self.chunk_bounds();
-        let allowed = own.inflate(self.layer.level_padding(self.level));
-        assert!(
-            allowed.contains(bounds),
-            "layer {:?} level {} reads outside its declared level padding: allowed {:?}, \
-             requested {:?}",
-            L::NAME,
-            self.level,
-            allowed,
-            bounds
-        );
-        let mut view = self.graph.view_at::<L>(self.key, bounds, self.level - 1);
-        view.chunks.retain(|(coord, _)| *coord != self.coord);
-        view
-    }
 }
 
 /// The region a chunk may read from a dependency: its own bounds inflated
