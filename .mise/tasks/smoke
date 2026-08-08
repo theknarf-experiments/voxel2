@@ -1,0 +1,33 @@
+#!/bin/bash
+#MISE description="Boot each shipped level with NO env vars and fail on any panic"
+# Every other check here runs with VOXEL_REMOTE, VOXEL_START and friends
+# set, so a system that only fails on a PLAIN launch survives all of them.
+# That is exactly what happened: `HostCommands` is created by the remote
+# plugin, and requiring it panicked the whole schedule on every ordinary
+# `cargo run` while every test passed.
+#
+# Usage: mise run smoke [seconds]
+set -e
+SECS=${1:-25}
+cargo build -p voxel2 2>&1 | tail -1
+status=0
+for level in levels/*.json; do
+    log=$(mktemp)
+    caffeinate -dis ./target/debug/voxel2 "$level" > "$log" 2>&1 &
+    pid=$!
+    sleep "$SECS"
+    kill "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+    for bad in "panicked" "error in system" "Validation Error" "never became drawable"; do
+        n=$(grep -c "$bad" "$log" || true)
+        if [ "$n" != "0" ]; then
+            echo "FAIL $level: $n x '$bad'"
+            grep -m2 "$bad" "$log"
+            status=1
+        fi
+    done
+    [ "$status" = "0" ] && echo "ok   $level"
+    rm -f "$log"
+done
+[ "$status" = "0" ] && echo "SMOKE PASS" || echo "SMOKE FAIL"
+exit $status

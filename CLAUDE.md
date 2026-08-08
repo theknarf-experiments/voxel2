@@ -6,6 +6,10 @@ architecture. Design plan: `~/.claude/plans/binary-twirling-brooks.md`.
 ## Build / test / run
 
 - `cargo test --workspace` — property tests; keep green.
+- `mise run smoke` — boots every shipped level with NO env vars and fails
+  on any panic. Every other check sets `VOXEL_REMOTE`/`VOXEL_START`, so a
+  system that only breaks on a plain `cargo run` survives all of them.
+  Run it before claiming a change works.
 - `cargo run -p voxel2 -- levels/<name>.json` — visual verification is
   mandatory for render changes: run ~35 s (LOD refinement needs time),
   screenshot, and look. Use `caffeinate -dis` so the display can't sleep,

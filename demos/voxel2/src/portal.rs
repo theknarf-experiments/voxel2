@@ -242,7 +242,11 @@ fn open_portal(
     mut portal: Query<&mut Portal>,
     mut backdrop: Query<&mut Transform, With<PortalBackdrop>>,
     keys: Res<ButtonInput<KeyCode>>,
-    mut host: ResMut<voxel_debug::remote::HostCommands>,
+    // OPTIONAL: the queue only exists when the remote server is running,
+    // and the keybind must work without it. Requiring it panicked the
+    // whole schedule on every plain `cargo run` — the remote was on in
+    // every test I did, so nothing caught it.
+    host: Option<ResMut<voxel_debug::remote::HostCommands>>,
     (mut worlds, mut programs, mut materials): (
         ResMut<StreamedWorlds>,
         ResMut<WorldPrograms>,
@@ -251,12 +255,13 @@ fn open_portal(
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials_assets: ResMut<Assets<StandardMaterial>>,
 ) {
-    let asked = keys.just_pressed(KeyCode::F7) || {
-        let n = host.0.len();
-        host.0
-            .retain(|c| c.get("cmd").and_then(|c| c.as_str()) != Some("portal"));
-        host.0.len() != n
-    };
+    let asked = keys.just_pressed(KeyCode::F7)
+        || host.is_some_and(|mut host| {
+            let n = host.0.len();
+            host.0
+                .retain(|c| c.get("cmd").and_then(|c| c.as_str()) != Some("portal"));
+            host.0.len() != n
+        });
     if !asked {
         return;
     }
