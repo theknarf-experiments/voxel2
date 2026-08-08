@@ -62,6 +62,34 @@ pub const WOP_FIELD: u32 = 17;
 /// Number of field registers.
 pub const FIELD_SLOTS: usize = 4;
 
+/// Sample the two region axes into the `ta`/`tb` registers.
+///
+/// Every band op in a program tests the same two axes, so they are
+/// computed ONCE per sample here rather than per band: three regions
+/// cost two noise evaluations, not six. Must precede any op that reads
+/// them, which in practice means first.
+///
+/// Deliberately unwarped — a region is its own field, not a feature of
+/// the terrain, so it does not follow an earlier `WOP_WARP_XZ`.
+///
+/// `p0 = (a_offset_x, a_offset_z, a_cycles_per_m, b_cycles_per_m)`,
+/// `p1 = (b_offset_x, b_offset_z, octaves, -)`.
+pub const WOP_REGION_AXES: u32 = 19;
+
+/// Add an FBM band to the height, faded in by how firmly a point is
+/// inside a region — terrain character per region.
+///
+/// The fade is smooth, unlike [`WOP_MATERIAL_BAND`]'s hard test: two
+/// materials cannot blend but two heights must, or every region border
+/// would be a cliff. Regions whose bands overlap simply sum, which is
+/// what makes a transition read as one landscape becoming another.
+///
+/// `p0 = (offset_x, offset_z, cycles_per_m, amplitude_m)`,
+/// `p1 = (octaves, noise_mode, feather, -)`,
+/// `p2 = (a0, a1, b0, b1)` — the region, in the axes `WOP_REGION_AXES`
+/// sampled.
+pub const WOP_HEIGHT_BAND_FBM: u32 = 20;
+
 /// Repaint the surface material where two low-frequency noise samples
 /// both fall inside a band: `if mat == from && a in [a0,a1) && b in
 /// [b0,b1) { mat = to }`.
@@ -72,15 +100,11 @@ pub const FIELD_SLOTS: usize = 4;
 /// bands and the names in its own file — the interpreter only ever sees
 /// numbers.
 ///
-/// Self-contained on purpose: it samples its own noise rather than
-/// reading a field register, because the field registers are CPU-only
-/// (see `eval_fields`) and giving the density shader a register file it
-/// otherwise has no use for would cost every sample, not just the ones
-/// that repaint.
+/// Reads the `ta`/`tb` registers [`WOP_REGION_AXES`] filled, so the
+/// noise is paid for once however many regions a level declares.
 ///
 /// `head.z = to material`, `p0 = (a0, a1, b0, b1)`,
-/// `p1 = (a_cycles_per_m, b_cycles_per_m, from material, octaves)`,
-/// `p2 = (a_offset_x, a_offset_z, b_offset_x, b_offset_z)`.
+/// `p1.z = from material`.
 pub const WOP_MATERIAL_BAND: u32 = 18;
 
 /// Cliff step: adds `amp * smoothstep(start, end, h)` to the height
@@ -160,12 +184,19 @@ impl WorldOp {
         self
     }
 
-    /// True for ops that only touch the height register (the height-only
-    /// interpreters in the height-replaying shaders evaluate exactly these).
+    /// True for ops that CONTRIBUTE to the height — which is what tells a
+    /// world it has a heightfield at all, and so whether the horizon
+    /// shadow bake has anything to bake.
+    ///
+    /// Not the same as appearing in the height-only replay:
+    /// `WOP_REGION_AXES` is replayed there (a height band needs its
+    /// registers) but adds nothing to `h`, and a sunless interior that
+    /// divides itself into districts still has no heightfield.
     pub fn is_height_op(&self) -> bool {
         self.kind == WOP_HEIGHT_FBM
             || self.kind == WOP_HEIGHT_OFFSET
             || self.kind == WOP_HEIGHT_STEP
+            || self.kind == WOP_HEIGHT_BAND_FBM
     }
 }
 

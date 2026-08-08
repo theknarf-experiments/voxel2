@@ -519,6 +519,9 @@ fn hfbm(q: vec2<f32>, s: f32, o: i32, m: u32) -> f32 {
 fn height_coarse(xz: vec2<f32>) -> f32 {
     var h = 0.0;
     var warp = vec2<f32>(0.0);
+    // Region axes, filled by WOP_REGION_AXES and read by the band ops.
+    var ta = 0.0;
+    var tb = 0.0;
     let pxz = xz;
     let w = world_header();
     for (var i = 0u; i < w.count.y; i++) {
@@ -539,6 +542,16 @@ fn height_coarse(xz: vec2<f32>) -> f32 {
                 let oct = to_i(op.p1.x);
                 warp.x += hfbm(q, op.p0.x, oct, 0) * op.p0.y;
                 warp.y += hfbm(q + v2(713.0, -337.0), op.p0.x, oct, 0) * op.p0.y;
+            }
+            case 19u: { // WOP_REGION_AXES
+                ta = hfbm(pxz + op.p0.xy, op.p0.z, to_i(op.p1.z), 0) + 0.5;
+                tb = hfbm(pxz + op.p1.xy, op.p0.w, to_i(op.p1.z), 0) + 0.5;
+            }
+            case 20u: { // WOP_HEIGHT_BAND_FBM
+                let fa = op.p1.z;
+                let wa = smoothstep(op.p2.x - fa, op.p2.x + fa, ta) * (1.0 - smoothstep(op.p2.y - fa, op.p2.y + fa, ta));
+                let wb = smoothstep(op.p2.z - fa, op.p2.z + fa, tb) * (1.0 - smoothstep(op.p2.w - fa, op.p2.w + fa, tb));
+                h += min(wa, wb) * hfbm(pxz + warp + op.p0.xy, op.p0.z, to_i(op.p1.x), to_u(op.p1.y)) * op.p0.w;
             }
 // GENOPS ARMS END
             default {}

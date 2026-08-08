@@ -224,6 +224,9 @@ fn eval_program(p: vec3<f32>, vs: f32) -> WorldSample {
     var sr = 0.0;
     var shaft = BIG;
     var warp = vec2<f32>(0.0);
+    // Region axes, filled by WOP_REGION_AXES and read by the band ops.
+    var ta = 0.0;
+    var tb = 0.0;
     let pxz = p.xz;
 
     let w = world_header();
@@ -262,12 +265,18 @@ fn eval_program(p: vec3<f32>, vs: f32) -> WorldSample {
                 let nd = p.y - h;
                 if nd < d { d = nd; mat = op.head.z; }
             }
+            case 19u: { // WOP_REGION_AXES
+                ta = fbm(pxz + op.p0.xy, op.p0.z, to_i(op.p1.z), vs, 0) + 0.5;
+                tb = fbm(pxz + op.p1.xy, op.p0.w, to_i(op.p1.z), vs, 0) + 0.5;
+            }
+            case 20u: { // WOP_HEIGHT_BAND_FBM
+                let fa = op.p1.z;
+                let wa = smoothstep(op.p2.x - fa, op.p2.x + fa, ta) * (1.0 - smoothstep(op.p2.y - fa, op.p2.y + fa, ta));
+                let wb = smoothstep(op.p2.z - fa, op.p2.z + fa, tb) * (1.0 - smoothstep(op.p2.w - fa, op.p2.w + fa, tb));
+                h += min(wa, wb) * fbm(pxz + warp + op.p0.xy, op.p0.z, to_i(op.p1.x), vs, to_u(op.p1.y)) * op.p0.w;
+            }
             case 18u: { // WOP_MATERIAL_BAND
-                if mat == to_u(op.p1.z) {
-                let ta = fbm(pxz + op.p2.xy, op.p1.x, to_i(op.p1.w), vs, 0) + 0.5;
-                let tb = fbm(pxz + op.p2.zw, op.p1.y, to_i(op.p1.w), vs, 0) + 0.5;
-                if ta >= op.p0.x && ta < op.p0.y && tb >= op.p0.z && tb < op.p0.w { mat = op.head.z; }
-                }
+                if mat == to_u(op.p1.z) && ta >= op.p0.x && ta < op.p0.y && tb >= op.p0.z && tb < op.p0.w { mat = op.head.z; }
             }
             case 3u: { // WOP_COARSE_SOLID
                 if SOLID < d { d = SOLID; mat = op.head.z; }

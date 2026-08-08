@@ -85,6 +85,8 @@ fn interpret(p: vec3<f32>, vs: f32) -> f32 {
     var sr = 0.0;
     var shaft = BIG;
     var warp = vec2<f32>(0.0);
+    var ta = 0.0;
+    var tb = 0.0;
     let pxz = p.xz;
     for (var i = 0u; i < prog.count.x; i++) {
         let op = prog.ops[i];

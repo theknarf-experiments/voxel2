@@ -94,6 +94,10 @@ fn max(a: f32, b: f32) -> f32 {
     a.max(b)
 }
 #[inline]
+fn min(a: f32, b: f32) -> f32 {
+    a.min(b)
+}
+
 fn length(v: Vec2) -> f32 {
     v.length()
 }
@@ -150,6 +154,9 @@ pub fn eval(ops: &[WorldOp], seed: u32, p: Vec3, vs: f32) -> (f32, u32) {
     let mut sr = 0.0f32;
     let mut shaft = BIG;
     let mut warp = Vec2::ZERO;
+    // Region axes, filled by WOP_REGION_AXES and read by the band ops.
+    let mut ta = 0.0f32;
+    let mut tb = 0.0f32;
     let pxz = Vec2::new(p.x, p.z);
     // Seeded shims: the generated arms call these by plain name, so a
     // world's seed reaches the noise without a global.
@@ -179,6 +186,8 @@ pub fn eval(ops: &[WorldOp], seed: u32, p: Vec3, vs: f32) -> (f32, u32) {
 pub fn eval_height(ops: &[WorldOp], seed: u32, xz: Vec2, vs: f32) -> f32 {
     let mut h = 0.0;
     let mut warp = Vec2::ZERO;
+    let mut ta = 0.0f32;
+    let mut tb = 0.0f32;
     // Shell names for the generated height arms: the replay shaders call
     // their band-limited FBM without a vs argument.
     let pxz = xz;
@@ -280,20 +289,32 @@ pub fn surface_material_weight(
     vs: f32,
     material: u32,
 ) -> f32 {
-    /// Half-width of the soft edge, in band units. Wide enough that a
-    /// scatter thins out visibly across a border instead of stopping on
-    /// a line, narrow enough that the ground colour it follows is still
-    /// recognisably the same shape.
-    const FEATHER: f32 = 0.03;
+    /// Half-width of the soft edge, in band units.
+    ///
+    /// The same width `WOP_HEIGHT_BAND_FBM` fades its terrain over, so
+    /// one region's ground, its content and its landform all transition
+    /// together. The hard `WOP_MATERIAL_BAND` flips its colour at the
+    /// midpoint of that zone, where the two regions weigh the same.
+    const FEATHER: f32 = 0.06;
     let inside = |v: f32, lo: f32, hi: f32| {
         smoothstep(lo - FEATHER, lo + FEATHER, v) * (1.0 - smoothstep(hi - FEATHER, hi + FEATHER, v))
     };
 
+    // The axes every band tests, sampled once — the same two values the
+    // interpreters put in their `ta`/`tb` registers.
+    let (mut ta, mut tb) = (0.0f32, 0.0f32);
     let mut base = 0u32;
     let mut claimed = 0.0f32;
     let mut mine = 0.0f32;
     for op in ops {
         match op.kind {
+            WOP_REGION_AXES => {
+                let oct = op.p1[2] as i32;
+                ta = crate::fbm_mode(seed, xz + Vec2::new(op.p0[0], op.p0[1]), op.p0[2], oct, vs, 0)
+                    + 0.5;
+                tb = crate::fbm_mode(seed, xz + Vec2::new(op.p1[0], op.p1[1]), op.p0[3], oct, vs, 0)
+                    + 0.5;
+            }
             WOP_HEIGHT_SURFACE | WOP_COARSE_SOLID => base = op.material,
             WOP_MATERIAL_BAND => {
                 // Bands only repaint what an earlier op left as `from`,
@@ -301,23 +322,11 @@ pub fn surface_material_weight(
                 if op.p1[2] as u32 != base {
                     continue;
                 }
-                let a = crate::fbm_mode(
-                    seed,
-                    xz + Vec2::new(op.p2[0], op.p2[1]),
-                    op.p1[0],
-                    op.p1[3] as i32,
-                    vs,
-                    0,
-                ) + 0.5;
-                let b = crate::fbm_mode(
-                    seed,
-                    xz + Vec2::new(op.p2[2], op.p2[3]),
-                    op.p1[1],
-                    op.p1[3] as i32,
-                    vs,
-                    0,
-                ) + 0.5;
-                let w = inside(a, op.p0[0], op.p0[1]).min(inside(b, op.p0[2], op.p0[3]))
+                // `min`, matching WOP_HEIGHT_BAND_FBM exactly — a point
+                // is as far inside a region as its weaker axis says, and
+                // the gate, the terrain and the colour must agree on how
+                // far inside it is, not merely on whether it is.
+                let w = inside(ta, op.p0[0], op.p0[1]).min(inside(tb, op.p0[2], op.p0[3]))
                     * (1.0 - claimed);
                 claimed += w;
                 if op.material == material {
@@ -354,6 +363,7 @@ pub fn planet_program() -> Vec<WorldOp> {
             .p1([octaves, 0.0, 0.0, 0.0])
     }
     vec![
+        planet_axes(),
         band([0.0, 0.0], 0.00005, 800.0, 3.0),
         band([510.0, -770.0], 0.0008, 420.0, 5.0),
         band([1337.0, 55.0], 0.01, 36.0, 5.0),
@@ -365,6 +375,13 @@ pub fn planet_program() -> Vec<WorldOp> {
         WorldOp::new(WOP_FIELD)
             .p0([-4200.0, 8800.0, 0.004, 1.6])
             .p1([3.0, 0.0, 0.0, 0.15]),
+        // Dunes in the desert: long ridged waves, low amplitude.
+        region_terrain([0.56, 1.0], [0.0, 0.47], [820.0, -410.0], 0.011, 21.0, 3, 2),
+        // Jagged crests in the alpine: ridged noise, tall and sharp.
+        region_terrain([0.0, 0.44], [0.0, 1.0], [-2600.0, 1750.0], 0.0035, 165.0, 5, 1),
+        // Wetland is the flattest ground on the planet: a gentle negative
+        // band, which is what makes water pool there.
+        region_terrain([0.0, 1.0], [0.56, 1.0], [4400.0, 900.0], 0.0025, -34.0, 3, 0),
         WorldOp::new(WOP_HEIGHT_SURFACE).material(1),
         // Regions: two noise axes, and a box in their product per region.
         // Order is priority — each only repaints ground still left as
@@ -381,8 +398,24 @@ fn region(material: u32, a: [f32; 2], b: [f32; 2]) -> WorldOp {
     WorldOp::new(WOP_MATERIAL_BAND)
         .material(material)
         .p0([a[0], a[1], b[0], b[1]])
-        .p1([8.0e-5, 1.1e-4, 1.0, 5.0])
-        .p2([-31000.0, 12000.0, 47000.0, -19000.0])
+        .p1([0.0, 0.0, 1.0, 0.0])
+}
+
+/// The planet's region axes: ~12 km and ~9 km, independent offsets.
+fn planet_axes() -> WorldOp {
+    WorldOp::new(WOP_REGION_AXES)
+        .p0([-31000.0, 12000.0, 8.0e-5, 1.1e-4])
+        .p1([47000.0, -19000.0, 5.0, 0.0])
+}
+
+/// Terrain the region shapes: dunes where it is desert, ridges where it
+/// is alpine. Faded by region weight, so a border is a landscape
+/// becoming another rather than a step.
+fn region_terrain(a: [f32; 2], b: [f32; 2], off: [f32; 2], scale: f32, amp: f32, oct: u32, mode: u32) -> WorldOp {
+    WorldOp::new(WOP_HEIGHT_BAND_FBM)
+        .p0([off[0], off[1], scale, amp])
+        .p1([oct as f32, mode as f32, 0.06, 0.0])
+        .p2([a[0], a[1], b[0], b[1]])
 }
 
 /// The shipped megastructure: shaft registers, coarse solid mass, floor
@@ -390,6 +423,9 @@ fn region(material: u32, a: [f32; 2], b: [f32; 2]) -> WorldOp {
 /// catwalk beams.
 pub fn mega_program() -> Vec<WorldOp> {
     vec![
+        WorldOp::new(WOP_REGION_AXES)
+            .p0([2100.0, -880.0, 1.3e-3, 1.7e-3])
+            .p1([-5400.0, 3300.0, 4.0, 0.0]),
         WorldOp::new(WOP_SHAFTS_XZ).p0([288.0, 90.0, 24.0, 30.0]),
         WorldOp::new(WOP_COARSE_SOLID)
             .flags(WOP_FLAG_COARSE_ONLY)
@@ -432,8 +468,7 @@ pub fn mega_program() -> Vec<WorldOp> {
         WorldOp::new(WOP_MATERIAL_BAND)
             .material(7)
             .p0([0.0, 0.46, 0.0, 1.0])
-            .p1([1.3e-3, 1.7e-3, 2.0, 4.0])
-            .p2([2100.0, -880.0, -5400.0, 3300.0]),
+            .p1([0.0, 0.0, 2.0, 0.0]),
     ]
 }
 
@@ -447,8 +482,18 @@ mod tests {
     fn planet_program_matches_legacy_terrain_height() {
         // Oracle: the pre-program formula, verbatim.
         let ops = planet_program();
+        // The base terrain, with the region ops stripped. Those ADD to
+        // the height by design, so the legacy oracle describes the
+        // planet without them — and must still describe it exactly, or
+        // the region work moved ground it was not supposed to touch.
+        let base_ops: Vec<WorldOp> = ops
+            .iter()
+            .copied()
+            .filter(|o| o.kind != WOP_HEIGHT_BAND_FBM)
+            .collect();
         let seed = 0u32;
         let mut seen = std::collections::HashSet::new();
+        let mut shaped = 0usize;
         for i in 0..500 {
             let p = Vec2::new((i * 37) as f32 * 13.7, (i * 91) as f32 * -7.3);
             for vs in [1.0, 8.0, 64.0] {
@@ -457,10 +502,28 @@ mod tests {
                     + fbm(seed, p + Vec2::new(1337.0, 55.0), 0.01, 5, vs) * 36.0;
                 let stepped = base + 90.0 * smoothstep(180.0, 230.0, base);
                 let legacy = stepped + fbm(seed, p + Vec2::new(37.0, 91.0), 0.06, 4, vs) * 5.0 - 8.0;
-                assert_eq!(eval_height(&ops, seed, p, vs), legacy);
+                assert_eq!(eval_height(&base_ops, seed, p, vs), legacy);
+
+                // With the region ops, height moves only where a region
+                // claims the point — and everywhere else stays exact.
+                let full = eval_height(&ops, seed, p, vs);
+                let claimed: f32 = [2u32, 5, 6]
+                    .iter()
+                    .map(|&m| surface_material_weight(&ops, seed, p, vs, m))
+                    .sum();
+                // Exactly zero, not nearly: outside the feather
+                // `smoothstep` clamps to 0, so the band adds `0.0 * amp`
+                // and the height is bit-identical. A tolerance here would
+                // hide a band that reaches where it should not.
+                if claimed == 0.0 {
+                    assert_eq!(full, legacy, "unclaimed ground must not move");
+                } else if full != legacy {
+                    shaped += 1;
+                }
+
                 // (h - 3) - h is not exactly -3 in f32; the height itself is
                 // bit-exact (asserted above), the SDF just subtracts it.
-                let (d, mat) = eval(&ops, seed, glam::Vec3::new(p.x, legacy - 3.0, p.y), vs);
+                let (d, mat) = eval(&ops, seed, glam::Vec3::new(p.x, full - 3.0, p.y), vs);
                 assert!((d + 3.0).abs() < 1.0e-3, "d={d}");
                 // The ground is whichever region claimed it. Bands only
                 // repaint, so the HEIGHT is unaffected either way — that
@@ -474,6 +537,8 @@ mod tests {
         let mut found: Vec<u32> = seen.into_iter().collect();
         found.sort_unstable();
         assert_eq!(found, vec![1, 2, 5, 6], "region coverage changed");
+        // And the regions that declare terrain actually shape it.
+        assert!(shaped > 100, "region terrain barely fires: {shaped} samples");
     }
 
     #[test]

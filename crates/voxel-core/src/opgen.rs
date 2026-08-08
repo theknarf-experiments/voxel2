@@ -138,15 +138,37 @@ if nd < d { d = nd; mat = @mat; }",
             d = d.min(py - h);"),
     },
     OpDef {
+        name: "WOP_REGION_AXES",
+        kind: WOP_REGION_AXES,
+        height: true,
+        body: "\
+ta = @FBM(pxz + @p0.xy, @p0.z, to_i(@p1.z), @VS@0) + 0.5;
+tb = @FBM(pxz + @p1.xy, @p0.w, to_i(@p1.z), @VS@0) + 0.5;",
+        // Registers only; neither the SDF nor the height moves.
+        range: Some("// region axes only"),
+    },
+    OpDef {
+        name: "WOP_HEIGHT_BAND_FBM",
+        kind: WOP_HEIGHT_BAND_FBM,
+        height: true,
+        body: "\
+let fa = @p1.z;
+let wa = smoothstep(@p2.x - fa, @p2.x + fa, ta) * (1.0 - smoothstep(@p2.y - fa, @p2.y + fa, ta));
+let wb = smoothstep(@p2.z - fa, @p2.z + fa, tb) * (1.0 - smoothstep(@p2.w - fa, @p2.w + fa, tb));
+h += min(wa, wb) * @FBM(pxz + warp + @p0.xy, @p0.z, to_i(@p1.x), @VS@to_u(@p1.y)) * @p0.w;",
+        range: Some("\
+            // The region weight is in [0, 1], so the contribution runs
+            // between nothing and the whole band — whichever way the
+            // amplitude points.
+            let band = frange(pxz_lo + @p0.xy, pxz_hi + @p0.xy, @p0.z, to_i(@p1.x), to_u(@p1.y)) * @p0.w;
+            h = h + Interval::new(band.lo.min(0.0), band.hi.max(0.0));"),
+    },
+    OpDef {
         name: "WOP_MATERIAL_BAND",
         kind: WOP_MATERIAL_BAND,
         height: false,
         body: "\
-if mat == to_u(@p1.z) {
-let ta = @FBM(pxz + @p2.xy, @p1.x, to_i(@p1.w), @VS@0) + 0.5;
-let tb = @FBM(pxz + @p2.zw, @p1.y, to_i(@p1.w), @VS@0) + 0.5;
-if ta >= @p0.x && ta < @p0.y && tb >= @p0.z && tb < @p0.w { mat = @mat; }
-}",
+if mat == to_u(@p1.z) && ta >= @p0.x && ta < @p0.y && tb >= @p0.z && tb < @p0.w { mat = @mat; }",
         // Repaints only; the SDF and the height are untouched, so a box
         // containing one of these is bounded exactly as it would be
         // without it.
