@@ -70,6 +70,55 @@ pub enum ImpostorShape {
 pub struct PropTable(pub HashMap<String, PropClass>);
 
 impl PropTable {
+    /// Which props dress a level, keyed off its file name — the same way
+    /// [`crate::scene_for`] picks its background. A real game has one
+    /// table; this binary ships several demos.
+    pub fn for_level(level_path: &std::path::Path) -> Self {
+        match level_path.file_stem().and_then(|s| s.to_str()) {
+            Some("purgatory") => Self::purgatory(),
+            // The megastructure scatters nothing; an empty table is right.
+            Some("megastructure") => Self::default(),
+            _ => Self::planet(),
+        }
+    }
+
+    /// Purgatory's litter: bone piles and scorched boulders.
+    ///
+    /// `bones` is `Model::Rock` in pale grey, squashed flat and scattered
+    /// — an impression of a heap rather than modelled bones. At this art
+    /// level a low pale clump reads as one, and a real bone model is a
+    /// modelling job, not an engine one.
+    fn purgatory() -> Self {
+        let mut classes = HashMap::new();
+        classes.insert(
+            "bones".to_string(),
+            PropClass {
+                variants: vec![PropVariant {
+                    model: Model::Rock,
+                    trunk: Color::srgb(0.30, 0.28, 0.24),
+                    foliage: Color::srgb(0.4520, 0.4310, 0.3800),
+                    impostor: None,
+                }],
+                blob_shadow: false,
+                squash: Vec3::new(1.5, 0.42, 1.5),
+            },
+        );
+        classes.insert(
+            "boulder".to_string(),
+            PropClass {
+                variants: vec![PropVariant {
+                    model: Model::Rock,
+                    trunk: Color::srgb(0.06, 0.05, 0.05),
+                    foliage: Color::srgb(0.0605, 0.0512, 0.0470),
+                    impostor: None,
+                }],
+                blob_shadow: false,
+                squash: Vec3::new(1.0, 0.85, 1.0),
+            },
+        );
+        Self(classes)
+    }
+
     /// The planet demo's forest and boulders.
     fn planet() -> Self {
         let bark = Color::srgb(0.1462, 0.0916, 0.0469);
@@ -135,7 +184,7 @@ pub struct PropsPlugin;
 
 impl Plugin for PropsPlugin {
     fn build(&self, app: &mut App) {
-        app.insert_resource(PropTable::planet())
+        app.init_resource::<PropTable>()
             .init_resource::<PropAssets>()
             .add_systems(Startup, build_prop_assets)
             .add_systems(

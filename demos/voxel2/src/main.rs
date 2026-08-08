@@ -83,6 +83,34 @@ pub struct Scene {
 /// scene and no match at all.
 fn scene_for(level_path: &std::path::Path) -> Scene {
     match level_path.file_stem().and_then(|s| s.to_str()) {
+        Some("purgatory") => Scene {
+            // Ash haze, not sky. The sun is low and the air is thick with
+            // whatever is still burning.
+            clear_color: Color::srgb(0.115, 0.082, 0.079),
+            start: Vec3::new(-5604.0, 112.0, 5660.0),
+            look: Vec3::new(0.55, -0.20, -0.81),
+            walk_speed: 60.0,
+            run_speed: 900.0,
+            // An overcast, ash-choked sky: a fifth of full daylight, and
+            // a warm ambient doing most of the work, so the ground reads
+            // without ever looking sunlit.
+            sun_illuminance: Some(light_consts::lux::OVERCAST_DAY),
+            ambient_color: Color::srgb(0.78, 0.52, 0.42),
+            ambient_brightness: 2_600.0,
+            fog: Some(DistanceFog {
+                color: Color::srgb(0.135, 0.092, 0.086),
+                directional_light_color: Color::srgb(1.0, 0.55, 0.30),
+                directional_light_exponent: 26.0,
+                falloff: FogFalloff::from_visibility_colors(
+                    5_200.0,
+                    Color::srgb(0.42, 0.20, 0.12),
+                    Color::srgb(0.20, 0.13, 0.11),
+                ),
+            }),
+            // Nothing here has an ocean. What pools in the low ground is
+            // the lava the planning stack routes, and that is a ribbon.
+            sea_level: None,
+        },
         Some("megastructure") => Scene {
             clear_color: Color::srgb(0.035, 0.045, 0.06),
             start: Vec3::new(11.0, 12.0, 7.0),
@@ -189,6 +217,7 @@ fn main() {
         }))
         .insert_resource(HostScene(scene))
         .init_resource::<HostWorld>()
+        .insert_resource(props::PropTable::for_level(std::path::Path::new(&path)))
         .insert_resource(WorldScenes(
             [(0, scene_for(std::path::Path::new(&path)))].into_iter().collect(),
         ))
