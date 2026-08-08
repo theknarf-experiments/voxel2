@@ -84,18 +84,22 @@ fn main() {
         ),
         ["ribbons", x, z, rest @ ..] => {
             let radius = rest.first().map(|r| parse_f64(r)).unwrap_or(512.0);
+            // The engine has no ribbons; `voxel/inspect` forwards the
+            // question to whatever host is loaded, which decides what a
+            // ribbon is and what to say about one.
             call(
-                "voxel/ribbons",
-                json!({"center": [parse_f64(x), parse_f64(z)], "radius": radius}),
+                "voxel/inspect",
+                json!({"kind": "ribbons", "center": [parse_f64(x), parse_f64(z)], "radius": radius}),
             )
         }
         ["markers", x, z, rest @ ..] => {
             let radius = rest.first().map(|r| parse_f64(r)).unwrap_or(2048.0);
-            let mut params = json!({"center": [parse_f64(x), parse_f64(z)], "radius": radius});
-            if let Some(kind) = rest.get(1) {
-                params["kind"] = json!(kind);
+            let mut params =
+                json!({"kind": "markers", "center": [parse_f64(x), parse_f64(z)], "radius": radius});
+            if let Some(of) = rest.get(1) {
+                params["of"] = json!(of);
             }
-            call("voxel/markers", params)
+            call("voxel/inspect", params)
         }
         ["scan", x, z, rest @ ..] => {
             let radius = rest.first().map(|r| parse_f64(r)).unwrap_or(4096.0);
@@ -123,6 +127,10 @@ fn main() {
             json!({"cmd": "portal", "level": n.parse::<u64>().unwrap_or(0)}),
         ),
         ["world", w] => call("voxel/world", json!({"world": parse_f64(w) as u64})),
+        ["inspect", params] => match serde_json::from_str(params) {
+            Ok(p) => call("voxel/inspect", p),
+            Err(e) => Err(format!("bad params JSON: {e}")),
+        },
         ["raw", method] => call(method, Value::Null),
         ["raw", method, params] => match serde_json::from_str(params) {
             Ok(p) => call(method, p),
@@ -132,6 +140,7 @@ fn main() {
             eprintln!(
                 "usage: voxctl status | goto X Y Z [DX DY DZ] | ribbons X Z [R] | \
                  markers X Z [R] [KIND] | scan X Z [R] [STEP] | shot PATH [--window] | \
+                 inspect JSON | \
                  portal [N] | world N | raw METHOD [JSON]"
             );
             std::process::exit(2);

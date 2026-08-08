@@ -20,8 +20,7 @@ impl Plugin for VoxelRemotePlugin {
             RemotePlugin::default()
                 .with_method_main("voxel/status", status)
                 .with_method_main("voxel/teleport", teleport)
-                .with_method_main("voxel/ribbons", ribbons)
-                .with_method_main("voxel/markers", markers)
+                .with_method_main("voxel/inspect", inspect)
                 .with_method_main("voxel/ops", ops)
                 .with_method_main("voxel/scan", scan)
                 .with_method_main("voxel/viz", viz)
@@ -200,54 +199,23 @@ fn here<'a>(
         .ok_or_else(|| err("no world loaded"))
 }
 
-/// `{"center": [x, z], "radius": r}` — planning ribbon segments near a
-/// point (find a level's ribbon surfaces).
-fn ribbons(
+/// Anything the HOST's planner cares to answer, carried verbatim.
+///
+/// The engine has no ribbons and no markers, so this endpoint does not
+/// either: it forwards the query and returns the reply. `voxctl ribbons`
+/// and `voxctl markers` are `{"kind": "ribbons"}` and
+/// `{"kind": "markers"}` to a host that knows what those are.
+fn inspect(
     In(params): In<Option<Value>>,
     worlds: Res<voxel_engine::Worlds>,
     camera: Res<voxel_render::CameraWorld>,
 ) -> BrpResult {
     let world = here(&worlds, &camera)?;
     let params = params.ok_or_else(|| err("params required"))?;
-    let c = f32s(&params, "center", 2)?;
-    let r = radius(&params, 512.0);
-    let (min, max) = (Vec2::new(c[0] - r, c[1] - r), Vec2::new(c[0] + r, c[1] + r));
+    // Introspection, not a working set — an absent answer out here is by
+    // design and must not count against `reads_missed`.
     let _peek = world.peek();
-    let segs: Vec<Value> = world
-        .ribbons_in(min, max)
-        .iter()
-        .map(|s| {
-            json!({
-                "a": [s.a.x, s.a.y],
-                "b": [s.b.x, s.b.y],
-                "half_w": s.half_w,
-                "levels": s.levels,
-            })
-        })
-        .collect();
-    Ok(json!({"count": segs.len(), "segments": segs}))
-}
-
-/// `{"center": [x, z], "radius": r, "kind": "ruin"?}` — stack markers
-/// near a point (findable content).
-fn markers(
-    In(params): In<Option<Value>>,
-    worlds: Res<voxel_engine::Worlds>,
-    camera: Res<voxel_render::CameraWorld>,
-) -> BrpResult {
-    let world = here(&worlds, &camera)?;
-    let params = params.ok_or_else(|| err("params required"))?;
-    let c = f32s(&params, "center", 2)?;
-    let r = radius(&params, 2048.0);
-    let kind = params.get("kind").and_then(Value::as_str);
-    let (min, max) = (Vec2::new(c[0] - r, c[1] - r), Vec2::new(c[0] + r, c[1] + r));
-    let _peek = world.peek();
-    let found: Vec<Value> = world
-        .markers_in(min, max, kind)
-        .iter()
-        .map(|m| json!({"pos": [m.pos.x, m.pos.y, m.pos.z], "kind": m.kind}))
-        .collect();
-    Ok(json!({"count": found.len(), "markers": found}))
+    Ok(world.inspect(&params))
 }
 
 /// `{"center": [x, y, z], "radius": r, "edge": chunk_edge_m?}` — CSG ops

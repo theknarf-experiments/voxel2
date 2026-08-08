@@ -146,7 +146,11 @@ fn repaint_world(
     // level asked for and whether they are ground at all. Introspection,
     // so the empty distance is not charged to `reads_missed`.
     let _peek = world.query.peek();
-    for seg in world.query.ribbons_in(origin, origin + Vec2::splat(span)) {
+    // Its OWN planner, downcast — the engine has no ribbons to hand out.
+    let Some(planner) = world.query.planner_as::<crate::planning::StackPlanner>() else {
+        return;
+    };
+    for seg in planner.ribbons_in(origin, origin + Vec2::splat(span)) {
         // A seated ribbon IS the ground, so its footprint is the whole
         // capsule. A levelled one is a water surface at a height the plan
         // decided: it covers its own course, and then only as much of the

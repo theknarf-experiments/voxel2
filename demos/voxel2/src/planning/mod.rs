@@ -120,77 +120,119 @@ impl WorldPlanner for StackPlanner {
         out
     }
 
-    fn clearance_in(&self, min: bevy::math::Vec2, max: bevy::math::Vec2) -> Vec<[bevy::math::Vec2; 2]> {
-        let (min3, max3) = (
-            Vec3::new(min.x, -FACADE_Y_M, min.y),
-            Vec3::new(max.x, FACADE_Y_M, max.y),
-        );
-        let mut out = Vec::new();
-        if let Some(rt) = &self.stack {
-            let mgr = rt.graph();
-            for e in self.emitters.iter().filter(|e| e.clearance) {
-                out.extend(layers::patches_in(mgr, &e.name, min3, max3).clearance);
-            }
-        }
-        out
+    fn as_any(&self) -> &(dyn std::any::Any + Send + Sync) {
+        self
     }
 
-    fn ribbons_in(&self, min: bevy::math::Vec2, max: bevy::math::Vec2) -> Vec<RibbonSeg> {
-        let (min3, max3) = (
-            Vec3::new(min.x, -FACADE_Y_M, min.y),
-            Vec3::new(max.x, FACADE_Y_M, max.y),
-        );
-        let mut out = Vec::new();
-        if let Some(rt) = &self.stack {
-            let mgr = rt.graph();
-            for e in self.emitters.iter().filter(|e| e.ribbons) {
-                out.extend(layers::patches_in(mgr, &e.name, min3, max3).ribbons);
-            }
-        }
-        out
-    }
-
-    fn weight_fields(&self) -> Vec<String> {
-        self.biome_tables.iter().map(|(n, _)| n.clone()).collect()
-    }
-
-    fn weights_at(&self, instance: &str, p: bevy::math::Vec2) -> Vec<(String, f32)> {
-        let Some(rt) = &self.stack else {
-            return Vec::new();
-        };
-        let mgr = rt.graph();
-        let Some(table) = self.biome_tables.iter().find_map(|(n, t)| {
-            (n == instance).then_some(t)
-        }) else {
-            return Vec::new();
-        };
-        let w = layers::gate_weights_at(mgr, instance, table.len(), p);
-        table.iter().cloned().zip(w).collect()
-    }
-
-    fn markers_in(
+    /// What this game thinks is worth looking at, as lines.
+    ///
+    /// The overlay budgets and orders them; deciding that a marker is a
+    /// 30 m stake, a clearance bed is a ground-following segment and a
+    /// weight field is a grid of stakes coloured by dominant member is
+    /// entirely this host's business.
+    fn debug_lines(
         &self,
         min: bevy::math::Vec2,
         max: bevy::math::Vec2,
-        kind: Option<&str>,
-    ) -> Vec<Marker> {
-        let (min3, max3) = (
-            Vec3::new(min.x, -FACADE_Y_M, min.y),
-            Vec3::new(max.x, FACADE_Y_M, max.y),
-        );
+    ) -> Vec<voxel_engine::planning::DebugLine> {
+        use voxel_engine::planning::DebugLine;
         let mut out = Vec::new();
-        if let Some(rt) = &self.stack {
-            let mgr = rt.graph();
-            for e in self.emitters.iter().filter(|e| e.markers) {
-                out.extend(
-                    layers::patches_in(mgr, &e.name, min3, max3)
-                        .markers
-                        .into_iter()
-                        .filter(|m| kind.is_none_or(|k| m.kind == k)),
-                );
+        let line = |a: Vec3, b: Vec3, color: [f32; 3]| DebugLine { a, b, color };
+
+        for m in self.markers_in(min, max, None) {
+            out.push(line(m.pos, m.pos + Vec3::Y * 30.0, kind_color(&m.kind)));
+        }
+        let gen = self.ctx.as_ref().map(|c| c.generator.clone());
+        let Some(gen) = gen else { return out };
+        let h = |p: bevy::math::Vec2| gen.height(p, 1.0) + 1.0;
+        for seg in self.clearance_in(min, max) {
+            out.push(line(
+                Vec3::new(seg[0].x, h(seg[0]), seg[0].y),
+                Vec3::new(seg[1].x, h(seg[1]), seg[1].y),
+                [1.0, 0.8, 0.2],
+            ));
+        }
+        for w in self.ribbons_in(min, max) {
+            out.push(line(
+                Vec3::new(w.a.x, w.levels[0] + 0.5, w.a.y),
+                Vec3::new(w.b.x, w.levels[1] + 0.5, w.b.y),
+                [0.2, 0.6, 1.0],
+            ));
+        }
+
+        // Weight fields as a 17x17 readout of the near range: a field
+        // sample, not a feature set, so it does not follow the overlay
+        // out to where one stake per 5 km would alias it into noise.
+        let c = (min + max) * 0.5;
+        let step = (max.x - min.x) / 16.0;
+        for name in self.weight_fields() {
+            for gz in -8..=8 {
+                for gx in -8..=8 {
+                    let p = c + bevy::math::Vec2::new(gx as f32, gz as f32) * step;
+                    let weights = self.weights_at(&name, p);
+                    let Some((i, (_, w))) = weights
+                        .iter()
+                        .enumerate()
+                        .max_by(|a, b| a.1 .1.total_cmp(&b.1 .1))
+                    else {
+                        continue;
+                    };
+                    let y = gen.height(p, 8.0) + 2.0;
+                    let hue = (i as f32 * 137.5) % 360.0;
+                    out.push(line(
+                        Vec3::new(p.x, y, p.y),
+                        Vec3::new(p.x, y + 4.0 + 12.0 * w, p.y),
+                        hsl_rgb(hue, 0.8, 0.5),
+                    ));
+                }
             }
         }
         out
+    }
+
+    /// Answer `voxctl`. The engine forwards the query without reading it.
+    fn inspect(&self, query: &serde_json::Value) -> serde_json::Value {
+        use serde_json::json;
+        let f = |k: &str, i: usize| -> f32 {
+            query
+                .get(k)
+                .and_then(|v| v.get(i))
+                .and_then(serde_json::Value::as_f64)
+                .unwrap_or(0.0) as f32
+        };
+        let r = query
+            .get("radius")
+            .and_then(serde_json::Value::as_f64)
+            .unwrap_or(512.0) as f32;
+        let c = bevy::math::Vec2::new(f("center", 0), f("center", 1));
+        let (min, max) = (c - bevy::math::Vec2::splat(r), c + bevy::math::Vec2::splat(r));
+        match query.get("kind").and_then(serde_json::Value::as_str) {
+            Some("ribbons") => {
+                let segs: Vec<_> = self
+                    .ribbons_in(min, max)
+                    .iter()
+                    .map(|s| {
+                        json!({
+                            "a": [s.a.x, s.a.y],
+                            "b": [s.b.x, s.b.y],
+                            "half_w": s.half_w,
+                            "levels": s.levels,
+                        })
+                    })
+                    .collect();
+                json!({"count": segs.len(), "segments": segs})
+            }
+            Some("markers") => {
+                let kind = query.get("of").and_then(serde_json::Value::as_str);
+                let found: Vec<_> = self
+                    .markers_in(min, max, kind)
+                    .iter()
+                    .map(|m| json!({"pos": [m.pos.x, m.pos.y, m.pos.z], "kind": m.kind}))
+                    .collect();
+                json!({"count": found.len(), "markers": found})
+            }
+            other => json!({"error": format!("unknown inspect kind {other:?}")}),
+        }
     }
 
     fn set_focus(&self, focus: bevy::math::IVec3) {
@@ -234,6 +276,108 @@ impl WorldPlanner for StackPlanner {
             generating: rt.is_generating(),
             layers: rt.graph().layer_stats(),
         })
+    }
+}
+
+/// Stable color per marker kind (hash to hue) — this game's palette.
+fn kind_color(kind: &str) -> [f32; 3] {
+    let mut h = 0u32;
+    for b in kind.bytes() {
+        h = h.wrapping_mul(31).wrapping_add(b as u32);
+    }
+    hsl_rgb((h % 360) as f32, 0.9, 0.6)
+}
+
+fn hsl_rgb(h: f32, s: f32, l: f32) -> [f32; 3] {
+    let c = (1.0 - (2.0 * l - 1.0).abs()) * s;
+    let x = c * (1.0 - ((h / 60.0) % 2.0 - 1.0).abs());
+    let m = l - c * 0.5;
+    let (r, g, b) = match (h / 60.0) as u32 {
+        0 => (c, x, 0.0),
+        1 => (x, c, 0.0),
+        2 => (0.0, c, x),
+        3 => (0.0, x, c),
+        4 => (x, 0.0, c),
+        _ => (c, 0.0, x),
+    };
+    [r + m, g + m, b + m]
+}
+
+/// What this HOST asks its own planner. None of it is engine vocabulary:
+/// a ribbon, a marker, a clearance bed and a weight field are this
+/// game's nouns, reached through `WorldQuery::planner_as`.
+impl StackPlanner {
+    pub fn clearance_in(&self, min: bevy::math::Vec2, max: bevy::math::Vec2) -> Vec<[bevy::math::Vec2; 2]> {
+        let (min3, max3) = (
+            Vec3::new(min.x, -FACADE_Y_M, min.y),
+            Vec3::new(max.x, FACADE_Y_M, max.y),
+        );
+        let mut out = Vec::new();
+        if let Some(rt) = &self.stack {
+            let mgr = rt.graph();
+            for e in self.emitters.iter().filter(|e| e.clearance) {
+                out.extend(layers::patches_in(mgr, &e.name, min3, max3).clearance);
+            }
+        }
+        out
+    }
+
+    pub fn ribbons_in(&self, min: bevy::math::Vec2, max: bevy::math::Vec2) -> Vec<RibbonSeg> {
+        let (min3, max3) = (
+            Vec3::new(min.x, -FACADE_Y_M, min.y),
+            Vec3::new(max.x, FACADE_Y_M, max.y),
+        );
+        let mut out = Vec::new();
+        if let Some(rt) = &self.stack {
+            let mgr = rt.graph();
+            for e in self.emitters.iter().filter(|e| e.ribbons) {
+                out.extend(layers::patches_in(mgr, &e.name, min3, max3).ribbons);
+            }
+        }
+        out
+    }
+
+    pub fn weight_fields(&self) -> Vec<String> {
+        self.biome_tables.iter().map(|(n, _)| n.clone()).collect()
+    }
+
+    pub fn weights_at(&self, instance: &str, p: bevy::math::Vec2) -> Vec<(String, f32)> {
+        let Some(rt) = &self.stack else {
+            return Vec::new();
+        };
+        let mgr = rt.graph();
+        let Some(table) = self.biome_tables.iter().find_map(|(n, t)| {
+            (n == instance).then_some(t)
+        }) else {
+            return Vec::new();
+        };
+        let w = layers::gate_weights_at(mgr, instance, table.len(), p);
+        table.iter().cloned().zip(w).collect()
+    }
+
+    pub fn markers_in(
+        &self,
+        min: bevy::math::Vec2,
+        max: bevy::math::Vec2,
+        kind: Option<&str>,
+    ) -> Vec<Marker> {
+        let (min3, max3) = (
+            Vec3::new(min.x, -FACADE_Y_M, min.y),
+            Vec3::new(max.x, FACADE_Y_M, max.y),
+        );
+        let mut out = Vec::new();
+        if let Some(rt) = &self.stack {
+            let mgr = rt.graph();
+            for e in self.emitters.iter().filter(|e| e.markers) {
+                out.extend(
+                    layers::patches_in(mgr, &e.name, min3, max3)
+                        .markers
+                        .into_iter()
+                        .filter(|m| kind.is_none_or(|k| m.kind == k)),
+                );
+            }
+        }
+        out
     }
 }
 
@@ -433,7 +577,7 @@ mod tests {
     use voxel_core::csg::CsgOp;
 
     use super::schema::{validate_level, validate_stack, StackLayerDef};
-    use super::{PlanningDef, StackPlanning};
+    use super::{PlanningDef, StackPlanner, StackPlanning};
 
     fn shipped(name: &str) -> LevelDef {
         let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../levels/");
@@ -505,6 +649,7 @@ mod tests {
     fn mega_stack_serves_pockets_and_tubes_through_world_query() {
         let mega = shipped("megastructure.json");
         let world = world_for(&mega);
+        let planner = world.planner_as::<StackPlanner>().expect("stack planner");
         let min = Vec3::new(-1500.0, -260.0, -1500.0);
         let max = Vec3::new(1500.0, 260.0, 1500.0);
         let ops = world.ops_in(min, max, 12.8);
@@ -516,11 +661,11 @@ mod tests {
         let min2 = bevy::math::Vec2::new(min.x, min.z);
         let max2 = bevy::math::Vec2::new(max.x, max.z);
         assert!(
-            !world.markers_in(min2, max2, Some("pocket")).is_empty(),
+            !planner.markers_in(min2, max2, Some("pocket")).is_empty(),
             "no pocket markers"
         );
         // A specific marker's room shell exists near the site.
-        let m = &world.markers_in(min2, max2, Some("pocket"))[0];
+        let m = &planner.markers_in(min2, max2, Some("pocket"))[0];
         let near = world.ops_in(
             m.pos - Vec3::splat(40.0),
             m.pos + Vec3::splat(40.0),
@@ -615,6 +760,7 @@ mod tests {
         let planet = shipped("planet.json");
         // A land region large enough to hold every feature kind.
         let world = world_at(&planet, 0, Vec3::new(-27000.0, 0.0, -38000.0));
+        let planner = world.planner_as::<StackPlanner>().expect("stack planner");
         let min = Vec3::new(-31096.0, -200.0, -42096.0);
         let max = Vec3::new(-22904.0, 500.0, -33904.0);
         let fine = world.ops_in(min, max, 12.8);
@@ -630,14 +776,14 @@ mod tests {
         // Clearance + water flow through the same facade.
         let min2 = bevy::math::Vec2::new(min.x, min.z);
         let max2 = bevy::math::Vec2::new(max.x, max.z);
-        assert!(!world.clearance_in(min2, max2).is_empty(), "no clearance");
-        assert!(!world.ribbons_in(min2, max2).is_empty(), "no ribbon segments");
+        assert!(!planner.clearance_in(min2, max2).is_empty(), "no clearance");
+        assert!(!planner.ribbons_in(min2, max2).is_empty(), "no ribbon segments");
         assert!(
-            !world.markers_in(min2, max2, Some("ruin")).is_empty(),
+            !planner.markers_in(min2, max2, Some("ruin")).is_empty(),
             "no ruin markers"
         );
         assert!(
-            !world.markers_in(min2, max2, Some("dungeon")).is_empty(),
+            !planner.markers_in(min2, max2, Some("dungeon")).is_empty(),
             "no dungeon markers"
         );
         // Biomes blend through the facade: partition of unity, both
@@ -647,7 +793,7 @@ mod tests {
             for gx in 0..12 {
                 let t = bevy::math::Vec2::new(gx as f32 / 11.0, gz as f32 / 11.0);
                 let p = min2 + (max2 - min2) * t;
-                let w = world.weights_at("biomes", p);
+                let w = planner.weights_at("biomes", p);
                 assert_eq!(w.len(), 2);
                 let sum: f32 = w.iter().map(|(_, v)| v).sum();
                 assert!((sum - 1.0).abs() < 1e-4);

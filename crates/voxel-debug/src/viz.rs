@@ -62,15 +62,6 @@ pub fn toggle_debug_viz(keys: Res<ButtonInput<KeyCode>>, mut viz: ResMut<DebugVi
     }
 }
 
-/// Stable color per marker kind (hash → hue).
-fn kind_color(kind: &str) -> Color {
-    let mut h = 0u32;
-    for b in kind.bytes() {
-        h = h.wrapping_mul(31).wrapping_add(b as u32);
-    }
-    Color::hsl((h % 360) as f32, 0.9, 0.6)
-}
-
 const CHUNK_VIZ_RADIUS_M: f32 = 400.0;
 
 /// Gizmo lines the planning overlay may draw in one frame.
@@ -136,24 +127,10 @@ pub fn draw_debug_viz(
         // than an arbitrary slice.
         let mut lines: Vec<(Vec3, Vec3, Color)> = Vec::new();
 
-        for m in world.markers_in(min, max, None) {
-            let color = kind_color(&m.kind);
-            lines.push((m.pos, m.pos + Vec3::Y * 30.0, color));
-        }
-        let h = |p: Vec2| world.generator().height(p, 1.0) + 1.0;
-        for seg in world.clearance_in(min, max) {
-            lines.push((
-                Vec3::new(seg[0].x, h(seg[0]), seg[0].y),
-                Vec3::new(seg[1].x, h(seg[1]), seg[1].y),
-                Color::srgb(1.0, 0.8, 0.2),
-            ));
-        }
-        for w in world.ribbons_in(min, max) {
-            lines.push((
-                Vec3::new(w.a.x, w.levels[0] + 0.5, w.a.y),
-                Vec3::new(w.b.x, w.levels[1] + 0.5, w.b.y),
-                Color::srgb(0.2, 0.6, 1.0),
-            ));
+        // Whatever the host wants shown. The overlay owns the budget
+        // and the ordering; what is worth a line is the planner's call.
+        for l in world.debug_lines(min, max) {
+            lines.push((l.a, l.b, Color::srgb(l.color[0], l.color[1], l.color[2])));
         }
         viz.wanted = lines.len();
         if lines.len() > LAYER_VIZ_MAX_LINES {
@@ -163,37 +140,6 @@ pub fn draw_debug_viz(
         viz.drawn = lines.len();
         for (a, b, color) in lines {
             planning.line(a, b, color);
-        }
-
-        // Weight fields: a stake per cell, colored by dominant member.
-        for name in world.weight_fields() {
-            // A 17x17 sample of the near range, whatever that is: this
-            // is a field readout, not a feature set. At the near range it
-            // spans 10 km with a stake every 625 m, which resolves 2 km
-            // field cells; at the far range one stake per 5 km would
-            // alias them into noise, so it does not follow that far.
-            let step = LAYER_VIZ_NEAR_M / 8.0;
-            for gz in -8..=8 {
-                for gx in -8..=8 {
-                    let p = c2 + Vec2::new(gx as f32, gz as f32) * step;
-                    let weights = world.weights_at(&name, p);
-                    let Some((i, (member, w))) = weights
-                        .iter()
-                        .enumerate()
-                        .max_by(|a, b| a.1 .1.total_cmp(&b.1 .1))
-                    else {
-                        continue;
-                    };
-                    let _ = member;
-                    let y = world.generator().height(p, 8.0) + 2.0;
-                    let color = Color::hsl(i as f32 * 137.5 % 360.0, 0.8, 0.5);
-                    planning.line(
-                        Vec3::new(p.x, y, p.y),
-                        Vec3::new(p.x, y + 4.0 + 12.0 * w, p.y),
-                        color,
-                    );
-                }
-            }
         }
     }
 }

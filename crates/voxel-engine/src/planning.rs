@@ -70,33 +70,45 @@ pub trait WorldPlanner: Send + Sync + 'static {
         None
     }
 
-    /// Segments props must keep off (roadbeds, ribbon beds) in the xz box.
-    fn clearance_in(&self, _min: Vec2, _max: Vec2) -> Vec<[Vec2; 2]> {
+    /// Downcast to the concrete planner, for the HOST's own systems.
+    ///
+    /// The engine's half of a planner is `ops_in` — planning has to be
+    /// able to inject CSG into voxel generation, and that is the only
+    /// question the engine itself asks. Everything else a host wants
+    /// from its own planner (what its ribbons are, where its markers
+    /// went, how it classifies a point) is host-to-host traffic, and it
+    /// travels through here rather than through five typed methods the
+    /// engine had to name — and therefore had to have opinions about.
+    fn as_any(&self) -> &(dyn std::any::Any + Send + Sync);
+
+    /// Line segments describing this planner, for a debug overlay.
+    ///
+    /// Lines are the whole vocabulary on purpose: the overlay owns the
+    /// budget, the sorting and the truncation, and the host owns what is
+    /// worth looking at. Both reference implementations of this design
+    /// landed on the same seam.
+    fn debug_lines(&self, _min: Vec2, _max: Vec2) -> Vec<DebugLine> {
         Vec::new()
     }
 
-    /// Ribbon surface segments overlapping the xz box.
-    fn ribbons_in(&self, _min: Vec2, _max: Vec2) -> Vec<RibbonSeg> {
-        Vec::new()
+    /// Answer an opaque question from out-of-process tooling.
+    ///
+    /// Carried verbatim, like the level's `planning` block: tooling asks
+    /// `{"kind": "..."}` and the host decides what that means and what
+    /// to reply. JSON because the asker is a socket, not a system.
+    fn inspect(&self, _query: &serde_json::Value) -> serde_json::Value {
+        serde_json::Value::Null
     }
 
-    /// Markers overlapping the xz box, optionally of one kind.
-    fn markers_in(&self, _min: Vec2, _max: Vec2, _kind: Option<&str>) -> Vec<Marker> {
-        Vec::new()
-    }
+}
 
-    /// Names of the host weight fields this planner answers
-    /// `weights_at` for. What they classify is the host's concept.
-    fn weight_fields(&self) -> Vec<String> {
-        Vec::new()
-    }
-
-    /// Blended weights at a point for a named field: (member, weight).
-    /// Empty if the planner has no such field.
-    fn weights_at(&self, _field: &str, _p: Vec2) -> Vec<(String, f32)> {
-        Vec::new()
-    }
-
+/// One line a planner wants drawn: world-space ends and an RGB colour.
+/// The overlay decides how many of these it can afford to draw.
+#[derive(Debug, Clone, Copy)]
+pub struct DebugLine {
+    pub a: Vec3,
+    pub b: Vec3,
+    pub color: [f32; 3],
 }
 
 /// What a planner reports about itself.
@@ -267,36 +279,24 @@ impl WorldQuery {
         ops
     }
 
-    pub fn clearance_in(&self, min: Vec2, max: Vec2) -> Vec<[Vec2; 2]> {
-        self.planner
-            .as_ref()
-            .map_or_else(Vec::new, |p| p.clearance_in(min, max))
+    /// Downcast to the concrete planner — see [`WorldPlanning::as_any`].
+    pub fn planner_as<P: 'static>(&self) -> Option<&P> {
+        self.planner.as_ref()?.as_any().downcast_ref::<P>()
     }
 
-    pub fn ribbons_in(&self, min: Vec2, max: Vec2) -> Vec<RibbonSeg> {
+    /// Line segments describing the planner, for a debug overlay.
+    pub fn debug_lines(&self, min: Vec2, max: Vec2) -> Vec<DebugLine> {
         self.planner
             .as_ref()
-            .map_or_else(Vec::new, |p| p.ribbons_in(min, max))
+            .map_or_else(Vec::new, |p| p.debug_lines(min, max))
     }
 
-    pub fn markers_in(&self, min: Vec2, max: Vec2, kind: Option<&str>) -> Vec<Marker> {
+    /// Ask the planner an opaque question on behalf of tooling.
+    pub fn inspect(&self, query: &serde_json::Value) -> serde_json::Value {
         self.planner
             .as_ref()
-            .map_or_else(Vec::new, |p| p.markers_in(min, max, kind))
+            .map_or(serde_json::Value::Null, |p| p.inspect(query))
     }
-
-    pub fn weight_fields(&self) -> Vec<String> {
-        self.planner
-            .as_ref()
-            .map_or_else(Vec::new, |p| p.weight_fields())
-    }
-
-    pub fn weights_at(&self, field: &str, p: Vec2) -> Vec<(String, f32)> {
-        self.planner
-            .as_ref()
-            .map_or_else(Vec::new, |p2| p2.weights_at(field, p))
-    }
-
 }
 
 /// The per-chunk ops provider for a world query.
