@@ -50,6 +50,7 @@ impl Plugin for PortalPlugin {
                     follow_camera_world,
                     sync_backdrops,
                     drive_portal,
+                    dress_views,
                 )
                     .chain()
                     // `drive_portal` publishes where each world is seen
@@ -71,7 +72,11 @@ impl Plugin for PortalPlugin {
 /// first. It gets its own material ids (planet's 1 and the
 /// megastructure's 1 no longer collide), its own planning graph, and its
 /// own painted surface map.
-fn ensure_far_world(far: &mut FarLevel, loader: &mut WorldLoader) -> Option<u8> {
+fn ensure_far_world(
+    far: &mut FarLevel,
+    loader: &mut WorldLoader,
+    scenes: &mut crate::WorldScenes,
+) -> Option<u8> {
     if let Some(id) = far.world {
         return Some(id);
     }
@@ -89,6 +94,7 @@ fn ensure_far_world(far: &mut FarLevel, loader: &mut WorldLoader) -> Option<u8> 
     // against the slab slots the loaded ones left, and caps it only as
     // far as it has to — which is the mechanism that cap was guessing at.
     let id = loader.load(level.clone(), 0, LodConfig::from(&level.lod));
+    scenes.0.insert(id, far.scene.clone());
     far.loaded = Some(level);
     far.world = Some(id);
     info!("portal: '{}' opened as world {id}", far.path);
@@ -107,10 +113,8 @@ fn ensure_far_world(far: &mut FarLevel, loader: &mut WorldLoader) -> Option<u8> 
 fn follow_camera_world(
     mut commands: Commands,
     camera_world: Res<voxel_render::CameraWorld>,
-    far: Option<Res<FarLevel>>,
-    scene: Res<crate::HostScene>,
     mut clear: ResMut<ClearColor>,
-    mut ambient: ResMut<GlobalAmbientLight>,
+    scenes: Res<crate::WorldScenes>,
     // `Option`, because not every camera carries the component: the
     // offscreen mirror camera `voxctl shot` renders through is spawned
     // without one, so a query that REQUIRED it silently skipped the very
@@ -123,21 +127,12 @@ fn follow_camera_world(
     // lazily on the first request, so gating on `is_changed` left it on
     // layer 0 forever — the window showed the right world while every
     // screenshot showed the wrong one.
-    // The background AND the ambient belong to the world you are in: step
-    // into an interior and the sky should stop being sky. Ambient is a
-    // single global in Bevy, so unlike the sun it cannot be given to a
-    // world and left there — it has to follow the camera. A sunless
-    // interior lit at the planet's ambient is nearly black.
-    let here = match far.as_ref().filter(|f| f.world == Some(camera_world.0)) {
-        Some(far) => &far.scene,
-        None => &scene.0,
-    };
-    if clear.0 != here.clear_color {
-        clear.0 = here.clear_color;
-    }
-    if ambient.brightness != here.ambient_brightness || ambient.color != here.ambient_color {
-        ambient.color = here.ambient_color;
-        ambient.brightness = here.ambient_brightness;
+    // The background belongs to the world you are in: step into an
+    // interior and the sky should stop being sky.
+    if let Some(here) = scenes.0.get(&camera_world.0) {
+        if clear.0 != here.clear_color {
+            clear.0 = here.clear_color;
+        }
     }
     let want = voxel_render::world_layer(camera_world.0);
     for (entity, layers) in &mut cameras {
@@ -162,6 +157,44 @@ fn follow_camera_world(
 
 /// A rectangular opening between two worlds.
 ///
+/// Give every view the ambient and the haze of the world IT looks at.
+///
+/// Per camera, not global. Ambient and fog are properties of the world
+/// being looked at, and a portal puts two worlds in one frame: the near
+/// view of a sunless interior wants its own bright ambient and no haze,
+/// while the far view of a planet through the same opening wants the
+/// planet's. Sharing one value lit the planet's ground at the interior's
+/// ambient — which is why it looked washed out through the opening — and
+/// dropped its atmospheric haze entirely.
+///
+/// Bevy's `AmbientLight` is a camera component that overrides
+/// `GlobalAmbientLight`, so this needs no engine support.
+fn dress_views(
+    mut commands: Commands,
+    scenes: Res<crate::WorldScenes>,
+    views: Query<(Entity, Option<&voxel_render::ViewWorld>), With<Camera3d>>,
+) {
+    for (entity, world) in &views {
+        let Some(scene) = scenes.0.get(&world.map_or(0, |w| w.0)) else {
+            continue;
+        };
+        let mut view = commands.entity(entity);
+        view.insert(AmbientLight {
+            color: scene.ambient_color,
+            brightness: scene.ambient_brightness,
+            ..default()
+        });
+        match &scene.fog {
+            Some(fog) => {
+                view.insert(fog.clone());
+            }
+            None => {
+                view.remove::<DistanceFog>();
+            }
+        }
+    }
+}
+
 /// A rectangular opening between two dimensions of the SAME space.
 ///
 /// Worlds share coordinates — that is what lets one chunk service and one
@@ -257,9 +290,6 @@ pub struct PortalBackdrop {
 #[derive(Resource)]
 struct PortalAssets {
     quad: Handle<Mesh>,
-    /// Indexed by the world the quad lives IN; it is painted with the
-    /// background of the world you are looking THROUGH to.
-    material: [Handle<StandardMaterial>; 2],
 }
 
 /// Marks a camera that renders the far side FOR a particular near-side
@@ -300,9 +330,8 @@ fn open_portal(
     host: Option<ResMut<voxel_debug::remote::HostCommands>>,
     camera_world: Res<voxel_render::CameraWorld>,
     mut loader: WorldLoader,
-    scene: Res<crate::HostScene>,
+    mut scenes: ResMut<crate::WorldScenes>,
     mut meshes: ResMut<Assets<Mesh>>,
-    mut materials_assets: ResMut<Assets<StandardMaterial>>,
 ) {
     let asked = keys.just_pressed(KeyCode::F7)
         || host.is_some_and(|mut host| {
@@ -317,7 +346,7 @@ fn open_portal(
     let Ok(eye) = camera.single() else {
         return;
     };
-    let Some(far_world) = ensure_far_world(&mut far, &mut loader) else {
+    let Some(far_world) = ensure_far_world(&mut far, &mut loader, &mut scenes) else {
         return;
     };
 
@@ -354,22 +383,8 @@ fn open_portal(
         worlds: (near_world, far_world),
         half: Vec2::new(4.0, 3.0),
     });
-    let mut backdrop = |color: Color| {
-        materials_assets.add(StandardMaterial {
-            base_color: color,
-            unlit: true,
-            // Both faces: an opening is approachable from either side,
-            // and a one-sided quad silently vanishes from whichever side
-            // it is not facing — which reads as "the backdrop is gone".
-            double_sided: true,
-            cull_mode: None,
-            ..default()
-        })
-    };
-    // Each side is painted with the background of the world it looks INTO.
     commands.insert_resource(PortalAssets {
         quad: meshes.add(Rectangle::new(8.0, 6.0)),
-        material: [backdrop(far.scene.clear_color), backdrop(scene.0.clear_color)],
     });
     info!("portal opened at {at:?} in world {near_world}");
 }
@@ -380,18 +395,20 @@ fn open_portal(
 /// then follow whatever the portal says, including the side that did not
 /// exist yet, and a stray or missing one heals itself instead of leaving
 /// an opening you cannot see.
+#[allow(clippy::too_many_arguments)]
 fn sync_backdrops(
     mut commands: Commands,
     portals: Query<&Portal>,
     assets: Option<Res<PortalAssets>>,
+    scenes: Res<crate::WorldScenes>,
+    mut materials_assets: ResMut<Assets<StandardMaterial>>,
     mut quads: Query<(Entity, &PortalBackdrop, &mut Transform)>,
 ) {
     let (Ok(portal), Some(assets)) = (portals.single(), assets) else {
         return;
     };
-    let sides = [(portal.worlds.0, 0usize), (portal.worlds.1, 1usize)];
     let placement = portal.at;
-    for (world, material) in sides {
+    for world in [portal.worlds.0, portal.worlds.1] {
         match quads.iter_mut().find(|(_, b, _)| b.world == world) {
             Some((_, _, mut transform)) => {
                 if *transform != placement {
@@ -399,10 +416,25 @@ fn sync_backdrops(
                 }
             }
             None => {
+                // Painted with the background of the world it looks INTO,
+                // looked up by that world — not by which side of the pair
+                // it happens to be, which is only right when the portal
+                // was opened from world 0.
+                let into = portal.other(world).and_then(|w| scenes.0.get(&w));
+                let material = materials_assets.add(StandardMaterial {
+                    base_color: into.map_or(Color::BLACK, |s| s.clear_color),
+                    unlit: true,
+                    // Both faces: an opening is approachable from either
+                    // side, and a one-sided quad silently vanishes from
+                    // whichever side it is not facing.
+                    double_sided: true,
+                    cull_mode: None,
+                    ..default()
+                });
                 commands.spawn((
                     PortalBackdrop { world },
                     Mesh3d(assets.quad.clone()),
-                    MeshMaterial3d(assets.material[material].clone()),
+                    MeshMaterial3d(material),
                     placement,
                     voxel_render::world_layer(world),
                 ));

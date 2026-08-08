@@ -26,6 +26,14 @@ use voxel_engine::{LevelDef, LevelPlugin, VoxelStreamSource};
 /// are written for ONE of them. Naming it beats leaving `0` in a dozen
 /// systems: decorating a second world becomes "run these for another id",
 /// and until then every place that assumes one world says so.
+/// How each loaded world is dressed: background, sun, ambient, haze.
+///
+/// One place that answers "how does world W look", because five systems
+/// need it and each one that reinvents the lookup is a chance for the
+/// far side of a portal to be lit, fogged or coloured like the near one.
+#[derive(Resource, Default)]
+pub struct WorldScenes(pub bevy::platform::collections::HashMap<voxel_engine::WorldId, Scene>);
+
 /// Defaults to 0: the level the app was launched with. A portal's far
 /// side is streamed and drawn, but this demo puts no grass in it.
 #[derive(Resource, Clone, Copy, Default)]
@@ -181,6 +189,9 @@ fn main() {
         }))
         .insert_resource(HostScene(scene))
         .init_resource::<HostWorld>()
+        .insert_resource(WorldScenes(
+            [(0, scene_for(std::path::Path::new(&path)))].into_iter().collect(),
+        ))
         .add_plugins((
             VoxelDebugPlugin,
             VoxelVizPlugin,
@@ -320,22 +331,17 @@ struct HostScene(Scene);
 fn sync_world_suns(
     mut commands: Commands,
     worlds: Res<voxel_engine::Worlds>,
-    far: Option<Res<portal::FarLevel>>,
-    scene: Res<HostScene>,
+    scenes: Res<WorldScenes>,
     mut reloaded: MessageReader<LevelReloaded>,
     mut suns: Query<(Entity, &LevelSun, &mut Transform)>,
 ) {
-    let changed = worlds.is_changed() || reloaded.read().count() > 0;
+    let changed = worlds.is_changed() || scenes.is_changed() || reloaded.read().count() > 0;
     if !changed {
         return;
     }
     for world in worlds.iter() {
-        // Which scene dresses this world: the launched level's, or the
-        // portal's far side.
-        let host = match far.as_ref().filter(|f| f.world == Some(world.id)) {
-            Some(far) => &far.scene,
-            None if world.id == 0 => &scene.0,
-            None => continue,
+        let Some(host) = scenes.0.get(&world.id) else {
+            continue;
         };
         let aim = Transform::from_translation(Vec3::ZERO)
             .looking_to(-sun_direction(&world.level), Vec3::Y);
