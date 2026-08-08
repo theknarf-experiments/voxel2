@@ -46,7 +46,10 @@ impl Plugin for PortalPlugin {
                     sync_backdrops,
                     drive_portal,
                 )
-                    .chain(),
+                    .chain()
+                    // `drive_portal` publishes where each world is seen
+                    // from; the engine's graphs follow it the same frame.
+                    .in_set(voxel_engine::WorldFocusSet::Publish),
             );
     }
 }
@@ -102,6 +105,7 @@ fn follow_camera_world(
     far: Option<Res<FarLevel>>,
     scene: Res<crate::HostScene>,
     mut clear: ResMut<ClearColor>,
+    mut ambient: ResMut<GlobalAmbientLight>,
     // `Option`, because not every camera carries the component: the
     // offscreen mirror camera `voxctl shot` renders through is spawned
     // without one, so a query that REQUIRED it silently skipped the very
@@ -114,15 +118,21 @@ fn follow_camera_world(
     // lazily on the first request, so gating on `is_changed` left it on
     // layer 0 forever — the window showed the right world while every
     // screenshot showed the wrong one.
-    // The background belongs to the world you are in: step into an
-    // interior and the sky should stop being sky.
-    let want_clear = if camera_world.0 == 0 {
-        scene.0.clear_color
-    } else {
-        far.as_ref().map_or(scene.0.clear_color, |f| f.scene.clear_color)
+    // The background AND the ambient belong to the world you are in: step
+    // into an interior and the sky should stop being sky. Ambient is a
+    // single global in Bevy, so unlike the sun it cannot be given to a
+    // world and left there — it has to follow the camera. A sunless
+    // interior lit at the planet's ambient is nearly black.
+    let here = match far.as_ref().filter(|f| f.world == Some(camera_world.0)) {
+        Some(far) => &far.scene,
+        None => &scene.0,
     };
-    if clear.0 != want_clear {
-        clear.0 = want_clear;
+    if clear.0 != here.clear_color {
+        clear.0 = here.clear_color;
+    }
+    if ambient.brightness != here.ambient_brightness || ambient.color != here.ambient_color {
+        ambient.color = here.ambient_color;
+        ambient.brightness = here.ambient_brightness;
     }
     let want = voxel_render::world_layer(camera_world.0);
     for (entity, layers) in &mut cameras {
@@ -162,6 +172,26 @@ pub struct Portal {
 }
 
 impl Portal {
+    /// The rigid motion carrying the `from` side onto the `to` side.
+    ///
+    /// With a HALF TURN in the middle, and that is the whole subtlety.
+    /// The two openings of a doorway FACE EACH OTHER: you go in through
+    /// one and come out of the other with it behind you. Mapping one
+    /// frame directly onto the other — `to * from⁻¹` — instead lines
+    /// their fronts up the same way, so you emerge travelling back INTO
+    /// the far opening, having apparently turned around. Nothing is
+    /// flipped: the pairing was simply missing the turn a doorway has.
+    ///
+    /// ONE definition, used by both the view and the traversal. They must
+    /// agree exactly or you see one thing through the opening and arrive
+    /// somewhere else.
+    fn motion(from: &Transform, to: &Transform) -> Transform {
+        let flip = Transform::from_rotation(Quat::from_rotation_y(std::f32::consts::PI));
+        Transform::from_matrix(Mat4::from(
+            to.compute_affine() * flip.compute_affine() * from.compute_affine().inverse(),
+        ))
+    }
+
     /// The opening's four corners, in the given placement.
     fn corners(at: &Transform, half: Vec2) -> [Vec3; 4] {
         let x = at.rotation * Vec3::X * half.x;
@@ -425,8 +455,7 @@ fn drive_portal(
     } else {
         (portal.far, portal.near)
     };
-    let motion =
-        Transform::from_matrix(Mat4::from(to.compute_affine() * from.compute_affine().inverse()));
+    let motion = Portal::motion(&from, &to);
 
     for (source, eye, camera, target) in &sources {
         let existing = portal_cams
@@ -568,8 +597,7 @@ fn traverse_portal(
         return; // through the wall beside it, not the opening
     }
 
-    let motion =
-        Transform::from_matrix(Mat4::from(to.compute_affine() * from.compute_affine().inverse()));
+    let motion = Portal::motion(&from, &to);
     transform.translation = motion.transform_point(now);
     transform.rotation = motion.rotation * transform.rotation;
     camera_world.0 = if entering {

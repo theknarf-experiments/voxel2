@@ -332,20 +332,27 @@ pub fn ops_provider(world: &WorldQuery) -> Option<crate::chunkgen::OpsFn> {
     }))
 }
 
-/// Publish the streaming source's position to every world's planner each
+/// Publish where each world is being looked at FROM to its planner, every
 /// frame. The planner's own quantization decides whether that is a change
 /// worth acting on, so this is a store, never a wait.
 ///
-/// Every world, because a world seen only through a portal still plans:
-/// the LOD graph will ask it for ops the moment the opening shows any of
-/// it. Where each world is looked at FROM is a separate question, and
-/// `WorldFocus` answers it — this is only the streaming source.
-pub fn follow_stream_source(worlds: Res<crate::Worlds>, sources: crate::StreamSourceQuery) {
+/// The same [`crate::WorldFocus`] the LOD graphs follow, and that is the
+/// point. Publishing the raw camera to every world centres a world seen
+/// through a portal on a point in ANOTHER world's coordinates — 46 km
+/// away, in the shipped pair — so its planning was resident nowhere near
+/// its chunks. Stepping through then snapped it to where you actually
+/// were and regenerated the whole graph, which is what "going through the
+/// portal rebuilds that world" was.
+pub fn follow_stream_source(
+    worlds: Res<crate::Worlds>,
+    focus: Res<crate::WorldFocus>,
+    sources: crate::StreamSourceQuery,
+) {
     let Ok(source) = sources.single() else {
         return; // no streaming source tagged yet
     };
-    let focus = source.translation().as_ivec3();
+    let camera = source.translation().as_dvec3();
     for world in worlds.iter() {
-        world.query.set_focus(focus);
+        world.query.set_focus(focus.at(world.id, camera).as_ivec3());
     }
 }

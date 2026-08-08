@@ -269,13 +269,7 @@ impl LodLayers {
     /// the portal looks out onto nothing, correctly and uselessly.
     pub fn follow(&mut self, camera: DVec3, focus: &WorldFocus) {
         for world in &mut self.worlds {
-            let at = focus
-                .0
-                .get(usize::from(world.shared.world))
-                .copied()
-                .flatten()
-                .unwrap_or(camera);
-            world.follow(at);
+            world.follow(focus.at(world.shared.world, camera));
         }
     }
 }
@@ -284,6 +278,22 @@ impl LodLayers {
 /// camera. Indexed by world; `None` means "follow the camera".
 #[derive(Resource, Default)]
 pub struct WorldFocus(pub Vec<Option<DVec3>>);
+
+impl WorldFocus {
+    /// Where world `id` is being looked at from.
+    ///
+    /// ONE answer, for every consumer that follows a world: the LOD
+    /// graphs and the planning graphs must centre on the same point or
+    /// planning is resident where the chunks are not, and the chunks
+    /// stream in featureless.
+    pub fn at(&self, id: voxel_core::WorldId, camera: DVec3) -> DVec3 {
+        self.0
+            .get(usize::from(id))
+            .copied()
+            .flatten()
+            .unwrap_or(camera)
+    }
+}
 
 /// How far the camera moves before the field is re-centred.
 pub const ANCHOR_STEP: f64 = 48.0;
@@ -599,6 +609,11 @@ impl Plugin for LodLayersPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<LodLayers>()
             .init_resource::<WorldFocus>()
-            .add_systems(Update, (build_lod_layers, follow_lod_focus).chain());
+            .add_systems(
+                Update,
+                (build_lod_layers, follow_lod_focus)
+                    .chain()
+                    .in_set(crate::WorldFocusSet::Follow),
+            );
     }
 }

@@ -1096,7 +1096,10 @@ impl Plugin for LevelPlugin {
             // resources — which is why a host adding a second world had to
             // rediscover which five, and got three of them.
             .add_systems(Startup, load_initial_world)
-            .add_systems(Update, crate::planning::follow_stream_source);
+            .add_systems(
+                Update,
+                crate::planning::follow_stream_source.in_set(crate::WorldFocusSet::Follow),
+            );
 
         if let Some(port) = self.remote_port {
             let _ = port; // BRP tooling lives in voxel-debug; see VoxelRemotePlugin

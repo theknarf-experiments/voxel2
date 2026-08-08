@@ -35,6 +35,23 @@ pub use lod_layers::WorldFocus;
 pub use scatter::{Placement, PlacementInputs, ScatterInstance};
 pub use voxel_core::{ChunkKey, WorldId};
 
+/// Where each world is looked at from is PUBLISHED before it is
+/// CONSUMED, in the same frame.
+///
+/// A host decides this — a portal moves the point a world is seen from —
+/// and the engine's LOD and planning graphs both follow it. Consuming a
+/// stale focus for one frame is not a hiccup: the fallback is the camera,
+/// and after stepping through a portal the camera is in another world's
+/// coordinates entirely, so the world you just left re-centres 46 km away
+/// and regenerates its whole planning graph.
+#[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
+pub enum WorldFocusSet {
+    /// Publish `WorldFocus`. The host's.
+    Publish,
+    /// Read it: LOD residency and planning residency.
+    Follow,
+}
+
 /// One loaded world, and everything that is true of it.
 ///
 /// A portal shows two levels at once, so "the world" is not a singleton:
@@ -222,6 +239,10 @@ impl Plugin for VoxelEnginePlugin {
     fn build(&self, app: &mut App) {
         app.add_plugins((voxel_render::VoxelChunksPlugin, VoxelStreamingPlugin))
             .init_resource::<Worlds>()
+            .configure_sets(
+                Update,
+                WorldFocusSet::Follow.after(WorldFocusSet::Publish),
+            )
             .add_systems(PreUpdate, sync_ops_providers);
     }
 }
