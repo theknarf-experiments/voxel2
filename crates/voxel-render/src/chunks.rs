@@ -752,6 +752,15 @@ fn sync_terrain_materials(
             assets.add(VoxelSurfaceMaterial::default())
         });
         for (handle, recipe) in slot.iter().zip(&world.materials) {
+            // ONLY when it actually differs. `get_mut` marks the asset
+            // modified, and a material modified every frame never settles:
+            // Bevy re-prepares it, the bind group is rebuilt under the
+            // draw, and `SetMaterialBindGroup` skips the whole terrain.
+            // That is invisible — no error, no validation warning, a full
+            // draw list and no ground.
+            if assets.get(handle).is_some_and(|m| m.recipe == *recipe) {
+                continue;
+            }
             if let Some(mut material) = assets.get_mut(handle) {
                 material.recipe = *recipe;
             }
@@ -2717,6 +2726,66 @@ mod multi_world_tests {
         // points in the same frame.
         let eye = key.min_corner_m();
         assert_eq!(draw_uniform(key, eye, &[]).offset.truncate(), Vec3::ZERO);
+    }
+
+    /// A material asset must not be touched when its recipe has not
+    /// changed.
+    ///
+    /// `get_mut` marks the asset modified, Bevy re-prepares it, and the
+    /// bind group is rebuilt under the draw. Do it every frame and it
+    /// never settles: `SetMaterialBindGroup` skips, and the terrain
+    /// vanishes with a full draw list, no error and no validation
+    /// warning. That is exactly what shipped — one host system taking
+    /// `RenderWorlds` mutably every frame was enough.
+    #[test]
+    fn unchanged_recipes_do_not_touch_their_assets() {
+        use bevy::ecs::system::RunSystemOnce;
+
+        let mut app = bevy::app::App::new();
+        app.init_resource::<Assets<VoxelSurfaceMaterial>>()
+            .init_resource::<TerrainMaterials>()
+            .init_resource::<RenderWorlds>();
+        app.world_mut()
+            .resource_mut::<RenderWorlds>()
+            .register(world(1, 0));
+        app.world_mut().spawn(VoxelTerrainMarker);
+
+        // First pass builds the handles and writes every recipe.
+        app.world_mut()
+            .run_system_once(sync_terrain_materials)
+            .unwrap();
+        assert_eq!(
+            app.world().resource::<TerrainMaterials>().0[0].len(),
+            MATERIAL_SLOTS,
+        );
+
+        // Second pass, with the same recipes but the resource marked
+        // changed — the shape a host system that touches `RenderWorlds`
+        // every frame creates.
+        app.world_mut().clear_trackers();
+        app.world_mut().resource_mut::<RenderWorlds>().set_changed();
+        app.world_mut()
+            .run_system_once(sync_terrain_materials)
+            .unwrap();
+        assert!(
+            !app.world()
+                .resource_ref::<Assets<VoxelSurfaceMaterial>>()
+                .is_changed(),
+            "a recipe that did not change must not modify its asset",
+        );
+
+        // But a recipe that DID change still applies.
+        app.world_mut().clear_trackers();
+        {
+            let mut worlds = app.world_mut().resource_mut::<RenderWorlds>();
+            worlds.get_mut(0).unwrap().materials[1].c0 = Vec4::new(1.0, 0.0, 0.0, 0.0);
+        }
+        app.world_mut()
+            .run_system_once(sync_terrain_materials)
+            .unwrap();
+        let handle = app.world().resource::<TerrainMaterials>().0[0][1].clone();
+        let assets = app.world().resource::<Assets<VoxelSurfaceMaterial>>();
+        assert_eq!(assets.get(&handle).unwrap().recipe.c0.x, 1.0);
     }
 
     /// More planes than the uniform holds must truncate, not overrun.

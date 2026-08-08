@@ -346,9 +346,13 @@ fn drive_portal(
     mut focus: ResMut<voxel_engine::WorldFocus>,
     camera_world: Res<voxel_render::CameraWorld>,
 ) {
-    // Republished every frame: a portal that closed or moved must stop
-    // masking with last frame's opening.
-    render_worlds.clear_clips();
+    // Republished when it changes, NOT every frame: taking `RenderWorlds`
+    // mutably marks it changed, and everything downstream that reacts to
+    // "a world changed" then reacts every frame. That cost the terrain its
+    // material bind group and the ground with it.
+    if render_worlds.iter().any(|w| !w.clip.is_empty()) {
+        render_worlds.clear_clips();
+    }
     let Ok(portal) = portals.single() else {
         return;
     };
@@ -450,8 +454,10 @@ fn drive_portal(
         ahead = -ahead;
     }
     planes.push(ahead.extend(-ahead.dot(to.translation)));
-    if let Some(world) = render_worlds.get_mut(showing) {
-        world.clip = planes;
+    if render_worlds.clip(showing) != planes {
+        if let Some(world) = render_worlds.get_mut(showing) {
+            world.clip = planes;
+        }
     }
 }
 
