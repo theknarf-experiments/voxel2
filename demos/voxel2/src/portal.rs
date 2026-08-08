@@ -10,6 +10,11 @@
 //! space, and which one you see is `CameraWorld`. That is why only the
 //! camera's world is drawn — two levels rendered together would interleave
 //! two solids rather than show two places.
+//!
+//! So a portal is one rectangle at one place, open in two worlds at once.
+//! Crossing it changes which world you are in and NOTHING else: same
+//! position, same heading, same velocity. There is no pairing transform
+//! because there is nothing to pair — both openings are the same opening.
 
 use bevy::prelude::*;
 use bevy::camera::visibility::RenderLayers;
@@ -157,50 +162,51 @@ fn follow_camera_world(
 
 /// A rectangular opening between two worlds.
 ///
-/// `near`/`far` place the SAME opening in each world. Looking through it
-/// from the near side shows the far world as if the two spaces were
-/// joined along the rectangle, which is what "seamless" means here: the
-/// far view is the near view moved by `far * near⁻¹`.
+/// A rectangular opening between two dimensions of the SAME space.
+///
+/// Worlds share coordinates — that is what lets one chunk service and one
+/// GPU arena serve all of them, with the world riding in `ChunkKey`. So a
+/// portal is one rectangle at one place, open in two worlds at once, and
+/// crossing it changes WHICH world you are in and nothing else. No
+/// displacement, no rotation, no pairing transform.
+///
+/// There used to be a placement per side, with the far one hardcoded to
+/// the world origin. Since the planet's demo starts 46 km out, stepping
+/// through teleported you 46 km — which then had to be undone by a
+/// pairing matrix, a half turn to come out the right side, and a separate
+/// focus point per world so the far side streamed somewhere other than
+/// where you were. All of that was machinery for a coordinate jump that
+/// should never have existed.
 #[derive(Component, Clone, Copy)]
 pub struct Portal {
-    pub near: Transform,
-    pub far: Transform,
-    pub near_world: u8,
-    pub far_world: u8,
+    /// Where the opening is, in the coordinates both worlds share.
+    pub at: Transform,
+    /// The two worlds it joins.
+    pub worlds: (u8, u8),
     /// Half width and half height of the opening, in metres.
     pub half: Vec2,
 }
 
 impl Portal {
-    /// The rigid motion carrying the `from` side onto the `to` side.
-    ///
-    /// With a HALF TURN in the middle, and that is the whole subtlety.
-    /// The two openings of a doorway FACE EACH OTHER: you go in through
-    /// one and come out of the other with it behind you. Mapping one
-    /// frame directly onto the other — `to * from⁻¹` — instead lines
-    /// their fronts up the same way, so you emerge travelling back INTO
-    /// the far opening, having apparently turned around. Nothing is
-    /// flipped: the pairing was simply missing the turn a doorway has.
-    ///
-    /// ONE definition, used by both the view and the traversal. They must
-    /// agree exactly or you see one thing through the opening and arrive
-    /// somewhere else.
-    fn motion(from: &Transform, to: &Transform) -> Transform {
-        let flip = Transform::from_rotation(Quat::from_rotation_y(std::f32::consts::PI));
-        Transform::from_matrix(Mat4::from(
-            to.compute_affine() * flip.compute_affine() * from.compute_affine().inverse(),
-        ))
+    /// The world on the other side from `world`, or `None` if this portal
+    /// does not touch it.
+    fn other(&self, world: u8) -> Option<u8> {
+        match world {
+            w if w == self.worlds.0 => Some(self.worlds.1),
+            w if w == self.worlds.1 => Some(self.worlds.0),
+            _ => None,
+        }
     }
 
-    /// The opening's four corners, in the given placement.
-    fn corners(at: &Transform, half: Vec2) -> [Vec3; 4] {
-        let x = at.rotation * Vec3::X * half.x;
-        let y = at.rotation * Vec3::Y * half.y;
+    /// The opening's four corners.
+    fn corners(&self) -> [Vec3; 4] {
+        let x = self.at.rotation * Vec3::X * self.half.x;
+        let y = self.at.rotation * Vec3::Y * self.half.y;
         [
-            at.translation - x - y,
-            at.translation + x - y,
-            at.translation + x + y,
-            at.translation - x + y,
+            self.at.translation - x - y,
+            self.at.translation + x - y,
+            self.at.translation + x + y,
+            self.at.translation - x + y,
         ]
     }
 }
@@ -332,12 +338,8 @@ fn open_portal(
     // would itself fail once a duplicate existed and leave it wedged.
     let mut open = portal.iter_mut();
     if let Some((_, mut existing)) = open.next() {
-        if camera_world.0 == existing.far_world {
-            existing.far = placement;
-        } else {
-            existing.near = placement;
-            existing.near_world = camera_world.0;
-        }
+        existing.at = placement;
+        existing.worlds = (camera_world.0, far_world);
         for (stray, _) in open {
             warn!("portal: despawning a duplicate opening");
             commands.entity(stray).despawn();
@@ -346,14 +348,10 @@ fn open_portal(
         return;
     }
 
-    // The opening is cut in the world the camera is standing in.
     let near_world = camera_world.0;
     commands.spawn(Portal {
-        near: placement,
-        // Room to stand inside the far level.
-        far: Transform::from_translation(Vec3::new(0.0, 22.0, 0.0)),
-        near_world,
-        far_world,
+        at: placement,
+        worlds: (near_world, far_world),
         half: Vec2::new(4.0, 3.0),
     });
     let mut backdrop = |color: Color| {
@@ -391,11 +389,9 @@ fn sync_backdrops(
     let (Ok(portal), Some(assets)) = (portals.single(), assets) else {
         return;
     };
-    let sides = [
-        (portal.near_world, portal.near, 0usize),
-        (portal.far_world, portal.far, 1usize),
-    ];
-    for (world, placement, material) in sides {
+    let sides = [(portal.worlds.0, 0usize), (portal.worlds.1, 1usize)];
+    let placement = portal.at;
+    for (world, material) in sides {
         match quads.iter_mut().find(|(_, b, _)| b.world == world) {
             Some((_, _, mut transform)) => {
                 if *transform != placement {
@@ -415,7 +411,7 @@ fn sync_backdrops(
     }
     // A side that moved to another world leaves its old quad behind.
     for (entity, backdrop, _) in &quads {
-        if backdrop.world != portal.near_world && backdrop.world != portal.far_world {
+        if portal.other(backdrop.world).is_none() {
             commands.entity(entity).despawn();
         }
     }
@@ -445,23 +441,19 @@ fn drive_portal(
     let Ok(portal) = portals.single() else {
         return;
     };
-    let showing = if camera_world.0 == portal.near_world {
-        portal.far_world
-    } else {
-        portal.near_world
+    let Some(showing) = portal.other(camera_world.0) else {
+        return; // this portal does not touch the world you are in
     };
-    let (from, to) = if camera_world.0 == portal.near_world {
-        (portal.near, portal.far)
-    } else {
-        (portal.far, portal.near)
-    };
-    let motion = Portal::motion(&from, &to);
 
     for (source, eye, camera, target) in &sources {
         let existing = portal_cams
             .iter_mut()
             .find(|(_, paired, _, _)| paired.0 == source);
-        let placement = Transform::from_matrix(motion.to_matrix() * eye.to_matrix());
+        // The SAME eye. Both worlds occupy the same coordinates, so the
+        // view of the other one through the opening is this view — there
+        // is nothing to transform and so nothing that can fail to line up
+        // at the edges.
+        let placement = Transform::from_matrix(eye.to_matrix());
         match existing {
             Some((entity, _, mut transform, mut cam)) => {
                 *transform = placement;
@@ -483,9 +475,7 @@ fn drive_portal(
                     PortalCamera(source),
                     // "Not the player camera." Without it the streamer
                     // can pick THIS one as the eye, and generation
-                    // priority is then computed from a point in the other
-                    // world — the chunks under your feet go to the back
-                    // of the queue and the ground appears to break.
+                    // priority is computed from the wrong view.
                     voxel_render::HelperCamera,
                     Camera3d::default(),
                     Camera {
@@ -515,35 +505,34 @@ fn drive_portal(
         }
     }
 
-    // The mask, in the FAR world's coordinates: the pyramid from the
-    // (moved) eye through the (far) opening, plus the opening's own plane
-    // so nothing between it and the eye leaks in.
+    // The mask: the pyramid from the eye through the opening, plus the
+    // opening's own plane so nothing between it and the eye leaks in.
+    // One set of coordinates, so these are the eye and the opening as they
+    // already are.
     let Some((_, eye, _, _)) = sources.iter().next() else {
         return;
     };
-    let far_eye = motion.transform_point(eye.translation());
-    // Stream the far world around where the portal looks INTO it. Left on
-    // the camera's position it resides chunks in the far world at the near
-    // world's coordinates, and the opening looks out onto empty space.
+    let eye = eye.translation();
+    // The far world streams around the SAME point the camera is at: it is
+    // the same place, in another dimension. Nothing to relocate.
     focus.0.clear();
     focus.0.resize(voxel_render::MAX_WORLDS, None);
-    focus.0[usize::from(showing)] = Some(far_eye.as_dvec3());
-    let corners = Portal::corners(&to, portal.half);
+    let corners = portal.corners();
     let mut planes = Vec::with_capacity(voxel_render::MAX_CLIP_PLANES);
     for i in 0..4 {
         let a = corners[i];
         let b = corners[(i + 1) % 4];
-        let mut n = (a - far_eye).cross(b - far_eye).normalize_or_zero();
+        let mut n = (a - eye).cross(b - eye).normalize_or_zero();
         if n.dot(corners[(i + 2) % 4] - a) < 0.0 {
             n = -n;
         }
         planes.push(n.extend(-n.dot(a)));
     }
-    let mut ahead = to.rotation * Vec3::Z;
-    if ahead.dot(to.translation - far_eye) < 0.0 {
+    let mut ahead = portal.at.rotation * Vec3::Z;
+    if ahead.dot(portal.at.translation - eye) < 0.0 {
         ahead = -ahead;
     }
-    planes.push(ahead.extend(-ahead.dot(to.translation)));
+    planes.push(ahead.extend(-ahead.dot(portal.at.translation)));
     if render_worlds.clip(showing) != planes {
         if let Some(world) = render_worlds.get_mut(showing) {
             world.clip = planes;
@@ -551,60 +540,52 @@ fn drive_portal(
     }
 }
 
-/// Step through: crossing the opening moves you by the pairing and swaps
-/// which world you are in.
+/// Step through: crossing the opening changes which world you are in,
+/// and nothing else.
 ///
-/// Tested against the SEGMENT the camera travelled this frame, not against
-/// which side it is on now. At walking speed a frame covers centimetres,
-/// but a fast flight covers tens of metres and would step straight over a
-/// 3 m opening between two samples — the portal would work until you
-/// approached it quickly, which is the worst way for it to fail.
+/// No displacement and no rotation, because there is nothing to displace
+/// to — the two worlds occupy the same coordinates and the opening is one
+/// rectangle open in both. You keep your position, your velocity and your
+/// heading; only the dimension you are in changes.
+///
+/// Tested against the SEGMENT the camera travelled this frame, not
+/// against which side it is on now. At walking speed a frame covers
+/// centimetres, but a fast flight covers tens of metres and would step
+/// straight over a 3 m opening between two samples — the portal would
+/// work until you approached it quickly, which is the worst way for it to
+/// fail.
 fn traverse_portal(
     portals: Query<&Portal>,
-    mut camera: Query<&mut Transform, With<crate::FreeCamera>>,
+    camera: Query<&Transform, With<crate::FreeCamera>>,
     mut camera_world: ResMut<voxel_render::CameraWorld>,
     mut was_at: Local<Option<Vec3>>,
 ) {
-    let (Ok(portal), Ok(mut transform)) = (portals.single(), camera.single_mut()) else {
+    let (Ok(portal), Ok(transform)) = (portals.single(), camera.single()) else {
         return;
     };
     let now = transform.translation;
     let Some(before) = was_at.replace(now) else {
         return;
     };
-    let entering = camera_world.0 == portal.near_world;
-    let (from, to) = if entering {
-        (portal.near, portal.far)
-    } else {
-        (portal.far, portal.near)
+    let Some(other) = portal.other(camera_world.0) else {
+        return;
     };
 
     // Signed distance to the opening's plane, before and after.
-    let normal = from.rotation * Vec3::Z;
-    let plane_d = -normal.dot(from.translation);
-    let (d0, d1) = (
-        normal.dot(before) + plane_d,
-        normal.dot(now) + plane_d,
-    );
+    let normal = portal.at.rotation * Vec3::Z;
+    let plane_d = -normal.dot(portal.at.translation);
+    let (d0, d1) = (normal.dot(before) + plane_d, normal.dot(now) + plane_d);
     if (d0 < 0.0) == (d1 < 0.0) {
         return; // did not cross
     }
     // Where it crossed, and whether that is inside the opening.
     let t = d0 / (d0 - d1);
     let hit = before.lerp(now, t.clamp(0.0, 1.0));
-    let local = from.rotation.inverse() * (hit - from.translation);
+    let local = portal.at.rotation.inverse() * (hit - portal.at.translation);
     if local.x.abs() > portal.half.x || local.y.abs() > portal.half.y {
         return; // through the wall beside it, not the opening
     }
 
-    let motion = Portal::motion(&from, &to);
-    transform.translation = motion.transform_point(now);
-    transform.rotation = motion.rotation * transform.rotation;
-    camera_world.0 = if entering {
-        portal.far_world
-    } else {
-        portal.near_world
-    };
-    *was_at = Some(transform.translation);
-    info!("stepped into world {}", camera_world.0);
+    camera_world.0 = other;
+    info!("stepped into world {other}");
 }
