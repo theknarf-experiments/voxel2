@@ -283,7 +283,7 @@ fn reconcile(
                         hash: p.seed as u32,
                     })
                     .collect();
-                points.set_class(&population.class, merged);
+                points.set_class(population.world, &population.class, merged);
             }
             ScatterOutput::Entities => {
                 let live = population.sink.keys();
@@ -320,8 +320,7 @@ fn reconcile(
                                     },
                                     // Only visible from its own world,
                                     // and from a far view of it.
-                                    crate::OfWorld(population.world),
-                                    voxel_render::world_layer(population.world),
+                                    crate::OfWorld::scene(population.world),
                                 ))
                                 .id()
                         })

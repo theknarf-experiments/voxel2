@@ -19,6 +19,7 @@
 //! of it — on the order of once per kilometre, never per frame.
 
 use bevy::prelude::*;
+use std::collections::HashMap;
 
 use crate::planning::world::WorldCtx;
 
@@ -89,44 +90,52 @@ fn levelled_handover_voxel_m(lod: &voxel_engine::streaming::LodConfig) -> f32 {
         .map_or(PAINT_FROM_VOXEL_M, |key| key.voxel_size_m() as f32)
 }
 
+/// Repaint every loaded world's ground map.
+///
+/// Every world, because the map is world content: it is indexed by
+/// world-space xz and says nothing about which world it belongs to, so it
+/// is held BY the world it paints. Painting only the launched one left
+/// every other level's roads and river beds unpainted past the distance
+/// their own geometry stops resolving.
 fn repaint(
     worlds: Res<voxel_engine::Worlds>,
-    host: Res<crate::HostWorld>,
     sources: voxel_engine::StreamSourceQuery,
     mut render: ResMut<voxel_render::RenderWorlds>,
-    mut painted_at: Local<Option<Vec2>>,
-    mut seen: Local<u64>,
+    mut painted: Local<HashMap<voxel_engine::WorldId, (Vec2, u64)>>,
 ) {
     let Ok(source) = sources.single() else {
         return;
     };
-    // The map is indexed by world-space xz and says nothing about which
-    // world it belongs to, so it is held BY the world it paints: worlds
-    // share coordinates, and one global raster painted this level's
-    // rivers onto whatever else was loaded.
-    let (Some(world), Some(map)) = (
-        worlds.get(host.0),
-        render.get_mut(host.0).map(|w| &mut w.surface_map),
-    ) else {
+    for world in worlds.iter() {
+        repaint_world(world, source.translation(), &mut render, &mut painted);
+    }
+}
+
+fn repaint_world(
+    world: &voxel_engine::World,
+    eye: Vec3,
+    render: &mut voxel_render::RenderWorlds,
+    painted: &mut HashMap<voxel_engine::WorldId, (Vec2, u64)>,
+) {
+    let Some(map) = render.get_mut(world.id).map(|w| &mut w.surface_map) else {
         return;
     };
     let lod = &world.config;
     let Some(ctx) = world.query.host_ctx::<WorldCtx>() else {
         return;
     };
-    let eye = source.translation();
     let eye = Vec2::new(eye.x, eye.z);
     // Repaint when the camera leaves the middle of the raster OR when the
     // plan under it changed. Camera movement alone is not enough: at
     // startup nothing is resident yet, so the first paint would find an
     // empty world and never look again.
     let generation = ctx.ribbons.generation();
-    let moved = painted_at.is_none_or(|at| at.distance(eye) > REPAINT_M);
-    if !moved && generation == *seen {
+    let last = painted.get(&world.id).copied();
+    let moved = last.is_none_or(|(at, _)| at.distance(eye) > REPAINT_M);
+    if !moved && last.is_some_and(|(_, seen)| seen == generation) {
         return;
     }
-    *painted_at = Some(eye);
-    *seen = generation;
+    painted.insert(world.id, (eye, generation));
 
     let span = MAP_SIZE as f32 * TEXEL_M;
     let origin = eye - Vec2::splat(span * 0.5);
@@ -170,7 +179,10 @@ fn repaint(
     map.coarse_from = coarse_from;
     map.generation = map.generation.wrapping_add(1);
     if std::env::var_os("VOXEL_LOG_LAYERS").is_some() {
-        info!("surface paint: {painted} texels around {eye:?}");
+        info!(
+            "surface paint: world {} {painted} texels around {eye:?}",
+            world.id
+        );
     }
 }
 

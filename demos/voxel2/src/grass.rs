@@ -43,13 +43,23 @@ use bevy::{
     },
 };
 use bytemuck::{Pod, Zeroable};
+use std::collections::HashMap;
 use voxel_render::{ScatterPoint, ScatterPoints};
 
-/// Marker entity anchoring the grass draw.
-#[derive(Clone, Component, ExtractComponent)]
+/// Marker entity anchoring one world's grass draw.
+///
+/// One per loaded world, each on its world's render layer, so Bevy's
+/// visible-entity filtering picks the right one per view and the draw
+/// command binds that world's instance buffer. Grass is world content:
+/// it is seated on a heightfield, and worlds share coordinates, so the
+/// wrong world's blades do not merely look out of place — they stand in
+/// mid-air or bury themselves in rock.
+#[derive(Clone, Copy, Component, ExtractComponent)]
 #[require(VisibilityClass)]
 #[component(on_add = visibility::add_visibility_class::<GrassMarker>)]
-pub struct GrassMarker;
+pub struct GrassMarker {
+    pub world: voxel_engine::WorldId,
+}
 
 /// The scatter population this demo draws as grass. Just a name the
 /// level and the demo agree on — the engine never sees it.
@@ -62,7 +72,7 @@ impl Plugin for GrassPlugin {
         embedded_asset!(app, "voxel_grass.wgsl");
         app.init_resource::<ScatterPoints>()
             .add_plugins(ExtractComponentPlugin::<GrassMarker>::default())
-            .add_systems(Startup, spawn_grass_marker);
+            .add_systems(Update, sync_grass_markers);
 
         let Some(render_app) = app.get_sub_app_mut(RenderApp) else {
             return;
@@ -90,16 +100,34 @@ impl Plugin for GrassPlugin {
     }
 }
 
-fn spawn_grass_marker(mut commands: Commands) {
-    commands.spawn((
-        GrassMarker,
-        Visibility::default(),
-        Transform::default(),
-        Aabb {
-            center: Vec3A::ZERO,
-            half_extents: Vec3A::splat(1.0e9),
-        },
-    ));
+/// Give every loaded world a grass anchor. Not a `Startup` one-shot: a
+/// world can arrive at any time, because opening a portal loads one.
+fn sync_grass_markers(
+    mut commands: Commands,
+    worlds: Res<voxel_engine::Worlds>,
+    // Bookkeeping, not a query: a spawn is not visible to a query until
+    // commands apply, so two changes to `Worlds` before the flush would
+    // give one world two markers and draw its grass twice.
+    mut spawned: Local<std::collections::HashSet<voxel_engine::WorldId>>,
+) {
+    if !worlds.is_changed() {
+        return;
+    }
+    for world in worlds.iter() {
+        if !spawned.insert(world.id) {
+            continue;
+        }
+        commands.spawn((
+            GrassMarker { world: world.id },
+            crate::OfWorld::scene(world.id),
+            Visibility::default(),
+            Transform::default(),
+            Aabb {
+                center: Vec3A::ZERO,
+                half_extents: Vec3A::splat(1.0e9),
+            },
+        ));
+    }
 }
 
 // --- tuft mesh ---------------------------------------------------------------
@@ -150,8 +178,9 @@ struct GrassBuffers {
     tuft_vertices: Option<Buffer>,
     tuft_indices: Option<Buffer>,
     tuft_index_count: u32,
-    instances: Option<Buffer>,
-    instance_count: u32,
+    /// One instance buffer per world. The tuft geometry is shared; where
+    /// the tufts stand is not.
+    instances: HashMap<voxel_engine::WorldId, (Buffer, u32)>,
 }
 
 #[derive(Resource)]
@@ -323,21 +352,24 @@ fn extract_grass_instances(
     mut buffers: ResMut<GrassBuffers>,
     render_device: Res<RenderDevice>,
 ) {
-    let Some(points) = instances.take_class_if_dirty(GROUND_COVER_CLASS) else {
+    let Some(per_world) = instances.take_class_if_dirty(GROUND_COVER_CLASS) else {
         return;
     };
-    buffers.instance_count = points.len() as u32;
-    if points.is_empty() {
-        buffers.instances = None;
-        return;
-    }
-    buffers.instances = Some(
-        render_device.create_buffer_with_data(&BufferInitDescriptor {
+    // Wholesale: a world that published no points this time has none, and
+    // leaving its old buffer would keep drawing grass the streamer has
+    // already let go of.
+    buffers.instances.clear();
+    for (world, points) in per_world {
+        if points.is_empty() {
+            continue;
+        }
+        let buffer = render_device.create_buffer_with_data(&BufferInitDescriptor {
             label: Some("grass_instances"),
             contents: bytemuck::cast_slice(&points),
             usage: BufferUsages::VERTEX,
-        }),
-    );
+        });
+        buffers.instances.insert(world, (buffer, points.len() as u32));
+    }
 }
 
 // --- drawing -----------------------------------------------------------------
@@ -490,34 +522,40 @@ where
 {
     type Param = (SRes<GrassBuffers>, SRes<GrassBindGroupRes>);
     type ViewQuery = ();
-    type ItemQuery = ();
+    /// The marker says which world this draw is for. Which markers a view
+    /// sees is already decided — they are ordinary entities filtered by
+    /// render layer — so this only has to bind what that one asked for.
+    type ItemQuery = bevy::ecs::system::lifetimeless::Read<GrassMarker>;
 
     fn render<'w>(
         _: &P,
         _: ROQueryItem<'w, '_, Self::ViewQuery>,
-        _: Option<ROQueryItem<'w, '_, Self::ItemQuery>>,
+        marker: Option<ROQueryItem<'w, '_, Self::ItemQuery>>,
         (buffers, bind_group): SystemParamItem<'w, '_, Self::Param>,
         pass: &mut TrackedRenderPass<'w>,
     ) -> RenderCommandResult {
         let buffers = buffers.into_inner();
+        let Some(marker) = marker else {
+            return RenderCommandResult::Skip;
+        };
         let Some(bg) = &bind_group.into_inner().0 else {
             return RenderCommandResult::Skip;
         };
-        let (Some(vb), Some(ib), Some(inst)) = (
+        let (Some(vb), Some(ib), Some((inst, count))) = (
             &buffers.tuft_vertices,
             &buffers.tuft_indices,
-            &buffers.instances,
+            buffers.instances.get(&marker.world),
         ) else {
             return RenderCommandResult::Success;
         };
-        if buffers.instance_count == 0 {
+        if *count == 0 {
             return RenderCommandResult::Success;
         }
         pass.set_bind_group(2, bg, &[]);
         pass.set_vertex_buffer(0, vb.slice(..));
         pass.set_vertex_buffer(1, inst.slice(..));
         pass.set_index_buffer(ib.slice(..), IndexFormat::Uint32);
-        pass.draw_indexed(0..buffers.tuft_index_count, 0, 0..buffers.instance_count);
+        pass.draw_indexed(0..buffers.tuft_index_count, 0, 0..*count);
         RenderCommandResult::Success
     }
 }

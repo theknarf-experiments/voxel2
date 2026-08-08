@@ -339,13 +339,17 @@ fn dress_scatter(
             scale: transform.scale * squash,
             ..*transform
         });
+        // Every child carries its world's layer of its own — see
+        // [`crate::OfWorld::scene`]. Parenting does not confer it.
+        let layers = voxel_render::world_layer(of_world.0);
         for (mesh, material) in parts {
             let (mesh, material) = (mesh.clone(), material.clone());
+            let layers = layers.clone();
             commands
                 .entity(entity)
                 .queue_silenced(move |mut instance: EntityWorldMut| {
                     instance.with_children(|parent| {
-                        parent.spawn((Mesh3d(mesh), MeshMaterial3d(material)));
+                        parent.spawn((Mesh3d(mesh), MeshMaterial3d(material), layers));
                     });
                 });
         }
@@ -385,6 +389,7 @@ fn dress_scatter(
                             Mesh3d(blob_mesh),
                             MeshMaterial3d(blob_mat),
                             local,
+                            layers,
                         ));
                     });
                 });
@@ -486,52 +491,50 @@ pub fn register_far_forest(graph: &mut LayerGraph) -> Option<TopDep> {
     ))
 }
 
-/// Build a merged mesh for every super-tile the layer published, and drop
-/// the ones it withdrew.
+/// Build a merged mesh for every super-tile each world's layer published,
+/// and drop the ones it withdrew.
+///
+/// Every world, not the launched one: a forest seen through an opening is
+/// the same forest at 3 km that it is at 30 m, and a far ring that only
+/// covered world 0 put the launch level's silhouettes on the horizon of
+/// whichever level you were actually standing in.
 fn reconcile_far_forest(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     assets: Res<PropAssets>,
     worlds: Res<voxel_engine::Worlds>,
-    host: Res<crate::HostWorld>,
-    mut spawned: Local<HashMap<crate::planning::world::PartKey, Option<Entity>>>,
-    mut seen: Local<u64>,
+    mut spawned: Local<HashMap<(voxel_engine::WorldId, crate::planning::world::PartKey), Option<Entity>>>,
+    mut seen: Local<HashMap<voxel_engine::WorldId, u64>>,
 ) {
-    let Some(sink) = worlds
-        .query(host.0)
-        .and_then(|w| w.host_ctx::<WorldCtx>())
-        .map(|c| c.far_props.clone())
-    else {
-        return;
-    };
-    let sink = &sink;
-    let generation = sink.generation();
-    if generation == *seen {
-        return;
-    }
-    *seen = generation;
-    let live = sink.keys();
-    spawned.retain(|part, entity| {
-        if live.contains(part) {
-            return true;
-        }
-        if let Some(entity) = entity.take() {
-            commands.entity(entity).despawn();
-        }
-        false
-    });
-    for part in live {
-        if spawned.contains_key(&part) {
+    for world in worlds.iter() {
+        let Some(sink) = world.query.host_ctx::<WorldCtx>().map(|c| c.far_props.clone()) else {
+            continue;
+        };
+        let generation = sink.generation();
+        if seen.get(&world.id) == Some(&generation) {
             continue;
         }
-        let Some(props) = sink.get(part) else { continue };
-        // The merged far forest is still the HOST world's only: its
-        // sink, its super-tiles and its silhouettes are all singular.
-        // Near trees are per world; the distant ones are not yet.
-        spawned.insert(
-            part,
-            build_super_tile(&mut commands, &mut meshes, &assets, host.0, &props),
-        );
+        seen.insert(world.id, generation);
+        let live = sink.keys();
+        spawned.retain(|(id, part), entity| {
+            if *id != world.id || live.contains(part) {
+                return true;
+            }
+            if let Some(entity) = entity.take() {
+                commands.entity(entity).despawn();
+            }
+            false
+        });
+        for part in live {
+            if spawned.contains_key(&(world.id, part)) {
+                continue;
+            }
+            let Some(props) = sink.get(part) else { continue };
+            spawned.insert(
+                (world.id, part),
+                build_super_tile(&mut commands, &mut meshes, &assets, world.id, &props),
+            );
+        }
     }
 }
 
@@ -569,6 +572,7 @@ fn build_super_tile(
         commands
             .spawn((
                 FarForestTile,
+                crate::OfWorld::scene(world),
                 Mesh3d(meshes.add(b.build())),
                 MeshMaterial3d(assets.impostor_mat.clone()),
                 Transform::default(),

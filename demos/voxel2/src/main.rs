@@ -27,13 +27,22 @@ use voxel_engine::{LevelDef, LevelPlugin, VoxelStreamSource};
 #[derive(Component, Clone, Copy)]
 pub struct OfWorld(pub voxel_engine::WorldId);
 
-/// The world this host decorates.
-///
-/// The engine streams any number of worlds; grass, props, water, ribbons
-/// and the painted surface map are this demo's scene content, and they
-/// are written for ONE of them. Naming it beats leaving `0` in a dozen
-/// systems: decorating a second world becomes "run these for another id",
-/// and until then every place that assumes one world says so.
+impl OfWorld {
+    /// Spawn scene content with this, never with `OfWorld` alone.
+    ///
+    /// Bevy does not propagate `RenderLayers` down `Children` — visibility
+    /// reads the layer off each entity and falls back to layer 0 — so a
+    /// child mesh spawned under world N's content draws on layer 0, which
+    /// is WORLD 0's layer. That is the whole reason another level's trees
+    /// and rocks appeared only in the launch level and never through the
+    /// opening onto their own.
+    pub fn scene(
+        world: voxel_engine::WorldId,
+    ) -> (Self, bevy::camera::visibility::RenderLayers) {
+        (Self(world), voxel_render::world_layer(world))
+    }
+}
+
 /// The props each loaded world scatters, keyed by world id — the
 /// companion to [`WorldScenes`]. A tree is dressed by the level it grows
 /// in, which is not necessarily the level you are standing in.
@@ -47,11 +56,6 @@ pub struct WorldProps(pub bevy::platform::collections::HashMap<voxel_engine::Wor
 /// far side of a portal to be lit, fogged or coloured like the near one.
 #[derive(Resource, Default)]
 pub struct WorldScenes(pub bevy::platform::collections::HashMap<voxel_engine::WorldId, Scene>);
-
-/// Defaults to 0: the level the app was launched with. A portal's far
-/// side is streamed and drawn, but this demo puts no grass in it.
-#[derive(Resource, Clone, Copy, Default)]
-pub struct HostWorld(pub voxel_engine::WorldId);
 
 mod grass;
 mod planning;
@@ -167,6 +171,17 @@ fn scene_for(level_path: &std::path::Path) -> Scene {
     }
 }
 
+/// How a world is dressed for THIS run. Coverage eval renders geometry
+/// only, so no world gets an ocean — a launch mode of the demo, not a
+/// property of any level.
+fn scene_for_run(level_path: &std::path::Path) -> Scene {
+    let mut scene = scene_for(level_path);
+    if std::env::var_os("VOXEL_EVAL_HOLES").is_some() {
+        scene.sea_level = None;
+    }
+    scene
+}
+
 /// The sun direction for the host's light comes from the engine's
 /// environment block, which owns it (the shadow bake uses it too).
 fn sun_direction(world: &LevelDef) -> Vec3 {
@@ -237,14 +252,15 @@ fn main() {
             ..default()
         }))
         .insert_resource(HostScene(scene))
-        .init_resource::<HostWorld>()
         .insert_resource(WorldProps(
             [(0, props::PropTable::for_level(std::path::Path::new(&path)))]
                 .into_iter()
                 .collect(),
         ))
         .insert_resource(WorldScenes(
-            [(0, scene_for(std::path::Path::new(&path)))].into_iter().collect(),
+            [(0, scene_for_run(std::path::Path::new(&path)))]
+                .into_iter()
+                .collect(),
         ))
         .add_plugins((
             VoxelDebugPlugin,
@@ -284,7 +300,7 @@ fn main() {
             .map(|p| ExtraLevel {
                 path: (*p).to_string(),
                 loaded: None,
-                scene: scene_for(std::path::Path::new(p)),
+                scene: scene_for_run(std::path::Path::new(p)),
                 world: None,
             })
             .collect(),
@@ -360,11 +376,6 @@ fn setup_scene(mut commands: Commands, scene: Res<HostScene>) {
     if let Some(fog) = host.fog.clone() {
         camera.insert(fog);
     }
-    // Coverage eval renders geometry only, so the ocean is off then.
-    commands.insert_resource(water::WaterSurface {
-        enabled: host.sea_level.is_some() && std::env::var_os("VOXEL_EVAL_HOLES").is_none(),
-        level: host.sea_level.unwrap_or(0.0),
-    });
 }
 
 /// A world's sun. One per world that has one — the megastructure is a
@@ -482,5 +493,62 @@ fn autopilot(mut cameras: Query<&mut Transform, With<VoxelStreamSource>>, time: 
             dir = dir.normalize_or_zero();
         }
         transform.translation += dir * speed * time.delta_secs();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bevy::camera::visibility::RenderLayers;
+
+    /// The trap that hid another level's trees and rocks.
+    ///
+    /// Bevy reads `RenderLayers` off each entity and does NOT inherit it
+    /// down `Children`, and its default is layer 0 — which is world 0's
+    /// layer. So a child mesh spawned under world N's content is visible
+    /// from the LAUNCH level and from nowhere else, including the world it
+    /// belongs to. Nothing about that is visible at the spawn site, which
+    /// is why it survived a working `OfWorld` on every parent.
+    #[test]
+    fn a_child_without_its_own_layer_belongs_to_world_zero() {
+        let inherited_by_default = RenderLayers::default();
+        assert!(inherited_by_default.intersects(&voxel_render::world_layer(0)));
+        assert!(!inherited_by_default.intersects(&voxel_render::world_layer(1)));
+    }
+
+    /// `OfWorld::scene` is the fix: it hands out the marker and the layer
+    /// together, so scene content cannot be spawned with one and not the
+    /// other.
+    #[test]
+    fn scene_content_carries_its_own_worlds_layer() {
+        for world in 0..3u8 {
+            let (of_world, layers) = OfWorld::scene(world);
+            assert_eq!(of_world.0, world);
+            assert!(layers.intersects(&voxel_render::world_layer(world)));
+            for other in (0..3u8).filter(|w| *w != world) {
+                assert!(
+                    !layers.intersects(&voxel_render::world_layer(other)),
+                    "world {world}'s content must not be visible from world {other}"
+                );
+            }
+        }
+    }
+
+    /// Coverage eval renders geometry only; a magenta background pixel
+    /// below the horizon is a hole, and an ocean would cover them all.
+    #[test]
+    fn hole_eval_gives_no_world_an_ocean() {
+        // SAFETY: single-threaded test, and the var is only read by
+        // `scene_for_run` below.
+        unsafe { std::env::set_var("VOXEL_EVAL_HOLES", "1") };
+        let planet = scene_for_run(std::path::Path::new("levels/planet.json"));
+        unsafe { std::env::remove_var("VOXEL_EVAL_HOLES") };
+        assert!(
+            scene_for(std::path::Path::new("levels/planet.json"))
+                .sea_level
+                .is_some(),
+            "planet has a sea to suppress"
+        );
+        assert!(planet.sea_level.is_none());
     }
 }

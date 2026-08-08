@@ -14,7 +14,8 @@
 struct WaterParams {
     // xz = grid origin (camera-snapped, world meters), y = sea level, w unused.
     origin: vec4<f32>,
-    // x = ocean enabled (0/1), y = river segment count, zw unused.
+    // x = ocean enabled (0/1), y = river segment count, z = world index,
+    // w unused.
     counts: vec4<f32>,
 }
 @group(2) @binding(0) var<uniform> params: WaterParams;
@@ -36,9 +37,12 @@ struct WorldOp {
     p1: vec4<f32>,
     p2: vec4<f32>,
 }
-// Layout twin of `GpuWorldProgram`. Water belongs to ONE world (the host
-// spawns a surface per world), so it reads that world's slice; today the
-// host only builds water for world 0.
+// Layout twin of `GpuWorldProgram` — the ARRAY LENGTH is part of the
+// twin, because `ops` starts after the table and a short table shifts
+// every op index. It must equal `voxel_render::MAX_WORLDS`.
+//
+// Water belongs to ONE world: the host spawns a surface per world and
+// passes its index in `params.counts.z`, so this reads that world's ops.
 struct WorldHeader {
     count: vec4<u32>,
     sun: vec4<f32>,
@@ -46,10 +50,14 @@ struct WorldHeader {
 struct WorldProgram {
     anchor: vec4<f32>,
     field: vec4<f32>,
-    worlds: array<WorldHeader, 4>,
+    worlds: array<WorldHeader, 8>,
     ops: array<WorldOp>,
 }
 @group(2) @binding(1) var<storage, read> prog: WorldProgram;
+
+fn world_header() -> WorldHeader {
+    return prog.worlds[u32(params.counts.z)];
+}
 
 const GRID_N: u32 = 192u;       // vertices per side
 const RANGE_M: f32 = 30000.0;   // farthest grid reach from center
@@ -184,7 +192,7 @@ fn vertex(@builtin(vertex_index) vid: u32) -> VsOut {
 }
 fn hash2(p: vec2<i32>) -> f32 {
     var h: u32 = u32(p.x) * 374761393u + u32(p.y) * 668265263u
-        + prog.worlds[0].count.w * 2654435769u;
+        + world_header().count.w * 2654435769u;
     h = (h ^ (h >> 13u)) * 1274126177u;
     h = h ^ (h >> 16u);
     return f32(h & 0xFFFFFFu) / 16777216.0;
@@ -251,8 +259,9 @@ fn seabed_height(xz: vec2<f32>) -> f32 {
     var h = 0.0;
     var warp = vec2<f32>(0.0);
     let pxz = xz;
-    for (var i = 0u; i < prog.worlds[0].count.y; i++) {
-        let op = prog.ops[prog.worlds[0].count.x + i];
+    let header = world_header();
+    for (var i = 0u; i < header.count.y; i++) {
+        let op = prog.ops[header.count.x + i];
         switch op.head.x {
 // GENOPS ARMS BEGIN (generated from voxel-core::opgen — run `mise run genops` after editing the op table)
             case 0u: { // WOP_HEIGHT_FBM

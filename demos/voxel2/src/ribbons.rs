@@ -159,25 +159,33 @@ pub fn register(
     ))
 }
 
-/// Rebuild the water pipeline's buffer when the resident set changed.
-fn publish_ribbons(
-    worlds: Res<voxel_engine::Worlds>,
-    host: Res<crate::HostWorld>,
-    mut rivers: ResMut<RiverWater>,
-) {
-    let Some(sink) = worlds
-        .query(host.0)
-        .and_then(|w| w.host_ctx::<WorldCtx>())
-        .map(|c| c.ribbons.clone())
-    else {
-        return;
-    };
-    let generation = sink.generation();
-    if generation == rivers.generation {
-        return;
+/// Rebuild each world's water buffer when its resident set changed.
+///
+/// Every loaded world, not the launched one. A course is world content
+/// and worlds share coordinates, so publishing only world 0's put the
+/// launch level's rivers over whatever level you were standing in and
+/// left that level's own courses undrawn.
+fn publish_ribbons(worlds: Res<voxel_engine::Worlds>, mut rivers: ResMut<RiverWater>) {
+    for world in worlds.iter() {
+        let Some(sink) = world.query.host_ctx::<WorldCtx>().map(|c| c.ribbons.clone()) else {
+            continue;
+        };
+        let generation = sink.generation();
+        // Bypassed, then set explicitly: reading the map through `ResMut`
+        // marks it changed every frame, and the render world re-uploads
+        // every world's segment buffer when it is.
+        let entry = rivers
+            .bypass_change_detection()
+            .0
+            .entry(world.id)
+            .or_default();
+        if generation == entry.generation {
+            continue;
+        }
+        entry.segments = sink.collect();
+        entry.generation = generation;
+        rivers.set_changed();
     }
-    rivers.segments = sink.collect();
-    rivers.generation = generation;
 }
 
 /// Draws the level's ribbon surfaces as this game's water.
