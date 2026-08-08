@@ -26,17 +26,28 @@ fn engine_hud(
                 "chunks: {} tracked | {} meshed | {} drawn | {} culled | {} pending",
                 s.tracked, s.meshed, s.drawn, s.culled, s.awaiting
             ));
-            let occ: Vec<String> = s
-                .slab_used
+            // Pages, and the shape of what is holding them. A run
+            // length is how many pages one chunk needed, so `runs`
+            // reads "this many chunks wanted 1 page, this many 2".
+            // Peaks accumulate as you fly: a reading taken standing
+            // still is one sample of a process that depends on where
+            // you are.
+            let runs: Vec<String> = s
+                .slab_peak_runs
                 .iter()
-                .zip(voxel_render::slab::CLASS_SLOTS)
-                .map(|(used, total)| format!("{used}/{total}"))
+                .enumerate()
+                .filter(|(_, &n)| n > 0)
+                .map(|(i, n)| format!("{}p x{n}", i + 1))
                 .collect();
             hud.0.push(format!(
-                "arena free: {} | slab used: [{}]",
+                "arena free: {} | slab: {}/{} pages (peak {}) | longest free run {}",
                 s.arena_free,
-                occ.join(", ")
+                s.slab_used_pages,
+                s.slab_total_pages,
+                s.slab_peak_pages,
+                s.slab_longest_free_run,
             ));
+            hud.0.push(format!("slab peak shape: [{}]", runs.join(", ")));
         }
     }
     hud.0.push(format!(

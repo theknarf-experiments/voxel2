@@ -225,8 +225,23 @@ pub struct RenderStats {
     /// Slots in use and free per class, both spelled out, and what the
     /// allocator had to do to keep up. A class at zero free is a working
     /// set, not a problem; pressure is the number that means something.
-    pub slab_used: [u32; 4],
-    pub slab_free: [u32; 4],
+    pub slab_used_pages: u32,
+    pub slab_total_pages: u32,
+    /// High-water mark over the session. A reading taken standing still
+    /// is one sample of a process that depends on where the camera is,
+    /// so this is what a budget should be judged against.
+    pub slab_peak_pages: u32,
+    /// Longest free run. Well below the maximum chunk size while pages
+    /// are plentiful means fragmentation, not exhaustion.
+    pub slab_longest_free_run: u32,
+    /// Live allocations by run length, and its high-water mark — the
+    /// working set's shape, which no fixed partition could predict.
+    pub slab_runs: Vec<u32>,
+    pub slab_peak_runs: Vec<u32>,
+    /// Chunks the slab can hold, from what chunks have actually cost at
+    /// their peak. Admission control's budget, and 0 before the render
+    /// world has run (callers fall back to the configured page count).
+    pub slab_capacity_chunks: usize,
     pub slab_pressure: crate::slab::SlabPressure,
     pub drawn: usize,
     pub culled: usize,
@@ -657,7 +672,14 @@ impl GpuWorldProgram {
 pub struct VoxelTerrainMarker;
 
 #[derive(Default)]
-pub struct VoxelChunksPlugin;
+pub struct VoxelChunksPlugin {
+    /// How big the mesh slab is and how finely it is divided. A game
+    /// whose chunks are denser than this demo's raises it here rather
+    /// than editing the crate — and what a world costs depends on where
+    /// the camera is, so the allocator reports peaks to size it against
+    /// instead of asking anyone to predict it.
+    pub slab: crate::slab::SlabConfig,
+}
 
 impl Plugin for VoxelChunksPlugin {
     fn build(&self, app: &mut App) {
@@ -665,6 +687,7 @@ impl Plugin for VoxelChunksPlugin {
         embedded_asset!(app, "shaders/voxel_mesh_chunks.wgsl");
         embedded_asset!(app, "shaders/voxel_chunk_draw.wgsl");
 
+        let slab_config = self.slab;
         let (ready_tx, ready_rx) = crossbeam_channel::unbounded();
         app.init_resource::<RenderWorlds>()
             .init_resource::<CameraWorld>()
@@ -695,6 +718,7 @@ impl Plugin for VoxelChunksPlugin {
             .init_resource::<WorldViews>()
             .init_resource::<EnvParams>()
             .insert_resource(stats)
+            .insert_resource(slab_config)
             .insert_resource(ChunkReadySender(ready_tx))
             .init_resource::<ExtractedChunkCommands>()
             .init_resource::<ChunkTable>()
@@ -1080,6 +1104,7 @@ fn init_chunk_resources(
     asset_server: Res<AssetServer>,
     pipeline_cache: Res<PipelineCache>,
     view_layouts: Res<MeshPipelineViewLayouts>,
+    slab_config: Res<crate::slab::SlabConfig>,
 ) {
     let buffer = |label: &str, size: u64, usage: BufferUsages| {
         render_device.create_buffer(&BufferDescriptor {
@@ -1117,13 +1142,13 @@ fn init_chunk_resources(
         ),
         vertex_slab: buffer(
             "voxel_vertex_slab",
-            SlabAllocator::total_vertices() * VERTEX_BYTES,
+            slab_config.total_vertices() * VERTEX_BYTES,
             BufferUsages::STORAGE | BufferUsages::VERTEX,
         ),
         index_slab: buffer(
             "voxel_index_slab",
             // u16 indices.
-            SlabAllocator::total_indices() * 2,
+            slab_config.total_indices() * 2,
             BufferUsages::STORAGE | BufferUsages::INDEX | BufferUsages::COPY_DST,
         ),
         counts: buffer(
@@ -1145,7 +1170,7 @@ fn init_chunk_resources(
         }),
         staging,
         arena_free: (0..ARENA_SLOTS).rev().collect(),
-        slab: SlabAllocator::new(),
+        slab: SlabAllocator::new(*slab_config),
         gen_uniforms: DynamicUniformBuffer::default(),
         program_buffer: StorageBuffer::default(),
         surface_map: None,
@@ -1471,8 +1496,7 @@ fn place(slab: &mut crate::slab::SlabAllocator, verts: u32, quads: u32) -> Place
         return Placement::Empty;
     }
     let indices = quads.saturating_mul(6);
-    let max_verts = *crate::slab::CLASS_VERTS.last().unwrap();
-    if verts > max_verts || indices > max_verts * crate::slab::INDEX_FACTOR {
+    if slab.pages_for(verts, indices) > slab.config().max_pages_per_chunk {
         return Placement::TooBig;
     }
     match slab.alloc(verts, indices) {
@@ -2185,8 +2209,13 @@ fn plan_frame(
             .filter(|c| !matches!(c.state, ChunkState::Meshed { .. } | ChunkState::Empty))
             .count();
         s.arena_free = gpu.arena_free.len() as u32;
-        s.slab_used = gpu.slab.used_slots();
-        s.slab_free = gpu.slab.free_slots();
+        s.slab_used_pages = gpu.slab.used_pages();
+        s.slab_total_pages = gpu.slab.config().total_pages;
+        s.slab_peak_pages = gpu.slab.peak_used_pages();
+        s.slab_longest_free_run = gpu.slab.longest_free_run();
+        s.slab_runs = gpu.slab.run_histogram().to_vec();
+        s.slab_peak_runs = gpu.slab.peak_run_histogram().to_vec();
+        s.slab_capacity_chunks = gpu.slab.capacity_chunks();
         s.slab_pressure = gpu.slab.pressure();
         let mut counts: std::collections::HashMap<&'static str, usize> = Default::default();
         for (key, c) in table.chunks.iter() {
@@ -2555,22 +2584,38 @@ const MESHED_BY_LEVEL: [&str; 16] = [
 #[cfg(test)]
 mod slab_pressure_tests {
     use super::*;
-    use crate::slab::{SlabAllocator, CLASS_SLOTS, CLASS_VERTS, INDEX_FACTOR};
+    use crate::slab::{SlabAllocator, SlabConfig};
 
-    /// Counts that land in class 0.
+    /// Counts that fit one page.
     const SMALL: (u32, u32) = (100, 100);
+
+    /// A deliberately tiny slab: these tests are about what the
+    /// ALLOCATOR does at its limit, and the limit should be reachable in
+    /// a few hundred allocations rather than eleven thousand.
+    fn tiny() -> SlabConfig {
+        SlabConfig {
+            page_verts: 2_048,
+            index_factor: 6,
+            total_pages: 256,
+            max_pages_per_chunk: 26,
+        }
+    }
+
+    fn tiny_slab() -> SlabAllocator {
+        SlabAllocator::new(tiny())
+    }
 
     #[test]
     fn placement_reads_the_counts_the_way_the_pipeline_does() {
-        let mut slab = SlabAllocator::new();
+        let (c, mut slab) = (tiny(), tiny_slab());
         assert!(matches!(place(&mut slab, 0, 10), Placement::Empty));
         assert!(matches!(place(&mut slab, 10, 0), Placement::Empty));
         assert!(matches!(place(&mut slab, 100, 100), Placement::Mesh(_)));
-        // Past the largest class in either dimension.
-        let max = *CLASS_VERTS.last().unwrap();
+        // Past the longest run one chunk may take, in either dimension.
+        let max = c.max_pages_per_chunk * c.page_verts;
         assert!(matches!(place(&mut slab, max + 1, 1), Placement::TooBig));
         assert!(matches!(
-            place(&mut slab, 1, max * INDEX_FACTOR / 6 + 1),
+            place(&mut slab, 1, max * c.index_factor / 6 + 1),
             Placement::TooBig
         ));
     }
@@ -2579,17 +2624,16 @@ mod slab_pressure_tests {
     /// would leak one per attempt and the slab would drain itself.
     #[test]
     fn a_deferral_holds_no_slab_slot() {
-        let mut slab = SlabAllocator::new();
+        let mut slab = tiny_slab();
         let mut held = Vec::new();
         while let Placement::Mesh(alloc) = place(&mut slab, SMALL.0, SMALL.1) {
             held.push(alloc);
         }
-        let exhausted = slab.free_slots();
-        assert_eq!(exhausted, [0; 4], "the fixture must exhaust every class");
+        assert_eq!(slab.free_pages(), 0, "the fixture must exhaust the slab");
         for _ in 0..100 {
             assert!(matches!(place(&mut slab, SMALL.0, SMALL.1), Placement::Defer));
         }
-        assert_eq!(slab.free_slots(), exhausted, "deferring must take nothing");
+        assert_eq!(slab.free_pages(), 0, "deferring must take nothing");
         // And freeing one makes exactly one placement possible again.
         slab.free(held.pop().unwrap());
         assert!(matches!(place(&mut slab, SMALL.0, SMALL.1), Placement::Mesh(_)));
@@ -2598,7 +2642,7 @@ mod slab_pressure_tests {
 
     #[test]
     fn would_fit_agrees_with_alloc() {
-        let mut slab = SlabAllocator::new();
+        let (c, mut slab) = (tiny(), tiny_slab());
         let mut held = Vec::new();
         loop {
             let fits = slab.would_fit(SMALL.0, SMALL.1);
@@ -2614,7 +2658,7 @@ mod slab_pressure_tests {
             }
         }
         // Oversized requests are never claimed to fit.
-        assert!(!slab.would_fit(*CLASS_VERTS.last().unwrap() + 1, 1));
+        assert!(!slab.would_fit(c.max_pages_per_chunk * c.page_verts + 1, 1));
     }
 
     /// THE WEDGE, reproduced against the real allocator and the real
@@ -2631,14 +2675,14 @@ mod slab_pressure_tests {
     /// says. A chunk holds an arena slot only while it can still finish.
     #[test]
     fn slab_exhaustion_returns_every_arena_slot() {
-        let mut slab = SlabAllocator::new();
+        let (c, mut slab) = (tiny(), tiny_slab());
         let arena_capacity = 512usize;
         let mut arena_free = arena_capacity;
         let mut meshed: Vec<SlabAlloc> = Vec::new();
         let mut deferred = 0usize;
 
         // Ten times more chunks than the slab can ever hold.
-        let demand: usize = CLASS_SLOTS.iter().map(|&s| s as usize).sum::<usize>() * 10;
+        let demand: usize = c.total_pages as usize * 10;
         for _ in 0..demand {
             // Density needs an arena slot.
             if arena_free == 0 {
@@ -2663,7 +2707,7 @@ mod slab_pressure_tests {
         assert!(deferred > 0, "the fixture must actually exhaust the slab");
         assert_eq!(
             meshed.len(),
-            CLASS_SLOTS.iter().map(|&s| s as usize).sum::<usize>(),
+            c.total_pages as usize,
             "and the slab was filled to capacity, not left short",
         );
         assert_eq!(slab.pressure().failed as usize, deferred);

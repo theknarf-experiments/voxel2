@@ -143,11 +143,19 @@ fn status(
             "awaiting": s.awaiting,
             "drawn": s.drawn,
             "arena_free": s.arena_free,
-            "slab_used": s.slab_used,
-            "slab_free": s.slab_free,
-            "slab_capacity": voxel_render::slab::CLASS_SLOTS,
-            "slab_oversized": s.slab_pressure.oversized,
+            "slab_used_pages": s.slab_used_pages,
+            "slab_total_pages": s.slab_total_pages,
+            "slab_peak_pages": s.slab_peak_pages,
+            "slab_longest_free_run": s.slab_longest_free_run,
+            // Live allocations by run length, and the session high-water
+            // mark. Standing still samples one point of a process that
+            // depends on where the camera is; the peak is what a budget
+            // has to answer to.
+            "slab_runs": s.slab_runs,
+            "slab_peak_runs": s.slab_peak_runs,
+            "slab_capacity_chunks": s.slab_capacity_chunks,
             "slab_failed": s.slab_pressure.failed,
+            "slab_fragmented": s.slab_pressure.fragmented,
             "states": s.state_counts.iter().cloned().collect::<std::collections::HashMap<_,_>>(),
         });
     }

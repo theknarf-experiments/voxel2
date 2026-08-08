@@ -77,7 +77,12 @@ pub struct StreamProbe {
     /// Rolling 2-second frame telemetry (hosts log or display it).
     pub fps: f32,
     pub worst_frame_ms: f32,
-    pub slab_free: [u32; 4],
+    /// Mesh pages free, and the peak used over the session. Peaks, not
+    /// the present: what a world costs depends on where the camera is.
+    pub slab_free_pages: u32,
+    pub slab_peak_pages: u32,
+    /// Chunks the slab can hold, measured from what they have cost.
+    pub slab_capacity_chunks: usize,
     /// Resident voxel chunks. Residency is exactly the shown set, so this
     /// is also what is drawn.
     pub resident: usize,
@@ -149,7 +154,9 @@ fn log_fps(
         *window = (0.0, 0, 0.0);
     }
     if let Ok(s) = stats.0.lock() {
-        probe.slab_free = s.slab_free;
+        probe.slab_free_pages = s.slab_total_pages.saturating_sub(s.slab_used_pages);
+        probe.slab_peak_pages = s.slab_peak_pages;
+        probe.slab_capacity_chunks = s.slab_capacity_chunks;
     }
 }
 

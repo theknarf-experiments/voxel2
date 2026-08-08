@@ -284,6 +284,13 @@ fn main() {
                 // This demo authors its layers as JSON; a game with
                 // hand-written layers passes its own factory here.
                 planner: Some(std::sync::Arc::new(planning::StackPlanning)),
+                // The mesh budget is the HOST's, because what a chunk
+                // costs is a property of the levels it ships: this
+                // demo's terrain is about a page each and its interior
+                // level several. The default suits all three; a game
+                // with denser geometry raises `total_pages` here rather
+                // than editing the engine.
+                slab: voxel_render::slab::SlabConfig::default(),
             },
         ));
     // What the portal keys open onto: every other shipped level, in key

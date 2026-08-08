@@ -266,7 +266,10 @@ fn the_slab_is_shared_between_worlds_not_claimed_in_order() {
     );
 
     let worlds = app.world().resource::<Worlds>();
-    let capacity = voxel_render::SlabAllocator::capacity_slots();
+    // Headless, so no render world has reported what chunks cost yet;
+    // admission falls back to the configured page count, which is the
+    // same bound it uses on the first frame of a real run.
+    let capacity = voxel_render::slab::SlabConfig::default().total_pages as usize;
     // Over-committing a little is the FLOOR, by design: a world dense
     // enough to want more than its share even at `MIN_STREAMED_LEVEL` is
     // admitted anyway rather than refused, and the excess is absorbed by

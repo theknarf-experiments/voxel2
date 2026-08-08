@@ -1027,6 +1027,11 @@ pub struct LevelPlugin {
     /// How this host builds its planning layers. `None` means the world
     /// is pure generator program plus authored placements — no layers.
     pub planner: Option<Arc<dyn HostPlanning>>,
+    /// The mesh slab's budget. Chunk cost is a property of the LEVEL —
+    /// terrain is about a page per chunk, dense interior geometry
+    /// several — so a host whose worlds are unlike this demo's says so
+    /// here instead of the engine guessing on its behalf.
+    pub slab: voxel_render::slab::SlabConfig,
 }
 
 impl LevelPlugin {
@@ -1036,6 +1041,7 @@ impl LevelPlugin {
             def,
             seed: 0,
             source: None,
+            slab: Default::default(),
             hole_eval: false,
             remote_port: None,
             planner: None,
@@ -1090,7 +1096,7 @@ impl Plugin for LevelPlugin {
         }
         app.insert_resource(env_params(&level))
             .insert_resource(level.clone())
-            .add_plugins(VoxelEnginePlugin)
+            .add_plugins(VoxelEnginePlugin { slab: self.slab })
             // World 0 is loaded through the SAME path as any other world.
             // It used to be assembled here, by hand, out of five separate
             // resources — which is why a host adding a second world had to

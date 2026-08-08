@@ -148,6 +148,13 @@ pub struct WorldLoader<'w, 's> {
     rebuild: ResMut<'w, streaming::StreamingRebuild>,
     /// Where the camera is. Demand is measured THERE, not at the origin.
     sources: StreamSourceQuery<'w, 's>,
+    /// What the slab has actually cost, reported by the render world.
+    /// Optional: a headless host registers worlds with no renderer at
+    /// all, and admission falls back to the configured page budget.
+    stats: Option<Res<'w, voxel_render::SharedRenderStats>>,
+    /// The page budget, for the first admission — before any chunk has
+    /// been meshed there is no evidence to measure.
+    slab_config: Option<Res<'w, voxel_render::slab::SlabConfig>>,
 }
 
 impl WorldLoader<'_, '_> {
@@ -205,7 +212,25 @@ impl WorldLoader<'_, '_> {
     /// was capped while three were loaded goes back up when one is
     /// dropped, and repeated loads cannot ratchet it down.
     fn rebalance(&mut self) -> bool {
-        let capacity = voxel_render::SlabAllocator::capacity_slots();
+        // MEASURED, not declared. The slab is a page pool, so how many
+        // chunks it holds depends on how many pages a chunk costs — ~1
+        // for terrain, several times that in dense interior geometry —
+        // and that is a property of the level, not of the allocator. It
+        // reports the figure from its own peak; before the render world
+        // has run there is nothing to report and the page count is the
+        // optimistic bound.
+        let budget = self
+            .slab_config
+            .as_deref()
+            .copied()
+            .unwrap_or_default()
+            .total_pages as usize;
+        let capacity = self
+            .stats
+            .as_ref()
+            .and_then(|s| s.0.lock().ok().map(|s| s.slab_capacity_chunks))
+            .filter(|c| *c > 0)
+            .unwrap_or(budget);
         // WHERE THE CAMERA IS, not the origin. Residency is radial, so I
         // assumed the count barely moved with the anchor and measured at
         // the origin — it moves by a THIRD on both shipped levels (1.37x
@@ -303,11 +328,20 @@ fn sync_ops_providers(worlds: Res<Worlds>, chunks: Res<ChunkGen>) {
 /// a generator program in [`voxel_render::WorldProgram`], normally installed
 /// by a [`LevelPlugin`].
 #[derive(Default)]
-pub struct VoxelEnginePlugin;
+pub struct VoxelEnginePlugin {
+    /// The mesh slab's budget. Passed straight through to
+    /// `voxel_render::VoxelChunksPlugin` — a game with denser chunks
+    /// than this demo's raises it here.
+    pub slab: voxel_render::slab::SlabConfig,
+}
 
 impl Plugin for VoxelEnginePlugin {
     fn build(&self, app: &mut App) {
-        app.add_plugins((voxel_render::VoxelChunksPlugin, VoxelStreamingPlugin))
+        app.add_plugins((
+            voxel_render::VoxelChunksPlugin { slab: self.slab },
+            VoxelStreamingPlugin,
+        ))
+            .insert_resource(self.slab)
             .init_resource::<Worlds>()
             .configure_sets(
                 Update,
