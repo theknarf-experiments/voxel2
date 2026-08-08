@@ -26,7 +26,10 @@ use voxel_engine::{LevelDef, LodConfig, WorldLoader};
 pub struct FarLevel {
     pub path: String,
     pub loaded: Option<LevelDef>,
-    pub clear_color: Color,
+    /// How the far side is dressed — its background, its sun, its
+    /// ambient. A world's presentation belongs to the world, not to
+    /// whichever level the app happened to launch with.
+    pub scene: crate::Scene,
     pub world: Option<u8>,
 }
 
@@ -116,7 +119,7 @@ fn follow_camera_world(
     let want_clear = if camera_world.0 == 0 {
         scene.0.clear_color
     } else {
-        far.as_ref().map_or(scene.0.clear_color, |f| f.clear_color)
+        far.as_ref().map_or(scene.0.clear_color, |f| f.scene.clear_color)
     };
     if clear.0 != want_clear {
         clear.0 = want_clear;
@@ -338,7 +341,7 @@ fn open_portal(
     // Each side is painted with the background of the world it looks INTO.
     commands.insert_resource(PortalAssets {
         quad: meshes.add(Rectangle::new(8.0, 6.0)),
-        material: [backdrop(far.clear_color), backdrop(scene.0.clear_color)],
+        material: [backdrop(far.scene.clear_color), backdrop(scene.0.clear_color)],
     });
     info!("portal opened at {at:?} in world {near_world}");
 }
@@ -438,7 +441,7 @@ fn drive_portal(
                 cam.is_active = far_view_enabled();
                 let mut cmd = commands.entity(entity);
                 cmd.insert(voxel_render::ViewWorld(showing))
-                    .insert(voxel_render::terrain_only_layer());
+                    .insert(voxel_render::far_view_layers(showing));
                 if let Some(target) = target {
                     cmd.insert(target.clone());
                 }
@@ -465,9 +468,9 @@ fn drive_portal(
                     },
                     placement,
                     voxel_render::ViewWorld(showing),
-                    // Terrain only: the clip planes mask chunks, and
-                    // nothing masks entities.
-                    voxel_render::terrain_only_layer(),
+                    // Terrain and the shown world's lights: the clip
+                    // planes mask chunks, and nothing masks entities.
+                    voxel_render::far_view_layers(showing),
                     // No second tonemap. Cameras sharing a target each run
                     // their own post-processing over the WHOLE image, so a
                     // portal view re-tonemapped the near world that was

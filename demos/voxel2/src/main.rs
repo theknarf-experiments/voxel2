@@ -49,7 +49,7 @@ use water::WaterPlugin;
 /// The demo's presentation for one world. A game would inline these
 /// values wherever it spawns its camera and lights.
 #[derive(Clone, Debug)]
-struct Scene {
+pub struct Scene {
     clear_color: Color,
     /// Camera start and look direction, and the flycam's speeds.
     start: Vec3,
@@ -215,13 +215,13 @@ fn main() {
     app.insert_resource(FarLevel {
         path: far_path.to_string(),
         loaded: None,
-        clear_color: scene_for(std::path::Path::new(far_path)).clear_color,
+        scene: scene_for(std::path::Path::new(far_path)),
         world: None,
     })
     .add_plugins(PortalPlugin);
     app
         .add_systems(Startup, setup_scene)
-        .add_systems(Update, (autopilot, follow_reloaded_sun));
+        .add_systems(Update, (autopilot, sync_world_suns));
 
     // Live tooling for the voxctl CLI: always on in a dev build, never in
     // a release one. It used to need `VOXEL_REMOTE=1`, which meant every
@@ -257,32 +257,8 @@ fn up_for(look: Vec3) -> Vec3 {
 /// The host's scene: camera (tagged as the streaming source), sun, and
 /// ambient light. `VOXEL_START` / `VOXEL_LOOK` override the scene's
 /// camera for repeatable runs.
-fn setup_scene(mut commands: Commands, scene: Res<HostScene>, level: Res<LevelDef>) {
+fn setup_scene(mut commands: Commands, scene: Res<HostScene>) {
     let host = &scene.0;
-    if let Some(illuminance) = host.sun_illuminance {
-        commands.spawn((
-            LevelSun,
-            // The sun lights whichever world is being viewed: a light
-            // confined to one world's layer leaves the others black.
-            voxel_render::all_world_layers(),
-            DirectionalLight {
-                illuminance,
-                shadow_maps_enabled: true,
-                ..default()
-            },
-            // Explicit cascades: the default bounds come from the camera's
-            // far plane, which is useless in a world this size.
-            CascadeShadowConfigBuilder {
-                num_cascades: 4,
-                minimum_distance: 0.5,
-                first_cascade_far_bound: 24.0,
-                maximum_distance: 420.0,
-                overlap_proportion: 0.2,
-            }
-            .build(),
-            Transform::from_translation(Vec3::ZERO).looking_to(-sun_direction(&level), Vec3::Y),
-        ));
-    }
     commands.insert_resource(GlobalAmbientLight {
         color: host.ambient_color,
         brightness: host.ambient_brightness,
@@ -320,26 +296,86 @@ fn setup_scene(mut commands: Commands, scene: Res<HostScene>, level: Res<LevelDe
     });
 }
 
+/// A world's sun. One per world that has one — the megastructure is a
+/// sunless interior and must not be lit by the planet's sun, nor take its
+/// tree shadows on the concrete.
 #[derive(Component)]
-struct LevelSun;
+struct LevelSun(voxel_engine::WorldId);
 
 /// The demo's presentation, kept for reloads.
 #[derive(Resource, Clone)]
 struct HostScene(Scene);
 
-/// The one host-visible thing a level reload can change: the sun
-/// direction, which is engine data (the shadow bake uses it) but which
-/// the host's own light has to follow.
-fn follow_reloaded_sun(
+/// Give every loaded world its own sun, and keep each aimed where its
+/// own level says.
+///
+/// A light belongs to a world exactly like grass does. One sun on every
+/// world's layer meant the planet's sun lit the megastructure's interior
+/// and — because the shadow map is built from whatever the light can see,
+/// and worlds share coordinates — laid the planet's tree shadows across
+/// its concrete.
+///
+/// Reload is the same operation: the level's sun direction is engine data
+/// (the shadow bake uses it) and the host's light follows it.
+fn sync_world_suns(
+    mut commands: Commands,
+    worlds: Res<voxel_engine::Worlds>,
+    far: Option<Res<portal::FarLevel>>,
+    scene: Res<HostScene>,
     mut reloaded: MessageReader<LevelReloaded>,
-    level: Res<LevelDef>,
-    mut suns: Query<&mut Transform, With<LevelSun>>,
+    mut suns: Query<(Entity, &LevelSun, &mut Transform)>,
 ) {
-    if reloaded.read().count() == 0 {
+    let changed = worlds.is_changed() || reloaded.read().count() > 0;
+    if !changed {
         return;
     }
-    for mut t in &mut suns {
-        *t = Transform::from_translation(Vec3::ZERO).looking_to(-sun_direction(&level), Vec3::Y);
+    for world in worlds.iter() {
+        // Which scene dresses this world: the launched level's, or the
+        // portal's far side.
+        let host = match far.as_ref().filter(|f| f.world == Some(world.id)) {
+            Some(far) => &far.scene,
+            None if world.id == 0 => &scene.0,
+            None => continue,
+        };
+        let aim = Transform::from_translation(Vec3::ZERO)
+            .looking_to(-sun_direction(&world.level), Vec3::Y);
+        match suns.iter_mut().find(|(_, sun, _)| sun.0 == world.id) {
+            Some((entity, _, mut transform)) => {
+                if host.sun_illuminance.is_none() {
+                    commands.entity(entity).despawn();
+                } else {
+                    *transform = aim;
+                }
+            }
+            None => {
+                let Some(illuminance) = host.sun_illuminance else {
+                    continue;
+                };
+                commands.spawn((
+                    LevelSun(world.id),
+                    // Its world AND its own light layer, so a portal
+                    // looking into this world can be lit by this sun
+                    // without also seeing this world's trees.
+                    voxel_render::lighting_layers(world.id),
+                    DirectionalLight {
+                        illuminance,
+                        shadow_maps_enabled: true,
+                        ..default()
+                    },
+                    // Explicit cascades: the default bounds come from the
+                    // camera's far plane, which is useless at this scale.
+                    CascadeShadowConfigBuilder {
+                        num_cascades: 4,
+                        minimum_distance: 0.5,
+                        first_cascade_far_bound: 24.0,
+                        maximum_distance: 420.0,
+                        overlap_proportion: 0.2,
+                    }
+                    .build(),
+                    aim,
+                ));
+            }
+        }
     }
 }
 

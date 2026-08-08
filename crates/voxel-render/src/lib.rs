@@ -66,13 +66,42 @@ pub fn terrain_only_layer() -> bevy::camera::visibility::RenderLayers {
     bevy::camera::visibility::RenderLayers::layer(TERRAIN_LAYER)
 }
 
-/// Shared by the terrain anchor and by lights, so a view can ask for
-/// terrain without asking for any world's scene content.
+/// Shared by the terrain anchor, so a view can ask for terrain without
+/// asking for any world's scene content.
 pub const TERRAIN_LAYER: usize = MAX_WORLDS;
+
+/// A world's LIGHTS, on a layer of their own.
+///
+/// Lighting needs a second axis. Render layers are one intersection test,
+/// so a view cannot say "world N's lights but not world N's trees" with a
+/// single set — and a far view needs exactly that: it draws terrain only,
+/// and unlit terrain is not a picture of anything.
+///
+/// So a light carries [`lighting_layers`] (its world AND this), while
+/// casters carry only their world layer. A light's shadow pass sees the
+/// casters of its own world and no other's, and a far view can subscribe
+/// to the light without subscribing to what it shines on.
+pub fn light_layer(world: voxel_core::WorldId) -> bevy::camera::visibility::RenderLayers {
+    bevy::camera::visibility::RenderLayers::layer(FIRST_LIGHT_LAYER + usize::from(world))
+}
+
+/// What to put ON a light belonging to `world`: visible to that world's
+/// cameras, and to a far view of it.
+pub fn lighting_layers(world: voxel_core::WorldId) -> bevy::camera::visibility::RenderLayers {
+    world_layer(world).union(&light_layer(world))
+}
+
+/// What to put on a camera showing `world` THROUGH a portal: that world's
+/// terrain and its lights, and no world's scene content.
+pub fn far_view_layers(world: voxel_core::WorldId) -> bevy::camera::visibility::RenderLayers {
+    terrain_only_layer().union(&light_layer(world))
+}
+
+pub const FIRST_LIGHT_LAYER: usize = TERRAIN_LAYER + 1;
 
 /// First render layer a host may use for its own purposes. See
 /// [`world_layer`].
-pub const FIRST_HOST_LAYER: usize = TERRAIN_LAYER + 1;
+pub const FIRST_HOST_LAYER: usize = FIRST_LIGHT_LAYER + MAX_WORLDS;
 
 /// Marker for helper cameras (offscreen screenshot mirrors, etc.) that
 /// gameplay/streaming systems must ignore when looking for "the player
