@@ -239,17 +239,24 @@ impl Portal {
 
 }
 
-/// Near-side views: every camera that is not itself a portal camera.
+/// The view the far world is rendered FOR: the player's.
+///
+/// One, not every near-side camera. The far view is an image, and an
+/// image is a viewpoint — pairing one with each camera meant several
+/// cameras rendering into the same target at the same order, which Bevy
+/// reports as an order ambiguity and resolves arbitrarily.
+///
+/// Other views of the same viewpoint share it correctly: the offscreen
+/// mirror `voxctl shot` renders through copies the player camera's
+/// transform, and the opening samples by NORMALIZED screen position, so
+/// its 1280x720 reads the same pixels out of a 2560x1440 far image. A
+/// view from somewhere else would sample the player's far view and be
+/// wrong — there is only one portal viewpoint, and this is it.
 type NearViews<'w, 's> = Query<
     'w,
     's,
-    (
-        Entity,
-        &'static GlobalTransform,
-        &'static Camera,
-        Option<&'static bevy::camera::RenderTarget>,
-    ),
-    (With<Camera3d>, Without<PortalCamera>),
+    (Entity, &'static GlobalTransform, &'static Camera),
+    (With<Camera3d>, Without<PortalCamera>, Without<voxel_render::HelperCamera>),
 >;
 
 /// Whether to render the far world through the opening. ON — without it
@@ -290,11 +297,24 @@ pub struct PortalViewMaterial {
 }
 
 impl Material for PortalViewMaterial {
-    fn vertex_shader() -> ShaderRef {
-        "embedded://voxel2/voxel_portal.wgsl".into()
-    }
     fn fragment_shader() -> ShaderRef {
         "embedded://voxel2/voxel_portal.wgsl".into()
+    }
+
+    /// BOTH FACES. An opening is approachable from either side, and a
+    /// quad culled from behind silently vanishes from whichever side it
+    /// is not facing — which reads as "the portal does not render". The
+    /// backdrop this replaced set `cull_mode: None` on its
+    /// `StandardMaterial` for the same reason; a custom material gets
+    /// Bevy's default of back-face culling unless it says otherwise.
+    fn specialize(
+        _pipeline: &bevy::pbr::MaterialPipeline,
+        descriptor: &mut bevy::render::render_resource::RenderPipelineDescriptor,
+        _layout: &bevy::mesh::MeshVertexBufferLayoutRef,
+        _key: bevy::pbr::MaterialPipelineKey<Self>,
+    ) -> Result<(), bevy::render::render_resource::SpecializedMeshPipelineError> {
+        descriptor.primitive.cull_mode = None;
+        Ok(())
     }
 }
 
@@ -546,7 +566,7 @@ fn drive_portal(
         .get(&showing)
         .map_or(Color::BLACK, |s| s.clear_color);
 
-    for (source, eye, camera, _) in &sources {
+    for (source, eye, camera) in &sources {
         let existing = portal_cams
             .iter_mut()
             .find(|(_, paired, _, _)| paired.0 == source);
@@ -601,7 +621,7 @@ fn drive_portal(
     // appear beyond the opening, not between it and the eye. The four
     // pyramid planes are gone — the quad does that, exactly, for
     // everything the far camera drew rather than for chunks alone.
-    let Some((_, eye, _, _)) = sources.iter().next() else {
+    let Some((_, eye, _)) = sources.iter().next() else {
         return;
     };
     let eye = eye.translation();
