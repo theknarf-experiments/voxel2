@@ -70,13 +70,12 @@ speed. Env vars:
 | `VOXEL_START=x,y,z` | Spawn position |
 | `VOXEL_LOOK=dx,dy,dz` | Initial look direction |
 | `VOXEL_AUTOPILOT=<m/s>` | Fly forward continuously (smoke tests); `VOXEL_AUTOPILOT_LEVEL=1` keeps it level |
-| `VOXEL_REMOTE=1` | BRP server for the `voxctl` CLI (teleport, planning queries, offscreen screenshots) |
 | `VOXEL_SCREENSHOT=path[,secs]` | Periodic offscreen frame dumps (works occluded) |
 | `VOXEL_EVAL_HOLES=1` | Coverage-eval rendering (used by `mise run eval`) |
 | `VOXEL_LOG_LAYERS=<n>` | Log the ensure-load passes and the first `n` read-driven generations (with a backtrace) |
 | `VOXEL_ENSURE_THREADS=<n>` | Override the planning ensure-load worker count |
 
-**Live tooling**: run with `VOXEL_REMOTE=1`, then drive the running game:
+**Live tooling**: dev builds always serve the BRP; drive the running game:
 `cargo run -p voxctl -- status | goto X Y Z [DX DY DZ] | ribbons X Z [R] |
 markers X Z [R] [KIND] | scan X Z [R] [STEP] | shot PATH | portal | world N |
 raw METHOD [JSON]`

@@ -7,7 +7,8 @@ architecture. Design plan: `~/.claude/plans/binary-twirling-brooks.md`.
 
 - `cargo test --workspace` — property tests; keep green.
 - `mise run smoke` — boots every shipped level with NO env vars and fails
-  on any panic. Every other check sets `VOXEL_REMOTE`/`VOXEL_START`, so a
+  on any panic. Checks that set `VOXEL_START` and friends can hide a
+  system that only breaks on a plain launch, so a
   system that only breaks on a plain `cargo run` survives all of them.
   Run it before claiming a change works.
 - `cargo run -p voxel2 -- levels/<name>.json` — visual verification is
@@ -17,8 +18,8 @@ architecture. Design plan: `~/.claude/plans/binary-twirling-brooks.md`.
   grabs whatever is on screen, not the app.
 - Env vars for repeatable scenes: `VOXEL_START=x,y,z`, `VOXEL_LOOK=dx,dy,dz`,
   `VOXEL_AUTOPILOT=<m/s>`.
-- PREFER live verification over relaunch cycles: run with `VOXEL_REMOTE=1`
-  and drive via `cargo run -p voxctl -q -- status | goto X Y Z [DIR] |
+- PREFER live verification over relaunch cycles: a dev build always
+  serves the BRP, so just drive it via `cargo run -p voxctl -q -- status | goto X Y Z [DIR] |
   ribbons/markers/ops X Z [R] | scan X Z [R] [STEP] | shot PATH`
   (offscreen screenshots; wait ~1 s for the file, ~10-15 s after a goto
   for streaming). `scan` ranks scenic spots; `portal`/F7 opens a

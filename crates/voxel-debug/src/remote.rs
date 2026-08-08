@@ -1,5 +1,6 @@
-//! Live tooling over the Bevy Remote Protocol: `VOXEL_REMOTE=1` (or a
-//! port number) starts an HTTP JSON-RPC server the `voxctl` CLI drives —
+//! Live tooling over the Bevy Remote Protocol: a dev build adds this
+//! unconditionally, starting an HTTP JSON-RPC server the `voxctl` CLI
+//! drives —
 //! teleport the camera, query planning data (ribbons, markers), and dump
 //! offscreen screenshots from a RUNNING game instead of relaunching it
 //! for every look.

@@ -210,15 +210,20 @@ fn main() {
         .add_systems(Startup, setup_scene)
         .add_systems(Update, (autopilot, follow_reloaded_sun));
 
-    // Live tooling: VOXEL_REMOTE=1 (or a port) starts the BRP server the
-    // voxctl CLI drives.
-    if let Ok(v) = std::env::var("VOXEL_REMOTE") {
-        let port = match v.parse::<u16>() {
-            Ok(p) if p > 1024 => p,
-            _ => 15702,
-        };
-        app.add_plugins(VoxelRemotePlugin { port });
-    }
+    // Live tooling for the voxctl CLI: always on in a dev build, never in
+    // a release one. It used to need `VOXEL_REMOTE=1`, which meant every
+    // check ran with a flag no ordinary launch had — and a system that
+    // required a resource the remote plugin creates panicked on every
+    // plain `cargo run` while passing all of them. A dev build should
+    // behave the way it is actually driven.
+    #[cfg(debug_assertions)]
+    app.add_plugins(VoxelRemotePlugin {
+        port: std::env::var("VOXCTL_PORT")
+            .ok()
+            .and_then(|p| p.parse().ok())
+            .filter(|p| *p > 1024)
+            .unwrap_or(15702),
+    });
     app.run();
 }
 
