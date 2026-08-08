@@ -430,13 +430,34 @@ fn sync_world_suns(
 
 /// `VOXEL_AUTOPILOT=<m/s>` flies the camera forward — the smoke-test and
 /// coverage-eval driver.
+///
+/// `VOXEL_AUTOPILOT_WEAVE=<deg/s>` makes it turn as it goes, and that is
+/// not a cosmetic difference. Flying straight moves a MONOTONE front
+/// through the world: tiles are created ahead of you and released behind
+/// you, and the two never happen to the same tile close together. Only
+/// turning back across ground you just left creates and releases a tile
+/// within a frame or two of each other, which is the window where a
+/// system holding an entity from `Added<..>` finds it despawned by the
+/// time its commands apply. A straight-line flight cannot catch that
+/// class of bug; this is what a player wandering around does.
 fn autopilot(mut cameras: Query<&mut Transform, With<VoxelStreamSource>>, time: Res<Time>) {
     let Ok(speed) = std::env::var("VOXEL_AUTOPILOT") else {
         return;
     };
     let speed: f32 = speed.parse().unwrap_or(50.0);
     let level_flight = std::env::var("VOXEL_AUTOPILOT_LEVEL").is_ok();
+    let weave: f32 = std::env::var("VOXEL_AUTOPILOT_WEAVE")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0.0);
     for mut transform in &mut cameras {
+        if weave != 0.0 {
+            // Sinusoidal, so it doubles back rather than circling: a
+            // steady turn is still a monotone front, just a curved one.
+            let t = time.elapsed_secs();
+            let yaw = weave.to_radians() * (t * 0.9).sin() * time.delta_secs() * 60.0;
+            transform.rotate_y(yaw);
+        }
         let mut dir = *transform.forward();
         if level_flight {
             dir.y = 0.0;

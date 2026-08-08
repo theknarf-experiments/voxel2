@@ -290,6 +290,14 @@ fn dress_scatter(
     let Some(query) = worlds.query(host.0) else {
         return;
     };
+    // EVERY command here is fallible, because the entity may be gone by
+    // the time they apply. `Added<ScatterInstance>` hands out entities
+    // the engine's scatter layer owns, and a tile created and released
+    // within a frame — which is what turning back across ground you just
+    // crossed does — despawns them between the query and the flush.
+    // `commands.entity(..).insert(..)` panics on that; `try_insert` and
+    // `queue_silenced` drop the work for an instance that no longer
+    // exists, which is exactly right: there is nothing left to dress.
     for (entity, instance, transform) in &new {
         let Some(variants) = assets.classes.get(&*instance.class) else {
             continue;
@@ -299,14 +307,19 @@ fn dress_scatter(
         };
         let class_def = table.0.get(&*instance.class).cloned().unwrap_or_default();
         let squash = class_def.squash.max(Vec3::splat(f32::EPSILON));
-        commands.entity(entity).insert(Transform {
+        commands.entity(entity).try_insert(Transform {
             scale: transform.scale * squash,
             ..*transform
         });
         for (mesh, material) in parts {
-            commands.entity(entity).with_children(|parent| {
-                parent.spawn((Mesh3d(mesh.clone()), MeshMaterial3d(material.clone())));
-            });
+            let (mesh, material) = (mesh.clone(), material.clone());
+            commands
+                .entity(entity)
+                .queue_silenced(move |mut instance: EntityWorldMut| {
+                    instance.with_children(|parent| {
+                        parent.spawn((Mesh3d(mesh), MeshMaterial3d(material)));
+                    });
+                });
         }
         if class_def.blob_shadow {
             // Grounding shadow, stretched along the sun and offset away
@@ -335,13 +348,18 @@ fn dress_scatter(
             let local = Transform::from_matrix(
                 parent.to_matrix().inverse() * world.to_matrix(),
             );
-            commands.entity(entity).with_children(|children| {
-                children.spawn((
-                    Mesh3d(assets.blob_mesh.clone()),
-                    MeshMaterial3d(assets.blob_mat.clone()),
-                    local,
-                ));
-            });
+            let (blob_mesh, blob_mat) = (assets.blob_mesh.clone(), assets.blob_mat.clone());
+            commands
+                .entity(entity)
+                .queue_silenced(move |mut instance: EntityWorldMut| {
+                    instance.with_children(|children| {
+                        children.spawn((
+                            Mesh3d(blob_mesh),
+                            MeshMaterial3d(blob_mat),
+                            local,
+                        ));
+                    });
+                });
         }
     }
 }

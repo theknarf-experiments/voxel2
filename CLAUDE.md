@@ -11,6 +11,14 @@ architecture. Design plan: `~/.claude/plans/binary-twirling-brooks.md`.
   system that only breaks on a plain launch, so a
   system that only breaks on a plain `cargo run` survives all of them.
   Run it before claiming a change works.
+- `mise run fly` — flies a WEAVING autopilot through every level. Booting
+  only exercises the first residency pass; everything that needs a chunk,
+  a scatter tile or a planning layer to be RELEASED survives `smoke`. The
+  weave is load-bearing: a straight line moves a monotone front (created
+  ahead, released behind, never the same tile twice in a frame), so it
+  cannot catch the create-then-release races. `dress_scatter` panicked on
+  exactly one, straight flight missed it for 100 s, weaving found it in
+  under 40. Run this too before claiming a change works.
 - `cargo run -p voxel2 -- levels/<name>.json` — visual verification is
   mandatory for render changes: run ~35 s (LOD refinement needs time),
   screenshot, and look. Use `caffeinate -dis` so the display can't sleep,

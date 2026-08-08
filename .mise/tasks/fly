@@ -1,0 +1,47 @@
+#!/bin/bash
+#MISE description="Fly a weaving autopilot through each shipped level and fail on any panic"
+# The companion to `smoke`, which only BOOTS a level. Booting exercises
+# the first residency pass and nothing after it: every bug that needs a
+# chunk, a scatter tile or a planning layer to be RELEASED survives it.
+#
+# The weave is the point, and it is not decoration. Flying straight moves
+# a monotone front through the world — tiles are created ahead of you and
+# released behind you, and the two never happen to the same tile close
+# together. Only doubling back across ground you just left creates and
+# releases a tile within a frame or two, which is the window where a
+# system holding an entity from `Added<..>` finds it despawned by the
+# time its commands apply. `dress_scatter` panicked exactly there, a
+# straight-line autopilot could not reproduce it in 100 seconds, and a
+# weaving one did in under 40.
+#
+# Usage: mise run fly [seconds]
+set -e
+SECS=${1:-45}
+cargo build -p voxel2 2>&1 | tail -1
+status=0
+for level in levels/*.json; do
+    log=$(mktemp)
+    # Level flight so it stays in the streamed band rather than burrowing
+    # into rock or climbing out of the world, and fast enough that tiles
+    # turn over several times in the run.
+    VOXEL_AUTOPILOT=90 \
+    VOXEL_AUTOPILOT_LEVEL=1 \
+    VOXEL_AUTOPILOT_WEAVE=55 \
+        caffeinate -dis ./target/debug/voxel2 "$level" > "$log" 2>&1 &
+    pid=$!
+    sleep "$SECS"
+    kill "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+    for bad in "panicked" "error in system" "Validation Error" "never became drawable"; do
+        n=$(grep -c "$bad" "$log" || true)
+        if [ "$n" != "0" ]; then
+            echo "FAIL $level: $n x '$bad'"
+            grep -m2 "$bad" "$log"
+            status=1
+        fi
+    done
+    [ "$status" = "0" ] && echo "ok   $level"
+    rm -f "$log"
+done
+[ "$status" = "0" ] && echo "FLY PASS" || echo "FLY FAIL"
+exit $status
