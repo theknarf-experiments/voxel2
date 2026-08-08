@@ -64,7 +64,7 @@ struct VoxelMaterialBindings {
 /// megastructure's 1 are different recipes that have to coexist while a
 /// both are loaded at once. Twin of `material_slot_index`.
 fn material_for(id: u32) -> WorldMaterial {
-    let i = chunk.head.y * 8u + min(id, 7u);
+    let i = chunk.head.y * 32u + min(id, 31u);
     let slot = env.material_slots[i / 4u][i % 4u];
     return material_array[material_indices[slot].material];
 }
@@ -73,7 +73,7 @@ fn material_for(id: u32) -> WorldMaterial {
 struct EnvParams {
     flags: vec4<f32>,                    // x = coverage-eval mode
     // (world, material id) -> bindless slab slot, world-major.
-    material_slots: array<vec4<u32>, 16>,
+    material_slots: array<vec4<u32>, 64>,
 }
 @group(2) @binding(1) var<uniform> env: EnvParams;
 

@@ -542,9 +542,18 @@ impl Default for WorldMaterial {
     }
 }
 
-/// How many material ids a world can use. The cap is now the id → slab
-/// slot map the shader indirects through, not a GPU table.
-pub const MATERIAL_SLOTS: usize = 8;
+/// How many material ids a world can use.
+///
+/// The recipes themselves live in runtime-sized storage buffers and are
+/// not capped at all. What this bounds is the id → slab slot map the
+/// draw shader indirects through, whose entries are packed one BYTE
+/// each — so `MAX_WORLDS * MATERIAL_SLOTS` must stay within 256 distinct
+/// slots. At 8 worlds that puts the ceiling here at exactly 32.
+///
+/// Raising it costs only the map: 8 x 32 entries is 256 bytes of uniform.
+/// Past that, widen the packed slot (and the vertex's material byte,
+/// `(extra >> 8u) & 0xFFu`, which is the real 256-per-chunk ceiling).
+pub const MATERIAL_SLOTS: usize = 32;
 
 /// A world's material table, indexed by material id and padded to
 /// [`MATERIAL_SLOTS`] so the id → slot arithmetic is uniform.
@@ -565,7 +574,7 @@ pub fn material_table(recipes: impl IntoIterator<Item = (u32, WorldMaterial)>) -
 /// Lighting and atmosphere are NOT here: voxel surfaces shade through
 /// Bevy's PBR, so the app's lights, ambient and `DistanceFog` drive them
 /// like any other surface.
-#[derive(Resource, ShaderType, Clone, Copy, Default, Debug)]
+#[derive(Resource, ShaderType, Clone, Copy, Debug)]
 pub struct EnvParams {
     /// x = coverage-eval mode (monotone geometry over a magenta clear).
     pub flags: Vec4,
@@ -577,6 +586,17 @@ pub struct EnvParams {
     /// says: planet's 1 and megastructure's 1 are different recipes that
     /// must be able to coexist.
     pub material_slots: [UVec4; MATERIAL_SLOT_VEC4S],
+}
+
+// Hand-written because the array outgrew the length `Default` is derived
+// for; `[UVec4; N]` only implements it up to 32.
+impl Default for EnvParams {
+    fn default() -> Self {
+        Self {
+            flags: Vec4::ZERO,
+            material_slots: [UVec4::ZERO; MATERIAL_SLOT_VEC4S],
+        }
+    }
 }
 
 /// `vec4`s needed to hold one slot per (world, material id) pair.
@@ -2919,7 +2939,10 @@ mod multi_world_tests {
     fn the_slot_index_matches_the_draw_shader() {
         let src = include_str!("shaders/voxel_chunk_draw.wgsl");
         assert!(
-            src.contains("let i = chunk.head.y * 8u + min(id, 7u);"),
+            src.contains(&format!(
+                "let i = chunk.head.y * {MATERIAL_SLOTS}u + min(id, {}u);",
+                MATERIAL_SLOTS - 1
+            )),
             "material_for must index (world, id) world-major with {MATERIAL_SLOTS} \
              ids per world — twin of material_slot_index",
         );
@@ -2927,13 +2950,19 @@ mod multi_world_tests {
             src.contains(&format!("array<vec4<u32>, {MATERIAL_SLOT_VEC4S}>")),
             "the shader's material_slots must hold {MATERIAL_SLOT_VEC4S} vec4s",
         );
-        assert_eq!(MATERIAL_SLOTS, 8, "the shader hardcodes 8 ids per world");
+        // The packed slot map is one byte per entry, so every
+        // (world, id) pair must fit a u8. A const assert, because
+        // raising either constant should fail the BUILD, not a test run.
+        const _: () = assert!(
+            MAX_WORLDS * MATERIAL_SLOTS <= 256,
+            "the slot map packs one byte per (world, id)"
+        );
         assert_eq!(material_slot_index(0, 0), 0);
         assert_eq!(material_slot_index(0, 7), 7);
-        assert_eq!(material_slot_index(1, 0), 8);
-        assert_eq!(material_slot_index(3, 7), 31);
+        assert_eq!(material_slot_index(1, 0), MATERIAL_SLOTS);
+        assert_eq!(material_slot_index(3, 7), 3 * MATERIAL_SLOTS + 7);
         // Out-of-range ids clamp INTO their own world, never into the next.
-        assert_eq!(material_slot_index(1, 99), 15);
+        assert_eq!(material_slot_index(1, 99), 2 * MATERIAL_SLOTS - 1);
     }
 
     /// Each world's painted raster lives in its own section, found through
