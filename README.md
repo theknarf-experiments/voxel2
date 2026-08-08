@@ -78,11 +78,18 @@ speed. Env vars:
 
 **Live tooling**: run with `VOXEL_REMOTE=1`, then drive the running game:
 `cargo run -p voxctl -- status | goto X Y Z [DX DY DZ] | ribbons X Z [R] |
-markers X Z [R] [KIND] | scan X Z [R] [STEP] | shot PATH | raw METHOD [JSON]`
+markers X Z [R] [KIND] | scan X Z [R] [STEP] | shot PATH | portal | world N |
+raw METHOD [JSON]`
 — `scan` ranks
 scenic spots (steep, high terrain) from the CPU world mirror. In-game overlays: F8 chunk
 boundaries by LOD, F9 planning layers (markers, clearance, ribbons, biome
 field).
+
+**Portals**: `portal` (or **F7**) opens a window onto the other shipped level 14 m
+ahead of you, loading it as a second world the first time — both then stream and
+render at once, and walking through swaps which one you are in. `world N` switches
+the camera's world without moving it. Nothing is loaded until you ask: a second
+world roughly doubles the meshed working set.
 
 ## How it works
 

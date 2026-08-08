@@ -16,7 +16,7 @@ pub struct VoxelRemotePlugin {
 
 impl Plugin for VoxelRemotePlugin {
     fn build(&self, app: &mut App) {
-        app.add_plugins(
+        app.init_resource::<HostCommands>().add_plugins(
             RemotePlugin::default()
                 .with_method_main("voxel/status", status)
                 .with_method_main("voxel/teleport", teleport)
@@ -26,6 +26,7 @@ impl Plugin for VoxelRemotePlugin {
                 .with_method_main("voxel/scan", scan)
                 .with_method_main("voxel/viz", viz)
                 .with_method_main("voxel/world", world_switch)
+                .with_method_main("voxel/host", host_command)
                 .with_method_main("voxel/screenshot", screenshot),
         )
         .add_plugins(RemoteHttpPlugin::default().with_port(self.port));
@@ -247,6 +248,21 @@ fn ops(In(params): In<Option<Value>>, world: Res<WorldQuery>) -> BrpResult {
 /// `{"chunks": bool?, "layers": bool|number?}` — toggle the debug
 /// overlays. `layers` takes a radius in meters, or a bool for the near
 /// range.
+/// Anything the HOST defines, passed through untouched.
+///
+/// The engine's tooling has no business knowing what a portal is, so it
+/// carries an opaque value and the host decides what it means — the same
+/// bargain as the level's `planning` block. Queued rather than applied,
+/// because the host reads it from its own systems.
+#[derive(Resource, Default)]
+pub struct HostCommands(pub Vec<Value>);
+
+fn host_command(In(params): In<Option<Value>>, mut queue: ResMut<HostCommands>) -> BrpResult {
+    let params = params.ok_or_else(|| err("params required"))?;
+    queue.0.push(params.clone());
+    Ok(json!({ "queued": params }))
+}
+
 /// `{"world": n}` — which world the camera is in, and so which one is
 /// drawn. Every registered world stays resident either way; this only
 /// chooses the view, which is how you can tell two levels are genuinely

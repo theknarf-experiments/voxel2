@@ -121,6 +121,7 @@ fn main() {
             std::process::exit(1);
         }
     };
+    let is_mega = path.contains("megastructure");
     let scene = scene_for(std::path::Path::new(&path));
     let title = format!(
         "voxel2 — {}",
@@ -138,18 +139,6 @@ fn main() {
     } else {
         scene.clear_color
     };
-
-    // A second level, live alongside the first: `VOXEL_FAR=levels/x.json`.
-    let far = std::env::var("VOXEL_FAR").ok().map(|p| {
-        let json = std::fs::read_to_string(&p)
-            .unwrap_or_else(|e| panic!("failed to read far level '{p}': {e}"));
-        let level = LevelDef::from_json(&json)
-            .unwrap_or_else(|e| panic!("failed to parse far level '{p}': {e}"));
-        FarLevel {
-            level,
-            clear_color: scene_for(std::path::Path::new(&p)).clear_color,
-        }
-    });
 
     let mut app = App::new();
     app
@@ -203,9 +192,20 @@ fn main() {
                 planner: Some(std::sync::Arc::new(planning::StackPlanning)),
             },
         ));
-    if let Some(far) = far {
-        app.insert_resource(far).add_plugins(PortalPlugin);
-    }
+    // Where F7 / `voxctl portal` opens onto: the other shipped level.
+    // Nothing is loaded until a portal is actually opened.
+    let far_path = if is_mega {
+        "levels/planet.json"
+    } else {
+        "levels/megastructure.json"
+    };
+    app.insert_resource(FarLevel {
+        path: far_path.to_string(),
+        loaded: None,
+        clear_color: scene_for(std::path::Path::new(far_path)).clear_color,
+        world: None,
+    })
+    .add_plugins(PortalPlugin);
     app
         .add_systems(Startup, setup_scene)
         .add_systems(Update, (autopilot, follow_reloaded_sun));

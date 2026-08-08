@@ -20,49 +20,61 @@ use voxel_render::WorldPrograms;
 /// seen through. See `register_far_world`.
 const FAR_MAX_LEVEL: u8 = 5;
 
-/// The far side, if the host asked for one: its level and its own
-/// background, which the opening shows wherever the far world is empty.
+/// The far side: which level file to open onto, and — once opened — the
+/// level itself with its own background, which the opening shows wherever
+/// the far world is empty.
+///
+/// Loaded on demand rather than at startup: a portal is something you
+/// open, and a second world is not free (it roughly doubles the meshed
+/// working set), so nobody should pay for one until they ask.
 #[derive(Resource)]
 pub struct FarLevel {
-    pub level: LevelDef,
+    pub path: String,
+    pub loaded: Option<LevelDef>,
     pub clear_color: Color,
+    pub world: Option<u8>,
 }
 
 pub struct PortalPlugin;
 
 impl Plugin for PortalPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Startup, register_far_world)
-            .add_systems(
+        app.add_systems(
                 Update,
-                (spawn_portal, traverse_portal, follow_camera_world, drive_portal).chain(),
+                (open_portal, traverse_portal, follow_camera_world, drive_portal).chain(),
             );
     }
 }
 
-/// Register the far level as world 1: generator into the shared program
-/// buffer, LOD field into the streamer.
-fn register_far_world(
-    far: Option<Res<FarLevel>>,
-    mut worlds: ResMut<StreamedWorlds>,
-    mut programs: ResMut<WorldPrograms>,
-    mut materials: ResMut<voxel_render::WorldMaterials>,
-    near: Res<LevelDef>,
-) {
-    let Some(far) = far else {
-        return;
-    };
-    let level = &far.level;
+/// Load the far level and register it as its own world, once.
+///
+/// Returns the world id, or `None` if it could not be read — a portal to
+/// a level that will not parse should say so rather than open onto
+/// nothing.
+fn ensure_far_world(
+    far: &mut FarLevel,
+    worlds: &mut StreamedWorlds,
+    programs: &mut WorldPrograms,
+    materials: &mut voxel_render::WorldMaterials,
+    near: &LevelDef,
+) -> Option<u8> {
+    if let Some(id) = far.world {
+        return Some(id);
+    }
+    let json = std::fs::read_to_string(&far.path)
+        .inspect_err(|e| error!("portal: cannot read '{}': {e}", far.path))
+        .ok()?;
+    let level = LevelDef::from_json(&json)
+        .inspect_err(|e| error!("portal: cannot parse '{}': {e}", far.path))
+        .ok()?;
+
     let generator = std::sync::Arc::new(level.generator(0));
-    // INTERIM, and the number that matters most here: a second world
-    // roughly doubles the meshed working set, and the slab is one fixed
-    // GPU allocation sized for one world — at the far level's own config
-    // every class hit 100% and 427 chunks wedged in AwaitingAlloc.
-    //
-    // The real fix is the portal: the far side only needs to be resident
-    // where you can SEE it, which is a cone through a surface, not a
-    // sphere around the camera. Until that exists, hold it to a small
-    // field so the thing streams and settles.
+    // INTERIM: a second world roughly doubles the meshed working set and
+    // the slab is one fixed GPU allocation sized for one, so at the far
+    // level's own config every class hit 100% and chunks wedged in
+    // AwaitingAlloc. Now that the far world streams around the PORTAL
+    // rather than the camera its working set is much smaller, so this cap
+    // is probably droppable — but on evidence, not on assumption.
     let mut config = voxel_engine::LodConfig::from(&level.lod);
     config.max_level = config.max_level.min(FAR_MAX_LEVEL);
     config.top_radius = 1;
@@ -76,20 +88,20 @@ fn register_far_world(
     // chunk's vertex carries, and ids are level data, so two levels that
     // coexist simply must not reuse one — planet is 1/3/4, the
     // megastructure is 2. A collision would silently repaint one world
-    // with the other's recipe, so it is worth the assert.
+    // with the other's recipe.
     for def in &level.materials {
-        let id = def.id() as usize;
-        assert!(
-            id < materials.0.len(),
-            "far level material id {id} is out of range",
-        );
+        let mid = def.id() as usize;
+        assert!(mid < materials.0.len(), "far material id {mid} out of range");
         assert!(
             !near.materials.iter().any(|n| n.id() == def.id()),
-            "far level reuses material id {id}, which the near level already defines",
+            "far level reuses material id {mid}, which the near level defines",
         );
-        materials.0[id] = def.pack();
+        materials.0[mid] = def.pack();
     }
-    info!("far level registered as world {id}");
+    far.loaded = Some(level);
+    far.world = Some(id);
+    info!("portal: '{}' opened as world {id}", far.path);
+    Some(id)
 }
 
 /// Scene content belongs to a world, and Bevy already has the mechanism:
@@ -193,6 +205,10 @@ type NearViews<'w, 's> = Query<
     (With<Camera3d>, Without<PortalCamera>),
 >;
 
+/// The quad painted with the far world's background, behind the opening.
+#[derive(Component)]
+pub struct PortalBackdrop;
+
 /// Marks a camera that renders the far side FOR a particular near-side
 /// camera.
 ///
@@ -210,29 +226,69 @@ pub struct PortalCamera(pub Entity);
 ///
 /// Positioned from where the camera ACTUALLY is rather than from the
 /// level's declared start, so `VOXEL_START` still puts you in front of it.
-fn spawn_portal(
+/// Open the portal in front of the camera, on F7 or on
+/// `voxctl portal`.
+///
+/// Not at startup and not from an env var: a portal is something you
+/// open, where you are looking. Opening it again moves it, so the
+/// interesting cases — walking in at an angle, standing something in
+/// front of it — can all be tried without a restart.
+#[allow(clippy::too_many_arguments)]
+fn open_portal(
     mut commands: Commands,
-    far: Option<Res<FarLevel>>,
+    mut far: ResMut<FarLevel>,
+    near: Res<LevelDef>,
     camera: Query<&GlobalTransform, With<crate::FreeCamera>>,
-    existing: Query<(), With<Portal>>,
+    mut portal: Query<&mut Portal>,
+    mut backdrop: Query<&mut Transform, With<PortalBackdrop>>,
+    keys: Res<ButtonInput<KeyCode>>,
+    mut host: ResMut<voxel_debug::remote::HostCommands>,
+    (mut worlds, mut programs, mut materials): (
+        ResMut<StreamedWorlds>,
+        ResMut<WorldPrograms>,
+        ResMut<voxel_render::WorldMaterials>,
+    ),
     mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
+    mut materials_assets: ResMut<Assets<StandardMaterial>>,
 ) {
-    if far.is_none() || !existing.is_empty() {
+    let asked = keys.just_pressed(KeyCode::F7) || {
+        let n = host.0.len();
+        host.0
+            .retain(|c| c.get("cmd").and_then(|c| c.as_str()) != Some("portal"));
+        host.0.len() != n
+    };
+    if !asked {
         return;
     }
     let Ok(eye) = camera.single() else {
         return;
     };
-    // The far level's own background, so the opening reads as somewhere
-    // else rather than as a hole with this world behind it.
-    let far_clear = far.as_ref().map_or(Color::BLACK, |f| f.clear_color);
+    let Some(far_world) = ensure_far_world(
+        &mut far,
+        &mut worlds,
+        &mut programs,
+        &mut materials,
+        &near,
+    ) else {
+        return;
+    };
+
     let forward = eye.forward().as_vec3();
     let at = eye.translation() + forward * 14.0;
-    let near = Transform::from_translation(at).looking_to(-forward, Vec3::Y);
-    let backdrop = meshes.add(Rectangle::new(8.0, 6.0));
-    let backdrop_mat = materials.add(StandardMaterial {
-        base_color: far_clear,
+    let placement = Transform::from_translation(at).looking_to(-forward, Vec3::Y);
+
+    // Already open: move it rather than stacking a second one, which
+    // would make `portals.single()` fail and stop the far view dead.
+    if let (Ok(mut portal), Ok(mut quad)) = (portal.single_mut(), backdrop.single_mut()) {
+        portal.near = placement;
+        *quad = placement;
+        info!("portal moved to {at:?}");
+        return;
+    }
+
+    let quad = meshes.add(Rectangle::new(8.0, 6.0));
+    let quad_mat = materials_assets.add(StandardMaterial {
+        base_color: far.clear_color,
         unlit: true,
         // Both faces: an opening is approachable from either side, and a
         // one-sided quad silently vanishes from whichever side it is not
@@ -242,24 +298,22 @@ fn spawn_portal(
         ..default()
     });
     commands.spawn(Portal {
-        near,
-        // Room to stand inside the megastructure.
+        near: placement,
+        // Room to stand inside the far level.
         far: Transform::from_translation(Vec3::new(0.0, 22.0, 0.0)),
         near_world: 0,
-        far_world: 1,
+        far_world,
         half: Vec2::new(4.0, 3.0),
     });
-    // The opening's backdrop, drawn in the NEAR world at the opening.
-    //
-    // The far camera cannot clear only the opening, so without this you
-    // see the near world wherever the far world happens to be empty. It
-    // belongs to the near world so that anything standing in FRONT of the
-    // opening still occludes it; the far view then draws over it, and
-    // what is left showing is the far world's own background.
+    // The opening's backdrop, in the NEAR world at the opening: the far
+    // camera cannot clear only the opening, so without this you see the
+    // near world wherever the far world is empty. Being in the near world
+    // is the point — anything in FRONT of the opening still occludes it.
     commands.spawn((
-        Mesh3d(backdrop),
-        MeshMaterial3d(backdrop_mat),
-        near,
+        PortalBackdrop,
+        Mesh3d(quad),
+        MeshMaterial3d(quad_mat),
+        placement,
         RenderLayers::layer(0),
     ));
     info!("portal opened at {at:?}");

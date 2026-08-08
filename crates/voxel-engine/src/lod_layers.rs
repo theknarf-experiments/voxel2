@@ -538,11 +538,15 @@ fn build_lod_layers(
         layers.worlds.clear();
         return;
     }
-    if !layers.is_empty() || worlds.0.is_empty() {
-        return;
-    }
     rebuild.0 = false;
+    // Any REGISTERED world without a graph gets one, rather than building
+    // the set once: a world can arrive long after startup — opening a
+    // portal loads the far level on the spot — and a one-shot build would
+    // register it, stream nothing, and show an empty opening.
     for world in &worlds.0 {
+        if layers.worlds.iter().any(|w| w.shared.world == world.id) {
+            continue;
+        }
         // The density band's scale is a constant of the configuration, so
         // it is set with the graph rather than on every anchor move.
         // World 0 owns it: the band is a property of the view, and every
