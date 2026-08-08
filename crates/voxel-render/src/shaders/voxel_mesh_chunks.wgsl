@@ -551,7 +551,7 @@ fn height_coarse(xz: vec2<f32>) -> f32 {
                 let fa = op.p1.z;
                 let wa = smoothstep(op.p2.x - fa, op.p2.x + fa, ta) * (1.0 - smoothstep(op.p2.y - fa, op.p2.y + fa, ta));
                 let wb = smoothstep(op.p2.z - fa, op.p2.z + fa, tb) * (1.0 - smoothstep(op.p2.w - fa, op.p2.w + fa, tb));
-                h += min(wa, wb) * hfbm(pxz + warp + op.p0.xy, op.p0.z, to_i(op.p1.x), to_u(op.p1.y)) * op.p0.w;
+                h += min(wa, wb) * (op.p1.w + hfbm(pxz + warp + op.p0.xy, op.p0.z, to_i(op.p1.x), to_u(op.p1.y)) * op.p0.w);
             }
 // GENOPS ARMS END
             default {}

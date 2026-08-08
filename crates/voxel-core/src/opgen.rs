@@ -144,8 +144,11 @@ if nd < d { d = nd; mat = @mat; }",
         body: "\
 ta = @FBM(pxz + @p0.xy, @p0.z, to_i(@p1.z), @VS@0) + 0.5;
 tb = @FBM(pxz + @p1.xy, @p0.w, to_i(@p1.z), @VS@0) + 0.5;",
-        // Registers only; neither the SDF nor the height moves.
-        range: Some("// region axes only"),
+        range: Some("\
+            // Both axes over the box, so a later band can tell whether
+            // this box is inside its region, outside it, or straddling.
+            ta = frange(pxz_lo + @p0.xy, pxz_hi + @p0.xy, @p0.z, to_i(@p1.z), 0) + 0.5;
+            tb = frange(pxz_lo + @p1.xy, pxz_hi + @p1.xy, @p0.w, to_i(@p1.z), 0) + 0.5;"),
     },
     OpDef {
         name: "WOP_HEIGHT_BAND_FBM",
@@ -155,13 +158,20 @@ tb = @FBM(pxz + @p1.xy, @p0.w, to_i(@p1.z), @VS@0) + 0.5;",
 let fa = @p1.z;
 let wa = smoothstep(@p2.x - fa, @p2.x + fa, ta) * (1.0 - smoothstep(@p2.y - fa, @p2.y + fa, ta));
 let wb = smoothstep(@p2.z - fa, @p2.z + fa, tb) * (1.0 - smoothstep(@p2.w - fa, @p2.w + fa, tb));
-h += min(wa, wb) * @FBM(pxz + warp + @p0.xy, @p0.z, to_i(@p1.x), @VS@to_u(@p1.y)) * @p0.w;",
+h += min(wa, wb) * (@p1.w + @FBM(pxz + warp + @p0.xy, @p0.z, to_i(@p1.x), @VS@to_u(@p1.y)) * @p0.w);",
         range: Some("\
-            // The region weight is in [0, 1], so the contribution runs
-            // between nothing and the whole band — whichever way the
-            // amplitude points.
-            let band = frange(pxz_lo + @p0.xy, pxz_hi + @p0.xy, @p0.z, to_i(@p1.x), to_u(@p1.y)) * @p0.w;
-            h = h + Interval::new(band.lo.min(0.0), band.hi.max(0.0));"),
+            // A box entirely outside the region contributes NOTHING, and
+            // saying so is the whole point: otherwise the tallest region
+            // in a level widens the bound of every box in it.
+            let f = crate::program::band_feather([@p2.x, @p2.y]);
+            let g = crate::program::band_feather([@p2.z, @p2.w]);
+            let touches = ta.hi >= @p2.x - f && ta.lo <= @p2.y + f
+                && tb.hi >= @p2.z - g && tb.lo <= @p2.w + g;
+            if touches {
+                let band = frange(pxz_lo + @p0.xy, pxz_hi + @p0.xy, @p0.z, to_i(@p1.x), to_u(@p1.y)) * @p0.w
+                    + @p1.w;
+                h = h + Interval::new(band.lo.min(0.0), band.hi.max(0.0));
+            }"),
     },
     OpDef {
         name: "WOP_MATERIAL_BAND",

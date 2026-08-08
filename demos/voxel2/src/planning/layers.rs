@@ -1974,8 +1974,8 @@ mod tests {
     #[test]
     fn region_weights_partition_and_every_region_is_reachable() {
         let generator = generator(3);
-        let mats = [1u32, 2, 5, 6];
-        let mut dominant = [false; 4];
+        let mats = [1u32, 2, 5, 6, 7];
+        let mut dominant = [false; 5];
         for i in 0..400 {
             let p = Vec2::new(
                 LAND.x as f32 + (i % 20) as f32 * 1700.0,
@@ -2022,7 +2022,7 @@ mod tests {
         let b = land_bounds(8192);
         let sites = sites_in(mgr.graph(), "sites:gated", b);
         assert!(!sites.is_empty(), "gate rejected everything");
-        // Accepted sites average a high weight of their biome; the
+        // Accepted sites average a high weight of their region; the
         // probabilistic gate keeps some low-weight border sites (blending).
         let generator = generator(11);
         let mean: f32 = sites
@@ -2030,10 +2030,28 @@ mod tests {
             .map(|&p| generator.surface_material_weight(p, 8.0, 1))
             .sum::<f32>()
             / sites.len() as f32;
-        // Acceptance probability = weight, so the accepted mean is
-        // E[w^2]/E[w] — clearly above the unconditioned 0.5 but well
-        // short of 1 (that headroom IS the blending at borders).
-        assert!(mean > 0.58, "gated sites not concentrated: mean w {mean}");
+        // Acceptance probability IS the weight, so the accepted mean is
+        // E[w^2]/E[w], which exceeds the unconditioned mean by the
+        // weight's variance over it. Compared against the unconditioned
+        // mean measured on the same ground rather than a constant, which
+        // would only re-encode how much of the world is forest today.
+        let b = land_bounds(8192);
+        let mut unconditioned = 0.0f32;
+        let n = 40;
+        for gz in 0..n {
+            for gx in 0..n {
+                let p = Vec2::new(
+                    b.min.x as f32 + (b.max.x - b.min.x) as f32 * gx as f32 / (n - 1) as f32,
+                    b.min.z as f32 + (b.max.z - b.min.z) as f32 * gz as f32 / (n - 1) as f32,
+                );
+                unconditioned += generator.surface_material_weight(p, 8.0, 1);
+            }
+        }
+        unconditioned /= (n * n) as f32;
+        assert!(
+            mean > unconditioned * 1.15,
+            "gated sites not concentrated: accepted mean {mean} vs unconditioned {unconditioned}"
+        );
     }
 
     /// Regression for the audit's C1/C2/M2: volumetric emits must serve

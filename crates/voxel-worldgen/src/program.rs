@@ -219,6 +219,12 @@ pub fn eval_range(ops: &[WorldOp], seed: u32, min: Vec3, max: Vec3, vs: f32) -> 
     // The xz box later height ops sample from; a warp widens it.
     let mut pxz_lo = Vec2::new(min.x, min.z);
     let mut pxz_hi = Vec2::new(max.x, max.z);
+    // The region axes over this box. Bounding them is what keeps a
+    // dramatic region's cost LOCAL: without it every box in the world is
+    // bounded as though it might contain the mountains, and the pruning
+    // this function exists for stops working everywhere at once.
+    let mut ta = Interval::point(0.5);
+    let mut tb = Interval::point(0.5);
     let frange = |lo: Vec2, hi: Vec2, s: f32, o: i32, m: u32| {
         crate::fbm_range(seed, lo, hi, s, o, vs, m)
     };
@@ -289,15 +295,14 @@ pub fn surface_material_weight(
     vs: f32,
     material: u32,
 ) -> f32 {
-    /// Half-width of the soft edge, in band units.
-    ///
-    /// The same width `WOP_HEIGHT_BAND_FBM` fades its terrain over, so
-    /// one region's ground, its content and its landform all transition
-    /// together. The hard `WOP_MATERIAL_BAND` flips its colour at the
-    /// midpoint of that zone, where the two regions weigh the same.
-    const FEATHER: f32 = 0.06;
+    // The same edge `WOP_HEIGHT_BAND_FBM` fades its terrain over, so a
+    // region's ground, its content and its landform transition together.
+    // Scaled down for a narrow band, or the region could never reach
+    // full weight. The hard `WOP_MATERIAL_BAND` flips its colour at the
+    // midpoint of that zone, where two regions weigh the same.
     let inside = |v: f32, lo: f32, hi: f32| {
-        smoothstep(lo - FEATHER, lo + FEATHER, v) * (1.0 - smoothstep(hi - FEATHER, hi + FEATHER, v))
+        let f = band_feather([lo, hi]);
+        smoothstep(lo - f, lo + f, v) * (1.0 - smoothstep(hi - f, hi + f, v))
     };
 
     // The axes every band tests, sampled once — the same two values the
@@ -376,17 +381,24 @@ pub fn planet_program() -> Vec<WorldOp> {
             .p0([-4200.0, 8800.0, 0.004, 1.6])
             .p1([3.0, 0.0, 0.0, 0.15]),
         // Dunes in the desert: long ridged waves, low amplitude.
-        region_terrain([0.56, 1.0], [0.0, 0.47], [820.0, -410.0], 0.011, 21.0, 3, 2),
+        region_terrain([0.56, 1.0], [0.0, 0.47], [820.0, -410.0], 0.011, 21.0, 3, 2, 0.0),
         // Jagged crests in the alpine: ridged noise, tall and sharp.
-        region_terrain([0.0, 0.44], [0.0, 1.0], [-2600.0, 1750.0], 0.0035, 165.0, 5, 1),
+        region_terrain([0.0, 0.44], [0.0, 1.0], [-2600.0, 1750.0], 0.0035, 165.0, 5, 1, 60.0),
         // Wetland is the flattest ground on the planet: a gentle negative
         // band, which is what makes water pool there.
-        region_terrain([0.0, 1.0], [0.56, 1.0], [4400.0, 900.0], 0.0025, -34.0, 3, 0),
+        region_terrain([0.0, 1.0], [0.56, 1.0], [4400.0, 900.0], 0.0025, 34.0, 3, 0, -26.0),
+        // A mountain range. The band is NARROW on one axis, so the
+        // region is an iso-strip of the noise field and snakes across
+        // the world the way a range does; a wide box would give a blob.
+        region_terrain([0.470, 0.530], [0.0, 1.0], [15200.0, -6400.0], 0.00022, 1250.0, 4, 1, 620.0),
+        region_terrain([0.470, 0.530], [0.0, 1.0], [-3300.0, 7100.0], 0.0016, 240.0, 5, 1, 0.0),
         WorldOp::new(WOP_HEIGHT_SURFACE).material(1),
         // Regions: two noise axes, and a box in their product per region.
         // Order is priority — each only repaints ground still left as
         // material 1, so the first to claim a point owns it, and roads
         // and river surfaces are never candidates at all.
+        // The range claims first: it cuts through whatever it crosses.
+        region(7, [0.470, 0.530], [0.0, 1.0]),
         region(5, [0.0, 0.44], [0.0, 1.0]),
         region(2, [0.56, 1.0], [0.0, 0.47]),
         region(6, [0.0, 1.0], [0.56, 1.0]),
@@ -401,6 +413,15 @@ fn region(material: u32, a: [f32; 2], b: [f32; 2]) -> WorldOp {
         .p1([0.0, 0.0, 1.0, 0.0])
 }
 
+/// Widest region edge, in band units. Narrow bands scale down from it.
+pub const FEATHER_MAX: f32 = 0.06;
+
+/// The edge width a band of this range gets: the shared maximum, unless
+/// the band is too narrow to reach full weight across it.
+pub fn band_feather(a: [f32; 2]) -> f32 {
+    FEATHER_MAX.min((a[1] - a[0]) * 0.3)
+}
+
 /// The planet's region axes: ~12 km and ~9 km, independent offsets.
 fn planet_axes() -> WorldOp {
     WorldOp::new(WOP_REGION_AXES)
@@ -411,10 +432,20 @@ fn planet_axes() -> WorldOp {
 /// Terrain the region shapes: dunes where it is desert, ridges where it
 /// is alpine. Faded by region weight, so a border is a landscape
 /// becoming another rather than a step.
-fn region_terrain(a: [f32; 2], b: [f32; 2], off: [f32; 2], scale: f32, amp: f32, oct: u32, mode: u32) -> WorldOp {
+#[allow(clippy::too_many_arguments)]
+fn region_terrain(
+    a: [f32; 2],
+    b: [f32; 2],
+    off: [f32; 2],
+    scale: f32,
+    amp: f32,
+    oct: u32,
+    mode: u32,
+    lift: f32,
+) -> WorldOp {
     WorldOp::new(WOP_HEIGHT_BAND_FBM)
         .p0([off[0], off[1], scale, amp])
-        .p1([oct as f32, mode as f32, 0.06, 0.0])
+        .p1([oct as f32, mode as f32, band_feather(a), lift])
         .p2([a[0], a[1], b[0], b[1]])
 }
 
@@ -507,7 +538,7 @@ mod tests {
                 // With the region ops, height moves only where a region
                 // claims the point — and everywhere else stays exact.
                 let full = eval_height(&ops, seed, p, vs);
-                let claimed: f32 = [2u32, 5, 6]
+                let claimed: f32 = [2u32, 5, 6, 7]
                     .iter()
                     .map(|&m| surface_material_weight(&ops, seed, p, vs, m))
                     .sum();
@@ -536,7 +567,7 @@ mod tests {
         // reference program should not be able to hide.
         let mut found: Vec<u32> = seen.into_iter().collect();
         found.sort_unstable();
-        assert_eq!(found, vec![1, 2, 5, 6], "region coverage changed");
+        assert_eq!(found, vec![1, 2, 5, 6, 7], "region coverage changed");
         // And the regions that declare terrain actually shape it.
         assert!(shaped > 100, "region terrain barely fires: {shaped} samples");
     }

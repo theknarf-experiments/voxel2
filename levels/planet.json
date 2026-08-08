@@ -106,7 +106,6 @@
       "scale": 0.011,
       "amp": 21.0,
       "octaves": 3,
-      "feather": 0.06,
       "mode": "billow"
     },
     {
@@ -126,8 +125,8 @@
       "scale": 0.0035,
       "amp": 165.0,
       "octaves": 5,
-      "feather": 0.06,
-      "mode": "ridged"
+      "mode": "ridged",
+      "lift": 60.0
     },
     {
       "type": "height_band_fbm",
@@ -144,13 +143,66 @@
         900.0
       ],
       "scale": 0.0025,
-      "amp": -34.0,
+      "amp": 34.0,
       "octaves": 3,
-      "feather": 0.06
+      "lift": -26.0
+    },
+    {
+      "type": "height_band_fbm",
+      "a": [
+        0.47,
+        0.53
+      ],
+      "b": [
+        0.0,
+        1.0
+      ],
+      "offset": [
+        15200.0,
+        -6400.0
+      ],
+      "scale": 0.00022,
+      "amp": 1250.0,
+      "octaves": 4,
+      "mode": "ridged",
+      "lift": 620.0
+    },
+    {
+      "type": "height_band_fbm",
+      "a": [
+        0.47,
+        0.53
+      ],
+      "b": [
+        0.0,
+        1.0
+      ],
+      "offset": [
+        -3300.0,
+        7100.0
+      ],
+      "scale": 0.0016,
+      "amp": 240.0,
+      "octaves": 5,
+      "mode": "ridged"
     },
     {
       "type": "height_surface",
       "material": 1
+    },
+    {
+      "type": "material_band",
+      "from": 1,
+      "material": 7,
+      "a": [
+        0.47,
+        0.53
+      ],
+      "b": [
+        0.0,
+        1.0
+      ],
+      "feather": 0.018
     },
     {
       "type": "material_band",
@@ -411,6 +463,64 @@
         0.045
       ],
       "detail_fade": 0.0025
+    },
+    {
+      "type": "zoned",
+      "id": 7,
+      "low": [
+        0.088,
+        0.082,
+        0.078
+      ],
+      "mid": [
+        [
+          0.126,
+          0.118,
+          0.11
+        ],
+        [
+          0.168,
+          0.158,
+          0.148
+        ]
+      ],
+      "high": [
+        [
+          0.235,
+          0.232,
+          0.238
+        ],
+        [
+          0.4,
+          0.405,
+          0.42
+        ]
+      ],
+      "peak": [
+        0.88,
+        0.905,
+        0.945
+      ],
+      "zones": {
+        "mid": [
+          120.0,
+          90.0
+        ],
+        "high": [
+          430.0,
+          220.0
+        ],
+        "peak": [
+          780.0,
+          200.0
+        ],
+        "border": 70.0
+      },
+      "steep": [
+        0.62,
+        0.3
+      ],
+      "detail_fade": 0.0018
     }
   ],
   "prefabs": {
@@ -630,6 +740,10 @@
           [
             "wetland",
             6
+          ],
+          [
+            "mountains",
+            7
           ]
         ]
       },

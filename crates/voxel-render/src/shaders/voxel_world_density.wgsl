@@ -273,7 +273,7 @@ fn eval_program(p: vec3<f32>, vs: f32) -> WorldSample {
                 let fa = op.p1.z;
                 let wa = smoothstep(op.p2.x - fa, op.p2.x + fa, ta) * (1.0 - smoothstep(op.p2.y - fa, op.p2.y + fa, ta));
                 let wb = smoothstep(op.p2.z - fa, op.p2.z + fa, tb) * (1.0 - smoothstep(op.p2.w - fa, op.p2.w + fa, tb));
-                h += min(wa, wb) * fbm(pxz + warp + op.p0.xy, op.p0.z, to_i(op.p1.x), vs, to_u(op.p1.y)) * op.p0.w;
+                h += min(wa, wb) * (op.p1.w + fbm(pxz + warp + op.p0.xy, op.p0.z, to_i(op.p1.x), vs, to_u(op.p1.y)) * op.p0.w);
             }
             case 18u: { // WOP_MATERIAL_BAND
                 if mat == to_u(op.p1.z) && ta >= op.p0.x && ta < op.p0.y && tb >= op.p0.z && tb < op.p0.w { mat = op.head.z; }

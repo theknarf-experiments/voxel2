@@ -84,8 +84,13 @@ pub const WOP_REGION_AXES: u32 = 19;
 /// would be a cliff. Regions whose bands overlap simply sum, which is
 /// what makes a transition read as one landscape becoming another.
 ///
+/// The FBM is ZERO-MEAN, so on its own a region digs as much as it
+/// raises — a "mountain range" built from noise alone sits half below
+/// the ground around it and fills with water. `lift` is the constant
+/// that makes a region a massif or a basin; the noise then shapes it.
+///
 /// `p0 = (offset_x, offset_z, cycles_per_m, amplitude_m)`,
-/// `p1 = (octaves, noise_mode, feather, -)`,
+/// `p1 = (octaves, noise_mode, feather, lift_m)`,
 /// `p2 = (a0, a1, b0, b1)` — the region, in the axes `WOP_REGION_AXES`
 /// sampled.
 pub const WOP_HEIGHT_BAND_FBM: u32 = 20;

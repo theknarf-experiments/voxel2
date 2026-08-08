@@ -717,9 +717,19 @@ pub enum GenOpDef {
         octaves: u32,
         #[serde(default)]
         mode: NoiseModeDef,
+        /// Constant metres this region sits above (or below) the ground
+        /// around it. The FBM is zero-mean, so without a lift a region
+        /// digs as much as it raises.
+        #[serde(default)]
+        lift: f32,
         /// Half-width of the fade at the region edge, in band units.
-        #[serde(default = "d_feather")]
-        feather: f32,
+        /// Derived from the band by default, and that is almost always
+        /// what you want: a feather wider than HALF the band leaves both
+        /// edges still fading at its centre, so the region can never
+        /// reach full weight and its terrain sits at partial amplitude
+        /// everywhere.
+        #[serde(default)]
+        feather: Option<f32>,
     },
     /// Repaint the surface material inside a band of two noise axes.
     ///
@@ -835,9 +845,6 @@ pub enum NoiseModeDef {
 fn d_full_band() -> [f32; 2] {
     [0.0, 1.0]
 }
-fn d_feather() -> f32 {
-    0.03
-}
 fn d_band_octaves() -> u32 {
     2
 }
@@ -930,10 +937,16 @@ impl GenOpDef {
                 amp,
                 octaves,
                 mode,
+                lift,
                 feather,
             } => WorldOp::new(WOP_HEIGHT_BAND_FBM)
                 .p0([offset[0], offset[1], scale, amp])
-                .p1([octaves as f32, mode as u32 as f32, feather, 0.0])
+                .p1([
+                    octaves as f32,
+                    mode as u32 as f32,
+                    feather.unwrap_or_else(|| voxel_worldgen::program::band_feather(a)),
+                    lift,
+                ])
                 .p2([a[0], a[1], b[0], b[1]]),
             GenOpDef::MaterialBand {
                 from,

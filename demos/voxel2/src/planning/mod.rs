@@ -793,15 +793,23 @@ mod tests {
             !planner.markers_in(min2, max2, Some("dungeon")).is_empty(),
             "no dungeon markers"
         );
-        // Biomes blend through the facade: partition of unity, both
-        // regions dominant somewhere across a wide sweep.
-        let mut dominant = [false; 4];
-        for gz in 0..12 {
-            for gx in 0..12 {
-                let t = bevy::math::Vec2::new(gx as f32 / 11.0, gz as f32 / 11.0);
+        // Regions blend through the facade: partition of unity, and
+        // every one of them dominant somewhere across a wide sweep.
+        //
+        // Densely, because the mountain range is a NARROW band — an
+        // iso-strip of the noise field, a tenth of the world — and a
+        // coarse grid can step right over it.
+        const N: usize = 48;
+        let mut dominant = [false; 5];
+        for gz in 0..N {
+            for gx in 0..N {
+                let t = bevy::math::Vec2::new(
+                    gx as f32 / (N - 1) as f32,
+                    gz as f32 / (N - 1) as f32,
+                );
                 let p = min2 + (max2 - min2) * t;
                 let w = planner.weights_at("biomes", p);
-                assert_eq!(w.len(), 4, "planet declares four regions");
+                assert_eq!(w.len(), 5, "planet declares five regions");
                 let sum: f32 = w.iter().map(|(_, v)| v).sum();
                 assert!((sum - 1.0).abs() < 1e-4);
                 for (b, (_, v)) in w.iter().enumerate() {
