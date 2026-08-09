@@ -2,8 +2,8 @@
 //!
 //! The engine says *where* props go ([`ScatterInstance`] on streamed
 //! entities); this file decides what they look like. Nothing here is in
-//! a reusable crate: the models, the species names, the impostor
-//! silhouettes and their colors are this demo's content, written in
+//! a reusable crate: the models, the species names and their colors are
+//! this demo's content, written in
 //! Rust right here. A game would put its own GLTFs, materials and
 //! gameplay components here instead — none of it belongs in the level
 //! file, which describes only the world the engine generates.
@@ -11,14 +11,9 @@
 use std::collections::HashMap;
 
 use bevy::mesh::{Indices, PrimitiveTopology};
-use bevy::light::NotShadowCaster;
-use bevy::math::DVec3;
 use bevy::prelude::*;
-use voxel_layers::{ChunkCtx, Dep, Layer, LayerChunk, LayerGraph, TopDep};
 
-use crate::planning::world::WorldCtx;
 use voxel_engine::scatter::ScatterInstance;
-use voxel_engine::VoxelStreamSource;
 
 /// Host-side appearance for one scatter class, indexed by the engine's
 /// variant number.
@@ -36,8 +31,6 @@ pub struct PropVariant {
     pub model: Model,
     pub trunk: Color,
     pub foliage: Color,
-    /// Far-forest silhouette, when this class has one.
-    pub impostor: Option<Impostor>,
 }
 
 /// The procedural models this demo builds. A real game names an asset
@@ -59,20 +52,6 @@ pub enum Model {
     Log,
     /// A tuft of tall thin blades, for standing water.
     Reed,
-}
-
-#[derive(Clone, Debug)]
-pub struct Impostor {
-    pub shape: ImpostorShape,
-    pub color: [f32; 3],
-    /// (half width, height) before the instance scale.
-    pub size: [f32; 2],
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ImpostorShape {
-    Cone,
-    Diamond,
 }
 
 /// The demo's props, keyed by the scatter class names in the level file.
@@ -109,7 +88,6 @@ impl PropTable {
                     model: Model::Rock,
                     trunk: Color::srgb(0.30, 0.28, 0.24),
                     foliage: Color::srgb(0.4520, 0.4310, 0.3800),
-                    impostor: None,
                 }],
                 blob_shadow: false,
                 squash: Vec3::new(1.5, 0.42, 1.5),
@@ -122,7 +100,6 @@ impl PropTable {
                     model: Model::Rock,
                     trunk: Color::srgb(0.06, 0.05, 0.05),
                     foliage: Color::srgb(0.0605, 0.0512, 0.0470),
-                    impostor: None,
                 }],
                 blob_shadow: false,
                 squash: Vec3::new(1.0, 0.85, 1.0),
@@ -143,31 +120,16 @@ impl PropTable {
                         model: Model::Broadleaf,
                         trunk: bark,
                         foliage: Color::srgb(0.1214, 0.1910, 0.0518),
-                        impostor: Some(Impostor {
-                            shape: ImpostorShape::Diamond,
-                            color: [0.16, 0.26, 0.08],
-                            size: [2.3, 5.5],
-                        }),
                     },
                     PropVariant {
                         model: Model::Conifer,
                         trunk: bark,
                         foliage: Color::srgb(0.0618, 0.1612, 0.0518),
-                        impostor: Some(Impostor {
-                            shape: ImpostorShape::Cone,
-                            color: [0.1, 0.22, 0.09],
-                            size: [1.7, 6.5],
-                        }),
                     },
                     PropVariant {
                         model: Model::Birch,
                         trunk: Color::srgb(0.5216, 0.5059, 0.4510),
                         foliage: Color::srgb(0.1600, 0.2210, 0.0700),
-                        impostor: Some(Impostor {
-                            shape: ImpostorShape::Diamond,
-                            color: [0.19, 0.28, 0.10],
-                            size: [1.6, 7.5],
-                        }),
                     },
                 ],
                 // Real cascaded shadows now; no fake disc needed.
@@ -182,7 +144,6 @@ impl PropTable {
                     model: Model::Rock,
                     trunk: bark,
                     foliage: Color::srgb(0.1910, 0.1810, 0.1711),
-                    impostor: None,
                 }],
                 blob_shadow: false,
                 squash: Vec3::new(1.0, 0.75, 1.0),
@@ -197,7 +158,6 @@ impl PropTable {
                 model,
                 trunk,
                 foliage,
-                impostor: None,
             }],
             blob_shadow: false,
             squash: Vec3::ONE,
@@ -273,16 +233,6 @@ impl PropTable {
     }
 }
 
-/// Far-forest tuning — the host's rendering choice, not the engine's.
-const SUPER_M: f32 = 128.0;
-/// How far the merged forest is visible. Formerly a tile radius plus a
-/// keep-radius plus a per-frame budget; now the size of one top
-/// dependency, and the tree placements underneath come with it.
-const SUPER_VIEW_M: f32 = 3072.0;
-const SUPER_HIDE_M: f32 = 320.0;
-/// The scatter class the far forest renders silhouettes for.
-const FOREST_CLASS: &str = "tree";
-
 pub struct PropsPlugin;
 
 impl Plugin for PropsPlugin {
@@ -293,8 +243,6 @@ impl Plugin for PropsPlugin {
                 Update,
                 (
                     dress_scatter,
-                    reconcile_far_forest,
-                    far_forest_visibility,
                 ),
             );
     }
@@ -313,10 +261,8 @@ struct PropAssets {
     /// and one map keyed by name alone would hand whichever built first
     /// to both.
     classes: HashMap<(voxel_engine::WorldId, String), Vec<VariantParts>>,
-    impostors: HashMap<(voxel_engine::WorldId, String), Vec<Option<Impostor>>>,
     /// Worlds whose props have been built already.
     built: std::collections::HashSet<voxel_engine::WorldId>,
-    impostor_mat: Handle<StandardMaterial>,
     blob_mesh: Handle<Mesh>,
     blob_mat: Handle<StandardMaterial>,
 }
@@ -349,7 +295,6 @@ fn build_prop_assets(
     };
     for (class, def) in &table.0 {
         let mut variants = Vec::new();
-        let mut impostors = Vec::new();
         for variant in &def.variants {
             let trunk_mat = materials.add(mat(variant.trunk, 0.95));
             let foliage_mat = materials.add(mat(variant.foliage, 0.9));
@@ -428,19 +373,10 @@ fn build_prop_assets(
                 }
             }
             variants.push(parts);
-            impostors.push(variant.impostor.clone());
         }
         assets.classes.insert((world, class.clone()), variants);
-        assets.impostors.insert((world, class.clone()), impostors);
     }
     }
-    assets.impostor_mat = materials.add(StandardMaterial {
-        base_color: Color::WHITE,
-        // Silhouettes bake their own sun shade into vertex colors.
-        unlit: true,
-        cull_mode: None,
-        ..default()
-    });
     assets.blob_mesh = meshes.add(bevy::math::primitives::Circle::new(1.0));
     assets.blob_mat = materials.add(StandardMaterial {
         base_color: Color::srgba(0.05, 0.07, 0.04, 0.42),
@@ -548,231 +484,6 @@ fn dress_scatter(
     }
 }
 
-// --- far forest -------------------------------------------------------------
-//
-// Merged silhouette impostors out to ~3 km. The engine hands over the
-// same placements the near meshes use (`tile_placements`), so trees
-// never teleport across the detail boundary.
-
-#[derive(Component)]
-struct FarForestTile;
-
-/// One impostor the far ring will draw: where it sits on the coarse
-/// surface, how big, and how the horizon shadow falls on it.
-#[derive(Clone)]
-pub struct FarProp {
-    pos: Vec3,
-    scale: f32,
-    variant: u32,
-    shade: f32,
-}
-
-/// Seats the forest's placements on the surface coarse LOD actually shows
-/// at that distance and samples the horizon shadow — the expensive part,
-/// which belongs off the main thread. Assembling the merged mesh from the
-/// result needs the impostor assets, so that stays in a system.
-pub struct FarForest {
-    source: String,
-}
-
-#[derive(Default)]
-pub struct FarForestChunk;
-
-impl Layer for FarForest {
-    type Chunk = FarForestChunk;
-    const NAME: &'static str = "far-forest";
-
-    fn chunk_extent(&self) -> DVec3 {
-        DVec3::new(SUPER_M as f64, 0.0, SUPER_M as f64)
-    }
-
-    fn dependencies(&self) -> Vec<Dep> {
-        vec![Dep::named(&self.source, IVec3::ZERO)]
-    }
-}
-
-impl LayerChunk for FarForestChunk {
-    type Layer = FarForest;
-
-    fn create(&mut self, ctx: &ChunkCtx<'_, FarForest>) {
-        let layer = ctx.layer();
-        let generator = &ctx.context::<WorldCtx>().generator;
-        let mut props = Vec::new();
-        ctx.get_named::<crate::scatter::ScatterPopulation>(&layer.source, ctx.chunk_bounds())
-            .for_each(|_, chunk| {
-                for placement in &chunk.placements {
-                    // Seat on the band-limited height coarse LOD shows at
-                    // that distance, or they float.
-                    let mut pos = placement.position;
-                    pos.y = generator.height(Vec2::new(pos.x, pos.z), 16.0) - 0.15;
-                    props.push(FarProp {
-                        pos,
-                        scale: placement.scale,
-                        variant: placement.variant,
-                        shade: 0.45 + 0.55 * generator.sun_shadow(pos),
-                    });
-                }
-            });
-        ctx.context::<WorldCtx>()
-            .far_props
-            .put(ctx.instance_key(), ctx.coord(), props);
-    }
-
-    fn destroy(&mut self, ctx: &ChunkCtx<'_, FarForest>) {
-        ctx.context::<WorldCtx>()
-            .far_props
-            .take(ctx.instance_key(), ctx.coord());
-    }
-}
-
-/// Register the far ring. Its top dependency is how far the forest is
-/// visible; the tree placements underneath it come along because this
-/// layer declares them, which is why nothing has to agree about reaches.
-pub fn register_far_forest(graph: &mut LayerGraph) -> Option<TopDep> {
-    if !graph.instances().iter().any(|n| n == FOREST_CLASS) {
-        return None; // a level with no forest gets no far ring
-    }
-    graph.register(FarForest {
-        source: FOREST_CLASS.to_string(),
-    });
-    Some(TopDep::new(
-        FarForest::NAME,
-        IVec3::new((2.0 * SUPER_VIEW_M) as i32, 0, (2.0 * SUPER_VIEW_M) as i32),
-    ))
-}
-
-/// Build a merged mesh for every super-tile each world's layer published,
-/// and drop the ones it withdrew.
-///
-/// Every world, not the launched one: a forest seen through an opening is
-/// the same forest at 3 km that it is at 30 m, and a far ring that only
-/// covered world 0 put the launch level's silhouettes on the horizon of
-/// whichever level you were actually standing in.
-fn reconcile_far_forest(
-    mut commands: Commands,
-    mut meshes: ResMut<Assets<Mesh>>,
-    assets: Res<PropAssets>,
-    worlds: Res<voxel_engine::Worlds>,
-    mut spawned: Local<HashMap<(voxel_engine::WorldId, crate::planning::world::PartKey), Option<Entity>>>,
-    mut seen: Local<HashMap<voxel_engine::WorldId, u64>>,
-) {
-    for world in worlds.iter() {
-        let Some(sink) = world.query.host_ctx::<WorldCtx>().map(|c| c.far_props.clone()) else {
-            continue;
-        };
-        let generation = sink.generation();
-        if seen.get(&world.id) == Some(&generation) {
-            continue;
-        }
-        seen.insert(world.id, generation);
-        let live = sink.keys();
-        spawned.retain(|(id, part), entity| {
-            if *id != world.id || live.contains(part) {
-                return true;
-            }
-            if let Some(entity) = entity.take() {
-                commands.entity(entity).despawn();
-            }
-            false
-        });
-        for part in live {
-            if spawned.contains_key(&(world.id, part)) {
-                continue;
-            }
-            let Some(props) = sink.get(part) else { continue };
-            spawned.insert(
-                (world.id, part),
-                build_super_tile(&mut commands, &mut meshes, &assets, world.id, &props),
-            );
-        }
-    }
-}
-
-/// Merge crossed-quad silhouettes for every placement in the super-tile.
-fn build_super_tile(
-    commands: &mut Commands,
-    meshes: &mut Assets<Mesh>,
-    assets: &PropAssets,
-    world: voxel_engine::WorldId,
-    props: &[FarProp],
-) -> Option<Entity> {
-    let impostors = assets.impostors.get(&(world, FOREST_CLASS.to_string()))?;
-    let mut b = MeshBuilder::default();
-    for prop in props {
-        let Some(Some(imp)) = impostors.get(prop.variant as usize) else {
-            continue;
-        };
-        let c = [
-            imp.color[0] * prop.shade,
-            imp.color[1] * prop.shade,
-            imp.color[2] * prop.shade,
-            1.0,
-        ];
-        let (hw, h) = (imp.size[0] * prop.scale, imp.size[1] * prop.scale);
-        if imp.shape == ImpostorShape::Cone {
-            b.cross_cone(prop.pos, hw, h, c);
-        } else {
-            b.cross_diamond(prop.pos, hw, h, c);
-        }
-    }
-    if b.positions.is_empty() {
-        return None;
-    }
-    Some(
-        commands
-            .spawn((
-                FarForestTile,
-                crate::OfWorld::scene(world),
-                Mesh3d(meshes.add(b.build())),
-                MeshMaterial3d(assets.impostor_mat.clone()),
-                Transform::default(),
-                // Silhouettes stand in for trees that are too far to see;
-                // letting them into the shadow map would blanket the world.
-                NotShadowCaster,
-            ))
-            .id(),
-    )
-}
-
-/// Hide super-tiles inside the detailed radius so silhouettes don't poke
-/// through the real canopies.
-fn far_forest_visibility(
-    mut tiles: Query<(&mut Visibility, &Mesh3d), With<FarForestTile>>,
-    meshes: Res<Assets<Mesh>>,
-    sources: Query<&GlobalTransform, With<VoxelStreamSource>>,
-) {
-    let Ok(source) = sources.single() else {
-        return;
-    };
-    let camera = source.translation();
-    let cam = Vec2::new(camera.x, camera.z);
-    for (mut vis, mesh) in &mut tiles {
-        let Some(mesh) = meshes.get(&mesh.0) else {
-            continue;
-        };
-        let Some(bevy::mesh::VertexAttributeValues::Float32x3(pos)) =
-            mesh.attribute(Mesh::ATTRIBUTE_POSITION)
-        else {
-            continue;
-        };
-        let Some(first) = pos.first() else {
-            continue;
-        };
-        let tile = Vec2::new(
-            (first[0] / SUPER_M).floor() * SUPER_M + SUPER_M * 0.5,
-            (first[2] / SUPER_M).floor() * SUPER_M + SUPER_M * 0.5,
-        );
-        let target = if cam.distance(tile) < SUPER_HIDE_M {
-            Visibility::Hidden
-        } else {
-            Visibility::Inherited
-        };
-        if *vis != target {
-            *vis = target;
-        }
-    }
-}
-
 #[derive(Default)]
 struct MeshBuilder {
     positions: Vec<[f32; 3]>,
@@ -875,51 +586,6 @@ impl MeshBuilder {
                 .extend([r0.to_array(), r1.to_array(), r0.to_array(), r1.to_array()]);
             self.indices
                 .extend([s, s + 2, s + 1, s + 1, s + 2, s + 3]);
-        }
-    }
-
-    /// Two crossed triangles: a conifer silhouette.
-    fn cross_cone(&mut self, at: Vec3, half_w: f32, height: f32, color: [f32; 4]) {
-        for axis in 0..2 {
-            let side = if axis == 0 {
-                Vec3::new(half_w, 0.0, 0.0)
-            } else {
-                Vec3::new(0.0, 0.0, half_w)
-            };
-            let n = if axis == 0 { Vec3::Z } else { Vec3::X };
-            let base = self.positions.len() as u32;
-            self.positions.extend([
-                (at - side).to_array(),
-                (at + side).to_array(),
-                (at + Vec3::Y * height).to_array(),
-            ]);
-            self.normals.extend([n.to_array(); 3]);
-            self.colors.extend([color; 3]);
-            self.indices.extend([base, base + 1, base + 2]);
-        }
-    }
-
-    /// Two crossed diamonds: a broadleaf silhouette.
-    fn cross_diamond(&mut self, at: Vec3, half_w: f32, height: f32, color: [f32; 4]) {
-        let mid = at + Vec3::Y * (height * 0.55);
-        for axis in 0..2 {
-            let side = if axis == 0 {
-                Vec3::new(half_w, 0.0, 0.0)
-            } else {
-                Vec3::new(0.0, 0.0, half_w)
-            };
-            let n = if axis == 0 { Vec3::Z } else { Vec3::X };
-            let base = self.positions.len() as u32;
-            self.positions.extend([
-                at.to_array(),
-                (mid - side).to_array(),
-                (at + Vec3::Y * height).to_array(),
-                (mid + side).to_array(),
-            ]);
-            self.normals.extend([n.to_array(); 4]);
-            self.colors.extend([color; 4]);
-            self.indices
-                .extend([base, base + 1, base + 2, base, base + 2, base + 3]);
         }
     }
 

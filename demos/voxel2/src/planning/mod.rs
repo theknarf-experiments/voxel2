@@ -612,7 +612,6 @@ impl StackPlanner {
             crate::scatter::register(&mut graph, level, emit_names, &biome_tables);
         deps.extend(scatter_tops);
         *ctx.populations.lock().unwrap() = Some(populations);
-        deps.extend(crate::props::register_far_forest(&mut graph));
 
         let runtime = Arc::new(LayerRuntime::start(Arc::new(graph), deps));
         let tops = (0..runtime.tops()).map(|i| runtime.top(i)).collect();

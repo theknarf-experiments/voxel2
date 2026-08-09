@@ -1005,6 +1005,23 @@
           ]
         }
       ]
+    },
+    {
+      "class": "treecover",
+      "output": "points",
+      "tile_m": 64.0,
+      "radius_tiles": 40,
+      "per_tile": 90,
+      "altitude": [
+        3.0,
+        340.0
+      ],
+      "min_up": 0.86,
+      "detail_vs": 8.0,
+      "density": {
+        "field": 0
+      },
+      "gate": "biomes:forest"
     }
   ],
   "planning": {

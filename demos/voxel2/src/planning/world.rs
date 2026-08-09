@@ -31,8 +31,6 @@ pub struct WorldCtx {
     pub ribbons: Sink<RiverSegGpu>,
     /// Scatter population handles, taken once by the app.
     pub populations: Mutex<Option<crate::scatter::Populations>>,
-    /// Merged far-forest impostors, contributed per super-tile.
-    pub far_props: Sink<crate::props::FarProp>,
     /// Live placements per scatter class, for tooling. Written by the
     /// reconciler, read by `inspect` — "how many trees are there right
     /// now" is the first question when pushing density, and counting
@@ -46,7 +44,6 @@ impl WorldCtx {
             generator,
             ribbons: Sink::default(),
             populations: Mutex::new(None),
-            far_props: Sink::default(),
             placements: Mutex::new(std::collections::BTreeMap::new()),
         }
     }

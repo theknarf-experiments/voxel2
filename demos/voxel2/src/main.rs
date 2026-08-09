@@ -58,6 +58,7 @@ pub struct WorldProps(pub bevy::platform::collections::HashMap<voxel_engine::Wor
 pub struct WorldScenes(pub bevy::platform::collections::HashMap<voxel_engine::WorldId, Scene>);
 
 mod grass;
+mod impostors;
 mod planning;
 mod portal;
 mod scatter;
@@ -76,6 +77,7 @@ const SHIPPED_LEVELS: &[&str] = &[
 ];
 use props::PropsPlugin;
 use grass::GrassPlugin;
+use impostors::ImpostorPlugin;
 use ribbons::RibbonsPlugin;
 use surface_paint::SurfacePaintPlugin;
 use water::WaterPlugin;
@@ -277,6 +279,7 @@ fn main() {
             WaterPlugin,
             // Ground cover: the engine scatters points, this draws blades.
             GrassPlugin,
+            ImpostorPlugin,
             LevelPlugin {
                 def: level,
                 // A game picks this at new-game time and restores it
