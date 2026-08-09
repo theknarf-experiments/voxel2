@@ -95,6 +95,26 @@ const COUNTS_SLOTS: u32 = 512;
 // Per frame, keeping each frame's GPU batch small enough not to blow a
 // ~8 ms vsync slot (spiky batches read as missed-vsync 17 ms frames even
 // when average load is fine).
+//
+// MEASURED at 45 m/s, vsync off, median of five samples. The batch size
+// is the whole difference between a smooth frame and a stutter, and it
+// costs nothing to make it small:
+//
+//   budget   p50    p95    worst   awaiting   settle
+//      320  14.1   57.6     80.7          0    2.20s
+//       96  17.7   32.6     38.6          0    2.13s
+//       48  16.4   26.4     31.3          0    2.25s
+//       24  13.4   21.1     28.9        500    2.1s
+//       12  11.7   19.0     25.0       2157      -
+//
+// 48 is where the queue still drains as fast as flying fills it —
+// `awaiting` stays at zero — and the worst frame is under half what 320
+// gives. Settle time does not move at all, because the GPU is saturated
+// either way and a batch only decides whether the work arrives in a lump.
+// Below 48 the frames keep improving and the backlog grows, which is
+// chunks arriving late: a smoother picture of the wrong world.
+//
+// At walking and stationary speeds none of this binds; there is no queue.
 fn env_budget(name: &str, default: usize) -> usize {
     std::env::var(name)
         .ok()
@@ -102,18 +122,19 @@ fn env_budget(name: &str, default: usize) -> usize {
         .unwrap_or(default)
 }
 
-/// Chunks whose density is dispatched per frame. Overridable while the
-/// right value is being measured; a batch is GPU work, and how much fits
-/// in a frame is a property of the machine as much as of the code.
+/// Chunks whose density is dispatched per frame. Env-overridable because
+/// how much GPU work fits in a frame is a property of the machine as much
+/// as of the code, and re-measuring the table above on another one should
+/// not need a rebuild.
 static GEN_BUDGET: std::sync::LazyLock<usize> =
-    std::sync::LazyLock::new(|| env_budget("VOXEL_GEN_BUDGET", 320));
+    std::sync::LazyLock::new(|| env_budget("VOXEL_GEN_BUDGET", 48));
 /// Deferred chunks re-admitted per frame. Each one costs a density pass
 /// it has already paid once, so recovery is deliberately gradual: the
 /// alternative is a frame that regenerates everything the slab just
 /// rejected and rejects it again.
 const RETRY_BUDGET: usize = 32;
 static MESH_BUDGET: std::sync::LazyLock<usize> =
-    std::sync::LazyLock::new(|| env_budget("VOXEL_MESH_BUDGET", 320));
+    std::sync::LazyLock::new(|| env_budget("VOXEL_MESH_BUDGET", 48));
 const STAGING_BUFFERS: usize = 3;
 
 // --- main-world <-> render-world plumbing ------------------------------------

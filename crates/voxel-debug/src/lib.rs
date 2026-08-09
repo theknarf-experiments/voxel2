@@ -149,10 +149,19 @@ impl Plugin for VoxelDebugPlugin {
 }
 
 /// The offscreen target and mirror camera for `VOXEL_SCREENSHOT`.
+///
+/// The camera is INACTIVE unless a capture is due. It renders the whole
+/// scene a second time, so leaving it on after the first screenshot
+/// doubled the frame's GPU work for the rest of the session — including
+/// every measurement taken after one, which is most of them.
 #[derive(Resource)]
 struct ScreenshotTarget {
     image: Handle<Image>,
     camera: Entity,
+    /// Frames the mirror stays active for. A capture needs the target
+    /// rendered before it can be read back, and the readback is observed
+    /// a frame later, so it cannot be a single frame.
+    armed: u8,
 }
 
 /// One-shot screenshot requests (paths), served by the same offscreen
@@ -182,10 +191,11 @@ fn auto_screenshot(
     mut commands: Commands,
     time: Res<Time>,
     mut images: ResMut<Assets<Image>>,
-    target: Option<Res<ScreenshotTarget>>,
+    target: Option<ResMut<ScreenshotTarget>>,
     main_cam: Query<&Transform, (With<FreeCamera>, With<Camera3d>)>,
     mut mirror_cam: Query<&mut Transform, (Without<FreeCamera>, With<Camera3d>)>,
     mut requests: ResMut<ScreenshotRequest>,
+    mut cameras: Query<&mut Camera>,
     mut next_at: Local<Option<f32>>,
 ) {
     use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat, TextureUsages};
@@ -216,6 +226,10 @@ fn auto_screenshot(
         let camera = commands
             .spawn((
                 Camera3d::default(),
+                Camera {
+                    is_active: false,
+                    ..default()
+                },
                 bevy::camera::RenderTarget::Image(handle.clone().into()),
                 voxel_render::HelperCamera,
                 Transform::default(),
@@ -224,6 +238,7 @@ fn auto_screenshot(
         commands.insert_resource(ScreenshotTarget {
             image: handle,
             camera,
+            armed: 0,
         });
         return;
     };
@@ -232,6 +247,20 @@ fn auto_screenshot(
     if let (Ok(main), Ok(mut mirror)) = (main_cam.single(), mirror_cam.get_mut(target.camera)) {
         *mirror = *main;
     }
+
+    // Armed for a few frames around a capture, off the rest of the time.
+    let target = target.into_inner();
+    let want_now = !requests.0.is_empty();
+    if want_now {
+        target.armed = 3;
+    }
+    if let Ok(mut camera) = cameras.get_mut(target.camera) {
+        let active = target.armed > 0;
+        if camera.is_active != active {
+            camera.is_active = active;
+        }
+    }
+    target.armed = target.armed.saturating_sub(1);
 
     // One-shot requests from remote tooling.
     for want in requests.0.drain(..) {
