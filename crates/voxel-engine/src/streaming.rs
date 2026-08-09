@@ -79,6 +79,12 @@ pub struct StreamProbe {
     pub worst_frame_ms: f32,
     /// Mesh pages free, and the peak used over the session. Peaks, not
     /// the present: what a world costs depends on where the camera is.
+    /// Chunks the interval bound proved empty, and chunks that reached
+    /// the generator anyway (with how many of those carried planning ops,
+    /// which skips the bound entirely). Cumulative.
+    pub pruned: usize,
+    pub unpruned: usize,
+    pub unpruned_with_ops: usize,
     pub slab_free_pages: u32,
     pub slab_peak_pages: u32,
     /// Chunks the slab can hold, measured from what they have cost.
@@ -466,6 +472,12 @@ pub fn can_hold_surface(generator: &voxel_worldgen::Generator, key: ChunkKey) ->
 /// the trade is lopsided by orders of magnitude and the cost only lands on
 /// chunks that were marginal in the first place.
 const PRUNE_SPLITS: u32 = 3;
+// Measured on the planet: 3 splits prune 37% of resident chunks and
+// settle in 1.79 s; 4 prunes 39% and settles in 2.27; 5 prunes 40% and
+// settles in 2.56. The bound is loose because the LOD field is already
+// surface-hugging, so what reaches it is marginal by construction —
+// subdividing asks a harder question more times, and the CPU it spends
+// is not repaid by the GPU passes it saves.
 
 /// `Some(true)` if the box is entirely solid, `Some(false)` if entirely
 /// air, `None` if a surface could cross it.

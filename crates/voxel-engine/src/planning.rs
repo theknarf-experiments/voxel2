@@ -63,6 +63,12 @@ pub trait WorldPlanner: Send + Sync + 'static {
     /// screens and tests — never call it from a frame.
     fn wait_idle(&self) {}
 
+    /// Has residency caught up? The cheap half of `wait_idle`, so a
+    /// caller can take the fast path without queueing to wait.
+    fn is_idle(&self) -> bool {
+        true
+    }
+
     /// The host's own per-world state, if it has any. The engine never
     /// looks inside; this is how a host's systems read what its own layers
     /// published, without the engine learning what a river is.
@@ -270,6 +276,11 @@ impl WorldQuery {
         }
     }
 
+    /// Has residency caught up? See [`WorldPlanner::is_idle`].
+    pub fn is_idle(&self) -> bool {
+        self.planner.as_ref().is_none_or(|p| p.is_idle())
+    }
+
     /// Cut ops (carved voids) overlapping the box: spawners consult this
     /// so props never seat on heightfield ground that a cave mouth or
     /// doorway has carved away.
@@ -319,6 +330,15 @@ pub fn ops_provider(world: &WorldQuery) -> Option<crate::chunkgen::OpsFn> {
         return None;
     }
     let world = world.clone();
+    // Waiting is serialized, querying is not.
+    //
+    // Both halves were once inside one lock in `ChunkGen::ops_for`, and
+    // moving the query out of it made the megastructure 34% faster and
+    // the planet 7% SLOWER. The query wants every thread; the wait wants
+    // exactly one. `wait_idle` polls on a 1 ms sleep, so N worker threads
+    // waiting concurrently is N milliseconds of streaming thrown away per
+    // poll, and the lock had been hiding that by accident.
+    let wait_gate = std::sync::Mutex::new(());
     Some(Arc::new(move |key: ChunkKey| {
         // Past the ops horizon `chunk_ops` returns nothing whatever
         // planning says, so waiting for residency is waiting to be told
@@ -328,7 +348,18 @@ pub fn ops_provider(world: &WorldQuery) -> Option<crate::chunkgen::OpsFn> {
         if key.edge_m() as f32 > OPS_HORIZON_EDGE_M {
             return Vec::new();
         }
-        world.wait_idle();
+        // Fast path takes no lock: once planning is idle it stays idle
+        // for the rest of the pass, which is nearly every chunk.
+        if !world.is_idle() {
+            let _one_waiter = wait_gate.lock().unwrap_or_else(|e| e.into_inner());
+            // Checked again inside: whoever got here first has already
+            // done the waiting for everyone, and the rest must fall
+            // straight through to querying in parallel rather than
+            // re-serialising behind a wait that is already over.
+            if !world.is_idle() {
+                world.wait_idle();
+            }
+        }
         world.chunk_ops(key)
     }))
 }

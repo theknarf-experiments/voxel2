@@ -267,6 +267,12 @@ impl WorldPlanner for StackPlanner {
         rt.wait_idle();
     }
 
+    fn is_idle(&self) -> bool {
+        self.stack.as_ref().is_none_or(|rt| {
+            self.focused.load(std::sync::atomic::Ordering::Acquire) && rt.is_idle()
+        })
+    }
+
     fn reads_missed(&self) -> usize {
         self.stack.as_ref().map_or(0, |rt| rt.graph().reads_missed())
     }

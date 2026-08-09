@@ -121,6 +121,14 @@ struct LodShared {
     state: Mutex<LodState>,
     /// Chunks the pipeline could not place. A hole for as long as it lasts.
     stalled: AtomicUsize,
+    /// Chunks the interval bound proved empty, and chunks that reached
+    /// the generator anyway. The ratio is what says whether the bound is
+    /// doing anything HERE — it can be decisive in the abstract and never
+    /// consulted, because a chunk carrying planning ops skips it.
+    pruned: AtomicUsize,
+    unpruned: AtomicUsize,
+    /// Of the unpruned, how many were blocked by carrying ops.
+    had_ops: AtomicUsize,
 }
 
 /// What a resident chunk was built from.
@@ -180,8 +188,13 @@ impl LayerChunk for LodChunk {
         // round trip the pass is waited on — which is what actually
         // bounds how fast a world can appear.
         if ops.is_none() && !can_hold_surface(&shared.generator, key) {
+            shared.pruned.fetch_add(1, Ordering::Relaxed);
             self.key = None;
             return;
+        }
+        shared.unpruned.fetch_add(1, Ordering::Relaxed);
+        if ops.is_some() {
+            shared.had_ops.fetch_add(1, Ordering::Relaxed);
         }
         let mask = seam_mask_at(&shared.config, shared.anchor.load().as_dvec3(), key);
         // ASK, do not wait. Waiting here made the round trip the unit of
@@ -251,6 +264,14 @@ impl LodLayers {
         self.worlds.iter().map(WorldLod::stalled).sum()
     }
 
+    /// (proved empty, reached the generator, of those blocked by ops).
+    pub fn prune_counts(&self) -> (usize, usize, usize) {
+        self.worlds.iter().fold((0, 0, 0), |a, w| {
+            let b = w.prune_counts();
+            (a.0 + b.0, a.1 + b.1, a.2 + b.2)
+        })
+    }
+
     pub fn is_generating(&self) -> bool {
         self.worlds.iter().any(WorldLod::is_generating)
     }
@@ -313,6 +334,9 @@ impl WorldLod {
             anchor: Anchor::default(),
             state: Mutex::new(LodState::default()),
             stalled: AtomicUsize::new(0),
+            pruned: AtomicUsize::new(0),
+            unpruned: AtomicUsize::new(0),
+            had_ops: AtomicUsize::new(0),
             config: config.clone(),
         });
         let mut graph = LayerGraph::new(u64::from(world)).with_threads(LOD_WORKERS);
@@ -410,6 +434,14 @@ impl WorldLod {
 
     pub fn stalled(&self) -> usize {
         self.shared.stalled.load(Ordering::Relaxed)
+    }
+
+    fn prune_counts(&self) -> (usize, usize, usize) {
+        (
+            self.shared.pruned.load(Ordering::Relaxed),
+            self.shared.unpruned.load(Ordering::Relaxed),
+            self.shared.had_ops.load(Ordering::Relaxed),
+        )
     }
 
     pub fn is_generating(&self) -> bool {
@@ -579,6 +611,10 @@ fn follow_lod_focus(
     probe.resident = layers.resident();
     probe.generating = layers.is_generating();
     probe.stalled = layers.stalled();
+    let (pruned, unpruned, had_ops) = layers.prune_counts();
+    probe.pruned = pruned;
+    probe.unpruned = unpruned;
+    probe.unpruned_with_ops = had_ops;
     // Summed over worlds: a miss in ANY of them is a consumer reading
     // outside what a top dependency covers, and the number has to stay 0
     // whichever world it happened in.

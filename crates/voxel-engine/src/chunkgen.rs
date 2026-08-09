@@ -61,12 +61,20 @@ impl ChunkGen {
     /// `None`: the density pass binds a dummy op buffer rather than an
     /// empty one.
     pub fn ops_for(&self, key: ChunkKey) -> Option<Arc<Vec<CsgOp>>> {
-        self.0
+        // Clone the provider OUT of the lock before calling it. Calling
+        // it inside serialized every LOD chunk create in the world on one
+        // mutex: the provider is a spatial query over the planning graph,
+        // not a lookup, and every worker thread wanted it for every chunk.
+        // The `Arc` is here precisely so this is a refcount bump.
+        let provider = self
+            .0
             .ops
             .lock()
             .unwrap()
             .get(usize::from(key.world))
             .and_then(Option::as_ref)
+            .cloned();
+        provider
             .map(|f| f(key))
             .filter(|v| !v.is_empty())
             .map(Arc::new)
