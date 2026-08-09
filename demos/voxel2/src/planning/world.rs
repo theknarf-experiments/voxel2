@@ -33,6 +33,11 @@ pub struct WorldCtx {
     pub populations: Mutex<Option<crate::scatter::Populations>>,
     /// Merged far-forest impostors, contributed per super-tile.
     pub far_props: Sink<crate::props::FarProp>,
+    /// Live placements per scatter class, for tooling. Written by the
+    /// reconciler, read by `inspect` — "how many trees are there right
+    /// now" is the first question when pushing density, and counting
+    /// entities from outside the demo cannot see the point populations.
+    pub placements: Mutex<std::collections::BTreeMap<String, usize>>,
 }
 
 impl WorldCtx {
@@ -42,6 +47,7 @@ impl WorldCtx {
             ribbons: Sink::default(),
             populations: Mutex::new(None),
             far_props: Sink::default(),
+            placements: Mutex::new(std::collections::BTreeMap::new()),
         }
     }
 }

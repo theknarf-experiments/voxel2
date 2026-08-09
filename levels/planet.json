@@ -640,7 +640,7 @@
   "scatter": [
     {
       "class": "tree",
-      "per_tile": 18,
+      "per_tile": 60,
       "altitude": [
         3.0,
         340.0

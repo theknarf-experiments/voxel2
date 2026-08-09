@@ -244,6 +244,7 @@ fn reconcile(
     mut commands: Commands,
     points: Res<voxel_render::ScatterPoints>,
     mut populations: ResMut<Populations>,
+    worlds: Res<voxel_engine::Worlds>,
 ) {
     for population in &mut populations.0 {
         let generation = population.sink.generation();
@@ -262,7 +263,9 @@ fn reconcile(
                         hash: p.seed as u32,
                     })
                     .collect();
+                let n = merged.len();
                 points.set_class(population.world, &population.class, merged);
+                record_count(&worlds, population, n);
             }
             ScatterOutput::Entities => {
                 let live = population.sink.keys();
@@ -306,8 +309,27 @@ fn reconcile(
                         .collect();
                     population.spawned.insert(part, entities);
                 }
+                let n = population.spawned.values().map(Vec::len).sum();
+                record_count(&worlds, population, n);
             }
         }
+    }
+}
+
+/// Publish a population's live size where tooling can read it.
+fn record_count(
+    worlds: &voxel_engine::Worlds,
+    population: &PopulationHandle,
+    n: usize,
+) {
+    if let Some(ctx) = worlds
+        .query(population.world)
+        .and_then(|w| w.host_ctx::<WorldCtx>())
+    {
+        ctx.placements
+            .lock()
+            .unwrap()
+            .insert(population.class.to_string(), n);
     }
 }
 

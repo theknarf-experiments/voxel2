@@ -295,6 +295,17 @@ impl WorldPlanner for StackPlanner {
                     "strongest": {"region": bn, "weight": bw, "pos": bp},
                 })
             }
+            // Live placements per class: what "push the density up"
+            // actually produced.
+            Some("scatter") => {
+                let counts = self
+                    .ctx
+                    .as_ref()
+                    .map(|c| c.placements.lock().unwrap().clone())
+                    .unwrap_or_default();
+                let total: usize = counts.values().sum();
+                json!({"total": total, "by_class": counts})
+            }
             other => json!({"error": format!("unknown inspect kind {other:?}")}),
         }
     }
