@@ -107,28 +107,40 @@ const COUNTS_SLOTS: u32 = 512;
 //       24  13.4   21.1     28.9        500    2.1s
 //       12  11.7   19.0     25.0       2157      -
 //
-// Re-measured after the frame got cheaper elsewhere, same flight, two
-// independent runs sampled at MATCHED positions (the autopilot crosses
-// ocean and forest, and position moves p95 by more than the budget does,
-// so samples are only comparable at the same second of the same path):
+// Re-measured after the frame got cheaper elsewhere. SPOT SAMPLES ARE
+// USELESS HERE: the autopilot crosses ocean and forest, and where it is
+// moves p95 by more than the budget does. These aggregate EVERY frame of
+// a 110 s flight, ~8-9k of them, which is the only way the orderings
+// below stayed put when repeated.
 //
-//   budget   p95    worst   settle    vsync-on fps while flying
-//       48  16.0    22.0     2.23s    64 / 91 / 81
-//       24  14.1    20.1     2.35s    -
-//       16    -       -        -      85 / 93 / 104
-//       12  10.8     15.4     2.82s   88 / 93 / 120
+//   budget   p50    p90    p99   over 16.67ms   backlog   boot settle
+//       24   8.3   16.1   22.9      7.85%       drains
+//       16   7.9   14.5   18.9      4.55%       drains       2.5s
+//       12   7.7   13.0   17.6      1.66%       drains       2.8s
+//        8   7.5   11.4   17.3    1.93/2.36%    drains       3.5s
+//        4   7.2   10.0   17.0      1.18%      NEVER         -
 //
-// 16, and the reasoning changed. The old table read "below 48 the backlog
+// `over 16.67ms` is the share of frames that miss 60 fps, which is the
+// number the target is actually about; p50 barely moves across the whole
+// range, so a median reading hides all of this.
+//
+// 12 is the knee. Below it the frame stops improving — 8 measured 1.93%
+// and 2.36% on two runs, so it is not distinguishable from 12's 1.66% —
+// while settle keeps getting worse, 2.8s to 3.5s. Paying a second of
+// boot for nothing is the wrong side of the trade.
+//
+// The old reasoning was wrong twice over. It read "below 48 the backlog
 // grows, which is a smoother picture of the wrong world" — but `awaiting`
-// is transient, not a floor: at 12 it peaks higher than at 48 and still
-// drains to zero every time, and `drawn` is within a few percent across
-// the whole range. What a smaller batch actually does is spread the same
-// work over more frames instead of landing it in one, which is why the
-// worst frame halves while the world stays as complete.
+// is a transient, not a floor. At 12 it peaks in the thousands and still
+// returns to zero, and `drawn` is within a few percent of what 48 draws.
+// What a smaller batch does is spread the same work over more frames
+// instead of landing it in one lump.
 //
-// 16 rather than 12 because the two are indistinguishable once you sample
-// enough of the path, and 16 keeps a third more throughput for it. The
-// real step is away from 48.
+// 4 is where that stops being true and the old warning comes good: the
+// backlog sits at ~2000 and never returns to zero, the world is
+// permanently behind the camera, and it never reports settled. So the
+// floor is set by whether the queue drains, not by the frame time, which
+// keeps improving past the point where the picture stops being right.
 //
 // At walking and stationary speeds none of this binds; there is no queue.
 fn env_budget(name: &str, default: usize) -> usize {
@@ -143,14 +155,14 @@ fn env_budget(name: &str, default: usize) -> usize {
 /// as of the code, and re-measuring the table above on another one should
 /// not need a rebuild.
 static GEN_BUDGET: std::sync::LazyLock<usize> =
-    std::sync::LazyLock::new(|| env_budget("VOXEL_GEN_BUDGET", 16));
+    std::sync::LazyLock::new(|| env_budget("VOXEL_GEN_BUDGET", 12));
 /// Deferred chunks re-admitted per frame. Each one costs a density pass
 /// it has already paid once, so recovery is deliberately gradual: the
 /// alternative is a frame that regenerates everything the slab just
 /// rejected and rejects it again.
 const RETRY_BUDGET: usize = 32;
 static MESH_BUDGET: std::sync::LazyLock<usize> =
-    std::sync::LazyLock::new(|| env_budget("VOXEL_MESH_BUDGET", 16));
+    std::sync::LazyLock::new(|| env_budget("VOXEL_MESH_BUDGET", 12));
 const STAGING_BUFFERS: usize = 3;
 
 // --- main-world <-> render-world plumbing ------------------------------------
