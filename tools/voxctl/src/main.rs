@@ -10,7 +10,11 @@
 //!   voxctl scan X Z [RADIUS] [STEP]   # scenic-spot ranking (ex-scout)
 //!   voxctl markers X Z [RADIUS] [KIND]
 //!   voxctl shot PATH
+//!   voxctl get [FIELD_PATH]          # read the live level
+//!   voxctl set FIELD_PATH VALUE      # write it; applies without a relaunch
 //!   voxctl raw METHOD [PARAMS_JSON]
+//!
+//! e.g. `voxctl set materials[7].base '[0.021,0.032,0.0087]'`
 //!
 //! `VOXCTL_PORT` overrides the default port (15702).
 
@@ -57,6 +61,68 @@ fn call(method: &str, params: Value) -> Result<Value, String> {
         return Err(error.to_string());
     }
     Ok(v.get("result").cloned().unwrap_or(Value::Null))
+}
+
+/// The live level. voxctl is voxel2's own tool, so it may name it.
+const LEVEL: &str = "voxel_engine::level::LevelDef";
+
+/// Reflect paths start at a field, so `materials[7].base[0]` needs a
+/// leading dot. Accepted either way: nobody typing one at a shell prompt
+/// wants to remember that, and the leading dot reads like a typo.
+fn normalize_path(path: &str) -> String {
+    if path.starts_with('.') || path.starts_with('[') {
+        path.to_string()
+    } else {
+        format!(".{path}")
+    }
+}
+
+/// Walk a reflect-style path through the JSON a resource read returns.
+///
+/// `get` and `set` must take the SAME path string, and they do not go
+/// through the same machinery: `set` hands the path to `GetPath` on the
+/// server, while a resource read has no path parameter at all and returns
+/// the whole thing. So the walk here reproduces what a reflect path does,
+/// which is not quite what the JSON looks like:
+///
+/// * An enum serializes as `{"Surface": {..}}`, but a reflect path reaches
+///   the active variant's fields directly — so a lone variant wrapper is
+///   transparent.
+/// * `Option` is an enum whose `Some` is a TUPLE variant, so reflect wants
+///   `.cover.0.full_at`; the serializer has already unwrapped it. A numeric
+///   segment against a non-array is therefore that unwrap, not an index.
+fn walk<'a>(root: &'a Value, path: &str) -> Result<&'a Value, String> {
+    let mut node = root;
+    let mut rest = path.trim_start_matches('.');
+    while !rest.is_empty() {
+        let (seg, next) = match rest.find(['.', '[']) {
+            Some(0) if rest.starts_with('[') => {
+                let end = rest.find(']').ok_or("unclosed `[`")?;
+                (&rest[1..end], rest[end + 1..].trim_start_matches('.'))
+            }
+            Some(i) => (&rest[..i], rest[i..].trim_start_matches('.')),
+            None => (rest, ""),
+        };
+        node = match (node, seg.parse::<usize>()) {
+            (Value::Array(items), Ok(i)) => items.get(i).ok_or(format!("no index {i}"))?,
+            // `Some`, which the serializer already unwrapped.
+            (_, Ok(_)) => node,
+            (Value::Object(map), Err(_)) if map.contains_key(seg) => &map[seg],
+            // A variant wrapper stands between the path and the fields it
+            // names. Stepped through only when the field is genuinely on
+            // the other side of it — a one-field struct is not a wrapper,
+            // and treating it as one walked straight past `cover`.
+            (Value::Object(map), Err(_)) if map.len() == 1 => map
+                .values()
+                .next()
+                .filter(|child| child.get(seg).is_some())
+                .and_then(|child| child.get(seg))
+                .ok_or(format!("no field `{seg}`"))?,
+            _ => return Err(format!("cannot take `{seg}` of {node}")),
+        };
+        rest = next;
+    }
+    Ok(node)
 }
 
 fn parse_f64(s: &str) -> f64 {
@@ -131,6 +197,27 @@ fn main() {
             Ok(p) => call("voxel/inspect", p),
             Err(e) => Err(format!("bad params JSON: {e}")),
         },
+        // Read and write the LIVE level by field path. The engine applies
+        // whatever writes the resource, so a set here takes the same route
+        // a file edit does — a material is a table upload, a generator or
+        // scatter change rebuilds. Tuning a colour used to be a relaunch.
+        // A resource read takes no path, so the walk happens here. See
+        // `walk` for why that is not the same as indexing the JSON.
+        ["get", path] => call("world.get_resources", json!({"resource": LEVEL}))
+            .and_then(|v| walk(v.get("value").unwrap_or(&v), path).cloned()),
+        ["get"] => call("world.get_resources", json!({"resource": LEVEL})),
+        ["set", path, value] => match serde_json::from_str::<Value>(value) {
+            Ok(v) => call(
+                "world.mutate_resources",
+                json!({"resource": LEVEL, "path": normalize_path(path), "value": v}),
+            ),
+            // A bare word is the common case for an enum variant, and
+            // quoting it through a shell is a papercut nobody needs.
+            Err(_) => call(
+                "world.mutate_resources",
+                json!({"resource": LEVEL, "path": normalize_path(path), "value": value}),
+            ),
+        },
         ["raw", method] => call(method, Value::Null),
         ["raw", method, params] => match serde_json::from_str(params) {
             Ok(p) => call(method, p),
@@ -140,7 +227,7 @@ fn main() {
             eprintln!(
                 "usage: voxctl status | goto X Y Z [DX DY DZ] | ribbons X Z [R] | \
                  markers X Z [R] [KIND] | scan X Z [R] [STEP] | shot PATH [--window] | \
-                 inspect JSON | \
+                 inspect JSON | get [PATH] | set PATH VALUE | \
                  portal [N] | world N | raw METHOD [JSON]"
             );
             std::process::exit(2);
@@ -152,5 +239,36 @@ fn main() {
             eprintln!("error: {e}");
             std::process::exit(1);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `get` and `set` must accept the same path string, and only one of
+    /// them goes through `GetPath` on the server. These are the three
+    /// places the JSON does not look like the reflect path that reaches it.
+    #[test]
+    fn a_reflect_path_walks_the_serialized_form() {
+        let level = json!({
+            "lod": {"split_k": 2.5},
+            // An enum: reflect names the variant's fields directly.
+            "materials": [{"Surface": {"base": [0.5, 0.25, 0.125]}}],
+            // An Option: reflect wants `.0`, the serializer inlined it.
+            "scatter": [{"cover": {"full_at": 0.02}}],
+        });
+        let at = |p: &str| walk(&level, p).unwrap().clone();
+
+        assert_eq!(at("lod.split_k"), json!(2.5));
+        assert_eq!(at(".lod.split_k"), json!(2.5), "a leading dot is optional");
+        assert_eq!(at("materials[0].base[1]"), json!(0.25), "through a variant");
+        assert_eq!(at("scatter[0].cover.0.full_at"), json!(0.02), "through Some");
+        // Naming the variant explicitly still has to work: it is what the
+        // JSON actually contains, and what someone reading a dump will try.
+        assert_eq!(at("materials[0].Surface.base[0]"), json!(0.5));
+
+        assert!(walk(&level, "lod.nope").is_err());
+        assert!(walk(&level, "materials[9].base").is_err());
     }
 }
