@@ -30,15 +30,27 @@ use std::collections::HashMap;
 
 use crate::planning::world::WorldCtx;
 
-/// Texels per side. 2048 at [`TEXEL_M`] covers 32.7 km, which is 4 MB of
-/// material ids — the whole visible near and middle field for the price
-/// of one mid-sized texture.
-const MAP_SIZE: u32 = 2048;
+/// Texels per side. 4096 at [`TEXEL_M`] covers 32.7 km, which is 16 MB of
+/// material ids — the whole visible near and middle field for the price of
+/// one large texture.
+///
+/// Only worlds that actually paint something carry a section this big (see
+/// the end of `repaint_world`), so the cost is per PAINTING world, not per
+/// loaded one. At `MAX_WORLDS` painting worlds it would be 128 MB, which
+/// is exactly wgpu's default `max_storage_buffer_binding_size` — a ceiling
+/// worth knowing about before a level ships with eight forested worlds
+/// open at once.
+const MAP_SIZE: u32 = 4096;
 
-/// Meters per texel. A 52 m highway is three texels across, which is
-/// enough to read as a line at range and is the scale the feature exists
-/// at anyway: it was never going to be sharp at 20 km.
-const TEXEL_M: f32 = 16.0;
+/// Meters per texel.
+///
+/// 16 m was chosen when the map held only ribbons, where it is generous: a
+/// 52 m highway was three texels across. An AREA is a harder customer than
+/// a line — a painted region has an EDGE, and a dithered edge on 16 m
+/// texels reads as chunky noise at the distance the paint takes over
+/// (4.8 px at 4 km). Halving it puts that edge at 2.4 px, which is the
+/// scale the impostors it stands in for occupy.
+const TEXEL_M: f32 = 8.0;
 
 /// Rebuild once the camera is this far from the raster's middle. The map
 /// covers far more than it needs to so this can be rare.
@@ -65,11 +77,21 @@ const BANK_M: f32 = 1.0;
 /// nothing today; it stays as the statement of intent.)
 const GROUND_SAMPLE_M: f32 = 8.0;
 
+/// Narrowest a stroke is painted, whatever the plan says it is.
+///
+/// In METRES, not in texels. It used to be half a texel — enough that a
+/// stroke could not miss — and that quietly meant "however wide the raster
+/// happens to be", so halving [`TEXEL_M`] halved every river. What the
+/// floor is really for is legibility: a 5 m stream painted at 5 m is
+/// invisible at the kilometres this map is read at, and a river you cannot
+/// see is not more accurate than one you can.
+const MIN_STROKE_HALF_W_M: f32 = 8.0;
+
 /// Paint only chunks at least this coarse.
 ///
 /// A road is 4.8 m wide, so a chunk whose voxels are finer than about
 /// half that still carries the carved road as real geometry, at a detail
-/// the 16 m texels of this map cannot approach. 3.2 m is level 5, which
+/// the texels of this map cannot approach. 3.2 m is level 5, which
 /// the LOD field puts 256 m out — near enough that the carve is doing the
 /// work, far enough that it has stopped resolving.
 const PAINT_FROM_VOXEL_M: f32 = 3.2;
@@ -115,12 +137,13 @@ pub fn cover_starts_m(lod: &voxel_engine::streaming::LodConfig, view_m: f32) -> 
 /// Texels per coverage sample in the area pass.
 ///
 /// Coverage is a slow field — a wood is hundreds of metres across — and it
-/// is only ever read kilometres away, so sampling it per 16 m texel spends
-/// sixteen noise evaluations on detail no pixel can resolve (1.5 s over
-/// the map, against 0.1 s at this stride). The two things that must stay
-/// per texel are cheap: the sample grid is interpolated between corners,
-/// so a block boundary is not an edge, and the dither is a hash.
-const COVER_STRIDE: u32 = 4;
+/// is only ever read kilometres away, so sampling it per texel spends
+/// dozens of noise evaluations on detail no pixel can resolve. Held at 64 m
+/// regardless of [`TEXEL_M`]: that is four samples across the narrowest
+/// feature the density field has, and finer buys nothing. The two things
+/// that must stay per texel are cheap — the grid is interpolated between
+/// corners, so a block boundary is not an edge, and the dither is a hash.
+const COVER_STRIDE: u32 = (64.0 / TEXEL_M) as u32;
 
 /// One world's last raster, kept so the cheap pass can run without the
 /// expensive one.
@@ -262,10 +285,15 @@ fn repaint_world(
         );
     }
 
+    // A world that paints nothing publishes NOTHING, rather than a blank
+    // section: at this resolution one is 16 MB, and a level with no roads
+    // and no cover was carrying that so the shader could read zero out of
+    // it. Size 0 is already how the map says "leave the terrain alone".
+    let empty = painted == 0 && coarse_from.is_empty();
     map.texels = std::sync::Arc::new(texels);
     map.origin = origin;
     map.texel_m = TEXEL_M;
-    map.size = MAP_SIZE;
+    map.size = if empty { 0 } else { MAP_SIZE };
     map.min_voxel_m = PAINT_FROM_VOXEL_M;
     map.coarse_from = coarse_from;
     map.generation = map.generation.wrapping_add(1);
@@ -357,25 +385,47 @@ impl CoverJob {
                     voxel_engine::scatter::coverage(def, &inputs, at)
                 })
                 .collect();
+            // Walked a cell at a time rather than a texel at a time, so
+            // the four corners are fetched once per cell instead of once
+            // per texel — and, far more than that, so a cell with no
+            // population at any corner skips its texels entirely. Most of
+            // a world is not forest, and that is what keeps the cost of
+            // this pass tied to the size of the woods rather than to the
+            // resolution of the map.
             let row = (cells + 1) as usize;
-            for z in 0..MAP_SIZE {
-                let (cz, fz) = (z / COVER_STRIDE, (z % COVER_STRIDE) as f32 / COVER_STRIDE as f32);
-                for x in 0..MAP_SIZE {
-                    let (cx, fx) =
-                        (x / COVER_STRIDE, (x % COVER_STRIDE) as f32 / COVER_STRIDE as f32);
+            let inv = 1.0 / COVER_STRIDE as f32;
+            for cz in 0..cells {
+                for cx in 0..cells {
                     let at = |ix: u32, iz: u32| grid[iz as usize * row + ix as usize];
-                    let c = (at(cx, cz) * (1.0 - fx) + at(cx + 1, cz) * fx) * (1.0 - fz)
-                        + (at(cx, cz + 1) * (1.0 - fx) + at(cx + 1, cz + 1) * fx) * fz;
-                    // Crowns land independently, so what closes over the
-                    // ground is Poisson, not linear: twice the density is
-                    // not twice the cover, because the second crown mostly
-                    // lands on the first. Painting `c / full_at` instead
-                    // showed a wood that reads as unbroken canopy as a few
-                    // scattered texels — the attempts that survive every
-                    // gate are a small fraction of a very large number.
-                    let share = 1.0 - (-c / full_at).exp();
-                    if share > dither(origin, x, z) {
-                        put(&mut texels, x, z, cover.material);
+                    let (c00, c10) = (at(cx, cz), at(cx + 1, cz));
+                    let (c01, c11) = (at(cx, cz + 1), at(cx + 1, cz + 1));
+                    if c00 <= 0.0 && c10 <= 0.0 && c01 <= 0.0 && c11 <= 0.0 {
+                        continue;
+                    }
+                    for iz in 0..COVER_STRIDE {
+                        let fz = iz as f32 * inv;
+                        let (top, bot) = (
+                            c00 * (1.0 - fz) + c01 * fz,
+                            c10 * (1.0 - fz) + c11 * fz,
+                        );
+                        for ix in 0..COVER_STRIDE {
+                            let fx = ix as f32 * inv;
+                            let c = top * (1.0 - fx) + bot * fx;
+                            // Crowns land independently, so what closes
+                            // over the ground is Poisson, not linear:
+                            // twice the density is not twice the cover,
+                            // because the second crown mostly lands on the
+                            // first. Painting `c / full_at` instead showed
+                            // a wood that reads as unbroken canopy as a
+                            // few scattered texels — the attempts that
+                            // survive every gate are a small fraction of a
+                            // very large number.
+                            let share = 1.0 - (-c / full_at).exp();
+                            let (x, z) = (cx * COVER_STRIDE + ix, cz * COVER_STRIDE + iz);
+                            if share > dither(origin, x, z) {
+                                put(&mut texels, x, z, cover.material);
+                            }
+                        }
                     }
                 }
             }
@@ -415,7 +465,7 @@ fn stroke(
     material: u32,
     under: Option<([f32; 2], &voxel_worldgen::Generator)>,
 ) -> usize {
-    let half_w = half_w.max(TEXEL_M * 0.5);
+    let half_w = half_w.max(MIN_STROKE_HALF_W_M);
     let lo = a.min(b) - Vec2::splat(half_w);
     let hi = a.max(b) + Vec2::splat(half_w);
     let to_texel = |p: Vec2| (p - origin) / TEXEL_M;
