@@ -295,6 +295,7 @@ pub struct ImpostorStyle {
     pub canopy_a: Vec4,
     pub canopy_b: Vec4,
     /// x = how dark the canopy goes at its base, as a fraction of itself.
+    /// y = how far the shading normal leans from up toward the viewer.
     pub base: Vec4,
     /// x = fade-in start, y = fade-in end, z = cull, w = base height (m).
     pub size: Vec4,
@@ -310,7 +311,7 @@ impl Default for ImpostorStyle {
             // then left behind when the props were retuned.
             canopy_a: Vec4::new(0.0051, 0.0223, 0.0041, 0.0),
             canopy_b: Vec4::new(0.0137, 0.0304, 0.0041, 0.0),
-            base: Vec4::new(0.35, 0.0, 0.0, 0.0),
+            base: Vec4::new(0.35, 0.5, 0.0, 0.0),
             // Real prop trees cover the first 120 m; impostors take over
             // across the next 60. Where they STOP is not authored here —
             // see `sync_impostor_style`.

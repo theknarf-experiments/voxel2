@@ -120,9 +120,35 @@ fn fragment(in: VsOut) -> @location(0) vec4<f32> {
         view.world_position.y + in.cam_rel.y,
         view.world_position.z + in.cam_rel.z,
     );
-    // Crossed planes have no meaningful normal; shade off up, like grass,
-    // so a stand is evenly lit and the cascades still darken it.
-    let n = vec3<f32>(0.0, 1.0, 0.0);
+    // Crossed planes have no meaningful normal of their own, but a TREE
+    // does: what a camera sees of a canopy is the hemisphere facing it. So
+    // the normal leans from up toward the viewer, horizontally, and a
+    // stand is lit from the sun side and unlit from the other.
+    //
+    // Shading off up alone — even, like grass — is right until you walk
+    // round a wood. Then every real tree in front of you has turned its
+    // shaded side to you and gone dark, and the impostors behind them have
+    // not: measured four times too bright against the props they hand over
+    // to. Up is only the correct normal for the one view from directly
+    // overhead, which is where this degenerates and falls back to it.
+    //
+    // Per fragment and horizontal, so it is a smooth function of where the
+    // camera is: the whole stand turns together as you move, with no
+    // instant at which anything pops.
+    let up = vec3<f32>(0.0, 1.0, 0.0);
+    let flat = vec2<f32>(-in.cam_rel.x, -in.cam_rel.z);
+    let flat_len = length(flat);
+    // Scaled by how side-on the tree is seen: from overhead a canopy
+    // really does present its top, and that is also where the horizontal
+    // direction stops being well conditioned, so the same term fixes the
+    // look and the degenerate case.
+    let sideness = flat_len / max(length(in.cam_rel), 1e-3);
+    var lean = up;
+    if (flat_len > 1e-3) {
+        let side = vec3<f32>(flat.x / flat_len, 0.0, flat.y / flat_len);
+        lean = mix(up, side, env.base.y * sideness);
+    }
+    let n = normalize(lean);
 
     var pbr_input = pbr_types::pbr_input_new();
     pbr_input.material.base_color = vec4<f32>(in.color, 1.0);
