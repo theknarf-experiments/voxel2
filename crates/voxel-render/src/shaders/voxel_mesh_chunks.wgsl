@@ -89,53 +89,6 @@ fn world_header() -> WorldHeader {
     return prog.worlds[u32(params.origin_voxels.w)];
 }
 
-// Surface material map: a header, then one byte per texel, four per
-// word, row-major. Size 0 = nothing painted. Layout twin of
-// `SurfaceMap::to_words`.
-const SURFACE_MAP_THRESHOLDS: u32 = 8u;
-const SURFACE_MAP_HEADER: u32 = 264u;
-// One buffer holds every world's map: `MAX_WORLDS` offsets, then the
-// sections. Offset 0 means that world paints nothing — the table itself
-// occupies word 0, so no real section can start there.
-@group(0) @binding(7) var<storage, read> surface_map: array<u32>;
-
-/// Where this chunk's world's map starts, or 0 for "paints nothing".
-///
-/// Per world because the map is indexed by world-space xz and says
-/// nothing about which world it belongs to. Worlds share coordinates by
-/// design, so one global raster painted the near level's rivers onto the
-/// far level's ground everywhere.
-fn surface_map_base() -> u32 {
-    return surface_map[u32(params.origin_voxels.w)];
-}
-
-/// The painted material at a world position, or 0 for "leave the
-/// terrain's own material alone".
-///
-/// One fetch, whatever the host planned there. This is what a feature
-/// becomes once it is thinner than a voxel: a road is 0.5 m thick, so
-/// carving it stops doing anything about 100 m out, but a road is not an
-/// object on the ground — it IS the ground, and past that distance it is
-/// a material rather than a shape.
-fn painted_material(base: u32, world_xz: vec2<f32>) -> u32 {
-    if (base == 0u) {
-        return 0u;
-    }
-    let size = surface_map[base];
-    if (size == 0u) {
-        return 0u;
-    }
-    let texel_m = bitcast<f32>(surface_map[base + 1u]);
-    let origin = vec2<f32>(bitcast<f32>(surface_map[base + 2u]),
-                           bitcast<f32>(surface_map[base + 3u]));
-    let t = floor((world_xz - origin) / texel_m);
-    if (t.x < 0.0 || t.y < 0.0 || u32(t.x) >= size || u32(t.y) >= size) {
-        return 0u;
-    }
-    let idx = u32(t.y) * size + u32(t.x);
-    return (surface_map[base + SURFACE_MAP_HEADER + idx / 4u] >> ((idx % 4u) * 8u)) & 0xFFu;
-}
-
 fn corner_offset(i: u32) -> vec3<i32> {
     return vec3<i32>(i32(i & 1u), i32((i >> 1u) & 1u), i32((i >> 2u) & 1u));
 }
@@ -413,29 +366,12 @@ fn sn_vertices(@builtin(global_invocation_id) id: vec3<u32>) {
             mat = sample_material(c + corner_offset(i));
         }
     }
-    // A painted surface overrides the material of an UP-FACING vertex,
-    // and only where the chunk is too coarse to show the real thing.
+    // The painted surface material is NOT applied here. It used to be, and
+    // a vertex is the wrong place for it: paint only applies where the LOD
+    // field has gone coarse, which is exactly where vertices are 51-102 m
+    // apart, so an 8 m map arrived as flat 100 m quads. The draw shader
+    // reads it per fragment instead — see `painted_material` there.
     //
-    // Up-facing because the map is a plan view: a road crossing a cliff
-    // paints the ledge it runs along, not the cliff face beside it. Only
-    // when coarse because near the camera the road is CARVED, at full
-    // detail — painting over it would replace geometry with a texel grid.
-    //
-    // The scale at which the paint takes over is PER MATERIAL, because it
-    // is a property of the thing painted, not of the map: a road's carve
-    // stops resolving within 100 m, while a water course has a carved bed
-    // AND a surface drawn over it out to a distance its own layer sets.
-    // One threshold for both drew the river twice — the real surface and
-    // a painted band around it — everywhere the two ranges overlapped.
-    if (normal.y > 0.5) {
-        let base = surface_map_base();
-        let painted = painted_material(base, params.origin.xyz.xz + pv.xz * params.origin.w);
-        if (painted != 0u
-            && params.origin.w >= bitcast<f32>(
-                surface_map[base + SURFACE_MAP_THRESHOLDS + painted])) {
-            mat = painted;
-        }
-    }
     // Debug (eval): flag failed-snap vertices via a reserved material so
     // the draw shader can paint them for correlation with hole pixels.
     if (snap_failed && params._pad.y == 1u) {

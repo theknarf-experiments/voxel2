@@ -77,6 +77,61 @@ struct EnvParams {
 }
 @group(2) @binding(1) var<uniform> env: EnvParams;
 
+// Surface material map: a header, then one byte per texel, four per word,
+// row-major. Size 0 = nothing painted. Layout twin of
+// `SurfaceMap::to_words`.
+//
+// Read PER FRAGMENT, not per vertex. The map is 8 m and the chunks that
+// read it are 51-102 m ones — paint only applies where the LOD field has
+// gone coarse — so choosing the material at a vertex threw away everything
+// finer than the vertex spacing and drew a wood as flat 100 m quads. A
+// material id cannot be interpolated, so there is no half-way house: the
+// lookup either happens here or the map may as well be a sixteenth of the
+// size.
+const SURFACE_MAP_THRESHOLDS: u32 = 8u;
+const SURFACE_MAP_HEADER: u32 = 264u;
+@group(2) @binding(2) var<storage, read> surface_map: array<u32>;
+
+/// The painted material at a world position, or 0 for "leave the terrain's
+/// own material alone".
+///
+/// Per world because the map is indexed by world-space xz and says nothing
+/// about which world it belongs to. Worlds share coordinates by design, so
+/// one global raster painted the near level's rivers onto the far level's
+/// ground everywhere.
+fn painted_material(world_xz: vec2<f32>) -> u32 {
+    // Offset 0 means this world paints nothing: the table itself occupies
+    // word 0, so no real section can start there.
+    let base = surface_map[chunk.head.y];
+    if (base == 0u) {
+        return 0u;
+    }
+    let size = surface_map[base];
+    if (size == 0u) {
+        return 0u;
+    }
+    let texel_m = bitcast<f32>(surface_map[base + 1u]);
+    let origin = vec2<f32>(bitcast<f32>(surface_map[base + 2u]),
+                           bitcast<f32>(surface_map[base + 3u]));
+    let t = floor((world_xz - origin) / texel_m);
+    if (t.x < 0.0 || t.y < 0.0 || u32(t.x) >= size || u32(t.y) >= size) {
+        return 0u;
+    }
+    let idx = u32(t.y) * size + u32(t.x);
+    let painted = (surface_map[base + SURFACE_MAP_HEADER + idx / 4u] >> ((idx % 4u) * 8u)) & 0xFFu;
+    // The scale the paint takes over at is PER MATERIAL, because it is a
+    // property of the thing painted, not of the map: a road's carve stops
+    // resolving within 100 m, while a water course has a carved bed AND a
+    // surface drawn over it out to a distance its own layer sets. One
+    // threshold for both drew the river twice — the real surface and a
+    // painted band around it — everywhere the two ranges overlapped.
+    if (painted == 0u
+        || chunk.offset.w < bitcast<f32>(surface_map[base + SURFACE_MAP_THRESHOLDS + painted])) {
+        return 0u;
+    }
+    return painted;
+}
+
 struct VsIn {
     // Quantized position: unorm16 x4 mapping [-8, 40] voxels (w unused).
     @location(0) pos: vec4<f32>,
@@ -217,7 +272,16 @@ fn fragment(in: VsOut) -> @location(0) vec4<f32> {
         }
     }
     let dist = length(in.cam_rel);
-    let m = material_for(in.material);
+    // Up-facing only, because the map is a plan view: a road crossing a
+    // cliff paints the ledge it runs along, not the rock face beside it.
+    var id = in.material;
+    if (n.y > 0.5) {
+        let painted = painted_material(world.xz);
+        if (painted != 0u) {
+            id = painted;
+        }
+    }
+    let m = material_for(id);
 
     var base: vec3<f32>;
     var nl = n;

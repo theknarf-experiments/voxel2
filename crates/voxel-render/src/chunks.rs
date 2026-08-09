@@ -1235,7 +1235,6 @@ fn init_chunk_resources(
                 storage_buffer_sized(false, None),           // index slab
                 storage_buffer_sized(false, None),           // counts
                 storage_buffer_read_only_sized(false, None), // generator program
-                storage_buffer_read_only_sized(false, None), // surface material map
             ),
         ),
     );
@@ -1285,8 +1284,9 @@ fn init_chunk_resources(
         &BindGroupLayoutEntries::sequential(
             ShaderStages::VERTEX_FRAGMENT,
             (
-                uniform_buffer::<ChunkDrawUniform>(true), // per-chunk offset
-                uniform_buffer::<EnvParams>(false),       // render flags
+                uniform_buffer::<ChunkDrawUniform>(true),    // per-chunk offset
+                uniform_buffer::<EnvParams>(false),          // render flags
+                storage_buffer_read_only_sized(false, None), // surface material map
             ),
         ),
     );
@@ -2348,10 +2348,6 @@ fn dispatch_chunk_work(
             gpu.index_slab.as_entire_buffer_binding(),
             gpu.counts.as_entire_buffer_binding(),
             program_binding,
-            gpu.surface_map
-                .as_ref()
-                .map_or(&gpu.surface_map_dummy, |(b, _)| b)
-                .as_entire_buffer_binding(),
         )),
     );
 
@@ -2459,7 +2455,14 @@ fn prepare_view_bind_group(
     bind_groups.chunk = Some(render_device.create_bind_group(
         "voxel_chunks_chunk_bg",
         &pipeline_cache.get_bind_group_layout(&pipeline.chunk_layout),
-        &BindGroupEntries::sequential((chunk_binding, env_binding)),
+        &BindGroupEntries::sequential((
+            chunk_binding,
+            env_binding,
+            gpu.surface_map
+                .as_ref()
+                .map_or(&gpu.surface_map_dummy, |(b, _)| b)
+                .as_entire_buffer_binding(),
+        )),
     ));
 }
 
@@ -2753,14 +2756,16 @@ mod slab_pressure_tests {
 mod surface_map_tests {
     use super::*;
 
-    /// Reads a `const NAME: u32 = N u;` out of the mesh shader.
+    /// Reads a `const NAME: u32 = N u;` out of the draw shader, which is
+    /// where the map is read: the mesh pass chose the material per VERTEX
+    /// and threw away everything finer than the vertex spacing.
     fn shader_const(name: &str) -> usize {
-        let src = include_str!("shaders/voxel_mesh_chunks.wgsl");
+        let src = include_str!("shaders/voxel_chunk_draw.wgsl");
         let prefix = format!("const {name}:");
         let line = src
             .lines()
             .find(|l| l.trim_start().starts_with(&prefix))
-            .unwrap_or_else(|| panic!("{name} is not declared in the mesh shader"));
+            .unwrap_or_else(|| panic!("{name} is not declared in the draw shader"));
         line.rsplit('=')
             .next()
             .unwrap()
@@ -3002,14 +3007,14 @@ mod multi_world_tests {
         assert_eq!(words[3], 0);
     }
 
-    /// The mesh shader indexes the offset table by the chunk's world, and
+    /// The draw shader indexes the offset table by the chunk's world, and
     /// treats 0 as "nothing painted". Both halves are load-bearing.
     #[test]
-    fn the_surface_map_table_matches_the_mesh_shader() {
-        let src = include_str!("shaders/voxel_mesh_chunks.wgsl");
+    fn the_surface_map_table_matches_the_draw_shader() {
+        let src = include_str!("shaders/voxel_chunk_draw.wgsl");
         assert!(
-            src.contains("return surface_map[u32(params.origin_voxels.w)];"),
-            "surface_map_base must index the table by the chunk's world",
+            src.contains("let base = surface_map[chunk.head.y];"),
+            "painted_material must index the table by the chunk's world",
         );
         assert!(
             src.contains("if (base == 0u) {"),
