@@ -107,12 +107,28 @@ const COUNTS_SLOTS: u32 = 512;
 //       24  13.4   21.1     28.9        500    2.1s
 //       12  11.7   19.0     25.0       2157      -
 //
-// 48 is where the queue still drains as fast as flying fills it —
-// `awaiting` stays at zero — and the worst frame is under half what 320
-// gives. Settle time does not move at all, because the GPU is saturated
-// either way and a batch only decides whether the work arrives in a lump.
-// Below 48 the frames keep improving and the backlog grows, which is
-// chunks arriving late: a smoother picture of the wrong world.
+// Re-measured after the frame got cheaper elsewhere, same flight, two
+// independent runs sampled at MATCHED positions (the autopilot crosses
+// ocean and forest, and position moves p95 by more than the budget does,
+// so samples are only comparable at the same second of the same path):
+//
+//   budget   p95    worst   settle    vsync-on fps while flying
+//       48  16.0    22.0     2.23s    64 / 91 / 81
+//       24  14.1    20.1     2.35s    -
+//       16    -       -        -      85 / 93 / 104
+//       12  10.8     15.4     2.82s   88 / 93 / 120
+//
+// 16, and the reasoning changed. The old table read "below 48 the backlog
+// grows, which is a smoother picture of the wrong world" — but `awaiting`
+// is transient, not a floor: at 12 it peaks higher than at 48 and still
+// drains to zero every time, and `drawn` is within a few percent across
+// the whole range. What a smaller batch actually does is spread the same
+// work over more frames instead of landing it in one, which is why the
+// worst frame halves while the world stays as complete.
+//
+// 16 rather than 12 because the two are indistinguishable once you sample
+// enough of the path, and 16 keeps a third more throughput for it. The
+// real step is away from 48.
 //
 // At walking and stationary speeds none of this binds; there is no queue.
 fn env_budget(name: &str, default: usize) -> usize {
@@ -127,14 +143,14 @@ fn env_budget(name: &str, default: usize) -> usize {
 /// as of the code, and re-measuring the table above on another one should
 /// not need a rebuild.
 static GEN_BUDGET: std::sync::LazyLock<usize> =
-    std::sync::LazyLock::new(|| env_budget("VOXEL_GEN_BUDGET", 48));
+    std::sync::LazyLock::new(|| env_budget("VOXEL_GEN_BUDGET", 16));
 /// Deferred chunks re-admitted per frame. Each one costs a density pass
 /// it has already paid once, so recovery is deliberately gradual: the
 /// alternative is a frame that regenerates everything the slab just
 /// rejected and rejects it again.
 const RETRY_BUDGET: usize = 32;
 static MESH_BUDGET: std::sync::LazyLock<usize> =
-    std::sync::LazyLock::new(|| env_budget("VOXEL_MESH_BUDGET", 48));
+    std::sync::LazyLock::new(|| env_budget("VOXEL_MESH_BUDGET", 16));
 const STAGING_BUFFERS: usize = 3;
 
 // --- main-world <-> render-world plumbing ------------------------------------
@@ -473,8 +489,13 @@ impl SurfaceMap {
     /// placement travels in the buffer rather than in a uniform so that no
     /// layout twin grows a field: `ChunkParams` is already mirrored in two
     /// shaders and Rust.
-    fn to_words(&self) -> Vec<u32> {
-        let mut out = Vec::with_capacity(SURFACE_MAP_HEADER + self.texels.len());
+    ///
+    /// Header ONLY: the texels are uploaded straight out of the `Arc` that
+    /// already holds them. Returning header and payload together meant
+    /// building a 16 MB `Vec` to copy a 24-word preamble onto the front of
+    /// a buffer that already existed.
+    fn header_words(&self) -> Vec<u32> {
+        let mut out = Vec::with_capacity(SURFACE_MAP_HEADER);
         out.push(self.size);
         out.push(self.texel_m.to_bits());
         out.push(self.origin.x.to_bits());
@@ -488,8 +509,16 @@ impl SurfaceMap {
             out[SURFACE_MAP_THRESHOLDS + (id as usize % SURFACE_MAP_MATERIALS)] =
                 min_voxel.to_bits();
         }
-        out.extend_from_slice(&self.texels);
         out
+    }
+
+    /// Words this world occupies in the shared buffer, header included.
+    fn section_words(&self) -> usize {
+        if self.size == 0 {
+            0
+        } else {
+            SURFACE_MAP_HEADER + self.texels.len()
+        }
     }
 }
 
@@ -504,18 +533,43 @@ impl SurfaceMap {
 ///
 /// Offset 0 means "this world paints nothing": the table itself occupies
 /// word 0, so no real section can start there.
-fn surface_map_words(worlds: &RenderWorlds) -> Vec<u32> {
-    let mut offsets = vec![0u32; MAX_WORLDS];
-    let mut sections: Vec<u32> = Vec::new();
+/// Where each world's section starts, and how many words the whole buffer
+/// needs. Computed without touching a texel.
+fn surface_map_layout(worlds: &RenderWorlds) -> ([u32; MAX_WORLDS], usize) {
+    let mut offsets = [0u32; MAX_WORLDS];
+    let mut cursor = MAX_WORLDS;
     for (id, world) in worlds.iter().enumerate().take(MAX_WORLDS) {
-        if world.surface_map.size == 0 {
+        let words = world.surface_map.section_words();
+        if words == 0 {
             continue;
         }
-        offsets[id] = (MAX_WORLDS + sections.len()) as u32;
-        sections.extend(world.surface_map.to_words());
+        offsets[id] = cursor as u32;
+        cursor += words;
     }
-    offsets.extend(sections);
-    offsets
+    (offsets, cursor)
+}
+
+/// The buffer image the upload produces, assembled in one piece.
+///
+/// Test-only, and deliberately built from the SAME two functions the
+/// upload writes from, so it cannot agree with a layout the GPU never
+/// sees. Production writes these sections straight into the queue at
+/// their offsets and never holds the whole thing in memory.
+#[cfg(test)]
+fn surface_map_words(worlds: &RenderWorlds) -> Vec<u32> {
+    let (offsets, total) = surface_map_layout(worlds);
+    let mut out = vec![0u32; total];
+    out[..MAX_WORLDS].copy_from_slice(&offsets);
+    for (id, world) in worlds.iter().enumerate().take(MAX_WORLDS) {
+        let words = world.surface_map.section_words();
+        if words == 0 {
+            continue;
+        }
+        let at = offsets[id] as usize;
+        out[at..at + SURFACE_MAP_HEADER].copy_from_slice(&world.surface_map.header_words());
+        out[at + SURFACE_MAP_HEADER..at + words].copy_from_slice(&world.surface_map.texels);
+    }
+    out
 }
 
 /// Bumped whenever any world's raster changes, so the GPU copy is rebuilt
@@ -2303,23 +2357,39 @@ fn plan_frame_inner(
             .as_ref()
             .is_none_or(|(_, uploaded)| *uploaded != generation)
     {
-        let words = surface_map_words(&worlds);
-        let bytes: &[u8] = bytemuck::cast_slice(&words);
-        let reusable = gpu
-            .surface_map
-            .as_ref()
-            .filter(|(b, _)| b.size() == bytes.len() as u64);
-        if let Some((buffer, _)) = reusable {
-            render_queue.write_buffer(buffer, 0, bytes);
-            gpu.surface_map.as_mut().unwrap().1 = generation;
-        } else {
-            let buffer = render_device.create_buffer_with_data(&BufferInitDescriptor {
+        // SECTION BY SECTION, never concatenated. Building one `Vec` of
+        // the whole thing walked 16 MB four times per repaint — into
+        // `to_words`, into `sections`, into `offsets`, then into the
+        // staging belt — and measured 5-7 ms on the render thread, 38
+        // times in 100 s of flight. The texels are behind an `Arc` that
+        // already holds them in exactly the layout the shader wants, so
+        // the only copy that has to happen is the one into the queue.
+        let (offsets, total_words) = surface_map_layout(&worlds);
+        let size = (total_words * size_of::<u32>()) as u64;
+        let buffer = match gpu.surface_map.as_ref().filter(|(b, _)| b.size() == size) {
+            Some((buffer, _)) => buffer.clone(),
+            None => render_device.create_buffer(&BufferDescriptor {
                 label: Some("voxel_surface_map"),
-                contents: bytes,
+                size,
                 usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
-            });
-            gpu.surface_map = Some((buffer, generation));
+                mapped_at_creation: false,
+            }),
+        };
+        render_queue.write_buffer(&buffer, 0, bytemuck::cast_slice(&offsets));
+        for (id, world) in worlds.iter().enumerate().take(MAX_WORLDS) {
+            if world.surface_map.section_words() == 0 {
+                continue;
+            }
+            let at = u64::from(offsets[id]) * size_of::<u32>() as u64;
+            let header = world.surface_map.header_words();
+            render_queue.write_buffer(&buffer, at, bytemuck::cast_slice(&header));
+            render_queue.write_buffer(
+                &buffer,
+                at + (SURFACE_MAP_HEADER * size_of::<u32>()) as u64,
+                bytemuck::cast_slice(&world.surface_map.texels),
+            );
         }
+        gpu.surface_map = Some((buffer, generation));
     }
 
     // 7. HUD stats.
@@ -2927,8 +2997,13 @@ mod surface_map_tests {
             texels: std::sync::Arc::new(vec![0]),
             ..Default::default()
         };
-        let words = map.to_words();
-        assert_eq!(words.len(), SURFACE_MAP_HEADER + 1);
+        let words = map.header_words();
+        assert_eq!(words.len(), SURFACE_MAP_HEADER);
+        assert_eq!(
+            map.section_words(),
+            SURFACE_MAP_HEADER + 1,
+            "the texel follows the header",
+        );
         let at = |id: usize| f32::from_bits(words[SURFACE_MAP_THRESHOLDS + id]);
         assert_eq!(at(3), 3.2, "an unnamed material keeps the default");
         assert_eq!(at(4), 6.4, "a named one takes over only when coarser");
