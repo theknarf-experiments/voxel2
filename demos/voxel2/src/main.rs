@@ -96,6 +96,20 @@ pub struct Scene {
     /// Its *direction* is engine data (the shadow bake needs it) and comes
     /// from the level's `environment`.
     sun_illuminance: Option<f32>,
+    /// Whether that light casts. A world lit from OUTSIDE wants shadows;
+    /// a sunless interior standing a directional term in for the glow off
+    /// its own lit ceilings does not — its cascades would end mid-hall
+    /// and leave the near field dark against a bright far one.
+    sun_shadows: bool,
+    /// Host override for the light's direction, for worlds where the
+    /// level's `sun_direction` is bake data about a sun nobody can see.
+    ///
+    /// An interior has no sun, but it cannot have NO directional term
+    /// either: ambient light is the same from every angle, so a world lit
+    /// only by ambient has no shading, no form, and no way to tell one
+    /// grey from another. Its lamps are on the ceilings, so the one
+    /// direction that is true here is down.
+    sun_from: Option<Vec3>,
     ambient_color: Color,
     ambient_brightness: f32,
     /// Atmospheric haze. Voxel surfaces shade through Bevy's PBR, so this
@@ -123,6 +137,8 @@ fn scene_for(level_path: &std::path::Path) -> Scene {
             // a warm ambient doing most of the work, so the ground reads
             // without ever looking sunlit.
             sun_illuminance: Some(light_consts::lux::OVERCAST_DAY),
+            sun_shadows: true,
+            sun_from: None,
             ambient_color: Color::srgb(0.78, 0.52, 0.42),
             ambient_brightness: 2_600.0,
             fog: Some(DistanceFog {
@@ -145,11 +161,37 @@ fn scene_for(level_path: &std::path::Path) -> Scene {
             look: Vec3::new(0.7, 0.05, 0.7),
             walk_speed: 8.0,
             run_speed: 60.0,
-            // Interiors are lit by the level's own emissive materials.
-            sun_illuminance: None,
-            ambient_color: Color::srgb(0.6, 0.7, 0.9),
-            ambient_brightness: 3_800.0,
-            fog: None,
+            // The glow off its own lit ceilings, standing in for a sun it
+            // does not have. Shadowless and from almost straight above:
+            // floors catch it, ceilings fall away, walls land between, and
+            // that gradient is the only thing giving a concrete interior
+            // any form at all.
+            //
+            // It replaces an ambient-only setup at 3,800 that had no
+            // directional term whatsoever. Nine deliberately different
+            // concretes came out as one flat blue-grey wash, because a
+            // bright uniform ambient both removes the shading AND lifts
+            // every albedo toward the same tonemapped value.
+            sun_illuminance: Some(1_250.0),
+            sun_shadows: false,
+            sun_from: Some(Vec3::new(0.18, 1.0, 0.3)),
+            // Ambient is now only bounce: dim, and desaturated, so the
+            // materials supply the colour instead of the light doing it.
+            ambient_color: Color::srgb(0.52, 0.57, 0.68),
+            ambient_brightness: 520.0,
+            // Haze, and load-bearing rather than decorative. The engine
+            // hard-cuts disagreeing SDFs across LOD on purpose — blending
+            // them makes phantom surfaces — and the design's answer to the
+            // seam that leaves is to let fog cover it. This level had
+            // `fog: None`, so every LOD transition showed as a torn edge
+            // and the whole interior read as ripped paper rather than
+            // architecture. An interior this size would be hazy anyway.
+            fog: Some(DistanceFog {
+                color: Color::srgb(0.052, 0.060, 0.075),
+                directional_light_color: Color::srgb(0.55, 0.60, 0.72),
+                directional_light_exponent: 12.0,
+                falloff: FogFalloff::Exponential { density: 9.0e-4 },
+            }),
             // A sunless interior: no sea.
             sea_level: None,
         },
@@ -164,6 +206,8 @@ fn scene_for(level_path: &std::path::Path) -> Scene {
             walk_speed: 60.0,
             run_speed: 600.0,
             sun_illuminance: Some(light_consts::lux::FULL_DAYLIGHT),
+            sun_shadows: true,
+            sun_from: None,
             ambient_color: Color::srgb(0.7, 0.8, 1.0),
             ambient_brightness: 1_100.0,
             fog: Some(DistanceFog {
@@ -428,8 +472,10 @@ fn sync_world_suns(
         let Some(host) = scenes.0.get(&world.id) else {
             continue;
         };
-        let aim = Transform::from_translation(Vec3::ZERO)
-            .looking_to(-sun_direction(&world.level), Vec3::Y);
+        let from = host
+            .sun_from
+            .map_or_else(|| sun_direction(&world.level), Vec3::normalize);
+        let aim = Transform::from_translation(Vec3::ZERO).looking_to(-from, up_for(-from));
         match suns.iter_mut().find(|(_, sun, _)| sun.0 == world.id) {
             Some((entity, _, mut transform)) => {
                 if host.sun_illuminance.is_none() {
@@ -451,7 +497,7 @@ fn sync_world_suns(
                     voxel_render::world_layer(world.id),
                     DirectionalLight {
                         illuminance,
-                        shadow_maps_enabled: true,
+                        shadow_maps_enabled: host.sun_shadows,
                         ..default()
                     },
                     // Explicit cascades: the default bounds come from the

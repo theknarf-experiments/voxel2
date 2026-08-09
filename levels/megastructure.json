@@ -276,7 +276,7 @@
         -5400.0,
         3300.0
       ],
-      "octaves": 4
+      "octaves": 2
     },
     {
       "type": "coarse_solid",
