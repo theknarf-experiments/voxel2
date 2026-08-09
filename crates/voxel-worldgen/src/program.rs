@@ -454,8 +454,8 @@ pub fn planet_program() -> Vec<WorldOp> {
         // A mountain range. The band is NARROW on one axis, so the
         // region is an iso-strip of the noise field and snakes across
         // the world the way a range does; a wide box would give a blob.
-        region_terrain([0.470, 0.530], [0.0, 1.0], [15200.0, -6400.0], 0.00022, 1250.0, 4, 1, 620.0),
-        region_terrain([0.470, 0.530], [0.0, 1.0], [-3300.0, 7100.0], 0.0016, 240.0, 5, 1, 0.0),
+        region_terrain([0.470, 0.530], [0.0, 1.0], [15200.0, -6400.0], 0.00022, 2350.0, 4, 1, 1150.0),
+        region_terrain([0.470, 0.530], [0.0, 1.0], [-3300.0, 7100.0], 0.0016, 430.0, 5, 1, 0.0),
         WorldOp::new(WOP_HEIGHT_SURFACE).material(1),
         // Regions: two noise axes, and a box in their product per region.
         // Order is priority — each only repaints ground still left as

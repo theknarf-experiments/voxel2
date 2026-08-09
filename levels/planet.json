@@ -162,10 +162,10 @@
         -6400.0
       ],
       "scale": 0.00022,
-      "amp": 1250.0,
+      "amp": 2350.0,
       "octaves": 4,
       "mode": "ridged",
-      "lift": 620.0
+      "lift": 1150.0
     },
     {
       "type": "height_band_fbm",
@@ -182,7 +182,7 @@
         7100.0
       ],
       "scale": 0.0016,
-      "amp": 240.0,
+      "amp": 430.0,
       "octaves": 5,
       "mode": "ridged"
     },
