@@ -435,6 +435,41 @@ fn setup_scene(mut commands: Commands, scene: Res<HostScene>) {
             ..default()
         },
     ));
+    // Anti-alias in a post pass, not by sampling the frame four times.
+    //
+    // Bevy defaults to MSAA 4x, and MSAA is priced in EDGE pixels: every
+    // partially covered pixel shades once per primitive that touches it.
+    // A forest is nothing but edges — hundreds of thousands of small
+    // overlapping quads, most of them a few pixels across — so this world
+    // is close to the worst case for it. On the horizon view, vsync on:
+    // 4x is 97.9 fps mean with p95 at 16.86 ms (a twelfth of frames on the
+    // 60 fps step), FXAA is 116.0 with p95 9.44, MSAA off is 119.0. Looking
+    // down at grass, 102.1 against 111.6. The megastructure is 120 either
+    // way — it has no forest, which is the point.
+    //
+    // FXAA rather than off: it keeps the edges smooth and gives up almost
+    // none of the win. Measured against 4x on static geometry (sky and
+    // ridge, where no wind sway contaminates the diff) the two differ on
+    // 0.001% of channels by more than 24/255 — a thin line of silhouette
+    // pixels, which is exactly what it should be.
+    //
+    // `VOXEL_MSAA=0|2|4|fxaa` overrides, so the alternatives stay
+    // measurable without a rebuild.
+    use bevy::render::view::Msaa;
+    match std::env::var("VOXEL_MSAA").as_deref() {
+        Ok("0") => {
+            camera.insert(Msaa::Off);
+        }
+        Ok("2") => {
+            camera.insert(Msaa::Sample2);
+        }
+        Ok("4") => {
+            camera.insert(Msaa::Sample4);
+        }
+        _ => {
+            camera.insert((Msaa::Off, bevy::anti_alias::fxaa::Fxaa::default()));
+        }
+    }
     if let Some(fog) = host.fog.clone() {
         camera.insert(fog);
     }
