@@ -18,7 +18,7 @@ use crate::planning::{HostPlanning, OpsSource, WorldQuery};
 use crate::streaming::StreamingRebuild;
 use crate::{LodConfig, VoxelEnginePlugin};
 
-#[derive(Serialize, Deserialize, Clone, Debug)]
+#[derive(Reflect, Serialize, Deserialize, Clone, Debug)]
 pub struct LodDef {
     pub max_level: u8,
     pub top_radius: i32,
@@ -42,7 +42,7 @@ impl From<&LodDef> for LodConfig {
 
 /// Lighting + atmosphere for the chunk draw. Every field has the sun-lit
 /// outdoor default, so levels only state what differs.
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[derive(Reflect, Serialize, Deserialize, Clone, Debug, PartialEq)]
 #[serde(default)]
 pub struct EnvDef {
     /// Direction the sun comes FROM (not normalized; twins normalize).
@@ -67,7 +67,7 @@ impl Default for EnvDef {
 }
 
 /// How a population's placements reach the host.
-#[derive(Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Reflect, Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ScatterOutput {
     /// One entity per placement, carrying [`crate::scatter::ScatterInstance`].
@@ -81,7 +81,7 @@ pub enum ScatterOutput {
 /// A scatter population: WHERE props go. What they look like is the
 /// host's business — the engine spawns entities carrying
 /// [`crate::scatter::ScatterInstance`] and the host dresses them.
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[derive(Reflect, Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct ScatterDef {
     /// Host-facing name for this population. Any string: the engine never
     /// interprets it, it only tags the placements so the host can decide
@@ -157,7 +157,7 @@ pub struct ScatterDef {
 /// map. The engine only carries the declaration and
 /// [`crate::scatter::coverage`]; where the ground's material comes from is
 /// the host's business.
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[derive(Reflect, Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct CoverDef {
     /// Material id the covered ground takes.
     pub material: u32,
@@ -172,7 +172,7 @@ pub struct CoverDef {
     pub full_at: f32,
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[derive(Reflect, Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct ScatterVariantDef {
     #[serde(default = "default_one")]
     pub weight: f32,
@@ -208,7 +208,7 @@ fn d_unit_scale() -> [f32; 2] {
 }
 
 /// One authored CSG primitive in a prefab's local space.
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[derive(Reflect, Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct CsgOpDef {
     /// "box" or "cylinder".
     pub shape: String,
@@ -268,7 +268,7 @@ impl CsgOpDef {
 /// A hand-authored instance of a prefab (or inline ops) in the world —
 /// VoxelPlugin's placeable asset items as level data. Applied after the
 /// procedural op providers, ordered by `priority`.
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[derive(Reflect, Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct PlacementDef {
     /// Name into the level's `prefabs` table...
     #[serde(default)]
@@ -292,7 +292,7 @@ pub struct PlacementDef {
 /// Spawn density driven by a generator field register (`field` op):
 /// gate = clamp(field[slot] * scale + offset, 0, 1). Shared world data —
 /// several spawners (and future consumers) can reference one field.
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[derive(Reflect, Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct FieldDensityDef {
     pub field: u32,
     #[serde(default = "default_one")]
@@ -303,7 +303,7 @@ pub struct FieldDensityDef {
 
 /// Orientation + banding rules shared by prop spawners (VoxelPlugin's
 /// BasicSpawner placement block as data).
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[derive(Reflect, Serialize, Deserialize, Clone, Debug, PartialEq)]
 #[serde(default)]
 pub struct PlacementRulesDef {
     /// Up-ness (surface normal Y) interval: 1 = flat ground. The lower
@@ -336,7 +336,7 @@ impl Default for PlacementRulesDef {
 }
 
 /// Coherent-patch noise for spawn density (clearings in a forest).
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[derive(Reflect, Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct PatchDef {
     pub scale: f32,
     #[serde(default)]
@@ -348,7 +348,7 @@ pub struct PatchDef {
 
 
 /// One material recipe, referenced by the material ids generator ops emit.
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[derive(Reflect, Serialize, Deserialize, Clone, Debug, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum MaterialDef {
     /// Uniform base with grain, optional bands/grime/streaks/moss/emissive.
@@ -415,7 +415,7 @@ pub enum MaterialDef {
     },
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[derive(Reflect, Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct BandDef {
     pub freq: f32,
     pub amp: f32,
@@ -425,19 +425,19 @@ pub struct BandDef {
     pub warp: f32,
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[derive(Reflect, Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct GrimeDef {
     pub tint: [f32; 3],
     pub amount: f32,
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[derive(Reflect, Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct MossDef {
     pub color: [f32; 3],
     pub amount: f32,
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[derive(Reflect, Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct EmissiveDef {
     pub color: [f32; 3],
     #[serde(default = "default_one")]
@@ -452,7 +452,7 @@ pub struct EmissiveDef {
     pub glow: f32,
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[derive(Reflect, Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct CanopyZonesDef {
     /// (start altitude, blend width) where canopy replaces the low color.
     pub canopy: [f32; 2],
@@ -462,7 +462,7 @@ pub struct CanopyZonesDef {
     pub border: f32,
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[derive(Reflect, Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct ZonesDef {
     pub mid: [f32; 2],
     pub high: [f32; 2],
@@ -595,7 +595,15 @@ impl MaterialDef {
 }
 
 /// A complete level description.
-#[derive(Resource, Serialize, Deserialize, Clone, Debug)]
+///
+/// Reflected as well as serialized, and those are not the same job. Serde
+/// is how a level is READ; reflection is how a running one is REACHED —
+/// `world.mutate_resources` addresses a field by path, so a tool can set
+/// `materials[7].base` in a live session and the change goes through
+/// [`apply_level_change`] exactly as a file edit would. Tuning a colour
+/// was a ninety-second relaunch before that.
+#[derive(Reflect, Resource, Serialize, Deserialize, Clone, Debug)]
+#[reflect(Resource)]
 pub struct LevelDef {
     #[serde(default)]
     pub environment: EnvDef,
@@ -620,12 +628,18 @@ pub struct LevelDef {
     /// the game's code, so the engine never looks inside this: it hands
     /// the block to the host's [`crate::planning::HostPlanning`] and
     /// takes back a planner.
+    ///
+    /// Opaque to reflection as well as to the engine. A tool editing this
+    /// level by field path can reach every number the ENGINE interprets
+    /// and none of what it merely carries, which is the same boundary
+    /// stated twice rather than a limitation.
     #[serde(default)]
+    #[reflect(ignore)]
     pub planning: serde_json::Value,
 }
 
 /// When a generator op applies across the LOD range.
-#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
+#[derive(Reflect, Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum LodGateDef {
     /// The op's natural default: structural detail is fine-only, height
@@ -638,7 +652,7 @@ pub enum LodGateDef {
 }
 
 /// Doorway cuts punched through walls.
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[derive(Reflect, Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct DoorDef {
     /// Spacing of candidate doorways along the wall (meters).
     pub cell: f32,
@@ -666,7 +680,7 @@ pub struct DoorDef {
 /// without the engine learning what a region is for. It compares two
 /// numbers against a box; the level decides those numbers mean a desert,
 /// a habitation block, or nothing at all.
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[derive(Reflect, Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct GenEntryDef {
     #[serde(flatten)]
     pub op: GenOpDef,
@@ -695,7 +709,7 @@ impl From<GenOpDef> for GenEntryDef {
 }
 
 /// One generator op — the JSON authoring form of `voxel_core::WorldOp`.
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[derive(Reflect, Serialize, Deserialize, Clone, Debug, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum GenOpDef {
     /// A band-limited FBM heightfield band added to the height register.
@@ -913,7 +927,7 @@ pub enum GenOpDef {
 }
 
 /// Octave shaping for `height_fbm`.
-#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
+#[derive(Reflect, Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum NoiseModeDef {
     #[default]
@@ -1269,6 +1283,17 @@ pub struct WorldSeed(pub u64);
 #[derive(Resource, Clone, Default)]
 pub struct HostPlanner(pub Option<Arc<dyn HostPlanning>>);
 
+/// The definition the running world was last built from.
+///
+/// [`LevelDef`] is what the level SAYS; this is what the world was made
+/// of. They differ for exactly one frame, between something writing the
+/// resource and [`apply_level_change`] catching up — which is the window
+/// the diff lives in. Keeping it separate is what lets any writer at all
+/// drive a partial rebuild, rather than only the file watcher that used to
+/// own both halves.
+#[derive(Resource, Clone)]
+struct AppliedLevel(LevelDef);
+
 /// Watch state for level hot-reload.
 #[derive(Resource)]
 struct LevelSource {
@@ -1291,7 +1316,7 @@ impl Plugin for LevelPlugin {
                 mtime,
                 poll: Timer::from_seconds(0.5, TimerMode::Repeating),
             })
-            .add_systems(Update, reload_level);
+            .add_systems(Update, watch_level_file);
         }
 
         if let Some(host) = &self.planner {
@@ -1300,7 +1325,12 @@ impl Plugin for LevelPlugin {
             }
         }
         app.insert_resource(env_params(&level))
+            .insert_resource(AppliedLevel(level.clone()))
             .insert_resource(level.clone())
+            .register_type::<LevelDef>()
+            // Applies whatever wrote the resource, watcher or not, so it
+            // runs whether or not this level came from a file.
+            .add_systems(Update, apply_level_change)
             .add_plugins(VoxelEnginePlugin { slab: self.slab })
             // World 0 is loaded through the SAME path as any other world.
             // It used to be assembled here, by hand, out of five separate
@@ -1403,16 +1433,18 @@ pub(crate) fn build_world_query(
 /// changes to the generator/ops/LOD topology rebuild the streamed
 /// world in place — including swapping in a completely different world.
 #[allow(clippy::too_many_arguments)]
-fn reload_level(
+/// Poll the watched file and publish what it says into [`LevelDef`].
+///
+/// Writing the resource is the whole job: applying the change is
+/// [`apply_level_change`], which watches the resource rather than the
+/// file. A level edited by any other route — a remote tool poking a value
+/// through reflection, a host's own UI — takes exactly the same path, and
+/// gets exactly the same partial rebuild, without knowing this file exists.
+fn watch_level_file(
     time: Res<Time>,
     mut source: ResMut<LevelSource>,
     mut level: ResMut<LevelDef>,
-    seed: Res<WorldSeed>,
     planner: Res<HostPlanner>,
-    mut rebuild: ResMut<StreamingRebuild>,
-    mut reloaded: MessageWriter<LevelReloaded>,
-    mut worlds: ResMut<crate::Worlds>,
-    mut render: ResMut<voxel_render::RenderWorlds>,
 ) {
     if !source.poll.tick(time.delta()).just_finished() {
         return;
@@ -1443,6 +1475,51 @@ fn reload_level(
             return;
         }
     }
+    *level = new;
+}
+
+/// Does this edit change what the streamed world is MADE of?
+///
+/// Everything a world is built from at `build_world_query` time belongs
+/// here, and the cost of missing one is silent: the level says one thing,
+/// the running planner another, and the edit appears to do nothing at all.
+/// `scatter` was missing exactly that way. Named as a function so the list
+/// can be tested against the schema rather than read carefully.
+///
+/// The generator is checked by the caller, which already has to build the
+/// program to compare it.
+fn needs_regen(new: &LevelDef, old: &LevelDef) -> bool {
+    new.planning != old.planning
+        || new.placements != old.placements
+        || new.prefabs != old.prefabs
+        || new.scatter != old.scatter
+        || new.lod.max_level != old.lod.max_level
+        || new.lod.top_radius != old.lod.top_radius
+        || new.lod.top_y != old.lod.top_y
+}
+
+/// Apply whatever changed in [`LevelDef`] to the running world.
+///
+/// Driven by change detection, not by the file watcher, so every writer of
+/// the resource is served. `applied` is the copy last acted on: the diff
+/// has to be against what the world was BUILT from, and the resource is
+/// already the new value by the time this runs.
+fn apply_level_change(
+    level: Res<LevelDef>,
+    mut applied: ResMut<AppliedLevel>,
+    seed: Res<WorldSeed>,
+    planner: Res<HostPlanner>,
+    mut rebuild: ResMut<StreamingRebuild>,
+    mut reloaded: MessageWriter<LevelReloaded>,
+    // Grouped: the two registries are always touched together, and
+    // clippy caps a system's arguments at seven.
+    (mut worlds, mut render): (ResMut<crate::Worlds>, ResMut<voxel_render::RenderWorlds>),
+) {
+    if !level.is_changed() {
+        return;
+    }
+    let new = level.clone();
+    let level = &applied.0;
     // Only the world this plugin loaded reloads. A portal's far side was
     // loaded from its own file and is nobody's business here.
     let (Some(world), Some(render)) = (worlds.get_mut(0), render.get_mut(0)) else {
@@ -1457,7 +1534,7 @@ fn reload_level(
     world.config.merge_k = new.lod.merge_k;
 
     // Generation-affecting changes rebuild the streamed world.
-    let sun_changed = sun_dir(&new) != sun_dir(level.as_ref());
+    let sun_changed = sun_dir(&new) != sun_dir(level);
     let generator_changed = new.generator != level.generator || sun_changed;
     // Rebuilt whether or not the program changed: the planning stack and
     // the facade below need one either way.
@@ -1465,14 +1542,7 @@ fn reload_level(
     if generator_changed {
         render.program = program;
     }
-    let regen = generator_changed
-        || new.planning != level.planning
-        || new.placements != level.placements
-        || new.prefabs != level.prefabs
-        || new.lod.max_level != level.lod.max_level
-        || new.lod.top_radius != level.lod.top_radius
-        || new.lod.top_y != level.lod.top_y;
-    if regen {
+    if needs_regen(&new, level) || generator_changed {
         world.config.max_level = new.lod.max_level;
         world.config.top_radius = new.lod.top_radius;
         world.config.top_y = new.lod.top_y;
@@ -1485,8 +1555,7 @@ fn reload_level(
 
     // The host owns the scene: it reads the new definition off this
     // message and applies its own camera, lights and clear color.
-    let previous = level.clone();
-    *level = new;
+    let previous = std::mem::replace(&mut applied.0, new);
     reloaded.write(LevelReloaded { previous });
 }
 
@@ -1507,6 +1576,102 @@ mod tests {
     fn shipped(name: &str) -> String {
         let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../levels/");
         std::fs::read_to_string(format!("{path}{name}")).unwrap()
+    }
+
+    /// Every section the world is BUILT from has to force a rebuild.
+    ///
+    /// Asserted per section rather than as one list, because the failure
+    /// this catches is silent: `scatter` was absent for as long as it took
+    /// somebody to edit a population, watch nothing happen, and relaunch
+    /// instead of asking why.
+    #[test]
+    fn an_edit_to_anything_the_world_is_built_from_rebuilds_it() {
+        let planet = LevelDef::from_json(&shipped("planet.json")).unwrap();
+        assert!(
+            !needs_regen(&planet, &planet),
+            "an unchanged level must not rebuild — a repaint would loop"
+        );
+
+        let mut scatter = planet.clone();
+        scatter.scatter[0].per_tile += 1;
+        assert!(needs_regen(&scatter, &planet), "scatter");
+
+        let mut cover = planet.clone();
+        let def = cover
+            .scatter
+            .iter_mut()
+            .find(|s| s.cover.is_some())
+            .expect("planet has a population that paints");
+        def.cover.as_mut().unwrap().full_at *= 2.0;
+        assert!(needs_regen(&cover, &planet), "scatter cover");
+
+        let mut placements = planet.clone();
+        placements.placements.clear();
+        assert!(needs_regen(&placements, &planet), "placements");
+
+        let mut prefabs = planet.clone();
+        prefabs.prefabs.clear();
+        assert!(needs_regen(&prefabs, &planet), "prefabs");
+
+        let mut planning = planet.clone();
+        planning.planning = serde_json::Value::Null;
+        assert!(needs_regen(&planning, &planet), "planning");
+
+        let mut lod = planet.clone();
+        lod.lod.max_level -= 1;
+        assert!(needs_regen(&lod, &planet), "lod.max_level");
+
+        // And the cheap ones must NOT: a material is a table upload, and
+        // rebuilding the streamed world to recolour it would make tuning
+        // a colour cost what it used to.
+        let mut material = planet.clone();
+        material.materials[0] = material.materials[0].clone();
+        assert!(!needs_regen(&material, &planet), "materials");
+        let mut split = planet.clone();
+        split.lod.split_k += 1.0;
+        assert!(!needs_regen(&split, &planet), "lod.split_k");
+    }
+
+    /// A tool has to be able to reach a level's values by field path —
+    /// that is what `world.mutate_resources` does over BRP, and it is the
+    /// difference between tuning a number and relaunching to see it.
+    #[test]
+    fn a_level_can_be_reached_by_field_path() {
+        use bevy::reflect::GetPath;
+        let mut planet = LevelDef::from_json(&shipped("planet.json")).unwrap();
+
+        // The path BRP would address, on the real shipped schema. Found by
+        // VARIANT, not by index: a path only reaches the fields the
+        // material actually has, and which recipe sits at which index is
+        // content.
+        let at = planet
+            .materials
+            .iter()
+            .position(|m| matches!(m, MaterialDef::Surface { .. }))
+            .expect("planet ships a surface material");
+        let path = format!(".materials[{at}].base[0]");
+        let was = *planet
+            .path::<f32>(path.as_str())
+            .expect("a material colour must be reachable by path");
+        *planet.path_mut::<f32>(path.as_str()).unwrap() = was + 0.25;
+        assert_eq!(
+            *planet.path::<f32>(path.as_str()).unwrap(),
+            was + 0.25,
+            "a path write must land on the level, not on a copy of it"
+        );
+
+        // Registered WITH the resource data, or the remote methods cannot
+        // find it however reflectable it is.
+        let mut registry = bevy::reflect::TypeRegistry::new();
+        registry.register::<LevelDef>();
+        assert!(
+            registry
+                .get_type_data::<bevy::ecs::reflect::ReflectResource>(
+                    std::any::TypeId::of::<LevelDef>()
+                )
+                .is_some(),
+            "LevelDef needs #[reflect(Resource)] to be reachable remotely"
+        );
     }
 
     #[test]

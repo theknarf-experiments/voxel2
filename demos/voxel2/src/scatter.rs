@@ -365,24 +365,51 @@ impl Plugin for ScatterPlugin {
 /// launched level was ever decorated. Its trees showed through a portal
 /// and the other level's did not.
 fn adopt_populations(
+    mut commands: Commands,
     worlds: Res<voxel_engine::Worlds>,
+    points: Res<voxel_render::ScatterPoints>,
     mut populations: ResMut<Populations>,
-    mut adopted: Local<std::collections::HashSet<voxel_engine::WorldId>>,
 ) {
     for world in worlds.iter() {
-        if adopted.contains(&world.id) {
-            continue;
-        }
         let Some(ctx) = world.query.host_ctx::<WorldCtx>() else {
             continue;
         };
-        let found = ctx.populations.lock().unwrap().take();
-        if let Some(found) = found {
-            populations.0.extend(found.0.into_iter().map(|mut p| {
-                p.world = world.id;
-                p
-            }));
-            adopted.insert(world.id);
-        }
+        // Having something to take IS the signal, so there is no "already
+        // adopted" flag: a hot reload rebuilds the world query and leaves
+        // a fresh set here, and a flag meant the old planner's handles
+        // stayed in the list forever, holding sinks nothing would ever
+        // fill again. Editing a population then did nothing at all.
+        let Some(found) = ctx.populations.lock().unwrap().take() else {
+            continue;
+        };
+        retire_populations(&mut commands, &points, &mut populations, world.id);
+        populations.0.extend(found.0.into_iter().map(|mut p| {
+            p.world = world.id;
+            p
+        }));
     }
+}
+
+/// Drop one world's populations, taking their entities and points with
+/// them. What replaces them may not have the same classes at all.
+fn retire_populations(
+    commands: &mut Commands,
+    points: &voxel_render::ScatterPoints,
+    populations: &mut Populations,
+    world: voxel_engine::WorldId,
+) {
+    populations.0.retain_mut(|population| {
+        if population.world != world {
+            return true;
+        }
+        for entities in population.spawned.values_mut() {
+            for entity in entities.drain(..) {
+                commands.entity(entity).despawn();
+            }
+        }
+        // A class the new level dropped would otherwise keep drawing the
+        // old planner's last published points forever.
+        points.set_class(world, &population.class, Vec::new());
+        false
+    });
 }

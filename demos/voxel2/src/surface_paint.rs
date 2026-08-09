@@ -184,9 +184,17 @@ type CoverRaster = (Vec<u32>, Vec<(u32, f32)>);
 fn repaint(
     worlds: Res<voxel_engine::Worlds>,
     sources: voxel_engine::StreamSourceQuery,
+    mut reloaded: MessageReader<voxel_engine::level::LevelReloaded>,
     mut render: ResMut<voxel_render::RenderWorlds>,
     mut painted: Local<HashMap<voxel_engine::WorldId, Painted>>,
 ) {
+    // The area pass is cached against the camera's position, and a level
+    // edit does not move the camera. Nothing else here would notice that
+    // the population it swept no longer exists.
+    if !reloaded.is_empty() {
+        reloaded.clear();
+        painted.clear();
+    }
     let Ok(source) = sources.single() else {
         return;
     };
