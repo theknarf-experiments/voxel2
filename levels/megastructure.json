@@ -280,7 +280,13 @@
     },
     {
       "type": "coarse_solid",
-      "material": 2
+      "material": 2,
+      "region": [
+        0.0,
+        0.427,
+        0.0,
+        0.444
+      ]
     },
     {
       "type": "lattice_y",
@@ -401,6 +407,16 @@
       ]
     },
     {
+      "type": "coarse_solid",
+      "material": 2,
+      "region": [
+        0.0,
+        0.427,
+        0.444,
+        0.595
+      ]
+    },
+    {
       "type": "lattice_y",
       "spacing": 26.0,
       "region": [
@@ -461,6 +477,16 @@
       ]
     },
     {
+      "type": "coarse_solid",
+      "material": 2,
+      "region": [
+        0.0,
+        0.427,
+        0.595,
+        1.0
+      ]
+    },
+    {
       "type": "lattice_y",
       "spacing": 12.0,
       "region": [
@@ -511,6 +537,16 @@
         0.427,
         0.595,
         1.0
+      ]
+    },
+    {
+      "type": "coarse_solid",
+      "material": 2,
+      "region": [
+        0.427,
+        0.565,
+        0.0,
+        0.444
       ]
     },
     {
@@ -572,6 +608,7 @@
     {
       "type": "lattice_y",
       "spacing": 195.0,
+      "lod": "all",
       "region": [
         0.427,
         0.565,
@@ -583,6 +620,7 @@
       "type": "slabs_y",
       "half_thickness": 6.0,
       "material": 7,
+      "lod": "all",
       "region": [
         0.427,
         0.565,
@@ -599,6 +637,7 @@
         12.0
       ],
       "material": 7,
+      "lod": "all",
       "region": [
         0.427,
         0.565,
@@ -629,6 +668,7 @@
       "half_height": 3.0,
       "reach": 26.0,
       "material": 7,
+      "lod": "all",
       "region": [
         0.427,
         0.565,
@@ -639,6 +679,7 @@
     {
       "type": "lattice_y",
       "spacing": 150.0,
+      "lod": "all",
       "region": [
         0.427,
         0.565,
@@ -650,6 +691,7 @@
       "type": "slabs_y",
       "half_thickness": 74.0,
       "material": 8,
+      "lod": "all",
       "region": [
         0.427,
         0.565,
@@ -680,11 +722,22 @@
       "half_height": 1.6,
       "reach": 30.0,
       "material": 8,
+      "lod": "all",
       "region": [
         0.427,
         0.565,
         0.595,
         1.0
+      ]
+    },
+    {
+      "type": "coarse_solid",
+      "material": 2,
+      "region": [
+        0.565,
+        1.0,
+        0.0,
+        0.444
       ]
     },
     {
@@ -778,6 +831,16 @@
       ]
     },
     {
+      "type": "coarse_solid",
+      "material": 2,
+      "region": [
+        0.565,
+        1.0,
+        0.444,
+        0.595
+      ]
+    },
+    {
       "type": "lattice_y",
       "spacing": 42.0,
       "region": [
@@ -843,6 +906,16 @@
         1.0,
         0.444,
         0.595
+      ]
+    },
+    {
+      "type": "coarse_solid",
+      "material": 2,
+      "region": [
+        0.565,
+        1.0,
+        0.595,
+        1.0
       ]
     },
     {

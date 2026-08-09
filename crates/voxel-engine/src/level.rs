@@ -800,7 +800,17 @@ pub enum GenOpDef {
         material: u32,
     },
     /// Establish the structural Y lattice used by slabs/holes/walls/beams.
-    LatticeY { spacing: f32 },
+    ///
+    /// Carries the same `lod` gate as everything that reads it: a
+    /// district whose storeys are hundreds of metres apart can afford to
+    /// exist at coarse LOD, and its slabs cannot do that without the
+    /// lattice that puts them at a height. Without it `fy` stays at `p.y`
+    /// and every floor in the world collapses onto y = 0.
+    LatticeY {
+        spacing: f32,
+        #[serde(default)]
+        lod: LodGateDef,
+    },
     /// Floor slabs on the lattice.
     SlabsY {
         half_thickness: f32,
@@ -1003,8 +1013,8 @@ impl GenOpDef {
             GenOpDef::CoarseSolid { material } => WorldOp::new(WOP_COARSE_SOLID)
                 .flags(WOP_FLAG_COARSE_ONLY)
                 .material(material),
-            GenOpDef::LatticeY { spacing } => WorldOp::new(WOP_LATTICE_Y)
-                .flags(WOP_FLAG_FINE_ONLY)
+            GenOpDef::LatticeY { spacing, lod } => WorldOp::new(WOP_LATTICE_Y)
+                .flags(gate_flags(lod, WOP_FLAG_FINE_ONLY))
                 .p0([spacing, 0.0, 0.0, 0.0]),
             GenOpDef::SlabsY {
                 half_thickness,

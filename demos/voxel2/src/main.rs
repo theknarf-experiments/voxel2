@@ -172,13 +172,16 @@ fn scene_for(level_path: &std::path::Path) -> Scene {
             // concretes came out as one flat blue-grey wash, because a
             // bright uniform ambient both removes the shading AND lifts
             // every albedo toward the same tonemapped value.
-            sun_illuminance: Some(1_250.0),
+            sun_illuminance: Some(2_100.0),
             sun_shadows: false,
             sun_from: Some(Vec3::new(0.18, 1.0, 0.3)),
             // Ambient is now only bounce: dim, and desaturated, so the
             // materials supply the colour instead of the light doing it.
+            // Enough ambient to keep the VERTICALS readable: an overhead
+            // fill only grazes a column, and a hall of columns lit by
+            // nothing else is a black frame with a bright floor.
             ambient_color: Color::srgb(0.52, 0.57, 0.68),
-            ambient_brightness: 520.0,
+            ambient_brightness: 1_050.0,
             // Haze, and load-bearing rather than decorative. The engine
             // hard-cuts disagreeing SDFs across LOD on purpose — blending
             // them makes phantom surfaces — and the design's answer to the
