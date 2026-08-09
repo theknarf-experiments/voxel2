@@ -3,7 +3,7 @@
 //! Run from the workspace root: `mise run genops`. A guard test in
 //! voxel-render fails when the spliced text goes stale.
 
-use voxel_core::layout::{wgsl_material_accessors, wgsl_struct, CHUNK_PARAMS};
+use voxel_core::layout::{wgsl_material_accessors, wgsl_struct, wgsl_texel_index, CHUNK_PARAMS};
 use voxel_core::opgen::{wgsl_arms, wgsl_column_arms, wgsl_helpers, Ctx};
 
 const HELPERS_BEGIN: &str = "// GENOPS HELPERS BEGIN";
@@ -18,6 +18,8 @@ const COLUMN_END: &str = "// GENOPS COLUMN ARMS END";
 /// per-chunk uniform, and the material recipes' named slot accessors.
 const PARAMS_BEGIN: &str = "// GENMAT CHUNKPARAMS BEGIN";
 const PARAMS_END: &str = "// GENMAT CHUNKPARAMS END";
+const TEXEL_BEGIN: &str = "// GENMAT TEXELORDER BEGIN";
+const TEXEL_END: &str = "// GENMAT TEXELORDER END";
 const MAT_BEGIN: &str = "// GENMAT ACCESSORS BEGIN";
 const MAT_END: &str = "// GENMAT ACCESSORS END";
 
@@ -101,6 +103,7 @@ fn main() {
     // interpreter in it at all.
     let draw = "crates/voxel-render/src/shaders/voxel_chunk_draw.wgsl";
     let text = std::fs::read_to_string(draw).unwrap_or_else(|e| panic!("{draw}: {e}"));
+    let text = splice(&text, TEXEL_BEGIN, TEXEL_END, &wgsl_texel_index(), "");
     let text = splice(&text, MAT_BEGIN, MAT_END, &wgsl_material_accessors(), "");
     std::fs::write(draw, text).unwrap();
     println!("spliced {draw}");

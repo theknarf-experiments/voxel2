@@ -89,6 +89,17 @@ struct EnvParams {
 // lookup either happens here or the map may as well be a sixteenth of the
 // size.
 const SURFACE_MAP_THRESHOLDS: u32 = 8u;
+// Texel order, generated from `voxel_core::layout` so it cannot disagree
+// with the writer. Run `mise run genops` after changing it.
+// GENMAT TEXELORDER BEGIN
+const TEXEL_TILE: u32 = 8u;
+fn surface_texel_index(size: u32, x: u32, z: u32) -> u32 {
+    let tiles_per_row = size / TEXEL_TILE;
+    let tile = (z / TEXEL_TILE) * tiles_per_row + (x / TEXEL_TILE);
+    return tile * TEXEL_TILE * TEXEL_TILE + (z % TEXEL_TILE) * TEXEL_TILE
+        + (x % TEXEL_TILE);
+}
+// GENMAT TEXELORDER END
 const SURFACE_MAP_HEADER: u32 = 264u;
 @group(2) @binding(2) var<storage, read> surface_map: array<u32>;
 
@@ -110,6 +121,17 @@ fn painted_material(world_xz: vec2<f32>) -> u32 {
     if (size == 0u) {
         return 0u;
     }
+    // Nothing painted can apply to a chunk finer than the coarsest thing
+    // the map holds, and that covers the NEAREST chunks — which is most of
+    // the screen. Tested before the texel read, which is a random access
+    // into 16 MB and the expensive half: the whole lookup measured 1.1 ms
+    // a frame, and near chunks were paying all of it to be told no.
+    //
+    // `min_voxel_m` is the floor over every material; the per-material
+    // threshold is still checked below, once a texel has named one.
+    if (chunk.offset.w < bitcast<f32>(surface_map[base + 4u])) {
+        return 0u;
+    }
     let texel_m = bitcast<f32>(surface_map[base + 1u]);
     let origin = vec2<f32>(bitcast<f32>(surface_map[base + 2u]),
                            bitcast<f32>(surface_map[base + 3u]));
@@ -117,7 +139,7 @@ fn painted_material(world_xz: vec2<f32>) -> u32 {
     if (t.x < 0.0 || t.y < 0.0 || u32(t.x) >= size || u32(t.y) >= size) {
         return 0u;
     }
-    let idx = u32(t.y) * size + u32(t.x);
+    let idx = surface_texel_index(size, u32(t.x), u32(t.y));
     let painted = (surface_map[base + SURFACE_MAP_HEADER + idx / 4u] >> ((idx % 4u) * 8u)) & 0xFFu;
     // The scale the paint takes over at is PER MATERIAL, because it is a
     // property of the thing painted, not of the map: a road's carve stops

@@ -3,7 +3,7 @@
 //! generated arms must be valid, well-typed WGSL. Run `mise run genops`
 //! after editing the op table to refresh the shaders.
 
-use voxel_core::layout::{wgsl_material_accessors, wgsl_struct, CHUNK_PARAMS};
+use voxel_core::layout::{wgsl_material_accessors, wgsl_struct, wgsl_texel_index, CHUNK_PARAMS};
 use voxel_core::opgen::{wgsl_arms, wgsl_column_arms, wgsl_helpers, Ctx};
 
 /// (path, helper dialect, arms ctx, has a separate column block).
@@ -201,5 +201,14 @@ fn spliced_layout_regions_match_the_tables() {
         ),
         wgsl_material_accessors(),
         "material accessors stale — run `mise run genops`"
+    );
+    assert_eq!(
+        region(
+            &at("src/shaders/voxel_chunk_draw.wgsl"),
+            "// GENMAT TEXELORDER BEGIN",
+            "// GENMAT TEXELORDER END"
+        ),
+        wgsl_texel_index(),
+        "texel order stale — run `mise run genops`"
     );
 }

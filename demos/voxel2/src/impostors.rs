@@ -225,15 +225,10 @@ fn sync_impostor_markers(
 struct ImpostorVertex {
     pos: [f32; 3],
     tip: f32,
-    /// Which species silhouette this vertex belongs to. The mesh carries
-    /// both; the vertex shader collapses the one the instance is not.
-    species: f32,
 }
 
-/// Two crossed silhouettes per species: a cone for conifers, a diamond
-/// for broadleaves. Both are in the mesh and the vertex shader collapses
-/// whichever the instance is not, so one draw call renders two species
-/// without an alpha cutout or a texture.
+/// One crossed silhouette, shaped per instance: a cone for conifers, a
+/// diamond for broadleaves, from the same four points.
 ///
 /// Silhouettes rather than rectangles: a rectangle reads as a billboard
 /// nobody finished, and at impostor range the outline is the only thing
@@ -241,26 +236,31 @@ struct ImpostorVertex {
 fn build_impostor() -> (Vec<ImpostorVertex>, Vec<u32>) {
     let mut verts: Vec<ImpostorVertex> = Vec::new();
     let mut indices = Vec::new();
-    // (u, v) outlines in unit space: x across, y up.
-    let cone: &[(f32, f32)] = &[(-1.0, 0.0), (1.0, 0.0), (0.0, 1.0)];
-    let diamond: &[(f32, f32)] = &[(0.0, 0.0), (-1.0, 0.5), (0.0, 1.0), (1.0, 0.5)];
-    for (species, outline) in [(0.0f32, cone), (1.0, diamond)] {
-        for axis in 0..2u32 {
-            let (sx, sz) = if axis == 0 { (1.0, 0.0) } else { (0.0, 1.0) };
-            let base = verts.len() as u32;
-            for &(u, v) in outline {
-                verts.push(ImpostorVertex {
-                    pos: [u * sx, v, u * sz],
-                    tip: v,
-                    species,
-                });
-            }
-            // Fan, and the same fan reversed: a crossed silhouette has to
-            // be visible from behind without disabling culling globally.
-            for i in 1..outline.len() as u32 - 1 {
-                indices.extend([base, base + i, base + i + 1]);
-                indices.extend([base, base + i + 1, base + i]);
-            }
+    // ONE outline for both species, a diamond: bottom, waist, top, waist.
+    // A conifer is the same four points with the waist dropped to the
+    // base, which the vertex shader does per instance.
+    //
+    // The mesh used to carry both silhouettes and collapse the one an
+    // instance was not, which meant shading fourteen vertices to draw
+    // six. At half a million trees that is several million vertex
+    // invocations a frame thrown away, and impostor cost measured LINEAR
+    // in instance count — the tell that it is per-instance work rather
+    // than fill.
+    let outline: [(f32, f32); 4] = [(0.0, 0.0), (-1.0, 0.5), (0.0, 1.0), (1.0, 0.5)];
+    for axis in 0..2u32 {
+        let (sx, sz) = if axis == 0 { (1.0, 0.0) } else { (0.0, 1.0) };
+        let base = verts.len() as u32;
+        for &(u, v) in &outline {
+            verts.push(ImpostorVertex {
+                pos: [u * sx, v, u * sz],
+                tip: v,
+            });
+        }
+        // Fan, and the same fan reversed: a crossed silhouette has to be
+        // visible from behind without disabling culling globally.
+        for i in 1..outline.len() as u32 - 1 {
+            indices.extend([base, base + i, base + i + 1]);
+            indices.extend([base, base + i + 1, base + i]);
         }
     }
     (verts, indices)
@@ -391,11 +391,6 @@ fn init_impostor_pipeline(
                             format: VertexFormat::Float32,
                             offset: 12,
                             shader_location: 1,
-                        },
-                        VertexAttribute {
-                            format: VertexFormat::Float32,
-                            offset: 16,
-                            shader_location: 4,
                         },
                     ],
                 },

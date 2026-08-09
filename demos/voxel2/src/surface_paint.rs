@@ -616,7 +616,7 @@ fn stroke(
 
 /// Write one texel's material id into the packed 4-per-word raster.
 fn put(texels: &mut [u32], x: u32, z: u32, material: u32) {
-    let idx = (z * MAP_SIZE + x) as usize;
+    let idx = voxel_core::layout::texel_index(MAP_SIZE, x, z) as usize;
     let word = &mut texels[idx / 4];
     let shift = (idx % 4) * 8;
     *word = (*word & !(0xFFu32 << shift)) | ((material & 0xFF) << shift);

@@ -30,10 +30,9 @@ struct ImpostorEnv {
 struct VsIn {
     // Quad vertex: x/z in -1..1 across the plane, y in 0..1 up it.
     @location(0) pos: vec3<f32>,
-    // 0 at the base, 1 at the crown.
+    // 0 at the base, 1 at the crown. The two waist vertices are at 0.5,
+    // which is what a conifer drops to the base.
     @location(1) tip: f32,
-    // 0 = conifer outline, 1 = broadleaf. The mesh holds both.
-    @location(4) species: f32,
     @location(2) inst_pos: vec3<f32>,
     @location(3) inst_hash: u32,
 }
@@ -51,21 +50,18 @@ fn vertex(in: VsIn) -> VsOut {
     let h03 = f32((in.inst_hash >> 16u) & 0xFFu) / 255.0;
     let shadow = f32((in.inst_hash >> 24u) & 0xFFu) / 255.0;
 
-    // Collapse the silhouette this instance is not. Cheaper than two
-    // draw calls and keeps the whole forest in one instance buffer.
+    // The silhouette IS the species: a diamond's waist at half height, or
+    // dropped to the base to make a cone. One mesh, no collapsed geometry
+    // — the version that carried both outlines shaded fourteen vertices
+    // per tree to draw six of them.
     let is_broadleaf = step(0.5, h03);
-    if (abs(in.species - is_broadleaf) > 0.5) {
-        var dead: VsOut;
-        dead.clip = vec4<f32>(0.0, 0.0, 2.0, 1.0);
-        dead.color = vec3<f32>(0.0);
-        dead.cam_rel = vec3<f32>(0.0);
-        return dead;
-    }
+    let tip = select(select(0.0, in.tip, in.tip != 0.5), in.tip, is_broadleaf > 0.5);
+    var local = vec3<f32>(in.pos.x, tip, in.pos.z);
 
     let yaw = h01 * 6.2831853;
     let c = cos(yaw);
     let s = sin(yaw);
-    var p = vec3<f32>(in.pos.x * c - in.pos.z * s, in.pos.y, in.pos.x * s + in.pos.z * c);
+    var p = vec3<f32>(local.x * c - local.z * s, local.y, local.x * s + local.z * c);
 
     // Size from the hash: crown width scales with height so a big tree is
     // not a stretched small one.
@@ -85,7 +81,7 @@ fn vertex(in: VsIn) -> VsOut {
     // A slow lean, so a forest is not a field of identical stamps.
     let t = globals.time;
     let phase = in.inst_pos.x * 0.05 + in.inst_pos.z * 0.037 + h03 * 6.28;
-    p.x += sin(t * 0.5 + phase) * in.tip * in.tip * height * 0.02;
+    p.x += sin(t * 0.5 + phase) * tip * tip * height * 0.02;
 
     let cam_rel = cam_rel_root + p;
     let view_space = (view.view_from_world * vec4<f32>(cam_rel, 0.0)).xyz;
@@ -101,7 +97,7 @@ fn vertex(in: VsIn) -> VsOut {
     // species — the whole reason the canopy colours are now taken from
     // them rather than authored again.
     let canopy = mix(env.canopy_a.rgb, env.canopy_b.rgb, is_broadleaf);
-    let color = canopy * mix(env.base.x, 1.0, in.tip) * (0.45 + 0.55 * shadow);
+    let color = canopy * mix(env.base.x, 1.0, tip) * (0.45 + 0.55 * shadow);
 
     var out: VsOut;
     out.clip = view.clip_from_view * vec4<f32>(view_space, 1.0);

@@ -97,6 +97,73 @@ pub fn wgsl_struct(name: &str, fields: &[Field]) -> String {
     out
 }
 
+// --- surface map texel order --------------------------------------------------
+
+/// Texels per side of a surface-map tile.
+///
+/// The map is stored in tiles rather than rows because it is read PER
+/// FRAGMENT and neighbouring fragments land on neighbouring texels — which
+/// row-major puts a whole row apart vertically (4 KB at 4096 wide), so a
+/// screen-space quad straddles cache lines every time it moves down one
+/// pixel. An 8x8 tile is 64 bytes: one line, one neighbourhood. Measured
+/// 0.7 ms a frame.
+pub const TEXEL_TILE: u32 = 8;
+
+/// Where a texel lives in the raster. `size` is the map's width in texels
+/// and must be a multiple of [`TEXEL_TILE`].
+pub fn texel_index(size: u32, x: u32, z: u32) -> u32 {
+    let tiles_per_row = size / TEXEL_TILE;
+    let tile = (z / TEXEL_TILE) * tiles_per_row + (x / TEXEL_TILE);
+    tile * TEXEL_TILE * TEXEL_TILE + (z % TEXEL_TILE) * TEXEL_TILE + (x % TEXEL_TILE)
+}
+
+/// The shader's twin of [`texel_index`], generated so the two orders
+/// cannot disagree. They fail SILENTLY if they do: the map still reads,
+/// it just reads somewhere else, and the world is painted with a scramble
+/// of its own data.
+pub fn wgsl_texel_index() -> String {
+    format!(
+        "const TEXEL_TILE: u32 = {TEXEL_TILE}u;\n\
+         fn surface_texel_index(size: u32, x: u32, z: u32) -> u32 {{\n\
+         \x20   let tiles_per_row = size / TEXEL_TILE;\n\
+         \x20   let tile = (z / TEXEL_TILE) * tiles_per_row + (x / TEXEL_TILE);\n\
+         \x20   return tile * TEXEL_TILE * TEXEL_TILE + (z % TEXEL_TILE) * TEXEL_TILE\n\
+         \x20       + (x % TEXEL_TILE);\n\
+         }}\n"
+    )
+}
+
+#[cfg(test)]
+mod texel_tests {
+    use super::*;
+
+    /// Every texel of a small map gets a distinct slot, and the slots fill
+    /// the map exactly. A tiling that overlaps or leaves holes is the
+    /// failure that would not announce itself.
+    #[test]
+    fn the_tiled_order_is_a_permutation() {
+        let size = 32;
+        let mut seen = vec![false; (size * size) as usize];
+        for z in 0..size {
+            for x in 0..size {
+                let i = texel_index(size, x, z) as usize;
+                assert!(!seen[i], "({x},{z}) collides at {i}");
+                seen[i] = true;
+            }
+        }
+        assert!(seen.iter().all(|&s| s), "the order leaves holes");
+    }
+
+    /// The point of the order: a row of eight neighbours is contiguous.
+    #[test]
+    fn a_tile_is_one_run_of_memory() {
+        let base = texel_index(4096, 64, 64);
+        for x in 0..TEXEL_TILE {
+            assert_eq!(texel_index(4096, 64 + x, 64), base + x);
+        }
+    }
+}
+
 // --- material recipes ---------------------------------------------------------
 
 /// Which of the eight `vec4`s a parameter lives in. `head` is the kind
