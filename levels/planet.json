@@ -640,7 +640,7 @@
   "scatter": [
     {
       "class": "tree",
-      "per_tile": 60,
+      "per_tile": 200,
       "altitude": [
         3.0,
         340.0
@@ -1010,8 +1010,8 @@
       "class": "treecover",
       "output": "points",
       "tile_m": 64.0,
-      "radius_tiles": 40,
-      "per_tile": 90,
+      "radius_tiles": 80,
+      "per_tile": 900,
       "altitude": [
         3.0,
         340.0

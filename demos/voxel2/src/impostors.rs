@@ -235,7 +235,7 @@ impl Default for ImpostorStyle {
             trunk: Vec4::new(0.0052, 0.0068, 0.0026, 0.0),
             // Real prop trees cover the first 120 m; impostors take over
             // across the next 60 and run to 4 km.
-            size: Vec4::new(120.0, 180.0, 4000.0, 7.0),
+            size: Vec4::new(85.0, 150.0, 4000.0, 7.0),
         }
     }
 }
