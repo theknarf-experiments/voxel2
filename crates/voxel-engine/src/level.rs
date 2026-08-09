@@ -143,6 +143,33 @@ pub struct ScatterDef {
     /// position and a hash, and the host decides what it draws there.
     #[serde(default)]
     pub variants: Vec<ScatterVariantDef>,
+    /// What this population becomes once it is too far to draw one by one.
+    #[serde(default)]
+    pub cover: Option<CoverDef>,
+}
+
+/// A population painted onto the ground instead of drawn.
+///
+/// The third thing a scattered population can be, after an entity and a
+/// point: past some distance an instance is smaller than a pixel, and a
+/// million of them are a colour the ground is. Same trade as a road, which
+/// stops being a carve and becomes a material — see the host's surface
+/// map. The engine only carries the declaration and
+/// [`crate::scatter::coverage`]; where the ground's material comes from is
+/// the host's business.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct CoverDef {
+    /// Material id the covered ground takes.
+    pub material: u32,
+    /// Distance the paint takes over at — where the host stopped drawing
+    /// the instances. Both numbers are the level's, so the handover is
+    /// authored as one decision rather than two that must be kept equal.
+    pub from_m: f32,
+    /// Coverage at which the ground is solidly this material; below it the
+    /// paint thins. A population's edge is a thinning of instances, not a
+    /// contour line, and paint that ends on one reads as a painted shape.
+    #[serde(default = "d_cover_full_at")]
+    pub full_at: f32,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -169,6 +196,9 @@ fn d_scatter_radius() -> i32 {
 }
 fn d_detail_vs() -> f32 {
     4.0
+}
+fn d_cover_full_at() -> f32 {
+    1.0
 }
 fn d_any_altitude() -> [f32; 2] {
     [f32::MIN, f32::MAX]

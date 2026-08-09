@@ -183,6 +183,23 @@ pub struct PopulationHandle {
     seen_generation: u64,
 }
 
+/// The material of the region a population's `"instance:member"` gate
+/// names, or `None` for one that grows anywhere.
+///
+/// A region IS a generator band, so this resolves to the same material id
+/// the ground is painted with — which is what lets anything that draws the
+/// population where its instances are not (the far-field ground paint) ask
+/// the same question the placer asked.
+pub fn gate_material(
+    def: &ScatterDef,
+    biome_tables: &[(String, Vec<(String, u32)>)],
+) -> Option<u32> {
+    let reference = def.gate.as_ref()?;
+    let (instance, name) = reference.rsplit_once(':')?;
+    let table = biome_tables.iter().find(|(n, _)| n == instance)?;
+    table.1.iter().find(|(n, _)| n == name).map(|(_, m)| *m)
+}
+
 /// Register one layer per scatter class and return their top dependencies.
 pub fn register(
     graph: &mut LayerGraph,
@@ -193,11 +210,7 @@ pub fn register(
     let mut tops = Vec::new();
     let mut handles = Vec::new();
     for def in &level.scatter {
-        let biome = def.gate.as_ref().and_then(|reference| {
-            let (instance, name) = reference.rsplit_once(':')?;
-            let table = biome_tables.iter().find(|(n, _)| n == instance)?;
-            table.1.iter().find(|(n, _)| n == name).map(|(_, m)| *m)
-        });
+        let biome = gate_material(def, biome_tables);
         let sink = Sink::default();
         let population = ScatterPopulation {
             def: def.clone(),

@@ -17,6 +17,13 @@
 //!
 //! The raster follows the camera and is rebuilt when it leaves the middle
 //! of it — on the order of once per kilometre, never per frame.
+//!
+//! The same trade applies to a scattered population, one step further out.
+//! A tree is drawn as a mesh, then as an impostor, and past the range where
+//! even an impostor is a couple of pixels it is not a thing standing on the
+//! ground either — it is what colour the ground IS. So the third tier is
+//! painted here too, from [`voxel_engine::scatter::coverage`] rather than
+//! from ribbons: an area, not a line.
 
 use bevy::prelude::*;
 use std::collections::HashMap;
@@ -76,19 +83,62 @@ impl Plugin for SurfacePaintPlugin {
     }
 }
 
-/// The voxel size at which the paint takes over from a levelled ribbon's
-/// own surface, derived so the two cannot drift apart.
+/// The first LOD level whose chunks are never shown nearer than `view_m` —
+/// where paint has to take over from whoever was drawing the real thing
+/// out to there.
 ///
-/// The LOD field shows level L over `[split_k·E_L, 2·split_k·E_L)`, so the
-/// level that begins at the ribbon layer's view distance is the first one
-/// that layer no longer covers — exactly where the paint must start.
-fn levelled_handover_voxel_m(lod: &voxel_engine::streaming::LodConfig) -> f32 {
-    let view = f64::from(crate::ribbons::RIBBON_NEAR_VIEW_M);
+/// The LOD field shows level L over `[split_k·E_L, 2·split_k·E_L)`, so this
+/// is the first level that drawer no longer covers. The shader tests a
+/// VOXEL SIZE and the host that keeps drawing has to know a DISTANCE; both
+/// come from this one level, so the handover cannot be in two places.
+fn handover_level(
+    lod: &voxel_engine::streaming::LodConfig,
+    view_m: f32,
+) -> Option<voxel_core::ChunkKey> {
     (0..=lod.max_level)
         .map(|level| voxel_core::ChunkKey::new(level, IVec3::ZERO))
-        .find(|key| lod.split_k * key.edge_m() >= view)
-        .map_or(PAINT_FROM_VOXEL_M, |key| key.voxel_size_m() as f32)
+        .find(|key| lod.split_k * key.edge_m() >= f64::from(view_m))
 }
+
+fn handover_voxel_m(lod: &voxel_engine::streaming::LodConfig, view_m: f32) -> f32 {
+    handover_level(lod, view_m).map_or(PAINT_FROM_VOXEL_M, |key| key.voxel_size_m() as f32)
+}
+
+/// The distance the paint actually begins at, which is further out than
+/// the level asked for: paint is a per-CHUNK decision, so it can only
+/// start where a whole LOD level does. Whoever draws the real thing has to
+/// reach here, or a ring of ground shows neither.
+pub fn cover_starts_m(lod: &voxel_engine::streaming::LodConfig, view_m: f32) -> f32 {
+    handover_level(lod, view_m).map_or(view_m, |key| (lod.split_k * key.edge_m()) as f32)
+}
+
+/// Texels per coverage sample in the area pass.
+///
+/// Coverage is a slow field — a wood is hundreds of metres across — and it
+/// is only ever read kilometres away, so sampling it per 16 m texel spends
+/// sixteen noise evaluations on detail no pixel can resolve (1.5 s over
+/// the map, against 0.1 s at this stride). The two things that must stay
+/// per texel are cheap: the sample grid is interpolated between corners,
+/// so a block boundary is not an edge, and the dither is a hash.
+const COVER_STRIDE: u32 = 4;
+
+/// One world's last raster, kept so the cheap pass can run without the
+/// expensive one.
+struct Painted {
+    /// Where the raster is anchored — NOT the camera. A repaint driven by
+    /// the plan changing does not re-sweep the area pass, and a raster
+    /// whose origin moved out from under a kept cover layer would put the
+    /// forest somewhere the forest is not.
+    origin: Vec2,
+    generation: u64,
+    cover: Vec<u32>,
+    coarse_from: Vec<(u32, f32)>,
+    /// A sweep running for a new anchor, and the anchor it is for.
+    sweeping: Option<(Vec2, bevy::tasks::Task<CoverRaster>)>,
+}
+
+/// What the area pass produces.
+type CoverRaster = (Vec<u32>, Vec<(u32, f32)>);
 
 /// Repaint every loaded world's ground map.
 ///
@@ -101,7 +151,7 @@ fn repaint(
     worlds: Res<voxel_engine::Worlds>,
     sources: voxel_engine::StreamSourceQuery,
     mut render: ResMut<voxel_render::RenderWorlds>,
-    mut painted: Local<HashMap<voxel_engine::WorldId, (Vec2, u64)>>,
+    mut painted: Local<HashMap<voxel_engine::WorldId, Painted>>,
 ) {
     let Ok(source) = sources.single() else {
         return;
@@ -115,7 +165,7 @@ fn repaint_world(
     world: &voxel_engine::World,
     eye: Vec3,
     render: &mut voxel_render::RenderWorlds,
-    painted: &mut HashMap<voxel_engine::WorldId, (Vec2, u64)>,
+    painted: &mut HashMap<voxel_engine::WorldId, Painted>,
 ) {
     let Some(map) = render.get_mut(world.id).map(|w| &mut w.surface_map) else {
         return;
@@ -125,23 +175,11 @@ fn repaint_world(
         return;
     };
     let eye = Vec2::new(eye.x, eye.z);
-    // Repaint when the camera leaves the middle of the raster OR when the
-    // plan under it changed. Camera movement alone is not enough: at
-    // startup nothing is resident yet, so the first paint would find an
-    // empty world and never look again.
-    let generation = ctx.ribbons.generation();
-    let last = painted.get(&world.id).copied();
-    let moved = last.is_none_or(|(at, _)| at.distance(eye) > REPAINT_M);
-    if !moved && last.is_some_and(|(_, seen)| seen == generation) {
-        return;
-    }
-    painted.insert(world.id, (eye, generation));
-
     let span = MAP_SIZE as f32 * TEXEL_M;
-    let origin = eye - Vec2::splat(span * 0.5);
-    let mut texels = vec![0u32; (MAP_SIZE * MAP_SIZE / 4) as usize];
-    let mut painted = 0usize;
-    let mut coarse_from: Vec<(u32, f32)> = Vec::new();
+    let generation = ctx.ribbons.generation();
+    // Where the raster would be anchored if it were rebuilt now.
+    let want = eye - Vec2::splat(span * 0.5);
+
     // Read the plan, not a render buffer: these carry the material the
     // level asked for and whether they are ground at all. Introspection,
     // so the empty distance is not charged to `reads_missed`.
@@ -150,6 +188,52 @@ fn repaint_world(
     let Some(planner) = world.query.planner_as::<crate::planning::StackPlanner>() else {
         return;
     };
+
+    // `u64::MAX` is "never painted": a real ribbon generation counts up
+    // from zero, so it cannot collide, and the first frame is then a move
+    // without having to special-case one.
+    let state = painted.entry(world.id).or_insert_with(|| Painted {
+        origin: want,
+        generation: u64::MAX,
+        cover: vec![0; (MAP_SIZE * MAP_SIZE / 4) as usize],
+        coarse_from: Vec::new(),
+        sweeping: None,
+    });
+
+    // The area pass only depends on the generator and where the raster is
+    // anchored, and a ribbon arriving changes neither, so it is swept only
+    // on a move — and off the main thread, because it is a fifth of a
+    // second of noise evaluation. Nothing waits for it: it decides ground
+    // kilometres away, and until it lands the previous sweep still covers
+    // that ground (the raster spans eight times the distance a move is).
+    let mut landed = false;
+    if let Some((origin, task)) = &mut state.sweeping {
+        if let Some((cover, coarse_from)) = bevy::tasks::block_on(bevy::tasks::poll_once(task)) {
+            state.origin = *origin;
+            state.cover = cover;
+            state.coarse_from = coarse_from;
+            state.sweeping = None;
+            landed = true;
+        }
+    } else if state.origin.distance(want) > REPAINT_M || state.generation == u64::MAX {
+        let job = CoverJob::of(world, planner, want);
+        state.sweeping = Some((
+            want,
+            bevy::tasks::AsyncComputeTaskPool::get().spawn(async move { job.run() }),
+        ));
+    }
+    // Repaint when a sweep lands OR when the plan under it changed. Camera
+    // movement alone is not enough: at startup nothing is resident yet, so
+    // the first paint would find an empty world and never look again.
+    if !landed && state.generation == generation {
+        return;
+    }
+    state.generation = generation;
+    let origin = state.origin;
+    let mut texels = state.cover.clone();
+    let mut coarse_from = state.coarse_from.clone();
+    let mut painted = 0usize;
+
     for seg in planner.ribbons_in(origin, origin + Vec2::splat(span)) {
         // A seated ribbon IS the ground, so its footprint is the whole
         // capsule. A levelled one is a water surface at a height the plan
@@ -162,7 +246,10 @@ fn repaint_world(
         // from the plan rather than named here: the level decides which
         // materials are water, this only notices which ones arrive levelled.
         if under.is_some() && !coarse_from.iter().any(|&(id, _)| id == seg.material) {
-            coarse_from.push((seg.material, levelled_handover_voxel_m(lod)));
+            coarse_from.push((
+                seg.material,
+                handover_voxel_m(lod, crate::ribbons::RIBBON_NEAR_VIEW_M as f32),
+            ));
         }
         painted += stroke(
             &mut texels,
@@ -184,10 +271,130 @@ fn repaint_world(
     map.generation = map.generation.wrapping_add(1);
     if std::env::var_os("VOXEL_LOG_LAYERS").is_some() {
         info!(
-            "surface paint: world {} {painted} texels around {eye:?}",
-            world.id
+            "surface paint: world {} {painted} ribbon texels around {eye:?}{}",
+            world.id,
+            if landed { ", cover sweep landed" } else { "" }
         );
     }
+}
+
+/// Everything the area pass reads, owned, so it can run on a worker.
+///
+/// Gathered on the main thread because that is where the level and the
+/// planner are; it is a handful of clones, against a fifth of a second of
+/// sweeping.
+struct CoverJob {
+    origin: Vec2,
+    generator: std::sync::Arc<voxel_worldgen::Generator>,
+    /// Each population that paints, with the region material its placer
+    /// gates on and the voxel size its paint takes over at.
+    populations: Vec<(voxel_engine::level::ScatterDef, Option<u32>, f32)>,
+}
+
+impl CoverJob {
+    fn of(
+        world: &voxel_engine::World,
+        planner: &crate::planning::StackPlanner,
+        origin: Vec2,
+    ) -> Self {
+        let populations = world
+            .level
+            .scatter
+            .iter()
+            .filter_map(|def| {
+                let cover = def.cover.as_ref()?;
+                // The population's own gate, resolved the way its placer
+                // resolves it — what grows somewhere and what is painted
+                // there are then the same question asked twice, not two
+                // answers that must be kept equal by hand.
+                let gate = planner.gate_material(def);
+                Some((
+                    def.clone(),
+                    gate,
+                    handover_voxel_m(&world.config, cover.from_m),
+                ))
+            })
+            .collect();
+        Self {
+            origin,
+            generator: world.generator.clone(),
+            populations,
+        }
+    }
+
+    /// Paint every population the level says becomes ground at a distance.
+    ///
+    /// Returns the raster the ribbon pass then strokes over — a road
+    /// through a wood is a road — and the handover threshold each cover
+    /// material takes.
+    fn run(self) -> CoverRaster {
+        let mut texels = vec![0u32; (MAP_SIZE * MAP_SIZE / 4) as usize];
+        let mut coarse_from = Vec::new();
+        let origin = self.origin;
+        for (def, gate, from_voxel_m) in &self.populations {
+            let cover = def.cover.as_ref().expect("filtered on having one");
+            coarse_from.push((cover.material, *from_voxel_m));
+            let generator = self.generator.clone();
+            let gate = *gate;
+            let inputs = voxel_engine::scatter::PlacementInputs {
+                generator: &self.generator,
+                clearance: Vec::new(),
+                cut_ops: Vec::new(),
+                gate_weight: Box::new(move |xz| {
+                    gate.map_or(1.0, |m| generator.surface_material_weight(xz, 8.0, m))
+                }),
+            };
+            let full_at = cover.full_at.max(1.0e-6);
+            // Sampled at block CORNERS, one row longer than there are
+            // blocks, so every texel sits inside a cell with four known
+            // corners and no block boundary becomes an edge.
+            let cells = MAP_SIZE / COVER_STRIDE;
+            let step = TEXEL_M * COVER_STRIDE as f32;
+            let grid: Vec<f32> = (0..=cells)
+                .flat_map(|gz| (0..=cells).map(move |gx| (gx, gz)))
+                .map(|(gx, gz)| {
+                    let at = origin + Vec2::new(gx as f32, gz as f32) * step;
+                    voxel_engine::scatter::coverage(def, &inputs, at)
+                })
+                .collect();
+            let row = (cells + 1) as usize;
+            for z in 0..MAP_SIZE {
+                let (cz, fz) = (z / COVER_STRIDE, (z % COVER_STRIDE) as f32 / COVER_STRIDE as f32);
+                for x in 0..MAP_SIZE {
+                    let (cx, fx) =
+                        (x / COVER_STRIDE, (x % COVER_STRIDE) as f32 / COVER_STRIDE as f32);
+                    let at = |ix: u32, iz: u32| grid[iz as usize * row + ix as usize];
+                    let c = (at(cx, cz) * (1.0 - fx) + at(cx + 1, cz) * fx) * (1.0 - fz)
+                        + (at(cx, cz + 1) * (1.0 - fx) + at(cx + 1, cz + 1) * fx) * fz;
+                    // Crowns land independently, so what closes over the
+                    // ground is Poisson, not linear: twice the density is
+                    // not twice the cover, because the second crown mostly
+                    // lands on the first. Painting `c / full_at` instead
+                    // showed a wood that reads as unbroken canopy as a few
+                    // scattered texels — the attempts that survive every
+                    // gate are a small fraction of a very large number.
+                    let share = 1.0 - (-c / full_at).exp();
+                    if share > dither(origin, x, z) {
+                        put(&mut texels, x, z, cover.material);
+                    }
+                }
+            }
+        }
+        (texels, coarse_from)
+    }
+}
+
+/// A fixed 0..1 per square of WORLD ground, so the thinning edge of a
+/// population holds still. Hashing the texel's raster index instead would
+/// reshuffle every wood in sight each time the map re-anchors.
+fn dither(origin: Vec2, x: u32, z: u32) -> f32 {
+    let w = (origin / TEXEL_M).floor() + Vec2::new(x as f32, z as f32);
+    let mut h = (w.x as i32 as u32).wrapping_mul(0x9E37_79B9)
+        ^ (w.y as i32 as u32).wrapping_mul(0x85EB_CA6B);
+    h ^= h >> 15;
+    h = h.wrapping_mul(0xC2B2_AE35);
+    h ^= h >> 16;
+    (h >> 8) as f32 / 16_777_216.0
 }
 
 /// Stamp one segment's footprint. Returns the texels written.

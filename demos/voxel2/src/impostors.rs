@@ -100,13 +100,51 @@ impl Plugin for ImpostorPlugin {
             )
             .add_systems(
                 ExtractSchedule,
-                extract_impostor_instances,
+                (extract_impostor_instances, sync_impostor_reach),
             )
             .add_systems(
                 Render,
                 prepare_impostor_bind_group.in_set(RenderSystems::PrepareBindGroups),
             )
             .add_systems(Render, queue_impostor.in_set(RenderSystems::Queue));
+    }
+}
+
+/// Fraction of the cull distance the impostors start shrinking at. Twin
+/// of the `env.size.z * 0.82` in `voxel_impostor.wgsl`.
+const FADE_FROM: f32 = 0.82;
+
+/// Stop the impostors where the ground starts painting them, not a beat
+/// before.
+///
+/// The two tiers meet at one distance and it is the level's to choose, but
+/// only one of them can honour the number as written: paint is decided per
+/// CHUNK, so it begins at whatever LOD boundary follows. Culling at the
+/// authored distance therefore left a ring of ground with impostors gone
+/// and paint not yet arrived. So the impostors are told where the paint
+/// really starts and fade out ACROSS it — the texel grid appears while
+/// they are still at full strength and is never seen bare.
+fn sync_impostor_reach(
+    worlds: Extract<Res<voxel_engine::Worlds>>,
+    mut style: ResMut<ImpostorStyle>,
+) {
+    // Every frame rather than on change: this is a fold over at most
+    // `MAX_WORLDS` levels, and a change tick compared across worlds is a
+    // subtlety to get wrong for no saving.
+    let reach = worlds
+        .iter()
+        .filter_map(|world| {
+            let def = world
+                .level
+                .scatter
+                .iter()
+                .find(|def| def.class == IMPOSTOR_CLASS)?;
+            let from = def.cover.as_ref()?.from_m;
+            Some(crate::surface_paint::cover_starts_m(&world.config, from) / FADE_FROM)
+        })
+        .fold(f32::NEG_INFINITY, f32::max);
+    if reach.is_finite() {
+        style.size.z = reach;
     }
 }
 
@@ -234,7 +272,8 @@ impl Default for ImpostorStyle {
             canopy_b: Vec4::new(0.0130, 0.0223, 0.0040, 0.0),
             trunk: Vec4::new(0.0052, 0.0068, 0.0026, 0.0),
             // Real prop trees cover the first 120 m; impostors take over
-            // across the next 60 and run to 4 km.
+            // across the next 60. Where they STOP is not authored here —
+            // see `sync_impostor_reach`.
             size: Vec4::new(85.0, 150.0, 4000.0, 7.0),
         }
     }

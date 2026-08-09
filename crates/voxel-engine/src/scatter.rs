@@ -208,6 +208,42 @@ pub fn tile_placements(def: &ScatterDef, inputs: &PlacementInputs<'_>, tile: IVe
     out
 }
 
+/// The share of attempts at `xz` that a placement would survive — how
+/// much of this ground the population covers, without placing anything.
+///
+/// For consumers that must draw a population where its instances do not
+/// exist: past its streaming radius, or past the range where drawing them
+/// one by one stops being worth it. Built from the same gate helpers
+/// [`tile_placements`] applies per attempt, so the two cannot drift; it
+/// deliberately does not reuse the placement LOOP, whose early-outs
+/// consume the rng in an order every world's props already depend on.
+///
+/// The gates it leaves out are the ones that are not functions of position
+/// at the scale this is read: clearance and carved ground are metres wide,
+/// and a caller asking "is there forest here" is asking about kilometres.
+pub fn coverage(def: &ScatterDef, inputs: &PlacementInputs<'_>, xz: Vec2) -> f32 {
+    let generator = inputs.generator;
+    let patch = def.patch.as_ref().map_or(1.0, |p| {
+        generator.patch_density(xz, p.scale, Vec2::from(p.offset), p.contrast, p.bias)
+    });
+    // Cheapest gates first: each one that zeroes here saves a heightfield
+    // evaluation, and this is called once per texel of a raster.
+    let w = patch * def.chance * field_gate(generator, &def.density, xz) * (inputs.gate_weight)(xz);
+    if w <= 0.0 {
+        return 0.0;
+    }
+    let y = generator.height(xz, def.detail_vs);
+    let w = w * altitude_gate(def.altitude, def.placement.altitude_falloff, y);
+    if w <= 0.0 {
+        return 0.0;
+    }
+    let up = generator.up(xz, def.detail_vs);
+    if up < def.min_up || up > def.placement.max_up {
+        return 0.0;
+    }
+    w
+}
+
 /// Weighted pick among the variants whose altitude band contains `y`.
 fn pick_variant(def: &ScatterDef, y: f32, roll: f32) -> Option<usize> {
     let eligible = |v: &crate::level::ScatterVariantDef| (v.altitude[0]..v.altitude[1]).contains(&y);
@@ -241,4 +277,90 @@ fn class_salt(class: &str) -> u64 {
         h = (h ^ b as u64).wrapping_mul(0x1000_0000_01B3);
     }
     h
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn shipped_planet() -> crate::LevelDef {
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../levels/planet.json");
+        crate::LevelDef::from_json(&std::fs::read_to_string(path).unwrap()).unwrap()
+    }
+
+    /// The whole point of [`coverage`]: a population painted where its
+    /// instances are not must be painted where they WOULD be.
+    ///
+    /// Compared as a correlation over tiles rather than tile by tile —
+    /// coverage is the expected share of surviving attempts and placement
+    /// is one draw of it, so a single 64 m tile is noise. What must hold
+    /// is that the tiles coverage calls empty are empty and the ones it
+    /// calls full are full.
+    #[test]
+    fn coverage_predicts_where_the_placer_actually_places() {
+        let level = shipped_planet();
+        let generator = level.generator(0);
+        let def = level
+            .scatter
+            .iter()
+            .find(|s| s.cover.is_some())
+            .expect("planet has a population that paints");
+        let gen = &generator;
+        let inputs = PlacementInputs {
+            generator: &generator,
+            clearance: Vec::new(),
+            cut_ops: Vec::new(),
+            // The planet gates this population on its forest region.
+            gate_weight: Box::new(move |xz| gen.surface_material_weight(xz, 8.0, 1)),
+        };
+
+        // Over a patch that has forest AND its edge. The origin is ocean,
+        // so a window there would compare zero against zero.
+        let centre = IVec2::new(-16384, -31744) / def.tile_m as i32;
+        let mut pairs = Vec::new();
+        for tz in -30..30 {
+            for tx in -30..30 {
+                let tile = centre + IVec2::new(tx, tz);
+                let placed = tile_placements(def, &inputs, tile).len() as f32;
+                let mid = (tile.as_vec2() + Vec2::splat(0.5)) * def.tile_m;
+                pairs.push((coverage(def, &inputs, mid), placed));
+            }
+        }
+        assert!(
+            pairs.iter().any(|&(c, _)| c > 0.0),
+            "the probe found no forest at all — pick a gate that exists"
+        );
+
+        // Most of the population must live where coverage saw it. Not ALL
+        // of it: coverage is one point and a tile is 900, so a midpoint
+        // that lands on a slope steeper than `min_up` reads zero for a
+        // tile whose flatter corners are wooded. That is a point sample's
+        // error, not drift — the raster samples on a grid and interpolates
+        // for exactly this reason.
+        let total: f32 = pairs.iter().map(|p| p.1).sum();
+        let missed: f32 = pairs.iter().filter(|p| p.0 <= 0.0).map(|p| p.1).sum();
+        let missed = missed / total;
+        assert!(
+            missed < 0.25,
+            "coverage saw none of {:.0}% of the population",
+            100.0 * missed
+        );
+
+        // And they rise together. Measured at 0.89 and 14% when this was
+        // written; the bar is where a real drift would land, not where the
+        // sampling noise does.
+        let n = pairs.len() as f32;
+        let (mx, my) = (
+            pairs.iter().map(|p| p.0).sum::<f32>() / n,
+            pairs.iter().map(|p| p.1).sum::<f32>() / n,
+        );
+        let cov = pairs.iter().map(|(x, y)| (x - mx) * (y - my)).sum::<f32>();
+        let sx = pairs.iter().map(|(x, _)| (x - mx).powi(2)).sum::<f32>().sqrt();
+        let sy = pairs.iter().map(|(_, y)| (y - my).powi(2)).sum::<f32>().sqrt();
+        let r = cov / (sx * sy);
+        assert!(
+            r > 0.8,
+            "coverage and placement have drifted apart: correlation {r:.3}"
+        );
+    }
 }

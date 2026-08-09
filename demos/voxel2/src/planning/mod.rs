@@ -418,6 +418,12 @@ impl StackPlanner {
         out
     }
 
+    /// The material of the region this population is gated on. See
+    /// [`crate::scatter::gate_material`].
+    pub fn gate_material(&self, def: &voxel_engine::level::ScatterDef) -> Option<u32> {
+        crate::scatter::gate_material(def, &self.biome_tables)
+    }
+
     pub fn weight_fields(&self) -> Vec<String> {
         self.biome_tables.iter().map(|(n, _)| n.clone()).collect()
     }

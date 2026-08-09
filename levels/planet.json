@@ -521,6 +521,17 @@
         0.3
       ],
       "detail_fade": 0.0018
+    },
+    {
+      "type": "surface",
+      "id": 8,
+      "base": [
+        0.021,
+        0.032,
+        0.0087
+      ],
+      "grain": 0.0,
+      "detail_fade": 0.0015
     }
   ],
   "prefabs": {
@@ -1021,7 +1032,12 @@
       "density": {
         "field": 0
       },
-      "gate": "biomes:forest"
+      "gate": "biomes:forest",
+      "cover": {
+        "material": 8,
+        "from_m": 3300.0,
+        "full_at": 0.02
+      }
     }
   ],
   "planning": {
