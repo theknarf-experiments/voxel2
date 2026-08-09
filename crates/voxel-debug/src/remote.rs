@@ -32,6 +32,34 @@ impl Plugin for VoxelRemotePlugin {
     }
 }
 
+/// Percentiles of a frame-time history, in milliseconds.
+///
+/// `worst` is the single slowest frame in the window rather than a
+/// percentile: one 40 ms frame in 120 is exactly the stutter this is for,
+/// and every percentile short of the maximum averages it away.
+fn frame_stats(values: &[f64]) -> serde_json::Value {
+    if values.is_empty() {
+        return serde_json::Value::Null;
+    }
+    let mut sorted = values.to_vec();
+    sorted.sort_by(f64::total_cmp);
+    let at = |q: f64| sorted[((sorted.len() - 1) as f64 * q).round() as usize];
+    let mean = values.iter().sum::<f64>() / values.len() as f64;
+    let round = |x: f64| (x * 100.0).round() / 100.0;
+    json!({
+        "n": sorted.len(),
+        "mean": round(mean),
+        "p50": round(at(0.5)),
+        "p95": round(at(0.95)),
+        "p99": round(at(0.99)),
+        "worst": round(at(1.0)),
+        // What the mean fps WOULD be without the tail, so a run can be
+        // compared against the 100 fps target without reading four
+        // numbers.
+        "mean_fps": round(1000.0 / mean),
+    })
+}
+
 fn err(msg: impl Into<String>) -> BrpError {
     BrpError {
         code: error_codes::INTERNAL_ERROR,
@@ -91,10 +119,20 @@ fn status(
     let fps = diagnostics
         .get(&bevy::diagnostic::FrameTimeDiagnosticsPlugin::FPS)
         .and_then(|d| d.smoothed());
+    // The DISTRIBUTION, not the average. An average hides the whole
+    // problem: a frame that misses its deadline every twentieth frame
+    // reads as a fine mean and a visible stutter, and the two are told
+    // apart by p99 against p50 and by nothing else. Milliseconds, over
+    // whatever history the diagnostic keeps (120 frames).
+    let frame_ms: Vec<f64> = diagnostics
+        .get(&bevy::diagnostic::FrameTimeDiagnosticsPlugin::FRAME_TIME)
+        .map(|d| d.values().copied().collect())
+        .unwrap_or_default();
     let mut out = json!({
         "pos": [t.translation.x, t.translation.y, t.translation.z],
         "look": [f.x, f.y, f.z],
         "fps": fps,
+        "frame_ms": frame_stats(&frame_ms),
     });
     if let Some(p) = probe {
         out["stream"] = json!({

@@ -156,8 +156,7 @@ pub fn cover_starts_m(lod: &voxel_engine::streaming::LodConfig, view_m: f32) -> 
 /// this.
 const COVER_STRIDE: u32 = (64.0 / TEXEL_M) as u32;
 
-/// One world's last raster, kept so the cheap pass can run without the
-/// expensive one.
+/// One world's last raster, and whatever is being built to replace it.
 struct Painted {
     /// Where the raster is anchored — NOT the camera. A repaint driven by
     /// the plan changing does not re-sweep the area pass, and a raster
@@ -165,14 +164,27 @@ struct Painted {
     /// forest somewhere the forest is not.
     origin: Vec2,
     generation: u64,
+    /// The area pass's output, kept so a ribbon arriving does not re-sweep
+    /// it: coverage is a function of position and the camera, and ribbons
+    /// arriving change neither.
     cover: Vec<u32>,
     coarse_from: Vec<(u32, f32)>,
-    /// A sweep running for a new anchor, and the anchor it is for.
-    sweeping: Option<(Vec2, bevy::tasks::Task<CoverRaster>)>,
+    /// A raster being built, and the anchor it is for.
+    building: Option<(Vec2, bevy::tasks::Task<PaintResult>)>,
 }
 
-/// What the area pass produces.
-type CoverRaster = (Vec<u32>, Vec<(u32, f32)>);
+/// What one build produces.
+struct PaintResult {
+    /// The area pass's layer, handed back so the next ribbon change can
+    /// start from it instead of sweeping again.
+    cover: Vec<u32>,
+    texels: Vec<u32>,
+    coarse_from: Vec<(u32, f32)>,
+    /// Whether anything was painted at all. Counted where the painting
+    /// happens: asking the finished raster costs a 16 MB scan, and asking
+    /// it on the main thread costs one every time a ribbon arrives.
+    any: bool,
+}
 
 /// Repaint every loaded world's ground map.
 ///
@@ -239,76 +251,69 @@ fn repaint_world(
         generation: u64::MAX,
         cover: vec![0; (MAP_SIZE * MAP_SIZE / 4) as usize],
         coarse_from: Vec::new(),
-        sweeping: None,
+        building: None,
     });
 
-    // The area pass only depends on the generator and where the raster is
-    // anchored, and a ribbon arriving changes neither, so it is swept only
-    // on a move — and off the main thread, because it is a fifth of a
-    // second of noise evaluation. Nothing waits for it: it decides ground
-    // kilometres away, and until it lands the previous sweep still covers
-    // that ground (the raster spans eight times the distance a move is).
-    let mut landed = false;
-    if let Some((origin, task)) = &mut state.sweeping {
-        if let Some((cover, coarse_from)) = bevy::tasks::block_on(bevy::tasks::poll_once(task)) {
-            state.origin = *origin;
-            state.cover = cover;
-            state.coarse_from = coarse_from;
-            state.sweeping = None;
-            landed = true;
+    // Everything is built off the main thread, area pass and ribbons
+    // alike. The ribbon pass looks cheap — stamp a few capsules — and is
+    // not: a levelled ribbon tests the heightfield PER TEXEL to find how
+    // far its water spreads, and at 8 m texels over a 32.7 km raster that
+    // measured 49 ms on average and 75 ms at worst, every few seconds,
+    // which is precisely the stutter you see while flying.
+    //
+    // Nothing waits for it. The raster decides ground a quarter of a
+    // kilometre away at the very nearest, and until the new one lands the
+    // last one is still right about almost all of it.
+    if let Some((anchor, task)) = &mut state.building {
+        let anchor = *anchor;
+        if let Some(done) = bevy::tasks::block_on(bevy::tasks::poll_once(task)) {
+            state.origin = anchor;
+            state.cover = done.cover;
+            state.coarse_from = done.coarse_from.clone();
+            state.building = None;
+            publish(map, done.texels, anchor, done.coarse_from, done.any);
         }
-    } else if state.origin.distance(want) > REPAINT_M || state.generation == u64::MAX {
-        let job = CoverJob::of(world, planner, want);
-        state.sweeping = Some((
-            want,
-            bevy::tasks::AsyncComputeTaskPool::get().spawn(async move { job.run() }),
-        ));
+        return;
     }
-    // Repaint when a sweep lands OR when the plan under it changed. Camera
-    // movement alone is not enough: at startup nothing is resident yet, so
-    // the first paint would find an empty world and never look again.
-    if !landed && state.generation == generation {
+
+    let moved = state.origin.distance(want) > REPAINT_M || state.generation == u64::MAX;
+    if !moved && state.generation == generation {
         return;
     }
     state.generation = generation;
-    let origin = state.origin;
-    let mut texels = state.cover.clone();
-    let mut coarse_from = state.coarse_from.clone();
-    let mut painted = 0usize;
+    let anchor = if moved { want } else { state.origin };
 
-    for seg in planner.ribbons_in(origin, origin + Vec2::splat(span)) {
-        // A seated ribbon IS the ground, so its footprint is the whole
-        // capsule. A levelled one is a water surface at a height the plan
-        // decided: it covers its own course, and then only as much of the
-        // surrounding ground as sits under that height — otherwise the
-        // capsule smears the river across the hillside it flows past.
-        let under = (!seg.seated).then_some(seg.levels);
-        // A levelled material is drawn as a surface by the ribbon layer
-        // too, so its paint must wait until that layer has stopped. Taken
-        // from the plan rather than named here: the level decides which
-        // materials are water, this only notices which ones arrive levelled.
-        if under.is_some() && !coarse_from.iter().any(|&(id, _)| id == seg.material) {
-            coarse_from.push((
-                seg.material,
-                handover_voxel_m(lod, crate::ribbons::RIBBON_NEAR_VIEW_M as f32),
-            ));
-        }
-        painted += stroke(
-            &mut texels,
-            origin,
-            seg.a,
-            seg.b,
-            seg.half_w,
-            seg.material,
-            under.map(|levels| (levels, &*ctx.generator)),
-        );
-    }
+    // Snapshotting the ribbons is the one part that has to happen here:
+    // they live in the planner's layer graph, which is not ours to send.
+    let segments = planner.ribbons_in(anchor, anchor + Vec2::splat(span));
+    let job = PaintJob {
+        anchor,
+        // A move invalidates the area pass; anything else reuses it.
+        base: (!moved).then(|| state.cover.clone()),
+        cover: CoverJob::of(world, planner, anchor),
+        segments,
+        generator: world.generator.clone(),
+        levelled_from_voxel_m: handover_voxel_m(lod, crate::ribbons::RIBBON_NEAR_VIEW_M as f32),
+    };
+    state.building = Some((
+        anchor,
+        bevy::tasks::AsyncComputeTaskPool::get().spawn(async move { job.run() }),
+    ));
+}
 
+/// Hand a finished raster to the renderer.
+fn publish(
+    map: &mut voxel_render::SurfaceMap,
+    texels: Vec<u32>,
+    origin: Vec2,
+    coarse_from: Vec<(u32, f32)>,
+    any: bool,
+) {
     // A world that paints nothing publishes NOTHING, rather than a blank
     // section: at this resolution one is 16 MB, and a level with no roads
     // and no cover was carrying that so the shader could read zero out of
     // it. Size 0 is already how the map says "leave the terrain alone".
-    let empty = painted == 0 && coarse_from.is_empty();
+    let empty = !any && coarse_from.is_empty();
     map.texels = std::sync::Arc::new(texels);
     map.origin = origin;
     map.texel_m = TEXEL_M;
@@ -316,12 +321,60 @@ fn repaint_world(
     map.min_voxel_m = PAINT_FROM_VOXEL_M;
     map.coarse_from = coarse_from;
     map.generation = map.generation.wrapping_add(1);
-    if std::env::var_os("VOXEL_LOG_LAYERS").is_some() {
-        info!(
-            "surface paint: world {} {painted} ribbon texels around {eye:?}{}",
-            world.id,
-            if landed { ", cover sweep landed" } else { "" }
-        );
+}
+
+/// Everything a raster is built from, owned, so it can run on a worker.
+struct PaintJob {
+    anchor: Vec2,
+    /// The cover layer to start from, or `None` to sweep a fresh one.
+    base: Option<Vec<u32>>,
+    cover: CoverJob,
+    segments: Vec<voxel_core::patch::RibbonSeg>,
+    generator: std::sync::Arc<voxel_worldgen::Generator>,
+    levelled_from_voxel_m: f32,
+}
+
+impl PaintJob {
+    fn run(self) -> PaintResult {
+        let (cover, mut coarse_from) = match self.base {
+            Some(base) => (base, self.cover.thresholds()),
+            None => self.cover.run(),
+        };
+        let mut texels = cover.clone();
+        let mut painted = 0usize;
+        for seg in &self.segments {
+            // A seated ribbon IS the ground, so its footprint is the whole
+            // capsule. A levelled one is a water surface at a height the
+            // plan decided: it covers its own course, and then only as
+            // much of the surrounding ground as sits under that height —
+            // otherwise the capsule smears the river across the hillside
+            // it flows past.
+            let under = (!seg.seated).then_some(seg.levels);
+            // A levelled material is drawn as a surface by the ribbon
+            // layer too, so its paint must wait until that layer has
+            // stopped. Taken from the plan rather than named here: the
+            // level decides which materials are water, this only notices
+            // which ones arrive levelled.
+            if under.is_some() && !coarse_from.iter().any(|&(id, _)| id == seg.material) {
+                coarse_from.push((seg.material, self.levelled_from_voxel_m));
+            }
+            painted += stroke(
+                &mut texels,
+                self.anchor,
+                seg.a,
+                seg.b,
+                seg.half_w,
+                seg.material,
+                under.map(|levels| (levels, &*self.generator)),
+            );
+        }
+        let any = painted > 0 || !coarse_from.is_empty();
+        PaintResult {
+            cover,
+            texels,
+            coarse_from,
+            any,
+        }
     }
 }
 
@@ -369,12 +422,26 @@ impl CoverJob {
         }
     }
 
+    /// The handover threshold each cover material takes, without sweeping.
+    ///
+    /// A raster rebuilt for a ribbon change reuses the cached cover layer
+    /// but still has to publish its thresholds, which are level data and
+    /// cost nothing to restate.
+    fn thresholds(&self) -> Vec<(u32, f32)> {
+        self.populations
+            .iter()
+            .filter_map(|(def, _, from_voxel_m)| {
+                Some((def.cover.as_ref()?.material, *from_voxel_m))
+            })
+            .collect()
+    }
+
     /// Paint every population the level says becomes ground at a distance.
     ///
     /// Returns the raster the ribbon pass then strokes over — a road
     /// through a wood is a road — and the handover threshold each cover
     /// material takes.
-    fn run(self) -> CoverRaster {
+    fn run(self) -> (Vec<u32>, Vec<(u32, f32)>) {
         let mut texels = vec![0u32; (MAP_SIZE * MAP_SIZE / 4) as usize];
         let mut coarse_from = Vec::new();
         let origin = self.origin;

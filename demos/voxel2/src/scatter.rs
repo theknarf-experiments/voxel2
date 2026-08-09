@@ -254,6 +254,19 @@ pub fn register(
 /// despawn entities per chunk, and hand point populations to the renderer
 /// in bulk.
 fn reconcile(
+    commands: Commands,
+    points: Res<voxel_render::ScatterPoints>,
+    populations: ResMut<Populations>,
+    worlds: Res<voxel_engine::Worlds>,
+) {
+    voxel_core::timed!(
+        "scatter::reconcile",
+        4.0,
+        reconcile_inner(commands, points, populations, worlds)
+    );
+}
+
+fn reconcile_inner(
     mut commands: Commands,
     points: Res<voxel_render::ScatterPoints>,
     mut populations: ResMut<Populations>,

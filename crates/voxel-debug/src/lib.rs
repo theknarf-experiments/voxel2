@@ -140,7 +140,8 @@ impl Plugin for VoxelDebugPlugin {
         ))
             .add_systems(Startup, spawn_hud)
             .init_resource::<ScreenshotRequest>()
-            .add_systems(Update, (engine_hud, update_hud, auto_screenshot, dump_camera).chain());
+            .add_systems(Update, (engine_hud, update_hud, auto_screenshot, dump_camera).chain())
+            .add_systems(Update, log_slow_frames);
     }
 }
 
@@ -323,4 +324,37 @@ fn update_hud(
         out.push_str(&line);
     }
     text.0 = out;
+}
+
+/// Log any frame that misses the budget badly, with the streaming state
+/// at the time.
+///
+/// A spike is invisible in an average and invisible in a screenshot; the
+/// only way to attribute one is to print it beside what the engine was
+/// doing that frame and correlate against the other logs by timestamp.
+/// Off unless `VOXEL_LOG_SLOW` is set; its value is the threshold in
+/// milliseconds, default 25.
+fn log_slow_frames(
+    time: Res<Time>,
+    probe: Option<Res<voxel_engine::streaming::StreamProbe>>,
+    stats: Option<Res<voxel_render::SharedRenderStats>>,
+    mut threshold: Local<Option<f32>>,
+) {
+    let threshold = *threshold.get_or_insert_with(|| {
+        std::env::var("VOXEL_LOG_SLOW")
+            .ok()
+            .map_or(f32::INFINITY, |v| v.parse().unwrap_or(25.0))
+    });
+    let ms = time.delta_secs() * 1000.0;
+    if ms < threshold {
+        return;
+    }
+    let (resident, generating) = probe.map_or((0, false), |p| (p.resident, p.generating));
+    let (meshed, awaiting) = stats
+        .and_then(|s| s.0.lock().ok().map(|s| (s.meshed, s.awaiting)))
+        .unwrap_or((0, 0));
+    warn!(
+        "SLOW FRAME {ms:.1} ms | resident {resident} generating {generating} \
+         meshed {meshed} awaiting {awaiting}"
+    );
 }

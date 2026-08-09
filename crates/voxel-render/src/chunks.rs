@@ -2213,9 +2213,13 @@ fn plan_frame(
     gpu.env_uniform.set(*env);
     gpu.env_uniform.write_buffer(&render_device, &render_queue);
 
-    // The surface map is rebuilt wholesale when the host repaints it,
-    // which is on the order of once per kilometre of travel — not per
-    // frame, and never per chunk.
+    // The surface map is rebuilt wholesale when the host repaints it —
+    // once per kilometre of travel, or when the plan under it changes.
+    //
+    // WRITTEN, not recreated. Allocating a fresh 16 MB buffer each time
+    // measured 10-13 ms on the render thread, which is a frame and a half
+    // at the rate this is trying to hold. The size only changes when a
+    // world starts or stops painting, so the allocation is the rare case.
     let generation = surface_map_generation(&worlds);
     if generation > 0
         && gpu
@@ -2224,12 +2228,22 @@ fn plan_frame(
             .is_none_or(|(_, uploaded)| *uploaded != generation)
     {
         let words = surface_map_words(&worlds);
-        let buffer = render_device.create_buffer_with_data(&BufferInitDescriptor {
-            label: Some("voxel_surface_map"),
-            contents: bytemuck::cast_slice(&words),
-            usage: BufferUsages::STORAGE,
-        });
-        gpu.surface_map = Some((buffer, generation));
+        let bytes: &[u8] = bytemuck::cast_slice(&words);
+        let reusable = gpu
+            .surface_map
+            .as_ref()
+            .filter(|(b, _)| b.size() == bytes.len() as u64);
+        if let Some((buffer, _)) = reusable {
+            render_queue.write_buffer(buffer, 0, bytes);
+            gpu.surface_map.as_mut().unwrap().1 = generation;
+        } else {
+            let buffer = render_device.create_buffer_with_data(&BufferInitDescriptor {
+                label: Some("voxel_surface_map"),
+                contents: bytes,
+                usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
+            });
+            gpu.surface_map = Some((buffer, generation));
+        }
     }
 
     // 7. HUD stats.
