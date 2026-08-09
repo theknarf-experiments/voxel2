@@ -10,7 +10,7 @@ license = "MIT OR Apache-2.0"
 [workspace.dependencies]
 # External
 # TODO: slim to explicit feature list once the needed set stabilizes.
-bevy = { version = "0.19", features = ["free_camera", "bevy_remote"] }
+bevy = { version = "0.19", features = ["free_camera", "bevy_remote", "bevy_dev_tools"] }
 glam = { version = "0.32", features = ["serde"] }  # keep in sync with bevy's glam version
 bytemuck = { version = "1", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }

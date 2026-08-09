@@ -1,10 +1,15 @@
-//! Debug tooling: flycam (re-exported Bevy `FreeCamera`) and an on-screen HUD
-//! showing fps and camera position. Chunk/pool/slab stats get added here as
-//! those systems come online.
+//! Debug tooling: flycam (re-exported Bevy `FreeCamera`), Bevy's own fps
+//! overlay, and an on-screen HUD of the engine's telemetry.
 
 use bevy::camera_controller::free_camera::FreeCameraPlugin;
-use bevy::diagnostic::{DiagnosticsStore, FrameTimeDiagnosticsPlugin};
+use bevy::dev_tools::fps_overlay::{FpsOverlayConfig, FpsOverlayPlugin, FrameTimeGraphConfig};
+use bevy::diagnostic::FrameTimeDiagnosticsPlugin;
 use bevy::prelude::*;
+
+/// Leaves room for Bevy's fps overlay, which spawns at the top-left
+/// corner and takes no position config. One text line plus a graph the
+/// overlay hardcodes at 40 px tall.
+const HUD_TOP_PX: i32 = 84;
 
 pub use bevy::camera_controller::free_camera::FreeCamera;
 
@@ -100,7 +105,39 @@ pub struct VoxelDebugPlugin;
 
 impl Plugin for VoxelDebugPlugin {
     fn build(&self, app: &mut App) {
-        app.add_plugins((FreeCameraPlugin, FrameTimeDiagnosticsPlugin::default()))
+        app.add_plugins((
+            FreeCameraPlugin,
+            FrameTimeDiagnosticsPlugin::default(),
+            // Bevy's own, for the frame-time GRAPH more than the number:
+            // a single fps reading hides exactly what matters here, which
+            // is whether a frame spiked. Settle transients, a cover sweep
+            // landing, a slab refill — all of them are one tall bar and
+            // an unchanged average.
+            FpsOverlayPlugin {
+                config: FpsOverlayConfig {
+                    text_config: TextFont {
+                        font_size: bevy::text::FontSize::Px(24.0),
+                        ..default()
+                    },
+                    // The scale has to BRACKET what the demo actually
+                    // runs at, 55-95 fps. `target_fps` is the FAST end and
+                    // it bites hard: a frame quicker than
+                    // `1/(target * 1.2)` clamps to zero height and simply
+                    // is not drawn, so `target_fps: 60` renders an empty
+                    // box whenever the demo manages 90 — which reads
+                    // exactly like a broken graph. 120 is the machine's
+                    // native refresh rate, which is what vsync caps at, so
+                    // it is the fastest a frame can honestly be; 30 at the
+                    // slow end leaves a spike somewhere to go.
+                    frame_time_graph_config: FrameTimeGraphConfig {
+                        enabled: true,
+                        min_fps: 30.0,
+                        target_fps: 120.0,
+                    },
+                    ..default()
+                },
+            },
+        ))
             .add_systems(Startup, spawn_hud)
             .init_resource::<ScreenshotRequest>()
             .add_systems(Update, (engine_hud, update_hud, auto_screenshot, dump_camera).chain());
@@ -255,7 +292,7 @@ fn spawn_hud(mut commands: Commands) {
     commands.spawn((
         Node {
             position_type: PositionType::Absolute,
-            top: px(8),
+            top: px(HUD_TOP_PX),
             left: px(8),
             ..default()
         },
@@ -268,22 +305,19 @@ fn update_hud(
     // The player's camera specifically: with a portal open there are
     // several, and `With<Camera3d>` reported whichever came first.
     camera_query: Query<&Transform, (With<Camera3d>, With<FreeCamera>)>,
-    diagnostics: Res<DiagnosticsStore>,
     mut extra: ResMut<DebugHudExtra>,
 ) {
     let Ok(mut text) = text_query.single_mut() else {
         return;
     };
-    let fps = diagnostics
-        .get(&FrameTimeDiagnosticsPlugin::FPS)
-        .and_then(|d| d.smoothed())
-        .unwrap_or(0.0);
     let pos = camera_query
         .single()
         .map(|t| t.translation)
         .unwrap_or(Vec3::ZERO);
 
-    let mut out = format!("fps: {fps:.0}\npos: {:.1} {:.1} {:.1}", pos.x, pos.y, pos.z);
+    // No fps line: Bevy's overlay is showing it directly above, larger,
+    // with the graph. `voxctl status` reads the diagnostic itself.
+    let mut out = format!("pos: {:.1} {:.1} {:.1}", pos.x, pos.y, pos.z);
     for line in extra.0.drain(..) {
         out.push('\n');
         out.push_str(&line);
