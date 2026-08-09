@@ -134,15 +134,26 @@ pub fn cover_starts_m(lod: &voxel_engine::streaming::LodConfig, view_m: f32) -> 
     handover_level(lod, view_m).map_or(view_m, |key| (lod.split_k * key.edge_m()) as f32)
 }
 
-/// Texels per coverage sample in the area pass.
+/// Texels between coverage samples in the area pass.
 ///
-/// Coverage is a slow field — a wood is hundreds of metres across — and it
-/// is only ever read kilometres away, so sampling it per texel spends
-/// dozens of noise evaluations on detail no pixel can resolve. Held at 64 m
-/// regardless of [`TEXEL_M`]: that is four samples across the narrowest
-/// feature the density field has, and finer buys nothing. The two things
-/// that must stay per texel are cheap — the grid is interpolated between
-/// corners, so a block boundary is not an edge, and the dither is a hash.
+/// 64 m, held there as [`TEXEL_M`] changes, because it is not a property
+/// of the raster: it is the size of a VOXEL in the chunks that read the
+/// paint. Paint only applies past `cover.from_m`, where the LOD field is
+/// already showing 51–102 m voxels, so a coverage edge resolved finer than
+/// that is drawn onto geometry that cannot express it.
+///
+/// **Measured, do not re-try.** Refining to 16 m inside a coarse mask (the
+/// obvious optimisation, since most of a world holds no population) was
+/// tried on the theory that coverage's fast terms — the altitude band and
+/// the slope gate — follow the terrain rather than the noise, and so carry
+/// detail a treeline would show. They do, and it does not matter: the
+/// sweep went from 0.29 s to 3.3 s for a mean difference of 1.7/255 across
+/// the frame, invisible at 5x zoom, and most of that was dither reshuffling
+/// rather than a sharper edge. A third of the map is inside the mask
+/// anyway, because the region gate's feather leaves a long tail of tiny
+/// nonzero coverage, so the mask saves much less than it looks like it
+/// should. What limits the far field now is the terrain's own LOD, not
+/// this.
 const COVER_STRIDE: u32 = (64.0 / TEXEL_M) as u32;
 
 /// One world's last raster, kept so the cheap pass can run without the
@@ -373,9 +384,10 @@ impl CoverJob {
                 }),
             };
             let full_at = cover.full_at.max(1.0e-6);
-            // Sampled at block CORNERS, one row longer than there are
-            // blocks, so every texel sits inside a cell with four known
-            // corners and no block boundary becomes an edge.
+            let started = std::time::Instant::now();
+            // Sampled at cell CORNERS, one row longer than there are cells,
+            // so every texel sits inside a cell with four known corners and
+            // no cell boundary becomes an edge.
             let cells = MAP_SIZE / COVER_STRIDE;
             let step = TEXEL_M * COVER_STRIDE as f32;
             let grid: Vec<f32> = (0..=cells)
@@ -385,13 +397,13 @@ impl CoverJob {
                     voxel_engine::scatter::coverage(def, &inputs, at)
                 })
                 .collect();
-            // Walked a cell at a time rather than a texel at a time, so
-            // the four corners are fetched once per cell instead of once
-            // per texel — and, far more than that, so a cell with no
-            // population at any corner skips its texels entirely. Most of
-            // a world is not forest, and that is what keeps the cost of
-            // this pass tied to the size of the woods rather than to the
-            // resolution of the map.
+            // Walked a cell at a time rather than a texel at a time, so the
+            // four corners are fetched once per cell instead of once per
+            // texel — and, far more than that, so a cell with no population
+            // at any corner skips its texels entirely. Most of a world is
+            // not forest, and that is what keeps the cost of this pass tied
+            // to the size of the woods rather than to the resolution of the
+            // map.
             let row = (cells + 1) as usize;
             let inv = 1.0 / COVER_STRIDE as f32;
             for cz in 0..cells {
@@ -404,10 +416,8 @@ impl CoverJob {
                     }
                     for iz in 0..COVER_STRIDE {
                         let fz = iz as f32 * inv;
-                        let (top, bot) = (
-                            c00 * (1.0 - fz) + c01 * fz,
-                            c10 * (1.0 - fz) + c11 * fz,
-                        );
+                        let (top, bot) =
+                            (c00 * (1.0 - fz) + c01 * fz, c10 * (1.0 - fz) + c11 * fz);
                         for ix in 0..COVER_STRIDE {
                             let fx = ix as f32 * inv;
                             let c = top * (1.0 - fx) + bot * fx;
@@ -428,6 +438,9 @@ impl CoverJob {
                         }
                     }
                 }
+            }
+            if std::env::var_os("VOXEL_LOG_LAYERS").is_some() {
+                info!("cover sweep '{}' in {:?}", def.class, started.elapsed());
             }
         }
         (texels, coarse_from)
