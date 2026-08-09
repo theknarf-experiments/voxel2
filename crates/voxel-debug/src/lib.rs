@@ -148,6 +148,16 @@ impl Plugin for VoxelDebugPlugin {
     }
 }
 
+// No per-pass GPU timing here on purpose. Bevy's `RenderDiagnosticsPlugin`
+// with `WgpuFeatures::TIMESTAMP_QUERY` was tried and does not work on this
+// machine: the M1 Pro reports TIMESTAMP_QUERY and INSIDE_ENCODERS but not
+// INSIDE_PASSES, and the passes that matter are render passes, so
+// `main_opaque_pass_3d` gets no `elapsed_gpu` at all and the three spans
+// that do report (clustering, fxaa, upscaling) all read 0.000 ms. Only
+// `elapsed_cpu` survives, and that is the time spent ENCODING a pass —
+// tens of microseconds, and no evidence about the GPU. Attribute render
+// cost by differencing instead: change one thing, measure the frame.
+
 /// The offscreen target and mirror camera for `VOXEL_SCREENSHOT`.
 ///
 /// The camera is INACTIVE unless a capture is due. It renders the whole
