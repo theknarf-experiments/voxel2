@@ -507,6 +507,43 @@ fn sync_world_suns(
     if !changed {
         return;
     }
+    // Shadows are the largest single thing left in the frame, and every
+    // way of making them cheaper is a visible trade, so these are
+    // MEASUREMENT HANDLES and the defaults do not move.
+    //
+    // Flying at 45 m/s, every frame of a 110 s flight aggregated, share
+    // of frames missing 60 fps and share making 120:
+    //
+    //   cascades / max      over 16.67ms   under 8.33ms
+    //     4 / 420 (ship)        3.90%          65.2%
+    //     2 / 420               2.41%          67.8%
+    //     3 / 250               1.79%          67.2%
+    //     4 / 180               1.70%          66.7%
+    //     shadows off           0.65%          84.6%
+    //
+    // Two things worth knowing before spending this. Halving the cascades
+    // buys a third of what turning shadows off buys, so most of the cost
+    // is the PCF sampling in the fragment shaders, not the cascade
+    // renders — cutting cascade COUNT is the weak lever. And shortening
+    // the range is not free even though the far field looks like it is
+    // already handled: large-scale terrain shadowing IS baked into the
+    // mesh, but the props are not, and the mid-distance tree shadows are
+    // carrying more of how a forest reads than they look like they do.
+    // Against 420 m, a 250 m range changes 2.8% of the forest band by
+    // more than 24/255 and a 180 m range changes 4.6% — for comparison
+    // the MSAA-to-FXAA switch changed 0.001%. It reads as a flatter,
+    // washed-out middle distance.
+    //
+    // So this is an art call with a real price on both sides, not a
+    // setting to quietly pick.
+    let cascades = std::env::var("VOXEL_CASCADES")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(4);
+    let shadow_max = std::env::var("VOXEL_SHADOW_MAX")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(420.0);
     for world in worlds.iter() {
         let Some(host) = scenes.0.get(&world.id) else {
             continue;
@@ -536,16 +573,17 @@ fn sync_world_suns(
                     voxel_render::world_layer(world.id),
                     DirectionalLight {
                         illuminance,
-                        shadow_maps_enabled: host.sun_shadows,
+                        shadow_maps_enabled: host.sun_shadows
+                            && std::env::var("VOXEL_SHADOWS").as_deref() != Ok("0"),
                         ..default()
                     },
                     // Explicit cascades: the default bounds come from the
                     // camera's far plane, which is useless at this scale.
                     CascadeShadowConfigBuilder {
-                        num_cascades: 4,
+                        num_cascades: cascades,
                         minimum_distance: 0.5,
                         first_cascade_far_bound: 24.0,
-                        maximum_distance: 420.0,
+                        maximum_distance: shadow_max,
                         overlap_proportion: 0.2,
                     }
                     .build(),
