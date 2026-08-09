@@ -172,6 +172,9 @@ pub fn eval(ops: &[WorldOp], seed: u32, p: Vec3, vs: f32) -> (f32, u32) {
         if !coarse && op.flags & WOP_FLAG_COARSE_ONLY != 0 {
             continue;
         }
+        if !region_gate(op.region, ta, tb) {
+            continue;
+        }
         // Generated from voxel-core::opgen — the single source both
         // interpreters share. Edit the op table, not this call site.
         include!(concat!(env!("OUT_DIR"), "/op_arms_full.rs"));
@@ -193,10 +196,34 @@ pub fn eval_height(ops: &[WorldOp], seed: u32, xz: Vec2, vs: f32) -> f32 {
     let pxz = xz;
     let hfbm = |q: Vec2, s: f32, o: i32, m: u32| crate::fbm_mode(seed, q, s, o, vs, m);
     for op in ops {
+        if !region_gate(op.region, ta, tb) {
+            continue;
+        }
         // Generated from voxel-core::opgen (height-only subset).
         include!(concat!(env!("OUT_DIR"), "/op_arms_height.rs"));
     }
     h
+}
+
+/// Does a point in the region axes fall inside an op's gate?
+///
+/// Twin of the identical test in every interpreter — the WGSL density
+/// shader's two loops, the mesh shader's shadow-bake replay and the water
+/// shader's seabed replay. All five must agree, or a district's walls
+/// stop at a different line than its floors.
+///
+/// Runs for every op of every sample, which invites optimising — but an
+/// integer version comparing byte-quantized axes measured no faster
+/// (megastructure settle 2.12 -> 2.30 s, inside the noise). A gated-out
+/// op costs its loop iteration and its 64-byte read; the compares are
+/// free either way.
+#[inline]
+pub fn region_gate(packed: u32, ta: f32, tb: f32) -> bool {
+    if packed == 0 {
+        return true;
+    }
+    let b = voxel_core::worldop::unpack_region(packed);
+    ta >= b[0] && ta < b[1] && tb >= b[2] && tb < b[3]
 }
 
 /// Bounds on the program's SDF over a box, or `None` if the program
@@ -229,10 +256,47 @@ pub fn eval_range(ops: &[WorldOp], seed: u32, min: Vec3, max: Vec3, vs: f32) -> 
         crate::fbm_range(seed, lo, hi, s, o, vs, m)
     };
     for op in ops {
+        match region_gate_range(op.region, ta, tb) {
+            // Definitely outside: the op does not exist over this box.
+            Some(false) => continue,
+            // Definitely inside: bound it exactly as an ungated op.
+            Some(true) => {}
+            // Straddling the district edge. Bounding this properly means
+            // bounding the program BOTH ways and unioning, which the
+            // generated arms cannot express — they mutate `d` in place.
+            // So refuse to answer, and let the box pay for a density
+            // pass. That is the honest cost of a hard-edged gate, and it
+            // is charged only to the boxes actually on a boundary.
+            None => return None,
+        }
         // Generated from voxel-core::opgen; see `OpDef::range`.
         include!(concat!(env!("OUT_DIR"), "/op_arms_range.rs"));
     }
     Some(d)
+}
+
+/// [`region_gate`] over an interval: `Some(true)`/`Some(false)` when the
+/// whole box is on one side of the gate, `None` when it straddles.
+fn region_gate_range(packed: u32, ta: Interval, tb: Interval) -> Option<bool> {
+    if packed == 0 {
+        return Some(true);
+    }
+    let b = voxel_core::worldop::unpack_region(packed);
+    let axis = |v: Interval, lo: f32, hi: f32| {
+        if v.lo >= lo && v.hi < hi {
+            Some(true)
+        } else if v.hi < lo || v.lo >= hi {
+            Some(false)
+        } else {
+            None
+        }
+    };
+    match (axis(ta, b[0], b[1]), axis(tb, b[2], b[3])) {
+        // Outside on either axis is outside, however unsure the other is.
+        (Some(false), _) | (_, Some(false)) => Some(false),
+        (Some(true), Some(true)) => Some(true),
+        _ => None,
+    }
 }
 
 /// The Y-lattice spacing of the program, if it has one (used by planning
@@ -449,56 +513,97 @@ fn region_terrain(
         .p2([a[0], a[1], b[0], b[1]])
 }
 
-/// The shipped megastructure: shaft registers, coarse solid mass, floor
-/// lattice with openings, pillars, gated walls with doorways, shaft cut,
-/// catwalk beams.
+/// A megastructure interior, in the shape the shipped level has: a coarse
+/// solid mass whose fine detail is region-gated, so what is built at a
+/// point depends on which district the point is in.
+///
+/// A FIXTURE, not a copy of the level. The shipped JSON has nine
+/// districts and no oracle to check them against, so the engine pins it
+/// by its properties (`every_megastructure_district_is_whole`) rather
+/// than op-for-op; what this needs to be is a realistic volumetric
+/// program with gates in it, for the bound and the interpreter to chew
+/// on.
 pub fn mega_program() -> Vec<WorldOp> {
+    // Two districts either side of a cut on the first axis: one warren of
+    // small walled cells, one hall of columns.
+    let warren = [0.0, 0.5, 0.0, 1.0];
+    let hall = [0.5, 1.0, 0.0, 1.0];
     vec![
         WorldOp::new(WOP_REGION_AXES)
-            .p0([2100.0, -880.0, 1.3e-3, 1.7e-3])
+            .p0([2100.0, -880.0, 9.0e-5, 7.0e-5])
             .p1([-5400.0, 3300.0, 4.0, 0.0]),
-        WorldOp::new(WOP_SHAFTS_XZ).p0([288.0, 90.0, 24.0, 30.0]),
+        WorldOp::new(WOP_SHAFTS_XZ)
+            .region(warren)
+            .p0([288.0, 90.0, 24.0, 30.0]),
+        WorldOp::new(WOP_SHAFTS_XZ)
+            .region(hall)
+            .p0([780.0, 200.0, 55.0, 40.0]),
         WorldOp::new(WOP_COARSE_SOLID)
             .flags(WOP_FLAG_COARSE_ONLY)
             .material(2),
+        // The warren: close floors, holes through them, walls both ways.
         WorldOp::new(WOP_LATTICE_Y)
             .flags(WOP_FLAG_FINE_ONLY)
+            .region(warren)
             .p0([44.0, 0.0, 0.0, 0.0]),
         WorldOp::new(WOP_SLABS_Y)
             .flags(WOP_FLAG_FINE_ONLY)
+            .region(warren)
             .material(2)
             .p0([1.5, 0.0, 0.0, 0.0]),
         WorldOp::new(WOP_GRID_HOLES)
             .flags(WOP_FLAG_FINE_ONLY)
+            .region(warren)
             .p0([16.0, 0.16, 0.0, 0.0])
             .p1([7.0, 4.0, 7.0, 0.0]),
         WorldOp::new(WOP_PILLARS_XZ)
             .flags(WOP_FLAG_FINE_ONLY)
+            .region(warren)
             .material(2)
             .p0([34.0, 8.0, 1.6, 2.2]),
         WorldOp::new(WOP_WALLS)
             .flags(WOP_FLAG_FINE_ONLY)
+            .region(warren)
             .material(2)
             .p0([104.0, 1.2, 0.45, 0.0])
             .p1([0.0, 22.0, 0.5, 0.0])
             .p2([4.0, 14.0, 5.0, 12.0]),
         WorldOp::new(WOP_WALLS)
             .flags(WOP_FLAG_FINE_ONLY)
+            .region(warren)
             .material(2)
             .p0([104.0, 1.2, 0.45, 1.0])
             .p1([501.0, 22.0, 0.5, 77.0])
             .p2([4.0, 14.0, 5.0, 12.0]),
+        // The hall: one storey every 195 m on columns, and nothing else.
+        WorldOp::new(WOP_LATTICE_Y)
+            .flags(WOP_FLAG_FINE_ONLY)
+            .region(hall)
+            .p0([195.0, 0.0, 0.0, 0.0]),
+        WorldOp::new(WOP_SLABS_Y)
+            .flags(WOP_FLAG_FINE_ONLY)
+            .region(hall)
+            .material(7)
+            .p0([6.0, 0.0, 0.0, 0.0]),
+        WorldOp::new(WOP_PILLARS_XZ)
+            .flags(WOP_FLAG_FINE_ONLY)
+            .region(hall)
+            .material(7)
+            .p0([250.0, 40.0, 16.0, 12.0]),
+        // One cut for both kinds of bore: only one district's shaft op
+        // can pass its gate at a point, so there is only ever one shaft.
         WorldOp::new(WOP_SHAFTS_CUT),
         WorldOp::new(WOP_BEAMS)
             .flags(WOP_FLAG_FINE_ONLY)
+            .region(warren)
             .material(2)
             .p0([3.0, 2.2, 1.0, 0.7])
             .p1([6.0, 0.0, 0.0, 0.0]),
-        // Districts: everything structural is material 2, so one band at
-        // the end divides the whole interior.
+        // The coarse mass takes each district's colour, so the silhouette
+        // at ten kilometres already says which one it is.
         WorldOp::new(WOP_MATERIAL_BAND)
             .material(7)
-            .p0([0.0, 0.46, 0.0, 1.0])
+            .p0(hall)
             .p1([0.0, 0.0, 2.0, 0.0]),
     ]
 }
@@ -774,6 +879,56 @@ mod range_tests {
         );
     }
 
+    /// A region-gated op applies inside its band and nowhere else, and
+    /// the bound never contradicts the samples where it does commit.
+    ///
+    /// The gate is the mechanism a level uses to give a district its own
+    /// architecture, so "inside is different from outside" IS the
+    /// feature; a gate that silently passed everywhere would leave every
+    /// district looking identical and no test failing.
+    #[test]
+    fn a_region_gate_divides_the_world_and_keeps_the_bound_honest() {
+        let mut ops = planet_program();
+        // A slab of solid over the whole altitude range, confined to the
+        // lower half of the first axis. Unmistakable: inside the band a
+        // column is solid to the sky, outside it is untouched.
+        let band = [0.0, 0.5, 0.0, 1.0];
+        ops.push(WorldOp::new(WOP_COARSE_SOLID).material(2).region(band));
+
+        let (mut inside, mut outside) = (0, 0);
+        for i in 0..600 {
+            let p = Vec3::new(i as f32 * 137.0 - 40_000.0, 6_000.0, i as f32 * 91.0 - 30_000.0);
+            let solid = eval(&ops, 0, p, 1.0).0 < 0.0;
+            // High above the terrain, so the ONLY thing that can be solid
+            // here is the gated op — which makes this a direct read of
+            // the gate rather than of the landscape.
+            if solid { inside += 1 } else { outside += 1 }
+
+            let lo = p - Vec3::splat(8.0);
+            let hi = p + Vec3::splat(8.0);
+            if let Some(bound) = eval_range(&ops, 0, lo, hi, 1.0) {
+                let d = eval(&ops, 0, p, 1.0).0;
+                assert!(bound.contains(d), "sdf {d} at {p:?} escapes {bound:?}");
+            }
+        }
+        assert!(inside > 50 && outside > 50, "gate is one-sided: {inside} in, {outside} out");
+    }
+
+    #[test]
+    fn a_region_packs_and_unpacks_within_a_byte() {
+        for band in [[0.0, 1.0, 0.0, 1.0], [0.25, 0.5, 0.6, 0.75], [0.0, 0.46, 0.0, 1.0]] {
+            let back = voxel_core::worldop::unpack_region(voxel_core::worldop::pack_region(band));
+            for (a, b) in band.iter().zip(back.iter()) {
+                assert!((a - b).abs() <= 1.0 / 255.0, "{band:?} -> {back:?}");
+            }
+        }
+        // The ungated sentinel must not be a band any level could mean:
+        // it packs from an EMPTY box, which would gate the op away
+        // entirely and so is never worth authoring.
+        assert!(region_gate(0, 0.5, 0.5));
+        assert_eq!(voxel_core::worldop::pack_region([0.0, 0.0, 0.0, 0.0]), 0);
+    }
+
     /// A world that can put solid anywhere declines to be analysed,
     /// rather than claiming a bound it cannot justify.
     #[test]
@@ -800,3 +955,4 @@ mod range_tests {
         assert!(deep.is_negative(), "the deep should be all solid: {deep:?}");
     }
 }
+

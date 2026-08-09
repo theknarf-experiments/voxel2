@@ -111,9 +111,19 @@ fn each_world_uploads_its_own_generator() {
         render.get(0).unwrap().program.ops.as_slice(),
         voxel_worldgen::program::planet_program(),
     );
+    // World 1 against the level it was loaded FROM, not against a
+    // fixture: what this test is for is that the second registration
+    // does not quietly reuse the first world's slot, and comparing each
+    // world to its own JSON says that without pinning either level's
+    // contents (the megastructure's are checked by their properties, in
+    // `every_megastructure_district_is_whole`).
     assert_eq!(
         render.get(1).unwrap().program.ops.as_slice(),
-        voxel_worldgen::program::mega_program(),
+        mega.generator(0).ops(),
+    );
+    assert_ne!(
+        render.get(0).unwrap().program.ops.as_slice(),
+        render.get(1).unwrap().program.ops.as_slice(),
     );
     // And the CPU twin agrees with the GPU one, per world.
     let worlds = app.world().resource::<Worlds>();

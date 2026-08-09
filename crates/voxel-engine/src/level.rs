@@ -572,7 +572,7 @@ pub struct LevelDef {
     pub lod: LodDef,
     /// The world's base geometry (and water/vegetation meta ops),
     /// interpreted in order.
-    pub generator: Vec<GenOpDef>,
+    pub generator: Vec<GenEntryDef>,
     /// Material recipes for the ids the generator ops emit.
     #[serde(default)]
     pub materials: Vec<MaterialDef>,
@@ -622,6 +622,46 @@ pub struct DoorDef {
     /// Decorrelation salt added to the lattice level in the hash.
     #[serde(default)]
     pub salt: i32,
+}
+
+/// One entry in a level's generator: an op, plus where it applies.
+///
+/// The region gate lives out here rather than on each op because it is
+/// not an op's business. `walls` knows about spacing and doorways; that
+/// a level only wants walls in one district is a fact about the LEVEL,
+/// and hanging an optional band off all fifteen variants would say
+/// otherwise fifteen times.
+///
+/// This is what makes "a different shape language per region" authorable
+/// without the engine learning what a region is for. It compares two
+/// numbers against a box; the level decides those numbers mean a desert,
+/// a habitation block, or nothing at all.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct GenEntryDef {
+    #[serde(flatten)]
+    pub op: GenOpDef,
+    /// `[a0, a1, b0, b1]` in the axes `region_axes` sampled — the same
+    /// band form `material_band` and `height_band_fbm` take. Absent
+    /// applies the op everywhere.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub region: Option<[f32; 4]>,
+}
+
+impl GenEntryDef {
+    /// Pack to the interpreter form, gate included.
+    pub fn pack(&self) -> WorldOp {
+        let op = self.op.pack();
+        match self.region {
+            Some(band) => op.region(band),
+            None => op,
+        }
+    }
+}
+
+impl From<GenOpDef> for GenEntryDef {
+    fn from(op: GenOpDef) -> Self {
+        Self { op, region: None }
+    }
 }
 
 /// One generator op — the JSON authoring form of `voxel_core::WorldOp`.
@@ -1050,12 +1090,32 @@ impl LevelDef {
     /// world they are planning on top of; at runtime the engine hands the
     /// same value to [`crate::planning::HostPlanning::build`].
     pub fn generator(&self, seed: u64) -> voxel_worldgen::Generator {
-        voxel_worldgen::Generator::new(
-            self.generator.iter().map(GenOpDef::pack).collect(),
-            seed as u32,
-            sun_dir(self),
-        )
+        let ops: Vec<WorldOp> = self.generator.iter().map(GenEntryDef::pack).collect();
+        assert_region_axes_first(&ops);
+        voxel_worldgen::Generator::new(ops, seed as u32, sun_dir(self))
     }
+}
+
+/// Every reader of the region axes must come after the op that fills
+/// them, and this is a hard error rather than a quiet zero.
+///
+/// The GPU splits the program in two — a column pass that fills `ta`/`tb`
+/// and a sample pass that consumes them — so on the GPU a band op reads
+/// the FINAL axes wherever it sits in the list, while the CPU twin runs
+/// the ops in order and would read zero. An out-of-order program is
+/// therefore not merely wrong, it is wrong DIFFERENTLY in each
+/// interpreter, which is the expensive kind of bug to find.
+fn assert_region_axes_first(ops: &[WorldOp]) {
+    let axes_at = ops.iter().position(|op| op.kind == WOP_REGION_AXES);
+    let reader_at = ops.iter().position(|op| {
+        op.region != 0 || matches!(op.kind, WOP_MATERIAL_BAND | WOP_HEIGHT_BAND_FBM)
+    });
+    let Some(reader) = reader_at else { return };
+    assert!(
+        axes_at.is_some_and(|axes| axes < reader),
+        "generator op {reader} reads the region axes but no `region_axes` op precedes it \
+         (add one, first in the list)"
+    );
 }
 
 /// Pack the level's generator, install it in the CPU interpreter, and
@@ -1443,7 +1503,7 @@ mod tests {
             .any(|d| d.output == ScatterOutput::Points));
         // The planet's geometry comes from height ops; sea level is the
         // host's business and no longer part of the program.
-        let packed: Vec<_> = planet.generator.iter().map(GenOpDef::pack).collect();
+        let packed: Vec<_> = planet.generator.iter().map(GenEntryDef::pack).collect();
         assert!(packed.iter().any(|op| op.is_height_op()));
         // Materials cover the ids the generator emits.
         assert!(planet.materials.iter().any(|m| m.id() == 1));
@@ -1451,7 +1511,7 @@ mod tests {
 
         let mega = LevelDef::from_json(&shipped("megastructure.json")).unwrap();
         assert!(mega.planning.is_object());
-        let packed: Vec<_> = mega.generator.iter().map(GenOpDef::pack).collect();
+        let packed: Vec<_> = mega.generator.iter().map(GenEntryDef::pack).collect();
         assert!(mega.scatter.is_empty());
         assert!(mega.materials.iter().any(|m| m.id() == 2));
         // Sunless interior: no height ops, so the horizon-shadow bake
@@ -1475,15 +1535,121 @@ mod tests {
     }
 
     #[test]
-    fn shipped_generators_pack_to_reference_programs() {
-        // The shipped JSONs must express exactly the reference programs the
-        // CPU interpreter tests verify against the legacy formulas.
+    fn the_planet_packs_to_the_reference_program() {
+        // Worth pinning exactly, because an ORACLE stands behind it:
+        // `planet_program_matches_legacy_terrain_height` checks the
+        // reference against the pre-program terrain formula, so tying the
+        // shipped JSON to the reference transitively checks the JSON.
+        //
+        // The megastructure has no such oracle — see the test below,
+        // which asserts what is actually true of it instead.
         let planet = LevelDef::from_json(&shipped("planet.json")).unwrap();
-        let packed: Vec<_> = planet.generator.iter().map(GenOpDef::pack).collect();
+        let packed: Vec<_> = planet.generator.iter().map(GenEntryDef::pack).collect();
         assert_eq!(packed, voxel_worldgen::program::planet_program());
+    }
 
+    /// The megastructure is a set of region-gated districts, and these
+    /// are the properties that makes it one — not any particular op list.
+    ///
+    /// Pinning it op-for-op would only assert that nobody edited the
+    /// level, which is the one thing a level is FOR. These catch the
+    /// authoring mistakes that actually happen: a district with no
+    /// architecture, a band nothing paints, a material with no recipe.
+    #[test]
+    fn every_megastructure_district_is_whole() {
         let mega = LevelDef::from_json(&shipped("megastructure.json")).unwrap();
-        let packed: Vec<_> = mega.generator.iter().map(GenOpDef::pack).collect();
-        assert_eq!(packed, voxel_worldgen::program::mega_program());
+        let ops: Vec<_> = mega.generator.iter().map(GenEntryDef::pack).collect();
+
+        assert_eq!(ops[0].kind, WOP_REGION_AXES, "the axes must be filled first");
+
+        // Every band that paints a district must also BUILD one, or the
+        // district is a colour swatch with no architecture in it.
+        let painted: Vec<_> = ops
+            .iter()
+            .filter(|op| op.kind == WOP_MATERIAL_BAND)
+            .map(|op| (op.material, pack_region([op.p0[0], op.p0[1], op.p0[2], op.p0[3]])))
+            .collect();
+        assert!(painted.len() >= 8, "only {} districts", painted.len());
+        for (mat, band) in &painted {
+            let built = ops.iter().filter(|op| op.region == *band).count();
+            assert!(built >= 3, "district {mat} has {built} gated ops");
+            assert!(
+                mega.materials.iter().any(|m| material_id(m) == *mat),
+                "district material {mat} has no recipe"
+            );
+        }
+
+        // Distinct bands, or two districts silently share one architecture.
+        let mut bands: Vec<_> = painted.iter().map(|(_, b)| *b).collect();
+        bands.sort_unstable();
+        bands.dedup();
+        assert_eq!(bands.len(), painted.len(), "two districts share a band");
+
+        // One cut at the end serves every district's bores: the shaft
+        // registers are per-sample, and only one gate can pass at a point.
+        let cut = ops.iter().rposition(|op| op.kind == WOP_SHAFTS_CUT);
+        let last_bore = ops.iter().rposition(|op| op.kind == WOP_SHAFTS_XZ);
+        assert!(cut > last_bore, "shafts are cut before the last one is defined");
+    }
+
+    /// No district may be a sliver of the world.
+    ///
+    /// The bands look even written down and are not: the region axes are
+    /// sums of noise, so they are bell-shaped around 0.5, and cutting
+    /// both at 0.455/0.545 — which reads as thirds — gave the three
+    /// middle districts about a twentieth of the world between them. The
+    /// shipped cuts are the measured terciles, and this is what keeps
+    /// them honest when somebody retunes the axis scale or octaves.
+    #[test]
+    fn no_megastructure_district_is_a_sliver() {
+        let mega = LevelDef::from_json(&shipped("megastructure.json")).unwrap();
+        let gen = mega.generator(0);
+        // Through `surface_material_weight`, which is the same query the
+        // host gates content with — so this measures the districts as
+        // anything placing things in them will see them.
+        let mats: Vec<u32> = gen
+            .ops()
+            .iter()
+            .filter(|op| op.kind == WOP_MATERIAL_BAND)
+            .map(|op| op.material)
+            .collect();
+
+        // By STRONGEST weight, not by weight over a half. In the feather
+        // between two districts neither is over a half — at a corner of
+        // the axis grid all four are near a quarter — so a threshold
+        // would report a sixth of the world as belonging to nobody when
+        // the interpreter, which tests the bands hard, leaves no gap.
+        const N: i32 = 110;
+        let mut hits = vec![0usize; mats.len()];
+        for i in 0..N {
+            for j in 0..N {
+                let xz =
+                    bevy::math::Vec2::new(i as f32 * 760.0 - 42_000.0, j as f32 * 760.0 - 42_000.0);
+                let strongest = mats
+                    .iter()
+                    .enumerate()
+                    .max_by(|(_, a), (_, b)| {
+                        let wa = gen.surface_material_weight(xz, 1.0, **a);
+                        let wb = gen.surface_material_weight(xz, 1.0, **b);
+                        wa.total_cmp(&wb)
+                    })
+                    .map(|(k, _)| k)
+                    .unwrap();
+                hits[strongest] += 1;
+            }
+        }
+        let total = f64::from(N * N);
+        for (mat, n) in mats.iter().zip(&hits) {
+            let share = *n as f64 / total;
+            assert!(share > 0.03, "district {mat} covers {:.1}% of the world", share * 100.0);
+        }
+    }
+
+    fn material_id(m: &MaterialDef) -> u32 {
+        match m {
+            MaterialDef::Surface { id, .. }
+            | MaterialDef::Canopy { id, .. }
+            | MaterialDef::Zoned { id, .. } => *id,
+        }
     }
 }

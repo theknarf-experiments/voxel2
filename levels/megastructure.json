@@ -18,14 +18,6 @@
         0.0784,
         0.0803
       ],
-      "grain": 0.35,
-      "band": {
-        "freq": 0.22,
-        "amp": 0.18,
-        "lo": 0.1,
-        "hi": 0.9,
-        "warp": 0.4
-      },
       "grime": {
         "tint": [
           0.55,
@@ -34,7 +26,7 @@
         ],
         "amount": 1.0
       },
-      "streaks": 0.35,
+      "detail_fade": 0.004,
       "emissive": {
         "color": [
           1.3,
@@ -44,8 +36,115 @@
         "intensity": 1.0,
         "spacing": 13.0,
         "level_spacing": 22.0,
-        "chance": 0.65,
+        "chance": 0.45,
         "glow": 0.077
+      }
+    },
+    {
+      "type": "surface",
+      "id": 3,
+      "base": [
+        0.085,
+        0.07,
+        0.052
+      ],
+      "grime": {
+        "tint": [
+          0.55,
+          0.58,
+          0.55
+        ],
+        "amount": 1.0
+      },
+      "detail_fade": 0.004,
+      "emissive": {
+        "color": [
+          1.4,
+          1.05,
+          0.55
+        ],
+        "intensity": 1.0,
+        "spacing": 9.0,
+        "level_spacing": 20.0,
+        "chance": 0.8,
+        "glow": 0.077
+      }
+    },
+    {
+      "type": "surface",
+      "id": 4,
+      "base": [
+        0.03,
+        0.038,
+        0.034
+      ],
+      "grime": {
+        "tint": [
+          0.55,
+          0.58,
+          0.55
+        ],
+        "amount": 1.0
+      },
+      "detail_fade": 0.004,
+      "emissive": {
+        "color": [
+          1.3,
+          1.25,
+          1.05
+        ],
+        "intensity": 1.0,
+        "spacing": 26.0,
+        "level_spacing": 26.0,
+        "chance": 0.3,
+        "glow": 0.077
+      }
+    },
+    {
+      "type": "surface",
+      "id": 5,
+      "base": [
+        0.135,
+        0.132,
+        0.12
+      ],
+      "grime": {
+        "tint": [
+          0.55,
+          0.58,
+          0.55
+        ],
+        "amount": 1.0
+      },
+      "detail_fade": 0.004,
+      "emissive": {
+        "color": [
+          0.85,
+          0.98,
+          1.3
+        ],
+        "intensity": 1.0,
+        "spacing": 11.0,
+        "level_spacing": 12.0,
+        "chance": 0.55,
+        "glow": 0.077
+      }
+    },
+    {
+      "type": "surface",
+      "id": 6,
+      "base": [
+        0.062,
+        0.036,
+        0.022
+      ],
+      "grime": {
+        "tint": [
+          0.55,
+          0.58,
+          0.55
+        ],
+        "amount": 1.0
       },
       "detail_fade": 0.004
     },
@@ -53,18 +152,10 @@
       "type": "surface",
       "id": 7,
       "base": [
-        0.052,
-        0.047,
-        0.055
+        0.1,
+        0.106,
+        0.12
       ],
-      "grain": 0.35,
-      "band": {
-        "freq": 0.22,
-        "amp": 0.18,
-        "lo": 0.1,
-        "hi": 0.9,
-        "warp": 0.4
-      },
       "grime": {
         "tint": [
           0.55,
@@ -73,18 +164,101 @@
         ],
         "amount": 1.0
       },
-      "streaks": 0.35,
+      "detail_fade": 0.004,
       "emissive": {
         "color": [
-          1.3,
-          1.25,
-          1.05
+          0.85,
+          0.98,
+          1.3
         ],
         "intensity": 1.0,
-        "spacing": 13.0,
-        "level_spacing": 22.0,
+        "spacing": 60.0,
+        "level_spacing": 195.0,
+        "chance": 0.9,
+        "glow": 0.077
+      }
+    },
+    {
+      "type": "surface",
+      "id": 8,
+      "base": [
+        0.02,
+        0.02,
+        0.023
+      ],
+      "grime": {
+        "tint": [
+          0.55,
+          0.58,
+          0.55
+        ],
+        "amount": 1.0
+      },
+      "detail_fade": 0.004
+    },
+    {
+      "type": "surface",
+      "id": 9,
+      "base": [
+        0.055,
+        0.048,
+        0.042
+      ],
+      "grime": {
+        "tint": [
+          0.55,
+          0.58,
+          0.55
+        ],
+        "amount": 1.0
+      },
+      "detail_fade": 0.004,
+      "emissive": {
+        "color": [
+          1.4,
+          1.05,
+          0.55
+        ],
+        "intensity": 1.0,
+        "spacing": 17.0,
+        "level_spacing": 52.0,
         "chance": 0.65,
         "glow": 0.077
+      }
+    },
+    {
+      "type": "surface",
+      "id": 10,
+      "base": [
+        0.072,
+        0.078,
+        0.06
+      ],
+      "grime": {
+        "tint": [
+          0.55,
+          0.58,
+          0.55
+        ],
+        "amount": 1.0
+      },
+      "detail_fade": 0.004
+    },
+    {
+      "type": "surface",
+      "id": 11,
+      "base": [
+        0.044,
+        0.041,
+        0.037
+      ],
+      "grime": {
+        "tint": [
+          0.55,
+          0.58,
+          0.55
+        ],
+        "amount": 1.0
       },
       "detail_fade": 0.004
     }
@@ -93,8 +267,8 @@
     {
       "type": "region_axes",
       "scale": [
-        0.0013,
-        0.0017
+        9e-05,
+        7e-05
       ],
       "offset": [
         2100.0,
@@ -105,107 +279,725 @@
       "octaves": 4
     },
     {
-      "type": "shafts_xz",
-      "spacing": 288.0,
-      "jitter": 90.0,
-      "radius": [
-        24.0,
-        30.0
-      ]
-    },
-    {
       "type": "coarse_solid",
       "material": 2
     },
     {
       "type": "lattice_y",
-      "spacing": 44.0
-    },
-    {
-      "type": "slabs_y",
-      "half_thickness": 1.5,
-      "material": 2
-    },
-    {
-      "type": "grid_holes",
-      "cell": 16.0,
-      "chance": 0.16,
-      "half": [
-        7.0,
-        4.0,
-        7.0
+      "spacing": 20.0,
+      "region": [
+        0.0,
+        0.427,
+        0.0,
+        0.444
       ]
     },
     {
-      "type": "pillars_xz",
-      "spacing": 34.0,
-      "jitter": 8.0,
-      "girth": [
-        1.6,
-        2.2
-      ],
-      "material": 2
+      "type": "slabs_y",
+      "half_thickness": 0.9,
+      "material": 3,
+      "region": [
+        0.0,
+        0.427,
+        0.0,
+        0.444
+      ]
     },
     {
       "type": "walls",
       "axis": "x",
-      "spacing": 104.0,
-      "half_thickness": 1.2,
-      "chance": 0.45,
+      "spacing": 34.0,
+      "half_thickness": 0.9,
+      "chance": 0.72,
       "door": {
-        "cell": 22.0,
-        "chance": 0.5,
+        "cell": 11.0,
+        "chance": 0.55,
         "half": [
-          4.0,
-          14.0,
-          5.0
+          3.0,
+          5.5,
+          2.4
         ],
-        "y": 12.0
+        "y": 5.0
       },
-      "material": 2
+      "material": 3,
+      "region": [
+        0.0,
+        0.427,
+        0.0,
+        0.444
+      ]
     },
     {
       "type": "walls",
       "axis": "z",
-      "spacing": 104.0,
-      "half_thickness": 1.2,
-      "chance": 0.45,
-      "salt": 501,
+      "spacing": 34.0,
+      "half_thickness": 0.9,
+      "chance": 0.72,
+      "salt": 811,
       "door": {
-        "cell": 22.0,
-        "chance": 0.5,
+        "cell": 11.0,
+        "chance": 0.55,
+        "half": [
+          3.0,
+          5.5,
+          2.4
+        ],
+        "y": 5.0,
+        "salt": 37
+      },
+      "material": 3,
+      "region": [
+        0.0,
+        0.427,
+        0.0,
+        0.444
+      ]
+    },
+    {
+      "type": "pillars_xz",
+      "spacing": 26.0,
+      "jitter": 5.0,
+      "girth": [
+        1.0,
+        1.4
+      ],
+      "material": 3,
+      "region": [
+        0.0,
+        0.427,
+        0.0,
+        0.444
+      ]
+    },
+    {
+      "type": "grid_holes",
+      "cell": 13.0,
+      "chance": 0.1,
+      "half": [
+        4.0,
+        3.0,
+        4.0
+      ],
+      "region": [
+        0.0,
+        0.427,
+        0.0,
+        0.444
+      ]
+    },
+    {
+      "type": "shafts_xz",
+      "spacing": 190.0,
+      "jitter": 60.0,
+      "radius": [
+        9.0,
+        7.0
+      ],
+      "region": [
+        0.0,
+        0.427,
+        0.0,
+        0.444
+      ]
+    },
+    {
+      "type": "lattice_y",
+      "spacing": 26.0,
+      "region": [
+        0.0,
+        0.427,
+        0.444,
+        0.595
+      ]
+    },
+    {
+      "type": "slabs_y",
+      "half_thickness": 1.8,
+      "material": 4,
+      "region": [
+        0.0,
+        0.427,
+        0.444,
+        0.595
+      ]
+    },
+    {
+      "type": "walls",
+      "axis": "z",
+      "spacing": 30.0,
+      "half_thickness": 2.6,
+      "chance": 0.94,
+      "door": {
+        "cell": 96.0,
+        "chance": 0.35,
         "half": [
           4.0,
-          14.0,
+          7.0,
           5.0
         ],
-        "y": 12.0,
-        "salt": 77
+        "y": 7.0
       },
-      "material": 2
+      "material": 4,
+      "region": [
+        0.0,
+        0.427,
+        0.444,
+        0.595
+      ]
+    },
+    {
+      "type": "shafts_xz",
+      "spacing": 640.0,
+      "jitter": 120.0,
+      "radius": [
+        26.0,
+        14.0
+      ],
+      "region": [
+        0.0,
+        0.427,
+        0.444,
+        0.595
+      ]
+    },
+    {
+      "type": "lattice_y",
+      "spacing": 12.0,
+      "region": [
+        0.0,
+        0.427,
+        0.595,
+        1.0
+      ]
+    },
+    {
+      "type": "slabs_y",
+      "half_thickness": 0.6,
+      "material": 5,
+      "region": [
+        0.0,
+        0.427,
+        0.595,
+        1.0
+      ]
+    },
+    {
+      "type": "grid_holes",
+      "cell": 22.0,
+      "chance": 0.3,
+      "half": [
+        9.0,
+        4.0,
+        9.0
+      ],
+      "region": [
+        0.0,
+        0.427,
+        0.595,
+        1.0
+      ]
+    },
+    {
+      "type": "pillars_xz",
+      "spacing": 48.0,
+      "jitter": 10.0,
+      "girth": [
+        0.8,
+        1.0
+      ],
+      "material": 5,
+      "region": [
+        0.0,
+        0.427,
+        0.595,
+        1.0
+      ]
+    },
+    {
+      "type": "lattice_y",
+      "spacing": 30.0,
+      "region": [
+        0.427,
+        0.565,
+        0.0,
+        0.444
+      ]
+    },
+    {
+      "type": "pillars_xz",
+      "spacing": 17.0,
+      "jitter": 4.0,
+      "girth": [
+        1.1,
+        1.6
+      ],
+      "material": 6,
+      "region": [
+        0.427,
+        0.565,
+        0.0,
+        0.444
+      ]
+    },
+    {
+      "type": "shafts_xz",
+      "spacing": 150.0,
+      "jitter": 40.0,
+      "radius": [
+        30.0,
+        18.0
+      ],
+      "region": [
+        0.427,
+        0.565,
+        0.0,
+        0.444
+      ]
+    },
+    {
+      "type": "beams",
+      "every": 1,
+      "half_width": 2.6,
+      "y": 1.0,
+      "half_height": 0.8,
+      "reach": 9.0,
+      "material": 6,
+      "region": [
+        0.427,
+        0.565,
+        0.0,
+        0.444
+      ]
+    },
+    {
+      "type": "lattice_y",
+      "spacing": 195.0,
+      "region": [
+        0.427,
+        0.565,
+        0.444,
+        0.595
+      ]
+    },
+    {
+      "type": "slabs_y",
+      "half_thickness": 6.0,
+      "material": 7,
+      "region": [
+        0.427,
+        0.565,
+        0.444,
+        0.595
+      ]
+    },
+    {
+      "type": "pillars_xz",
+      "spacing": 250.0,
+      "jitter": 40.0,
+      "girth": [
+        16.0,
+        12.0
+      ],
+      "material": 7,
+      "region": [
+        0.427,
+        0.565,
+        0.444,
+        0.595
+      ]
+    },
+    {
+      "type": "shafts_xz",
+      "spacing": 780.0,
+      "jitter": 200.0,
+      "radius": [
+        55.0,
+        40.0
+      ],
+      "region": [
+        0.427,
+        0.565,
+        0.444,
+        0.595
+      ]
+    },
+    {
+      "type": "beams",
+      "every": 1,
+      "half_width": 7.0,
+      "y": 60.0,
+      "half_height": 3.0,
+      "reach": 26.0,
+      "material": 7,
+      "region": [
+        0.427,
+        0.565,
+        0.444,
+        0.595
+      ]
+    },
+    {
+      "type": "lattice_y",
+      "spacing": 150.0,
+      "region": [
+        0.427,
+        0.565,
+        0.595,
+        1.0
+      ]
+    },
+    {
+      "type": "slabs_y",
+      "half_thickness": 74.0,
+      "material": 8,
+      "region": [
+        0.427,
+        0.565,
+        0.595,
+        1.0
+      ]
+    },
+    {
+      "type": "shafts_xz",
+      "spacing": 600.0,
+      "jitter": 150.0,
+      "radius": [
+        95.0,
+        55.0
+      ],
+      "region": [
+        0.427,
+        0.565,
+        0.595,
+        1.0
+      ]
+    },
+    {
+      "type": "beams",
+      "every": 1,
+      "half_width": 4.0,
+      "y": 74.0,
+      "half_height": 1.6,
+      "reach": 30.0,
+      "material": 8,
+      "region": [
+        0.427,
+        0.565,
+        0.595,
+        1.0
+      ]
+    },
+    {
+      "type": "lattice_y",
+      "spacing": 52.0,
+      "region": [
+        0.565,
+        1.0,
+        0.0,
+        0.444
+      ]
+    },
+    {
+      "type": "slabs_y",
+      "half_thickness": 3.2,
+      "material": 9,
+      "region": [
+        0.565,
+        1.0,
+        0.0,
+        0.444
+      ]
+    },
+    {
+      "type": "walls",
+      "axis": "x",
+      "spacing": 68.0,
+      "half_thickness": 3.4,
+      "chance": 0.82,
+      "door": {
+        "cell": 34.0,
+        "chance": 0.6,
+        "half": [
+          5.0,
+          13.0,
+          8.0
+        ],
+        "y": 13.0
+      },
+      "material": 9,
+      "region": [
+        0.565,
+        1.0,
+        0.0,
+        0.444
+      ]
+    },
+    {
+      "type": "walls",
+      "axis": "z",
+      "spacing": 210.0,
+      "half_thickness": 2.0,
+      "chance": 0.4,
+      "salt": 313,
+      "material": 9,
+      "region": [
+        0.565,
+        1.0,
+        0.0,
+        0.444
+      ]
+    },
+    {
+      "type": "shafts_xz",
+      "spacing": 300.0,
+      "jitter": 90.0,
+      "radius": [
+        22.0,
+        16.0
+      ],
+      "region": [
+        0.565,
+        1.0,
+        0.0,
+        0.444
+      ]
+    },
+    {
+      "type": "beams",
+      "every": 2,
+      "half_width": 5.0,
+      "y": 3.0,
+      "half_height": 2.0,
+      "reach": 14.0,
+      "material": 9,
+      "region": [
+        0.565,
+        1.0,
+        0.0,
+        0.444
+      ]
+    },
+    {
+      "type": "lattice_y",
+      "spacing": 42.0,
+      "region": [
+        0.565,
+        1.0,
+        0.444,
+        0.595
+      ]
+    },
+    {
+      "type": "slabs_y",
+      "half_thickness": 1.6,
+      "material": 10,
+      "region": [
+        0.565,
+        1.0,
+        0.444,
+        0.595
+      ]
+    },
+    {
+      "type": "pillars_xz",
+      "spacing": 44.0,
+      "jitter": 14.0,
+      "girth": [
+        2.0,
+        3.0
+      ],
+      "material": 10,
+      "region": [
+        0.565,
+        1.0,
+        0.444,
+        0.595
+      ]
+    },
+    {
+      "type": "walls",
+      "axis": "z",
+      "spacing": 88.0,
+      "half_thickness": 1.4,
+      "chance": 0.5,
+      "salt": 55,
+      "material": 10,
+      "region": [
+        0.565,
+        1.0,
+        0.444,
+        0.595
+      ]
+    },
+    {
+      "type": "fbm3",
+      "scale": 0.004,
+      "y_ratio": 1.6,
+      "octaves": 3,
+      "threshold": 0.06,
+      "width": 26.0,
+      "carve": true,
+      "material": 10,
+      "region": [
+        0.565,
+        1.0,
+        0.444,
+        0.595
+      ]
+    },
+    {
+      "type": "lattice_y",
+      "spacing": 64.0,
+      "region": [
+        0.565,
+        1.0,
+        0.595,
+        1.0
+      ]
+    },
+    {
+      "type": "slabs_y",
+      "half_thickness": 32.0,
+      "material": 11,
+      "region": [
+        0.565,
+        1.0,
+        0.595,
+        1.0
+      ]
+    },
+    {
+      "type": "shafts_xz",
+      "spacing": 210.0,
+      "jitter": 70.0,
+      "radius": [
+        11.0,
+        9.0
+      ],
+      "region": [
+        0.565,
+        1.0,
+        0.595,
+        1.0
+      ]
     },
     {
       "type": "shafts_cut"
     },
     {
-      "type": "beams",
-      "every": 3,
-      "half_width": 2.2,
-      "y": 1.0,
-      "half_height": 0.7,
-      "reach": 6.0,
-      "material": 2
+      "type": "material_band",
+      "from": 2,
+      "material": 3,
+      "a": [
+        0.0,
+        0.427
+      ],
+      "b": [
+        0.0,
+        0.444
+      ]
+    },
+    {
+      "type": "material_band",
+      "from": 2,
+      "material": 4,
+      "a": [
+        0.0,
+        0.427
+      ],
+      "b": [
+        0.444,
+        0.595
+      ]
+    },
+    {
+      "type": "material_band",
+      "from": 2,
+      "material": 5,
+      "a": [
+        0.0,
+        0.427
+      ],
+      "b": [
+        0.595,
+        1.0
+      ]
+    },
+    {
+      "type": "material_band",
+      "from": 2,
+      "material": 6,
+      "a": [
+        0.427,
+        0.565
+      ],
+      "b": [
+        0.0,
+        0.444
+      ]
     },
     {
       "type": "material_band",
       "from": 2,
       "material": 7,
       "a": [
-        0.0,
-        0.46
+        0.427,
+        0.565
+      ],
+      "b": [
+        0.444,
+        0.595
+      ]
+    },
+    {
+      "type": "material_band",
+      "from": 2,
+      "material": 8,
+      "a": [
+        0.427,
+        0.565
+      ],
+      "b": [
+        0.595,
+        1.0
+      ]
+    },
+    {
+      "type": "material_band",
+      "from": 2,
+      "material": 9,
+      "a": [
+        0.565,
+        1.0
       ],
       "b": [
         0.0,
+        0.444
+      ]
+    },
+    {
+      "type": "material_band",
+      "from": 2,
+      "material": 10,
+      "a": [
+        0.565,
+        1.0
+      ],
+      "b": [
+        0.444,
+        0.595
+      ]
+    },
+    {
+      "type": "material_band",
+      "from": 2,
+      "material": 11,
+      "a": [
+        0.565,
+        1.0
+      ],
+      "b": [
+        0.595,
         1.0
       ]
     }
@@ -217,12 +1009,40 @@
         "name": "districts",
         "table": [
           [
-            "habitation",
-            2
+            "warrens",
+            3
           ],
           [
-            "void",
+            "conduit",
+            4
+          ],
+          [
+            "stacks",
+            5
+          ],
+          [
+            "girders",
+            6
+          ],
+          [
+            "cathedral",
             7
+          ],
+          [
+            "silos",
+            8
+          ],
+          [
+            "foundry",
+            9
+          ],
+          [
+            "ruin",
+            10
+          ],
+          [
+            "bedrock",
+            11
           ]
         ]
       },
@@ -231,7 +1051,7 @@
         "name": "sites:pockets",
         "chance": 0.45,
         "snap_y_m": 44.0,
-        "biome": "districts:habitation"
+        "biome": "districts:warrens"
       },
       {
         "kind": "emit",

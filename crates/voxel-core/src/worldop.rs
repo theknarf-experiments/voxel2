@@ -138,6 +138,28 @@ pub const WOP_FLAG_COARSE_ONLY: u32 = 2;
 /// and `COARSE_ONLY` ops apply. Must match the WGSL interpreter.
 pub const WOP_COARSE_VOXEL_M: f32 = 4.0;
 
+/// Pack a region gate into the header word: four band edges in 0..1, one
+/// byte each, in the order `(a0, a1, b0, b1)`.
+///
+/// A byte is 1/255 of an axis, and an axis is kilometres wide — finer than
+/// any boundary a level can meaningfully author, and it costs no space at
+/// all, which matters more: the op is 64 bytes and every one of them is
+/// spoken for.
+///
+/// Zero is the ungated sentinel and cannot collide with a real gate,
+/// because it decodes to the empty band `a in [0, 0)`.
+pub fn pack_region(band: [f32; 4]) -> u32 {
+    let q = |v: f32| ((v.clamp(0.0, 1.0) * 255.0).round() as u32) & 0xFF;
+    q(band[0]) | (q(band[1]) << 8) | (q(band[2]) << 16) | (q(band[3]) << 24)
+}
+
+/// Inverse of [`pack_region`]. The twin of the WGSL unpack in each
+/// interpreter's gate.
+pub fn unpack_region(packed: u32) -> [f32; 4] {
+    let u = |s: u32| ((packed >> s) & 0xFF) as f32 / 255.0;
+    [u(0), u(8), u(16), u(24)]
+}
+
 /// One generator op, 64 bytes, `#[repr(C)]` — uploaded verbatim.
 #[derive(Clone, Copy, Debug, PartialEq, Pod, Zeroable)]
 #[repr(C)]
@@ -145,7 +167,18 @@ pub struct WorldOp {
     pub kind: u32,
     pub flags: u32,
     pub material: u32,
-    pub _pad: u32,
+    /// Region gate, packed by [`pack_region`]; 0 applies the op
+    /// everywhere. Tested against the `ta`/`tb` registers before the op
+    /// runs at all, so ANY op can be confined to a region without the op
+    /// itself knowing regions exist.
+    ///
+    /// Hard-edged, unlike [`WOP_HEIGHT_BAND_FBM`]'s fade, because what
+    /// this gates is structure: a wall is present or it is not, and there
+    /// is no half of one to blend to. Where a level wants the ground to
+    /// change gradually it uses the band ops; where it wants the
+    /// ARCHITECTURE to change it uses this, and an abrupt seam is the
+    /// point.
+    pub region: u32,
     pub p0: [f32; 4],
     pub p1: [f32; 4],
     pub p2: [f32; 4],
@@ -157,11 +190,17 @@ impl WorldOp {
             kind,
             flags: 0,
             material: 0,
-            _pad: 0,
+            region: 0,
             p0: [0.0; 4],
             p1: [0.0; 4],
             p2: [0.0; 4],
         }
+    }
+
+    /// Confine this op to a box in the two region axes.
+    pub fn region(mut self, band: [f32; 4]) -> Self {
+        self.region = pack_region(band);
+        self
     }
 
     pub fn flags(mut self, flags: u32) -> Self {

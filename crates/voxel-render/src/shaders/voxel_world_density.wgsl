@@ -206,6 +206,23 @@ fn sd_box(p: vec3<f32>, b: vec3<f32>) -> f32 {
 fn v2(x: f32, y: f32) -> vec2<f32> { return vec2<f32>(x, y); }
 fn to_i(x: f32) -> i32 { return i32(x); }
 fn to_u(x: f32) -> u32 { return u32(x); }
+// Region gate (WorldOp::region). Emitted here rather than written into
+// each shader so the three files cannot drift: every interpreter loop
+// calls this before its switch, and 0 means the op is ungated.
+//
+// An integer form that compared the axes quantized to bytes, skipping
+// the unpack, measured no faster (megastructure settle 2.12 -> 2.30 s,
+// inside the run-to-run noise): what a gated-out op costs is the loop
+// iteration and the 64-byte read, not the arithmetic. Left in the
+// obvious form.
+fn region_gate(packed: u32, ta: f32, tb: f32) -> bool {
+    if packed == 0u { return true; }
+    let a0 = f32(packed & 0xFFu) / 255.0;
+    let a1 = f32((packed >> 8u) & 0xFFu) / 255.0;
+    let b0 = f32((packed >> 16u) & 0xFFu) / 255.0;
+    let b1 = f32((packed >> 24u) & 0xFFu) / 255.0;
+    return ta >= a0 && ta < a1 && tb >= b0 && tb < b1;
+}
 fn v3(x: f32, y: f32, z: f32) -> vec3<f32> { return vec3<f32>(x, y, z); }
 fn iv2(x: i32, y: i32) -> vec2<i32> { return vec2<i32>(x, y); }
 fn iv3(x: i32, y: i32, z: i32) -> vec3<i32> { return vec3<i32>(x, y, z); }
@@ -243,6 +260,7 @@ fn eval_column(pxz: vec2<f32>, vs: f32) -> Column {
         // about which ops exist or the column is not the column.
         if (coarse && (op.head.y & 1u) != 0u) { continue; }
         if (!coarse && (op.head.y & 2u) != 0u) { continue; }
+        if (!region_gate(op.head.w, ta, tb)) { continue; }
         switch op.head.x {
 // GENOPS COLUMN ARMS BEGIN (generated from voxel-core::opgen — run `mise run genops` after editing the op table)
             case 0u: { // WOP_HEIGHT_FBM
@@ -296,6 +314,7 @@ fn eval_program(p: vec3<f32>, vs: f32, col: Column) -> WorldSample {
         let op = prog.ops[w.count.x + i];
         if (coarse && (op.head.y & 1u) != 0u) { continue; }
         if (!coarse && (op.head.y & 2u) != 0u) { continue; }
+        if (!region_gate(op.head.w, ta, tb)) { continue; }
         switch op.head.x {
 // GENOPS ARMS BEGIN (generated from voxel-core::opgen — run `mise run genops` after editing the op table)
             case 15u: { // WOP_FBM3

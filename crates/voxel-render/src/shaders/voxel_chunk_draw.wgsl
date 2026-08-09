@@ -240,10 +240,29 @@ fn fragment(in: VsOut) -> @location(0) vec4<f32> {
         let ceilingness = smoothstep(-0.55, -0.85, n.y);
         let line = 1.0 - smoothstep(0.25, 0.75, abs(fract(world.z / m.p1.z) - 0.5) * m.p1.z);
         let works = step(1.0 - m.p2.x, hash3(vec3<i32>(i32(floor(world.z / m.p1.z)), i32(lf), 7)));
-        emissive += m.c3.rgb * m.c3.w * ceilingness * line * works;
+        // Converge to the pattern's MEAN once a period stops spanning a
+        // pixel, which is what a mip chain would do if this were a
+        // texture. Point-sampling it instead turns a grid of lamps seen
+        // across a kilometre of floor into moiré arcs that read as
+        // scratches — and since `surface_albedo` became a flat colour,
+        // this is the only procedural detail left to alias.
+        //
+        // Faded to the mean rather than to zero: a lit district has to
+        // still look lit from the far side of the hall, or the light is
+        // exactly the identity it was giving the district away by.
+        // Against the STRIP's width, not the period: a strip is about a
+        // metre of every thirteen to sixty, so it stops spanning a pixel
+        // long before the pattern's period does, and fading on the
+        // period leaves the aliasing untouched at every distance you can
+        // actually see it at.
+        let resolved = 1.0 - smoothstep(0.35, 1.4, fwidth(world.z));
+        // A strip is ~1 m of every `spacing`, and `works` is on with
+        // probability `chance` — so those are the two means.
+        let lit = mix(0.5 / m.p1.z, line, resolved) * mix(m.p2.x, works, resolved);
+        emissive += m.c3.rgb * m.c3.w * ceilingness * lit;
         // Faint up-glow from the strips onto nearby floors.
         let floorness = smoothstep(0.55, 0.85, n.y);
-        emissive += m.c3.rgb * m.p2.y * floorness * line * works;
+        emissive += m.c3.rgb * m.p2.y * floorness * lit;
     }
 
     var pbr_input = pbr_types::pbr_input_new();
