@@ -11,8 +11,7 @@
 // which fades out.
 
 #import bevy_pbr::{
-    mesh_view_bindings::{view, globals},
-    mesh_types::MESH_FLAGS_SHADOW_RECEIVER_BIT,
+    mesh_view_bindings::{view, globals, lights},
     pbr_types,
     pbr_functions,
 }
@@ -106,16 +105,58 @@ fn vertex(in: VsIn) -> VsOut {
     return out;
 }
 
+/// Sun and ambient only, off Bevy's own light buffer.
+///
+/// The impostor pass costs almost exactly what its fragment shader costs:
+/// cutting the mesh to eight vertices changed nothing, and so did thinning
+/// the population while holding covered area constant. Returning a
+/// constant from the fragment shader was worth 1.9 ms of a 10 ms frame, so
+/// the fragment shader is the only place there is anything to win here.
+///
+/// This takes 0.5 ms of that 1.9 (mean 9.9 -> 9.4 ms, matched settle
+/// time). The rest is fog, tonemapping and the deband dither, which are
+/// what make an impostor agree with every other surface in the frame and
+/// so are not ours to skip.
+///
+/// What is dropped, and why it is safe here:
+///   - clustered point/spot iteration — a forest is lit by the sun;
+///   - specular — `reflectance` is already zero, so it contributed zero;
+///   - environment map / `EnvBRDFApprox` — there is no environment map,
+///     and ambient here is a percent of the sun;
+///   - Burley — at `roughness = 1` its two scatter terms are within a few
+///     percent of Lambert except at grazing angles, which a canopy a few
+///     pixels across cannot resolve;
+///   - cascaded shadows — the cascades stop at 420 m and impostors run to
+///     4 km, so they covered the near sliver only, and every instance
+///     already carries a baked terrain sun-shadow in its hash.
+///
+/// The light VALUES are still Bevy's, read from the per-view lights
+/// buffer, so there is nothing here to drift out of step with the props
+/// these hand over to — only the BRDF is simplified, not the lighting.
+fn sun_and_ambient(base: vec3<f32>, n: vec3<f32>) -> vec3<f32> {
+    // Per view, so this is already only the suns that light this world —
+    // Bevy filters directional lights by render layer on the CPU.
+    var direct = vec3<f32>(0.0);
+    for (var i = 0u; i < lights.n_directional_lights; i = i + 1u) {
+        let l = lights.directional_lights[i];
+        let n_dot_l = saturate(dot(n, l.direction_to_light.xyz));
+        direct += l.color.rgb * n_dot_l;
+    }
+    // Two factors that are easy to drop and both blow the canopy out:
+    // the 1/PI lives inside `Fd_Burley`, so dropping Burley drops the
+    // normalisation with it, and Bevy applies `view.exposure` once over
+    // the summed lighting rather than per light.
+    const FRAC_1_PI: f32 = 0.31830987;
+    return base * (direct * FRAC_1_PI + lights.ambient_color.rgb) * view.exposure;
+}
+
 @fragment
 fn fragment(in: VsOut) -> @location(0) vec4<f32> {
     if (env.flags.x > 0.5) {
         return vec4<f32>(1.0, 1.0, 1.0, 1.0);
     }
-    let world = vec3<f32>(
-        view.world_position.x + in.cam_rel.x,
-        view.world_position.y + in.cam_rel.y,
-        view.world_position.z + in.cam_rel.z,
-    );
+    let cam_rel = in.cam_rel;
+    let world = view.world_position.xyz + cam_rel;
     // Crossed planes have no meaningful normal of their own, but a TREE
     // does: what a camera sees of a canopy is the hemisphere facing it. So
     // the normal leans from up toward the viewer, horizontally, and a
@@ -128,17 +169,16 @@ fn fragment(in: VsOut) -> @location(0) vec4<f32> {
     // to. Up is only the correct normal for the one view from directly
     // overhead, which is where this degenerates and falls back to it.
     //
-    // Per fragment and horizontal, so it is a smooth function of where the
-    // camera is: the whole stand turns together as you move, with no
-    // instant at which anything pops.
+    // A smooth function of where the camera is, so the whole stand turns
+    // together as you move with no instant at which anything pops.
     let up = vec3<f32>(0.0, 1.0, 0.0);
-    let flat = vec2<f32>(-in.cam_rel.x, -in.cam_rel.z);
+    let flat = vec2<f32>(-cam_rel.x, -cam_rel.z);
     let flat_len = length(flat);
     // Scaled by how side-on the tree is seen: from overhead a canopy
     // really does present its top, and that is also where the horizontal
     // direction stops being well conditioned, so the same term fixes the
     // look and the degenerate case.
-    let sideness = flat_len / max(length(in.cam_rel), 1e-3);
+    let sideness = flat_len / max(length(cam_rel), 1e-3);
     var lean = up;
     if (flat_len > 1e-3) {
         let side = vec3<f32>(flat.x / flat_len, 0.0, flat.y / flat_len);
@@ -146,22 +186,15 @@ fn fragment(in: VsOut) -> @location(0) vec4<f32> {
     }
     let n = normalize(lean);
 
+    // Fog, tonemapping and dither stay Bevy's — they are cheap, and they
+    // are what has to agree with every other surface in the frame. Only
+    // the lighting above is ours. This carries just the fields that path
+    // reads.
     var pbr_input = pbr_types::pbr_input_new();
-    pbr_input.material.base_color = vec4<f32>(in.color, 1.0);
-    pbr_input.material.perceptual_roughness = 1.0;
-    pbr_input.material.metallic = 0.0;
-    // Foliage is not a mirror. The default F0 of 0.04 over a large flat
-    // quad facing straight up is enough specular to wash the canopy out
-    // to near-white under full daylight.
-    pbr_input.material.reflectance = vec3<f32>(0.0);
     pbr_input.material.flags = pbr_types::STANDARD_MATERIAL_FLAGS_FOG_ENABLED_BIT;
     pbr_input.frag_coord = in.clip;
     pbr_input.world_position = vec4<f32>(world, 1.0);
-    pbr_input.world_normal = n;
-    pbr_input.N = n;
-    pbr_input.V = normalize(-in.cam_rel);
-    pbr_input.flags = MESH_FLAGS_SHADOW_RECEIVER_BIT;
 
-    let color = pbr_functions::apply_pbr_lighting(pbr_input);
+    let color = vec4<f32>(sun_and_ambient(in.color, n), 1.0);
     return pbr_functions::main_pass_post_lighting_processing(pbr_input, color);
 }
