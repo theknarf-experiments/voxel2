@@ -75,6 +75,16 @@ pub struct ImpostorMarker {
 /// the level and the demo agree on — the engine never sees it.
 pub const IMPOSTOR_CLASS: &str = "treecover";
 
+/// The prop class these impostors stand in for.
+///
+/// Their canopy colours are TAKEN from its variants rather than authored
+/// again. They were authored twice, and the two drifted: the impostors
+/// carried hand-converted linear values that had lost a third of their
+/// green, so a stand handed over to real trees that were a different
+/// species of green. One palette, and retuning the props retunes the
+/// forest behind them.
+pub const IMPOSTOR_STANDS_IN_FOR: &str = "tree";
+
 pub struct ImpostorPlugin;
 
 impl Plugin for ImpostorPlugin {
@@ -100,7 +110,7 @@ impl Plugin for ImpostorPlugin {
             )
             .add_systems(
                 ExtractSchedule,
-                (extract_impostor_instances, sync_impostor_reach),
+                (extract_impostor_instances, sync_impostor_style),
             )
             .add_systems(
                 Render,
@@ -114,20 +124,50 @@ impl Plugin for ImpostorPlugin {
 /// of the `env.size.z * 0.82` in `voxel_impostor.wgsl`.
 const FADE_FROM: f32 = 0.82;
 
-/// Stop the impostors where the ground starts painting them, not a beat
-/// before.
+/// Take the impostors' colour from the trees they stand in for, and their
+/// reach from the ground that paints them.
 ///
-/// The two tiers meet at one distance and it is the level's to choose, but
-/// only one of them can honour the number as written: paint is decided per
-/// CHUNK, so it begins at whatever LOD boundary follows. Culling at the
-/// authored distance therefore left a ring of ground with impostors gone
-/// and paint not yet arrived. So the impostors are told where the paint
-/// really starts and fade out ACROSS it — the texel grid appears while
-/// they are still at full strength and is never seen bare.
-fn sync_impostor_reach(
+/// Both are the middle tier's whole job: it has a real forest on one side
+/// and a painted one on the other, and it is the only thing that can be
+/// wrong about either. Neither number is authored here, because both are
+/// really somebody else's — see [`IMPOSTOR_STANDS_IN_FOR`] for the palette.
+///
+/// For the reach: the two tiers meet at one distance and it is the level's
+/// to choose, but only one of them can honour the number as written. Paint
+/// is decided per CHUNK, so it begins at whatever LOD boundary follows;
+/// culling at the authored distance left a ring of ground with impostors
+/// gone and paint not yet arrived. So the impostors are told where the
+/// paint really starts and fade out ACROSS it — the texel grid appears
+/// while they are still at full strength and is never seen bare.
+fn sync_impostor_style(
     worlds: Extract<Res<voxel_engine::Worlds>>,
+    props: Extract<Res<crate::WorldProps>>,
     mut style: ResMut<ImpostorStyle>,
 ) {
+    // The cone silhouette is a conifer and the diamond is a broadleaf, so
+    // each takes that prop variant's foliage. Matched by MODEL rather than
+    // by index: which variant a level lists first is level dressing, and
+    // reading it positionally would swap the two species the day someone
+    // reorders them.
+    for table in props.0.values() {
+        let Some(class) = table.0.get(IMPOSTOR_STANDS_IN_FOR) else {
+            continue;
+        };
+        let foliage = |model| {
+            class
+                .variants
+                .iter()
+                .find(|v| v.model == model)
+                .map(|v| v.foliage.to_linear().to_vec4())
+        };
+        if let Some(c) = foliage(crate::props::Model::Conifer) {
+            style.canopy_a = c;
+        }
+        if let Some(c) = foliage(crate::props::Model::Broadleaf) {
+            style.canopy_b = c;
+        }
+    }
+
     // Every frame rather than on change: this is a fold over at most
     // `MAX_WORLDS` levels, and a change tick compared across worlds is a
     // subtlety to get wrong for no saving.
@@ -254,7 +294,8 @@ struct ImpostorBindGroupRes(Option<BindGroup>);
 pub struct ImpostorStyle {
     pub canopy_a: Vec4,
     pub canopy_b: Vec4,
-    pub trunk: Vec4,
+    /// x = how dark the canopy goes at its base, as a fraction of itself.
+    pub base: Vec4,
     /// x = fade-in start, y = fade-in end, z = cull, w = base height (m).
     pub size: Vec4,
 }
@@ -262,18 +303,17 @@ pub struct ImpostorStyle {
 impl Default for ImpostorStyle {
     fn default() -> Self {
         Self {
-            // LINEAR, not sRGB. The prop trees are authored as
-            // `Color::srgb(0.12, 0.19, 0.05)`, which Bevy converts to
-            // roughly (0.014, 0.030, 0.004) — so sRGB-looking numbers
-            // written straight into this field come out 3-5x too bright
-            // and a stand of impostors reads as pale cardboard next to
-            // the real trees it is standing in for.
-            canopy_a: Vec4::new(0.0075, 0.0170, 0.0028, 0.0),
-            canopy_b: Vec4::new(0.0130, 0.0223, 0.0040, 0.0),
-            trunk: Vec4::new(0.0052, 0.0068, 0.0026, 0.0),
+            // LINEAR, not sRGB — and overwritten from the prop table every
+            // frame anyway, so these only have to be sane for the frames
+            // before a world has loaded. Authoring them here is what went
+            // wrong before: the same greens converted by hand, once, and
+            // then left behind when the props were retuned.
+            canopy_a: Vec4::new(0.0051, 0.0223, 0.0041, 0.0),
+            canopy_b: Vec4::new(0.0137, 0.0304, 0.0041, 0.0),
+            base: Vec4::new(0.35, 0.0, 0.0, 0.0),
             // Real prop trees cover the first 120 m; impostors take over
             // across the next 60. Where they STOP is not authored here —
-            // see `sync_impostor_reach`.
+            // see `sync_impostor_style`.
             size: Vec4::new(85.0, 150.0, 4000.0, 7.0),
         }
     }
@@ -286,7 +326,7 @@ struct ImpostorEnv {
     flags: Vec4,
     canopy_a: Vec4,
     canopy_b: Vec4,
-    trunk: Vec4,
+    base: Vec4,
     size: Vec4,
 }
 
@@ -481,7 +521,7 @@ fn prepare_impostor_bind_group(
         flags: env.flags,
         canopy_a: style.canopy_a,
         canopy_b: style.canopy_b,
-        trunk: style.trunk,
+        base: style.base,
         size: style.size,
     });
     env_uniform.0.write_buffer(&render_device, &render_queue);

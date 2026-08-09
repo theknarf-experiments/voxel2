@@ -288,9 +288,17 @@ fn build_prop_assets(
         .collect();
     for (world, table) in pending {
     assets.built.insert(world);
+    // Nothing a prop is made of is a mirror — bark, leaves, rock. The
+    // default F0 of 0.04 under this demo's sun (FULL_DAYLIGHT against an
+    // ambient a hundredth of it) put a white highlight on every skyward
+    // face, which turned a dark green conifer into pale mint while the
+    // impostor standing behind it stayed green. `voxel_impostor.wgsl`
+    // already zeroes reflectance for exactly this reason; the props were
+    // the half that never got the memo.
     let mat = |base_color: Color, rough: f32| StandardMaterial {
         base_color,
         perceptual_roughness: rough,
+        reflectance: 0.0,
         ..default()
     };
     for (class, def) in &table.0 {

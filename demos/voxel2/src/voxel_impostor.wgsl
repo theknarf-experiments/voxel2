@@ -21,7 +21,7 @@ struct ImpostorEnv {
     flags: vec4<f32>,    // x = coverage-eval flag
     canopy_a: vec4<f32>, // species A canopy
     canopy_b: vec4<f32>, // species B canopy
-    trunk: vec4<f32>,    // trunk/shadowed base
+    base: vec4<f32>,     // x = how dark the canopy goes at its base
     // x = fade-in start, y = fade-in end, z = cull distance, w = height
     size: vec4<f32>,
 }
@@ -91,9 +91,17 @@ fn vertex(in: VsIn) -> VsOut {
     let view_space = (view.view_from_world * vec4<f32>(cam_rel, 0.0)).xyz;
 
     // Two species by hash, darker toward the base where a real canopy
-    // shades its own trunk.
+    // shades itself.
+    //
+    // A SHADE of the canopy, not a second colour. It used to blend to a
+    // hand-picked brown, which is the wrong thing in two ways: almost none
+    // of an impostor's area is trunk, and that brown was as red as the
+    // canopy was green, so the lower half of every tree dragged a stand
+    // warm. Against the real trees it stands in for it read as a different
+    // species — the whole reason the canopy colours are now taken from
+    // them rather than authored again.
     let canopy = mix(env.canopy_a.rgb, env.canopy_b.rgb, is_broadleaf);
-    let color = mix(env.trunk.rgb, canopy, in.tip) * (0.45 + 0.55 * shadow);
+    let color = canopy * mix(env.base.x, 1.0, in.tip) * (0.45 + 0.55 * shadow);
 
     var out: VsOut;
     out.clip = view.clip_from_view * vec4<f32>(view_space, 1.0);
