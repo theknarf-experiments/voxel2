@@ -153,8 +153,12 @@ fn scene_for(level_path: &std::path::Path) -> Scene {
         },
         _ => Scene {
             clear_color: Color::srgb(0.65, 0.77, 0.94),
-            start: Vec3::new(-27570.0, 80.0, -36770.0),
-            look: Vec3::new(0.4, -0.35, 0.4),
+            // In the forest, looking along the mountain range. Found
+            // with `voxctl inspect '{"kind":"regions", ...}'` rather than
+            // guessed: the old spawn ended up INSIDE the range when the
+            // range was added, which reads as a black screen.
+            start: Vec3::new(-2332.0, 152.0, -38199.0),
+            look: Vec3::new(0.7, -0.14, 0.7),
             walk_speed: 60.0,
             run_speed: 600.0,
             sun_illuminance: Some(light_consts::lux::FULL_DAYLIGHT),

@@ -46,7 +46,19 @@ pub struct PropVariant {
 pub enum Model {
     Conifer,
     Broadleaf,
+    /// A third canopy: narrow, pale-trunked, taller than the others.
+    Birch,
     Rock,
+    /// Low woody clump — no trunk worth drawing at this scale.
+    Bush,
+    /// Stem plus a wide squashed cap, in two colours.
+    Mushroom,
+    /// Ribbed column with a pair of raised arms.
+    Cactus,
+    /// A fallen trunk lying along the ground.
+    Log,
+    /// A tuft of tall thin blades, for standing water.
+    Reed,
 }
 
 #[derive(Clone, Debug)]
@@ -147,6 +159,16 @@ impl PropTable {
                             size: [1.7, 6.5],
                         }),
                     },
+                    PropVariant {
+                        model: Model::Birch,
+                        trunk: Color::srgb(0.5216, 0.5059, 0.4510),
+                        foliage: Color::srgb(0.1600, 0.2210, 0.0700),
+                        impostor: Some(Impostor {
+                            shape: ImpostorShape::Diamond,
+                            color: [0.19, 0.28, 0.10],
+                            size: [1.6, 7.5],
+                        }),
+                    },
                 ],
                 // Real cascaded shadows now; no fake disc needed.
                 blob_shadow: false,
@@ -164,6 +186,87 @@ impl PropTable {
                 }],
                 blob_shadow: false,
                 squash: Vec3::new(1.0, 0.75, 1.0),
+            },
+        );
+
+        // Undergrowth. Small, dense and cheap: these are what make a
+        // forest floor read as ground you could walk through rather than
+        // a lawn with trunks in it.
+        let plain = |model, trunk, foliage| PropClass {
+            variants: vec![PropVariant {
+                model,
+                trunk,
+                foliage,
+                impostor: None,
+            }],
+            blob_shadow: false,
+            squash: Vec3::ONE,
+        };
+        classes.insert(
+            "bush".to_string(),
+            plain(Model::Bush, bark, Color::srgb(0.0512, 0.0912, 0.0299)),
+        );
+        classes.insert(
+            "fern".to_string(),
+            PropClass {
+                squash: Vec3::new(1.25, 0.55, 1.25),
+                ..plain(Model::Bush, bark, Color::srgb(0.0448, 0.1002, 0.0331))
+            },
+        );
+        classes.insert(
+            "mushroom".to_string(),
+            plain(
+                Model::Mushroom,
+                Color::srgb(0.5647, 0.5216, 0.4392),
+                Color::srgb(0.4510, 0.1294, 0.0863),
+            ),
+        );
+        classes.insert(
+            "deadwood".to_string(),
+            plain(Model::Log, Color::srgb(0.0912, 0.0699, 0.0448), bark),
+        );
+        classes.insert(
+            "cactus".to_string(),
+            plain(Model::Cactus, bark, Color::srgb(0.0699, 0.1502, 0.0562)),
+        );
+        classes.insert(
+            "drybrush".to_string(),
+            PropClass {
+                squash: Vec3::new(1.1, 0.7, 1.1),
+                ..plain(Model::Bush, bark, Color::srgb(0.1502, 0.1305, 0.0699))
+            },
+        );
+        classes.insert(
+            "marshcap".to_string(),
+            plain(
+                Model::Mushroom,
+                Color::srgb(0.4510, 0.4275, 0.3765),
+                Color::srgb(0.3255, 0.2510, 0.0980),
+            ),
+        );
+        classes.insert(
+            "screebush".to_string(),
+            PropClass {
+                squash: Vec3::new(1.15, 0.4, 1.15),
+                ..plain(Model::Bush, bark, Color::srgb(0.0805, 0.0699, 0.0448))
+            },
+        );
+        classes.insert(
+            "reed".to_string(),
+            plain(Model::Reed, bark, Color::srgb(0.1002, 0.1305, 0.0562)),
+        );
+        classes.insert(
+            "scree".to_string(),
+            PropClass {
+                squash: Vec3::new(1.3, 0.5, 1.3),
+                ..plain(Model::Rock, bark, Color::srgb(0.2100, 0.2050, 0.2000))
+            },
+        );
+        classes.insert(
+            "alpinebush".to_string(),
+            PropClass {
+                squash: Vec3::new(1.2, 0.45, 1.2),
+                ..plain(Model::Bush, bark, Color::srgb(0.0699, 0.0805, 0.0505))
             },
         );
         Self(classes)
@@ -259,6 +362,54 @@ fn build_prop_assets(
                         meshes.add(rock.build()),
                         materials.add(mat(variant.foliage, 0.85)),
                     ));
+                }
+                Model::Bush => {
+                    let mut b = MeshBuilder::default();
+                    b.blob(Vec3::new(0.0, 0.34, 0.0), 0.46, 0.30, 5);
+                    b.blob(Vec3::new(0.30, 0.24, 0.16), 0.30, 0.34, 61);
+                    b.blob(Vec3::new(-0.24, 0.22, -0.20), 0.27, 0.34, 131);
+                    parts.push((meshes.add(b.build()), foliage_mat));
+                }
+                Model::Mushroom => {
+                    parts.push((meshes.add(cylinder_mesh(0.045, 0.22, 6)), trunk_mat));
+                    let mut cap = MeshBuilder::default();
+                    cap.blob(Vec3::new(0.0, 0.235, 0.0), 0.16, 0.12, 17);
+                    parts.push((meshes.add(cap.build()), foliage_mat));
+                }
+                Model::Cactus => {
+                    let mut c = MeshBuilder::default();
+                    c.limb(Vec3::ZERO, Vec3::Y, 0.16, 1.5, 7);
+                    // Arms: up the trunk, out, then up again.
+                    c.limb(Vec3::new(0.0, 0.75, 0.0), Vec3::X, 0.09, 0.42, 6);
+                    c.limb(Vec3::new(0.42, 0.75, 0.0), Vec3::Y, 0.09, 0.52, 6);
+                    c.limb(Vec3::new(0.0, 0.95, 0.0), -Vec3::X, 0.08, 0.34, 6);
+                    c.limb(Vec3::new(-0.34, 0.95, 0.0), Vec3::Y, 0.08, 0.40, 6);
+                    parts.push((meshes.add(c.build()), foliage_mat));
+                }
+                Model::Log => {
+                    let mut l = MeshBuilder::default();
+                    l.limb(Vec3::new(-0.9, 0.17, 0.0), Vec3::X, 0.17, 1.8, 7);
+                    parts.push((meshes.add(l.build()), trunk_mat));
+                }
+                Model::Reed => {
+                    let mut r = MeshBuilder::default();
+                    for i in 0..7u32 {
+                        let a = std::f32::consts::TAU * i as f32 / 7.0 + i as f32 * 0.9;
+                        let (sn, cs) = a.sin_cos();
+                        let lean = Vec3::new(cs, 0.0, sn) * 0.16;
+                        let base = Vec3::new(cs, 0.0, sn) * 0.09;
+                        let h = 0.75 + ((i * 37) % 11) as f32 * 0.06;
+                        r.limb(base, (Vec3::Y + lean).normalize(), 0.018, h, 4);
+                    }
+                    parts.push((meshes.add(r.build()), foliage_mat));
+                }
+                Model::Birch => {
+                    parts.push((meshes.add(cylinder_mesh(0.10, 3.0, 7)), trunk_mat));
+                    let mut top = MeshBuilder::default();
+                    top.blob(Vec3::new(0.0, 3.9, 0.0), 1.05, 0.18, 71);
+                    top.blob(Vec3::new(0.34, 3.35, -0.2), 0.72, 0.20, 173);
+                    top.blob(Vec3::new(-0.28, 4.5, 0.25), 0.62, 0.22, 211);
+                    parts.push((meshes.add(top.build()), foliage_mat));
                 }
                 model => {
                     parts.push((meshes.add(cylinder_mesh(0.14, 1.6, 8)), trunk_mat));
@@ -696,6 +847,34 @@ impl MeshBuilder {
                 self.indices
                     .extend([base, base + 1, base + 2, base, base + 2, base + 3]);
             }
+        }
+    }
+
+    /// A tapered column from `base` along `dir`. The one primitive the
+    /// stems, arms, logs and blades are all made of.
+    fn limb(&mut self, base: Vec3, dir: Vec3, radius: f32, len: f32, sides: u32) {
+        let dir = dir.normalize_or(Vec3::Y);
+        let side = dir.cross(Vec3::Y).try_normalize().unwrap_or(Vec3::X);
+        let up = side.cross(dir);
+        let tip = base + dir * len;
+        for i in 0..sides {
+            let a0 = std::f32::consts::TAU * i as f32 / sides as f32;
+            let a1 = std::f32::consts::TAU * (i + 1) as f32 / sides as f32;
+            let r0 = side * a0.cos() + up * a0.sin();
+            let r1 = side * a1.cos() + up * a1.sin();
+            // Tapered, so a stem reads as organic and a log as a log.
+            let t = 0.75;
+            let s = self.positions.len() as u32;
+            self.positions.extend([
+                (base + r0 * radius).to_array(),
+                (base + r1 * radius).to_array(),
+                (tip + r0 * radius * t).to_array(),
+                (tip + r1 * radius * t).to_array(),
+            ]);
+            self.normals
+                .extend([r0.to_array(), r1.to_array(), r0.to_array(), r1.to_array()]);
+            self.indices
+                .extend([s, s + 2, s + 1, s + 1, s + 2, s + 3]);
         }
     }
 

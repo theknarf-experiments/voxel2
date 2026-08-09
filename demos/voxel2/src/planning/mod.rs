@@ -233,6 +233,68 @@ impl WorldPlanner for StackPlanner {
                     .collect();
                 json!({"count": found.len(), "markers": found})
             }
+            // Region weights on a grid: what the ground is, where, and
+            // how firmly. Used to place cameras and demo starts by
+            // evidence instead of guessing at a noise field.
+            Some("regions") => {
+                let step = query
+                    .get("step")
+                    .and_then(serde_json::Value::as_f64)
+                    .unwrap_or(f64::from(r) / 4.0) as f32;
+                let n = ((2.0 * r / step.max(1.0)) as i32).clamp(1, 64);
+                let mut totals: std::collections::BTreeMap<String, f32> =
+                    std::collections::BTreeMap::new();
+                let mut best: Option<(f32, [f32; 3], String)> = None;
+                let want = query.get("of").and_then(serde_json::Value::as_str);
+                // A region search that ignores altitude finds the sea
+                // floor: most of a region's area can be under water.
+                let alt = query.get("altitude").and_then(|v| {
+                    Some([v.get(0)?.as_f64()? as f32, v.get(1)?.as_f64()? as f32])
+                });
+                let gen = self.ctx.as_ref().map(|c| c.generator.clone());
+                for gz in 0..n {
+                    for gx in 0..n {
+                        let p = bevy::math::Vec2::new(
+                            min.x + (max.x - min.x) * gx as f32 / (n - 1).max(1) as f32,
+                            min.y + (max.y - min.y) * gz as f32 / (n - 1).max(1) as f32,
+                        );
+                        let w = self.weights_at("biomes", p);
+                        for (name, v) in &w {
+                            *totals.entry(name.clone()).or_default() += v;
+                        }
+                        let in_band = alt.is_none_or(|[lo, hi]| {
+                            gen.as_ref().is_some_and(|g| {
+                                let h = g.height(p, 8.0);
+                                h >= lo && h <= hi
+                            })
+                        });
+                        if !in_band {
+                            continue;
+                        }
+                        if let Some((name, v)) = w
+                            .iter()
+                            .filter(|(name, _)| want.is_none_or(|k| k == name))
+                            .max_by(|a, b| a.1.total_cmp(&b.1))
+                        {
+                            if best.as_ref().is_none_or(|(bv, _, _)| v > bv) {
+                                let h = gen.as_ref().map_or(0.0, |g| g.height(p, 8.0));
+                                best = Some((*v, [p.x, h, p.y], name.clone()));
+                            }
+                        }
+                    }
+                }
+                let samples = (n * n) as f32;
+                let share: serde_json::Map<String, serde_json::Value> = totals
+                    .into_iter()
+                    .map(|(k, v)| (k, json!((v / samples * 1000.0).round() / 10.0)))
+                    .collect();
+                let (bw, bp, bn) = best.unwrap_or((0.0, [0.0, 0.0, 0.0], String::new()));
+                json!({
+                    "samples": n * n,
+                    "share_pct": share,
+                    "strongest": {"region": bn, "weight": bw, "pos": bp},
+                })
+            }
             other => json!({"error": format!("unknown inspect kind {other:?}")}),
         }
     }

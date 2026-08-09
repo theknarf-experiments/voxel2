@@ -1416,11 +1416,25 @@ mod tests {
         // without ever parsing it.
         assert!(planet.planning.is_object());
         // Scatter is placement-only: classes and variants, no models.
-        assert_eq!(
-            planet.scatter.iter().map(|s| s.class.as_str()).collect::<Vec<_>>(),
-            vec!["tree", "boulder", "groundcover"]
-        );
-        assert!(planet.scatter[0].variants.len() == 2);
+        // Asserted as PROPERTIES, not as a list — which classes a level
+        // ships is content and changes whenever the world is dressed.
+        let classes: Vec<&str> = planet.scatter.iter().map(|s| s.class.as_str()).collect();
+        for want in ["tree", "boulder", "groundcover"] {
+            assert!(classes.contains(&want), "planet lost its {want} scatter");
+        }
+        // A class name IS a layer instance name, so a duplicate is a
+        // registration panic at load rather than a merge.
+        let mut unique = classes.clone();
+        unique.sort_unstable();
+        unique.dedup();
+        assert_eq!(unique.len(), classes.len(), "duplicate scatter class: {classes:?}");
+        for def in &planet.scatter {
+            assert!(
+                def.output == ScatterOutput::Points || !def.variants.is_empty(),
+                "{} draws entities but declares no variant",
+                def.class
+            );
+        }
         // Ground cover is just another scatter population that outputs
         // points instead of entities.
         assert!(planet
