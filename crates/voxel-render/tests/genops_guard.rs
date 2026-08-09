@@ -3,6 +3,7 @@
 //! generated arms must be valid, well-typed WGSL. Run `mise run genops`
 //! after editing the op table to refresh the shaders.
 
+use voxel_core::layout::{wgsl_material_accessors, wgsl_struct, CHUNK_PARAMS};
 use voxel_core::opgen::{wgsl_arms, wgsl_column_arms, wgsl_helpers, Ctx};
 
 /// (path, helper dialect, arms ctx, has a separate column block).
@@ -165,4 +166,40 @@ fn interpret(p: vec3<f32>, vs: f32) -> f32 {
         .validate(&module)
         .unwrap_or_else(|e| panic!("generated WGSL does not validate: {e:?}"));
     }
+}
+
+/// The GPU struct layouts (voxel-core::layout) spliced into the shaders
+/// that carry their markers.
+///
+/// Separate from the op-table guard because these are twins of a struct
+/// rather than of an interpreter: the per-chunk uniform, and the named
+/// accessors that keep a material parameter's slot out of the shader.
+#[test]
+fn spliced_layout_regions_match_the_tables() {
+    let at = |path: &str| {
+        std::fs::read_to_string(format!("{}/{}", env!("CARGO_MANIFEST_DIR"), path)).unwrap()
+    };
+    for path in [
+        "src/shaders/voxel_world_density.wgsl",
+        "src/shaders/voxel_mesh_chunks.wgsl",
+    ] {
+        assert_eq!(
+            region(
+                &at(path),
+                "// GENMAT CHUNKPARAMS BEGIN",
+                "// GENMAT CHUNKPARAMS END"
+            ),
+            wgsl_struct("ChunkParams", CHUNK_PARAMS),
+            "{path}: ChunkParams stale — run `mise run genops`"
+        );
+    }
+    assert_eq!(
+        region(
+            &at("src/shaders/voxel_chunk_draw.wgsl"),
+            "// GENMAT ACCESSORS BEGIN",
+            "// GENMAT ACCESSORS END"
+        ),
+        wgsl_material_accessors(),
+        "material accessors stale — run `mise run genops`"
+    );
 }

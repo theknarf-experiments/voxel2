@@ -35,21 +35,34 @@ const VERTEX_WORDS: u32 = 3u;
 const POS_BIAS: f32 = 8.0;
 const POS_RANGE: f32 = 48.0;
 
+// Layout twin of `ChunkParams` in voxel-render, generated from
+// `voxel_core::layout::CHUNK_PARAMS`. Run `mise run genops` after
+// editing it.
+// GENMAT CHUNKPARAMS BEGIN
 struct ChunkParams {
     // xyz = chunk minimum corner in world meters, w = voxel size in meters.
     origin: vec4<f32>,
-    // Layout twin of the density shader's integer origin; w = world.
+    // Minimum corner in integer world-voxel units (pos * 32, this chunk's
+    // scale); w = which WORLD's program to interpret. Sample positions
+    // derive from these EXACT integers so two chunks sharing a sample
+    // compute a bit-identical position at any voxel size — `origin + idx
+    // * vs` rounds differently per chunk whenever the voxel size is not
+    // an exact binary float (0.1 m is not), and one ULP flips a sign
+    // where a surface grazes a sample: deterministic seam cracks.
     origin_voxels: vec4<i32>,
+    // Density arena slot this chunk's samples live in.
     slot: u32,
     base_vertex: u32,
     first_index: u32,
     counts_slot: u32,
+    // Range into this frame's concatenated CSG op buffer.
     csg_offset: u32,
     csg_count: u32,
-    // x = seam mask: 2 bits per face (+x,-x,+y,-y,+z,-z);
-    // 1 = neighbor coarser, 2 = neighbor finer.
+    // x = seam mask, 2 bits per face (+x,-x,+y,-y,+z,-z): 1 = neighbour
+    // coarser, 2 = neighbour finer. Read by the mesh pass only.
     _pad: vec2<u32>,
 }
+// GENMAT CHUNKPARAMS END
 
 struct SlotCounts {
     verts: atomic<u32>,

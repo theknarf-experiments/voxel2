@@ -532,6 +532,25 @@ pub struct WorldMaterial {
     pub p2: Vec4,
 }
 
+impl WorldMaterial {
+    /// Assemble from `voxel_core::layout::MatPack`, which is what decides
+    /// which parameter lives in which component. Nothing here knows what
+    /// any of the eight `vec4`s means — that is the point.
+    pub fn from_packed((kind, slots): (u32, [[f32; 4]; 7])) -> Self {
+        let v = |i: usize| Vec4::from_array(slots[i]);
+        Self {
+            head: UVec4::new(kind, 0, 0, 0),
+            c0: v(0),
+            c1: v(1),
+            c2: v(2),
+            c3: v(3),
+            p0: v(4),
+            p1: v(5),
+            p2: v(6),
+        }
+    }
+}
+
 impl Default for WorldMaterial {
     fn default() -> Self {
         // Neutral gray surface — what an unassigned material id renders as.
@@ -2755,6 +2774,28 @@ mod slab_pressure_tests {
 #[cfg(test)]
 mod surface_map_tests {
     use super::*;
+
+    /// The layout table generates the SHADER side of `ChunkParams`; this
+    /// struct is still hand-written because it carries `ShaderType`.
+    /// Sizes agreeing is not proof the fields do, but it catches the
+    /// change that actually happens — a field added to one, not the other.
+    #[test]
+    fn the_chunk_params_table_is_the_size_of_this_struct() {
+        let bytes: usize = voxel_core::layout::CHUNK_PARAMS
+            .iter()
+            .map(|f| match f.ty {
+                "vec4<f32>" | "vec4<i32>" | "vec4<u32>" => 16,
+                "vec2<u32>" | "vec2<f32>" => 8,
+                "u32" | "i32" | "f32" => 4,
+                other => panic!("size of `{other}` is not known here"),
+            })
+            .sum();
+        assert_eq!(
+            bytes,
+            core::mem::size_of::<ChunkParams>(),
+            "voxel_core::layout::CHUNK_PARAMS and ChunkParams disagree"
+        );
+    }
 
     /// Reads a `const NAME: u32 = N u;` out of the draw shader, which is
     /// where the map is read: the mesh pass chose the material per VERTEX

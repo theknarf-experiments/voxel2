@@ -3,6 +3,7 @@
 //! Run from the workspace root: `mise run genops`. A guard test in
 //! voxel-render fails when the spliced text goes stale.
 
+use voxel_core::layout::{wgsl_material_accessors, wgsl_struct, CHUNK_PARAMS};
 use voxel_core::opgen::{wgsl_arms, wgsl_column_arms, wgsl_helpers, Ctx};
 
 const HELPERS_BEGIN: &str = "// GENOPS HELPERS BEGIN";
@@ -13,6 +14,12 @@ const ARMS_END: &str = "// GENOPS ARMS END";
 /// per column instead of once per sample.
 const COLUMN_BEGIN: &str = "// GENOPS COLUMN ARMS BEGIN";
 const COLUMN_END: &str = "// GENOPS COLUMN ARMS END";
+/// GPU struct layouts (voxel-core::layout) rather than op bodies: the
+/// per-chunk uniform, and the material recipes' named slot accessors.
+const PARAMS_BEGIN: &str = "// GENMAT CHUNKPARAMS BEGIN";
+const PARAMS_END: &str = "// GENMAT CHUNKPARAMS END";
+const MAT_BEGIN: &str = "// GENMAT ACCESSORS BEGIN";
+const MAT_END: &str = "// GENMAT ACCESSORS END";
 
 fn splice(text: &str, begin: &str, end: &str, content: &str, indent: &str) -> String {
     let b = text.find(begin).expect("begin marker");
@@ -30,6 +37,17 @@ fn splice(text: &str, begin: &str, end: &str, content: &str, indent: &str) -> St
         })
         .collect();
     format!("{}{}{}", &text[..b_line_end], indented, &text[e_line_start..])
+}
+
+/// Splice only where the marker exists. A shader opts into a region by
+/// carrying its markers, so the water shader — which has an interpreter
+/// but no per-chunk uniform — needs no entry in a table to say so.
+fn splice_if_present(text: &str, begin: &str, end: &str, content: &str, indent: &str) -> String {
+    if text.contains(begin) {
+        splice(text, begin, end, content, indent)
+    } else {
+        text.to_string()
+    }
 }
 
 fn main() {
@@ -69,7 +87,21 @@ fn main() {
             Some(_) => splice(&text, COLUMN_BEGIN, COLUMN_END, &wgsl_column_arms(), arm_indent),
             None => text,
         };
+        let text = splice_if_present(
+            &text,
+            PARAMS_BEGIN,
+            PARAMS_END,
+            &wgsl_struct("ChunkParams", CHUNK_PARAMS),
+            "",
+        );
         std::fs::write(path, text).unwrap();
         println!("spliced {path}");
     }
+    // The material table is read by the draw shader alone, which has no
+    // interpreter in it at all.
+    let draw = "crates/voxel-render/src/shaders/voxel_chunk_draw.wgsl";
+    let text = std::fs::read_to_string(draw).unwrap_or_else(|e| panic!("{draw}: {e}"));
+    let text = splice(&text, MAT_BEGIN, MAT_END, &wgsl_material_accessors(), "");
+    std::fs::write(draw, text).unwrap();
+    println!("spliced {draw}");
 }

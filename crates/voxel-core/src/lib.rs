@@ -7,6 +7,7 @@ pub mod interval;
 pub mod opgen;
 pub mod csg;
 pub mod key;
+pub mod layout;
 pub mod morton;
 pub mod patch;
 pub mod pos;

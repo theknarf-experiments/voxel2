@@ -509,9 +509,15 @@ impl MaterialDef {
     }
 
     /// Pack into the GPU recipe form.
+    ///
+    /// By NAME, through `voxel_core::layout::MATERIALS`, which is also
+    /// what generates the shader's accessors. The slot a parameter lives
+    /// in used to be written here as a `vec4` position and read there as
+    /// `m.p2.y`, agreed by a comment; adding a field meant finding a free
+    /// component by counting. Now neither side can move one alone.
     pub fn pack(&self) -> voxel_render::WorldMaterial {
-        use bevy::math::{UVec4, Vec4};
-        let v3 = |c: [f32; 3], w: f32| Vec4::new(c[0], c[1], c[2], w);
+        use voxel_core::layout::MatPack;
+        let mut m;
         match *self {
             MaterialDef::Surface {
                 base,
@@ -524,29 +530,34 @@ impl MaterialDef {
                 detail_fade,
                 ..
             } => {
-                let b = band.clone();
-                let e = emissive.clone();
-                voxel_render::WorldMaterial {
-                    head: UVec4::new(voxel_render::MAT_KIND_SURFACE, 0, 0, 0),
-                    c0: v3(base, grain),
-                    c1: grime.as_ref().map_or(Vec4::ZERO, |g| v3(g.tint, g.amount)),
-                    c2: moss.as_ref().map_or(Vec4::ZERO, |m| v3(m.color, m.amount)),
-                    c3: e.as_ref().map_or(Vec4::ZERO, |e| v3(e.color, e.intensity)),
-                    p0: b
-                        .as_ref()
-                        .map_or(Vec4::ZERO, |b| Vec4::new(b.freq, b.amp, b.lo, b.hi)),
-                    p1: Vec4::new(
-                        b.as_ref().map_or(0.0, |b| b.warp),
-                        streaks,
-                        e.as_ref().map_or(1.0, |e| e.spacing),
-                        e.as_ref().map_or(1.0, |e| e.level_spacing),
-                    ),
-                    p2: Vec4::new(
-                        e.as_ref().map_or(0.0, |e| e.chance),
-                        e.as_ref().map_or(0.0, |e| e.glow),
-                        detail_fade,
-                        0.0,
-                    ),
+                m = MatPack::new("surface");
+                m.rgb_w("base", base, "grain", grain)
+                    .set("streaks", streaks)
+                    .set("detail_fade", detail_fade);
+                if let Some(g) = grime {
+                    m.rgb_w("grime_tint", g.tint, "grime_amount", g.amount);
+                }
+                if let Some(moss) = moss {
+                    m.rgb_w("moss_color", moss.color, "moss_amount", moss.amount);
+                }
+                if let Some(b) = band {
+                    m.set("band_freq", b.freq)
+                        .set("band_amp", b.amp)
+                        .set("band_lo", b.lo)
+                        .set("band_hi", b.hi)
+                        .set("band_warp", b.warp);
+                }
+                // The strip spacings default to 1 rather than 0 even with
+                // no emissive block: the shader divides by them.
+                m.set("strip_spacing", emissive.as_ref().map_or(1.0, |e| e.spacing))
+                    .set(
+                        "strip_level_spacing",
+                        emissive.as_ref().map_or(1.0, |e| e.level_spacing),
+                    );
+                if let Some(e) = emissive {
+                    m.rgb_w("emissive_color", e.color, "emissive_intensity", e.intensity)
+                        .set("strip_chance", e.chance)
+                        .set("strip_glow", e.glow);
                 }
             }
             MaterialDef::Canopy {
@@ -561,16 +572,22 @@ impl MaterialDef {
                 patch_amount,
                 detail_fade,
                 ..
-            } => voxel_render::WorldMaterial {
-                head: UVec4::new(voxel_render::MAT_KIND_CANOPY, 0, 0, 0),
-                c0: v3(canopy[0], zones.canopy[0]),
-                c1: v3(canopy[1], zones.rock[0]),
-                c2: v3(rock, zones.rock[1]),
-                c3: v3(patch, zones.border),
-                p0: v3(low, zones.canopy[1]),
-                p1: Vec4::new(crowns[0], crowns[1], strata[0], strata[1]),
-                p2: Vec4::new(steep[0], steep[1], detail_fade, patch_amount),
-            },
+            } => {
+                m = MatPack::new("canopy");
+                m.rgb_w("canopy_a", canopy[0], "canopy_start", zones.canopy[0])
+                    .rgb_w("canopy_b", canopy[1], "rock_start", zones.rock[0])
+                    .rgb_w("rock", rock, "rock_width", zones.rock[1])
+                    .rgb_w("patch", patch, "border", zones.border)
+                    .rgb_w("low", low, "canopy_width", zones.canopy[1])
+                    .set("crown_scale", crowns[0])
+                    .set("crown_relief", crowns[1])
+                    .set("strata_scale", strata[0])
+                    .set("strata_relief", strata[1])
+                    .set("steep_hi", steep[0])
+                    .set("steep_lo", steep[1])
+                    .set("detail_fade", detail_fade)
+                    .set("patch_amount", patch_amount);
+            }
             MaterialDef::Zoned {
                 low,
                 mid,
@@ -580,17 +597,21 @@ impl MaterialDef {
                 steep,
                 detail_fade,
                 ..
-            } => voxel_render::WorldMaterial {
-                head: UVec4::new(voxel_render::MAT_KIND_ZONED, 0, 0, 0),
-                c0: v3(low, zones.mid[0]),
-                c1: v3(mid[0], zones.high[0]),
-                c2: v3(high[0], zones.peak[0]),
-                c3: v3(peak, zones.border),
-                p0: v3(mid[1], zones.mid[1]),
-                p1: v3(high[1], zones.high[1]),
-                p2: Vec4::new(zones.peak[1], steep[0], steep[1], detail_fade),
-            },
+            } => {
+                m = MatPack::new("zoned");
+                m.rgb_w("low", low, "mid_start", zones.mid[0])
+                    .rgb_w("mid_a", mid[0], "high_start", zones.high[0])
+                    .rgb_w("high_a", high[0], "peak_start", zones.peak[0])
+                    .rgb_w("peak", peak, "border", zones.border)
+                    .rgb_w("mid_b", mid[1], "mid_width", zones.mid[1])
+                    .rgb_w("high_b", high[1], "high_width", zones.high[1])
+                    .set("peak_width", zones.peak[1])
+                    .set("steep_hi", steep[0])
+                    .set("steep_lo", steep[1])
+                    .set("detail_fade", detail_fade);
+            }
         }
+        voxel_render::WorldMaterial::from_packed(m.finish())
     }
 }
 
@@ -1576,6 +1597,40 @@ mod tests {
     fn shipped(name: &str) -> String {
         let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../levels/");
         std::fs::read_to_string(format!("{path}{name}")).unwrap()
+    }
+
+    /// A recipe lands in the exact components the shader reads.
+    ///
+    /// Written out by hand from `planet.json` rather than compared against
+    /// `pack()`'s own output, which would only prove it agrees with
+    /// itself. This is the assertion that moving the packer onto
+    /// `voxel_core::layout` changed no bytes, and it stays as the pin on
+    /// the canopy layout: every number here is visible in the level file.
+    #[test]
+    fn a_recipe_packs_into_the_components_the_shader_reads() {
+        let planet = LevelDef::from_json(&shipped("planet.json")).unwrap();
+        let canopy = planet
+            .materials
+            .iter()
+            .find(|m| matches!(m, MaterialDef::Canopy { .. }))
+            .expect("planet ships a canopy material");
+        let m = canopy.pack();
+        let v = |x: f32, y: f32, z: f32, w: f32| bevy::math::Vec4::new(x, y, z, w);
+        assert_eq!(m.head.x, voxel_render::MAT_KIND_CANOPY);
+        // canopy[0] | zones.canopy[0]
+        assert_eq!(m.c0, v(0.014, 0.0261, 0.0084, 1.5));
+        // canopy[1] | zones.rock[0]
+        assert_eq!(m.c1, v(0.0747, 0.0933, 0.0261, 340.0));
+        // rock | zones.rock[1]
+        assert_eq!(m.c2, v(0.0635, 0.0541, 0.0467, 140.0));
+        // patch | zones.border
+        assert_eq!(m.c3, v(0.0597, 0.0448, 0.0205, 60.0));
+        // low | zones.canopy[1]
+        assert_eq!(m.p0, v(0.112, 0.1027, 0.0784, 3.0));
+        // crowns | strata
+        assert_eq!(m.p1, v(0.35, 0.9, 0.15, 1.2));
+        // steep | detail_fade | patch_amount
+        assert_eq!(m.p2, v(0.72, 0.45, 0.0015, 0.55));
     }
 
     /// Every section the world is BUILT from has to force a rebuild.

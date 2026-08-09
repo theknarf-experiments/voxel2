@@ -212,31 +212,103 @@ struct MatSample {
 // the recipes select their own colours by the two things that carry real
 // information about the surface — how high it is and how steep it is.
 
+// Which component of which vec4 each named parameter lives in is
+// generated from `voxel_core::layout::MATERIALS` — the same table the
+// engine's packer writes through, so a parameter cannot move on one side
+// only. Run `mise run genops` after editing it.
+// GENMAT ACCESSORS BEGIN
+// --- surface (head.x == 0u) ---
+const MAT_KIND_SURFACE: u32 = 0u;
+fn surface_base(m: WorldMaterial) -> vec3<f32> { return m.c0.rgb; }
+fn surface_grain(m: WorldMaterial) -> f32 { return m.c0.w; }
+fn surface_grime_tint(m: WorldMaterial) -> vec3<f32> { return m.c1.rgb; }
+fn surface_grime_amount(m: WorldMaterial) -> f32 { return m.c1.w; }
+fn surface_moss_color(m: WorldMaterial) -> vec3<f32> { return m.c2.rgb; }
+fn surface_moss_amount(m: WorldMaterial) -> f32 { return m.c2.w; }
+fn surface_emissive_color(m: WorldMaterial) -> vec3<f32> { return m.c3.rgb; }
+fn surface_emissive_intensity(m: WorldMaterial) -> f32 { return m.c3.w; }
+fn surface_band_freq(m: WorldMaterial) -> f32 { return m.p0.x; }
+fn surface_band_amp(m: WorldMaterial) -> f32 { return m.p0.y; }
+fn surface_band_lo(m: WorldMaterial) -> f32 { return m.p0.z; }
+fn surface_band_hi(m: WorldMaterial) -> f32 { return m.p0.w; }
+fn surface_band_warp(m: WorldMaterial) -> f32 { return m.p1.x; }
+fn surface_streaks(m: WorldMaterial) -> f32 { return m.p1.y; }
+fn surface_strip_spacing(m: WorldMaterial) -> f32 { return m.p1.z; }
+fn surface_strip_level_spacing(m: WorldMaterial) -> f32 { return m.p1.w; }
+fn surface_strip_chance(m: WorldMaterial) -> f32 { return m.p2.x; }
+fn surface_strip_glow(m: WorldMaterial) -> f32 { return m.p2.y; }
+fn surface_detail_fade(m: WorldMaterial) -> f32 { return m.p2.z; }
+// --- zoned (head.x == 1u) ---
+const MAT_KIND_ZONED: u32 = 1u;
+fn zoned_low(m: WorldMaterial) -> vec3<f32> { return m.c0.rgb; }
+fn zoned_mid_start(m: WorldMaterial) -> f32 { return m.c0.w; }
+fn zoned_mid_a(m: WorldMaterial) -> vec3<f32> { return m.c1.rgb; }
+fn zoned_high_start(m: WorldMaterial) -> f32 { return m.c1.w; }
+fn zoned_high_a(m: WorldMaterial) -> vec3<f32> { return m.c2.rgb; }
+fn zoned_peak_start(m: WorldMaterial) -> f32 { return m.c2.w; }
+fn zoned_peak(m: WorldMaterial) -> vec3<f32> { return m.c3.rgb; }
+fn zoned_border(m: WorldMaterial) -> f32 { return m.c3.w; }
+fn zoned_mid_b(m: WorldMaterial) -> vec3<f32> { return m.p0.rgb; }
+fn zoned_mid_width(m: WorldMaterial) -> f32 { return m.p0.w; }
+fn zoned_high_b(m: WorldMaterial) -> vec3<f32> { return m.p1.rgb; }
+fn zoned_high_width(m: WorldMaterial) -> f32 { return m.p1.w; }
+fn zoned_peak_width(m: WorldMaterial) -> f32 { return m.p2.x; }
+fn zoned_steep_hi(m: WorldMaterial) -> f32 { return m.p2.y; }
+fn zoned_steep_lo(m: WorldMaterial) -> f32 { return m.p2.z; }
+fn zoned_detail_fade(m: WorldMaterial) -> f32 { return m.p2.w; }
+// --- canopy (head.x == 2u) ---
+const MAT_KIND_CANOPY: u32 = 2u;
+fn canopy_canopy_a(m: WorldMaterial) -> vec3<f32> { return m.c0.rgb; }
+fn canopy_canopy_start(m: WorldMaterial) -> f32 { return m.c0.w; }
+fn canopy_canopy_b(m: WorldMaterial) -> vec3<f32> { return m.c1.rgb; }
+fn canopy_rock_start(m: WorldMaterial) -> f32 { return m.c1.w; }
+fn canopy_rock(m: WorldMaterial) -> vec3<f32> { return m.c2.rgb; }
+fn canopy_rock_width(m: WorldMaterial) -> f32 { return m.c2.w; }
+fn canopy_patch(m: WorldMaterial) -> vec3<f32> { return m.c3.rgb; }
+fn canopy_border(m: WorldMaterial) -> f32 { return m.c3.w; }
+fn canopy_low(m: WorldMaterial) -> vec3<f32> { return m.p0.rgb; }
+fn canopy_canopy_width(m: WorldMaterial) -> f32 { return m.p0.w; }
+fn canopy_crown_scale(m: WorldMaterial) -> f32 { return m.p1.x; }
+fn canopy_crown_relief(m: WorldMaterial) -> f32 { return m.p1.y; }
+fn canopy_strata_scale(m: WorldMaterial) -> f32 { return m.p1.z; }
+fn canopy_strata_relief(m: WorldMaterial) -> f32 { return m.p1.w; }
+fn canopy_steep_hi(m: WorldMaterial) -> f32 { return m.p2.x; }
+fn canopy_steep_lo(m: WorldMaterial) -> f32 { return m.p2.y; }
+fn canopy_detail_fade(m: WorldMaterial) -> f32 { return m.p2.z; }
+fn canopy_patch_amount(m: WorldMaterial) -> f32 { return m.p2.w; }
+// GENMAT ACCESSORS END
+
 fn surface_albedo(m: WorldMaterial, world: vec3<f32>, n: vec3<f32>, dist: f32) -> vec3<f32> {
-    return m.c0.rgb;
+    return surface_base(m);
 }
 
 /// Altitude-zoned natural terrain: low/mid/high/peak, slope overriding to
 /// the high (rock) colour.
 fn zoned_albedo(m: WorldMaterial, world: vec3<f32>, n: vec3<f32>, dist: f32) -> vec3<f32> {
-    var base = mix(m.c0.rgb, m.c1.rgb, smoothstep(m.c0.w, m.c0.w + m.p0.w, world.y));
-    base = mix(base, m.c2.rgb, smoothstep(m.c1.w, m.c1.w + m.p1.w, world.y));
-    base = mix(base, m.c3.rgb, smoothstep(m.c2.w, m.c2.w + m.p2.x, world.y));
+    let mid_start = zoned_mid_start(m);
+    let high_start = zoned_high_start(m);
+    let peak_start = zoned_peak_start(m);
+    let rock = zoned_high_a(m);
+    var base = mix(zoned_low(m), zoned_mid_a(m), smoothstep(mid_start, mid_start + zoned_mid_width(m), world.y));
+    base = mix(base, rock, smoothstep(high_start, high_start + zoned_high_width(m), world.y));
+    base = mix(base, zoned_peak(m), smoothstep(peak_start, peak_start + zoned_peak_width(m), world.y));
     // 1 on cliffs (the edges are inverted on purpose: n.y falls as it steepens).
-    return mix(base, m.c2.rgb, smoothstep(m.p2.y, m.p2.z, n.y));
+    return mix(base, rock, smoothstep(zoned_steep_hi(m), zoned_steep_lo(m), n.y));
 }
 
 fn canopy_material(m: WorldMaterial, world: vec3<f32>, n: vec3<f32>, dist: f32) -> MatSample {
-    let veg_edge = smoothstep(m.c0.w, m.c0.w + m.p0.w, world.y);
+    let canopy_start = canopy_canopy_start(m);
+    let rock_start = canopy_rock_start(m);
+    let veg_edge = smoothstep(canopy_start, canopy_start + canopy_canopy_width(m), world.y);
     let rockness = max(
-        smoothstep(m.c1.w, m.c1.w + m.c2.w, world.y),
-        smoothstep(m.p2.x, m.p2.y, n.y),
+        smoothstep(rock_start, rock_start + canopy_rock_width(m), world.y),
+        smoothstep(canopy_steep_hi(m), canopy_steep_lo(m), n.y),
     );
     // The canopy's two greens averaged: the crown noise that used to pick
     // between them per pixel is gone.
-    let canopy = mix(m.c0.rgb, m.c1.rgb, 0.5);
+    let canopy = mix(canopy_canopy_a(m), canopy_canopy_b(m), 0.5);
     var out: MatSample;
-    out.albedo = mix(mix(m.p0.rgb, canopy, veg_edge), m.c2.rgb, rockness);
+    out.albedo = mix(mix(canopy_low(m), canopy, veg_edge), canopy_rock(m), rockness);
     out.normal = n;
     out.ao = 1.0;
     return out;
@@ -286,12 +358,12 @@ fn fragment(in: VsOut) -> @location(0) vec4<f32> {
     var base: vec3<f32>;
     var nl = n;
     var ao = 1.0;
-    if (m.head.x == 2u) {
+    if (m.head.x == MAT_KIND_CANOPY) {
         let ms = canopy_material(m, world, n, dist);
         base = ms.albedo;
         nl = ms.normal;
         ao = ms.ao;
-    } else if (m.head.x == 1u) {
+    } else if (m.head.x == MAT_KIND_ZONED) {
         base = zoned_albedo(m, world, n, dist);
     } else {
         base = surface_albedo(m, world, n, dist);
@@ -299,11 +371,13 @@ fn fragment(in: VsOut) -> @location(0) vec4<f32> {
 
     // Emissive ceiling light strips (surface materials).
     var emissive = vec3<f32>(0.0);
-    if (m.head.x == 0u && m.c3.w > 0.0) {
-        let lf = floor(world.y / m.p1.w);
+    if (m.head.x == MAT_KIND_SURFACE && surface_emissive_intensity(m) > 0.0) {
+        let spacing = surface_strip_spacing(m);
+        let chance = surface_strip_chance(m);
+        let lf = floor(world.y / surface_strip_level_spacing(m));
         let ceilingness = smoothstep(-0.55, -0.85, n.y);
-        let line = 1.0 - smoothstep(0.25, 0.75, abs(fract(world.z / m.p1.z) - 0.5) * m.p1.z);
-        let works = step(1.0 - m.p2.x, hash3(vec3<i32>(i32(floor(world.z / m.p1.z)), i32(lf), 7)));
+        let line = 1.0 - smoothstep(0.25, 0.75, abs(fract(world.z / spacing) - 0.5) * spacing);
+        let works = step(1.0 - chance, hash3(vec3<i32>(i32(floor(world.z / spacing)), i32(lf), 7)));
         // Converge to the pattern's MEAN once a period stops spanning a
         // pixel, which is what a mip chain would do if this were a
         // texture. Point-sampling it instead turns a grid of lamps seen
@@ -322,11 +396,11 @@ fn fragment(in: VsOut) -> @location(0) vec4<f32> {
         let resolved = 1.0 - smoothstep(0.35, 1.4, fwidth(world.z));
         // A strip is ~1 m of every `spacing`, and `works` is on with
         // probability `chance` — so those are the two means.
-        let lit = mix(0.5 / m.p1.z, line, resolved) * mix(m.p2.x, works, resolved);
-        emissive += m.c3.rgb * m.c3.w * ceilingness * lit;
+        let lit = mix(0.5 / spacing, line, resolved) * mix(chance, works, resolved);
+        emissive += surface_emissive_color(m) * surface_emissive_intensity(m) * ceilingness * lit;
         // Faint up-glow from the strips onto nearby floors.
         let floorness = smoothstep(0.55, 0.85, n.y);
-        emissive += m.c3.rgb * m.p2.y * floorness * lit;
+        emissive += surface_emissive_color(m) * surface_strip_glow(m) * floorness * lit;
     }
 
     var pbr_input = pbr_types::pbr_input_new();
