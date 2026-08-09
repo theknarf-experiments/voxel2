@@ -43,7 +43,6 @@ use bevy::{
     },
 };
 use bytemuck::{Pod, Zeroable};
-use std::collections::HashMap;
 use voxel_render::{ScatterPoint, ScatterPoints};
 
 /// Marker entity anchoring one world's grass draw.
@@ -180,7 +179,7 @@ struct GrassBuffers {
     tuft_index_count: u32,
     /// One instance buffer per world. The tuft geometry is shared; where
     /// the tufts stand is not.
-    instances: HashMap<voxel_engine::WorldId, (Buffer, u32)>,
+    instances: crate::instancing::InstanceBuffers,
 }
 
 #[derive(Resource)]
@@ -351,25 +350,14 @@ fn extract_grass_instances(
     instances: Extract<Res<ScatterPoints>>,
     mut buffers: ResMut<GrassBuffers>,
     render_device: Res<RenderDevice>,
+    render_queue: Res<bevy::render::renderer::RenderQueue>,
 ) {
     let Some(per_world) = instances.take_class_if_dirty(GROUND_COVER_CLASS) else {
         return;
     };
-    // Wholesale: a world that published no points this time has none, and
-    // leaving its old buffer would keep drawing grass the streamer has
-    // already let go of.
-    buffers.instances.clear();
-    for (world, points) in per_world {
-        if points.is_empty() {
-            continue;
-        }
-        let buffer = render_device.create_buffer_with_data(&BufferInitDescriptor {
-            label: Some("grass_instances"),
-            contents: bytemuck::cast_slice(&points),
-            usage: BufferUsages::VERTEX,
-        });
-        buffers.instances.insert(world, (buffer, points.len() as u32));
-    }
+    buffers
+        .instances
+        .publish("grass_instances", per_world, &render_device, &render_queue);
 }
 
 // --- drawing -----------------------------------------------------------------
@@ -541,21 +529,18 @@ where
         let Some(bg) = &bind_group.into_inner().0 else {
             return RenderCommandResult::Skip;
         };
-        let (Some(vb), Some(ib), Some((inst, count))) = (
+        let (Some(vb), Some(ib), Some(slot)) = (
             &buffers.tuft_vertices,
             &buffers.tuft_indices,
-            buffers.instances.get(&marker.world),
+            buffers.instances.get(marker.world),
         ) else {
             return RenderCommandResult::Success;
         };
-        if *count == 0 {
-            return RenderCommandResult::Success;
-        }
         pass.set_bind_group(2, bg, &[]);
         pass.set_vertex_buffer(0, vb.slice(..));
-        pass.set_vertex_buffer(1, inst.slice(..));
+        pass.set_vertex_buffer(1, slot.buffer.slice(..));
         pass.set_index_buffer(ib.slice(..), IndexFormat::Uint32);
-        pass.draw_indexed(0..buffers.tuft_index_count, 0, 0..*count);
+        pass.draw_indexed(0..buffers.tuft_index_count, 0, 0..slot.count);
         RenderCommandResult::Success
     }
 }

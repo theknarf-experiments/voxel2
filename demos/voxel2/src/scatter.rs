@@ -280,15 +280,10 @@ fn reconcile_inner(
         population.seen_generation = generation;
         match population.output {
             ScatterOutput::Points => {
-                let merged: Vec<voxel_render::ScatterPoint> = population
-                    .sink
-                    .collect()
-                    .iter()
-                    .map(|p| voxel_render::ScatterPoint {
-                        pos: p.position.to_array(),
-                        hash: p.seed as u32,
-                    })
-                    .collect();
+                let merged = population.sink.collect_map(|p| voxel_render::ScatterPoint {
+                    pos: p.position.to_array(),
+                    hash: p.seed as u32,
+                });
                 let n = merged.len();
                 points.set_class(population.world, &population.class, merged);
                 record_count(&worlds, population, n);

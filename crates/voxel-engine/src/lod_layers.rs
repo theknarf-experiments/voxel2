@@ -564,6 +564,10 @@ fn refresh_masks(shared: &LodShared) {
     if stale.is_empty() {
         return;
     }
+    if std::env::var_os("VOXEL_LOG_REFRESH").is_some() {
+        let shown = shared.state.lock().unwrap().shown.len();
+        info!("REFRESH {} of {shown} chunks", stale.len());
+    }
     let mut batch = crate::chunkgen::ChunkBatch::default();
     for (key, want) in &stale {
         batch.add(&shared.chunks, *key, want.mask, true, want.ops.clone());

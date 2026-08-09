@@ -95,13 +95,25 @@ const COUNTS_SLOTS: u32 = 512;
 // Per frame, keeping each frame's GPU batch small enough not to blow a
 // ~8 ms vsync slot (spiky batches read as missed-vsync 17 ms frames even
 // when average load is fine).
-const GEN_BUDGET: usize = 320;
+fn env_budget(name: &str, default: usize) -> usize {
+    std::env::var(name)
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(default)
+}
+
+/// Chunks whose density is dispatched per frame. Overridable while the
+/// right value is being measured; a batch is GPU work, and how much fits
+/// in a frame is a property of the machine as much as of the code.
+static GEN_BUDGET: std::sync::LazyLock<usize> =
+    std::sync::LazyLock::new(|| env_budget("VOXEL_GEN_BUDGET", 320));
 /// Deferred chunks re-admitted per frame. Each one costs a density pass
 /// it has already paid once, so recovery is deliberately gradual: the
 /// alternative is a frame that regenerates everything the slab just
 /// rejected and rejects it again.
 const RETRY_BUDGET: usize = 32;
-const MESH_BUDGET: usize = 320;
+static MESH_BUDGET: std::sync::LazyLock<usize> =
+    std::sync::LazyLock::new(|| env_budget("VOXEL_MESH_BUDGET", 320));
 const STAGING_BUFFERS: usize = 3;
 
 // --- main-world <-> render-world plumbing ------------------------------------
@@ -1588,8 +1600,51 @@ fn gen_priority(key: ChunkKey, camera: DVec3) -> f64 {
     camera.distance(closest) / key.edge_m()
 }
 
+/// Times `plan_frame` without wrapping every caller's borrow: the shim
+/// takes the system's parameters and hands them straight on.
 #[allow(clippy::too_many_arguments)]
 fn plan_frame(
+    gpu: ResMut<ChunkGpuResources>,
+    table: ResMut<ChunkTable>,
+    extracted: ResMut<ExtractedChunkCommands>,
+    batches: ResMut<FrameBatches>,
+    draw_lists: ResMut<VoxelDrawLists>,
+    camera: Res<ExtractedCameraPos>,
+    world_registries: (Res<WorldViews>, Res<RenderWorlds>),
+    env: Res<EnvParams>,
+    frustum: Res<ExtractedFrustum>,
+    stats: Res<SharedRenderStats>,
+    ready_tx: Res<ChunkReadySender>,
+    pipelines: Option<Res<ChunkPipelines>>,
+    pipeline_cache: Res<PipelineCache>,
+    render_device: Res<RenderDevice>,
+    render_queue: Res<RenderQueue>,
+) {
+    voxel_core::timed!(
+        "render::plan_frame",
+        4.0,
+        plan_frame_inner(
+            gpu,
+            table,
+            extracted,
+            batches,
+            draw_lists,
+            camera,
+            world_registries,
+            env,
+            frustum,
+            stats,
+            ready_tx,
+            pipelines,
+            pipeline_cache,
+            render_device,
+            render_queue,
+        )
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn plan_frame_inner(
     mut gpu: ResMut<ChunkGpuResources>,
     mut table: ResMut<ChunkTable>,
     mut extracted: ResMut<ExtractedChunkCommands>,
@@ -1948,7 +2003,7 @@ fn plan_frame(
                     || matches!(c.pending, Some(Pending::ReadyToMesh { .. }))
             })
             .map(|(k, _)| *k)
-            .take(MESH_BUDGET.min((COUNTS_SLOTS as usize).saturating_sub(GEN_BUDGET)))
+            .take((*MESH_BUDGET).min((COUNTS_SLOTS as usize).saturating_sub(*GEN_BUDGET)))
             .collect()
     };
     if let Ok(mut st) = stats.0.lock() {
@@ -2094,7 +2149,7 @@ fn plan_frame(
         queued.sort_by(|a, b| a.1.total_cmp(&b.1));
         let mut started = 0u64;
         let mut starved = false;
-        for (key, _) in queued.into_iter().take(GEN_BUDGET) {
+        for (key, _) in queued.into_iter().take(*GEN_BUDGET) {
             let Some(slot) = gpu.arena_free.pop() else {
                 starved = true;
                 break;

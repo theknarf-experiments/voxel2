@@ -121,6 +121,18 @@ impl<T: Clone> Sink<T> {
         let inner = self.inner.lock().unwrap();
         inner.parts.values().flatten().cloned().collect()
     }
+
+    /// Every part's items, mapped, without the intermediate `collect`
+    /// would make.
+    ///
+    /// A point population is half a million placements of fifty-odd bytes
+    /// that become sixteen-byte points, so collecting first copies 28 MB
+    /// to read it once and throw it away — per republish, of which there
+    /// are dozens a minute while flying.
+    pub fn collect_map<U>(&self, f: impl FnMut(&T) -> U) -> Vec<U> {
+        let inner = self.inner.lock().unwrap();
+        inner.parts.values().flatten().map(f).collect()
+    }
 }
 
 impl<T> Clone for Sink<T> {

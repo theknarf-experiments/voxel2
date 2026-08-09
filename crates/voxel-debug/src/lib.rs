@@ -141,7 +141,10 @@ impl Plugin for VoxelDebugPlugin {
             .add_systems(Startup, spawn_hud)
             .init_resource::<ScreenshotRequest>()
             .add_systems(Update, (engine_hud, update_hud, auto_screenshot, dump_camera).chain())
-            .add_systems(Update, log_slow_frames);
+            .init_resource::<MainWorldSpan>()
+            .init_resource::<MainWorldMs>()
+            .add_systems(First, main_world_begin)
+            .add_systems(Last, (main_world_end, log_slow_frames).chain());
     }
 }
 
@@ -326,6 +329,30 @@ fn update_hud(
     text.0 = out;
 }
 
+/// Where a frame's time went: the main-world schedules, or everything
+/// else (render extract/prepare/queue, the GPU, and the present wait).
+///
+/// Splitting the frame in two before hunting a system is worth one pair
+/// of systems: a spike that is entirely outside the main world is not
+/// going to be found by timing another main-world system, and that is
+/// most of a day's wrong turns.
+#[derive(Resource, Default)]
+struct MainWorldSpan(Option<std::time::Instant>);
+
+fn main_world_begin(mut span: ResMut<MainWorldSpan>) {
+    span.0 = Some(std::time::Instant::now());
+}
+
+fn main_world_end(span: Res<MainWorldSpan>, mut probe: ResMut<MainWorldMs>) {
+    if let Some(started) = span.0 {
+        probe.0 = started.elapsed().as_secs_f32() * 1000.0;
+    }
+}
+
+/// How long the main-world schedules took, last frame.
+#[derive(Resource, Default)]
+pub struct MainWorldMs(pub f32);
+
 /// Log any frame that misses the budget badly, with the streaming state
 /// at the time.
 ///
@@ -338,6 +365,7 @@ fn log_slow_frames(
     time: Res<Time>,
     probe: Option<Res<voxel_engine::streaming::StreamProbe>>,
     stats: Option<Res<voxel_render::SharedRenderStats>>,
+    main_ms: Res<MainWorldMs>,
     mut threshold: Local<Option<f32>>,
 ) {
     let threshold = *threshold.get_or_insert_with(|| {
@@ -354,7 +382,9 @@ fn log_slow_frames(
         .and_then(|s| s.0.lock().ok().map(|s| (s.meshed, s.awaiting)))
         .unwrap_or((0, 0));
     warn!(
-        "SLOW FRAME {ms:.1} ms | resident {resident} generating {generating} \
-         meshed {meshed} awaiting {awaiting}"
+        "SLOW FRAME {ms:.1} ms (main world {:.1}, elsewhere {:.1}) | \
+         resident {resident} generating {generating} meshed {meshed} awaiting {awaiting}",
+        main_ms.0,
+        ms - main_ms.0,
     );
 }

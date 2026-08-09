@@ -58,6 +58,7 @@ pub struct WorldProps(pub bevy::platform::collections::HashMap<voxel_engine::Wor
 pub struct WorldScenes(pub bevy::platform::collections::HashMap<voxel_engine::WorldId, Scene>);
 
 mod grass;
+mod instancing;
 mod impostors;
 mod planning;
 mod portal;
