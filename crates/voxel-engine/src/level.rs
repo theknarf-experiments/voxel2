@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 use voxel_core::csg::CsgOp;
 use voxel_core::worldop::*;
 
-use crate::graph::NodeDef;
+use crate::graph::{node::Invalidates, NodeDef};
 use crate::planning::{HostPlanning, OpsSource, WorldQuery};
 use crate::schema;
 use crate::streaming::StreamingRebuild;
@@ -1167,7 +1167,7 @@ fn watch_level_file(
     *level = new;
 }
 
-/// Does this edit change what the streamed world is MADE of?
+/// What this edit makes stale.
 ///
 /// Everything a world is built from at `build_world_query` time belongs
 /// here, and the cost of missing one is silent: the level says one thing,
@@ -1177,17 +1177,23 @@ fn watch_level_file(
 /// also how [`schema::Rebuilds`] is kept honest.
 ///
 /// The generator and the sun the shadows bake along belong here as much as
-/// the planning stack does. They used to be tested at the call site, which
+/// the planning graph does. They used to be tested at the call site, which
 /// gave "does this edit restream" two answers in two places and one of
 /// them to an editor that has to ask.
-fn needs_regen(new: &LevelDef, old: &LevelDef) -> bool {
-    new.nodes != old.nodes
-        || sun_dir(new) != sun_dir(old)
+///
+/// The node list answers for itself, per node — see [`crate::graph::changed`].
+fn staleness(new: &LevelDef, old: &LevelDef) -> Option<Invalidates> {
+    let world = sun_dir(new) != sun_dir(old)
         || new.placements != old.placements
         || new.prefabs != old.prefabs
         || new.lod.max_level != old.lod.max_level
         || new.lod.top_radius != old.lod.top_radius
-        || new.lod.top_y != old.lod.top_y
+        || new.lod.top_y != old.lod.top_y;
+    let nodes = crate::graph::changed(&new.nodes, &old.nodes);
+    match (world, nodes) {
+        (true, _) => Some(Invalidates::World),
+        (false, effect) => effect,
+    }
 }
 
 /// Apply whatever changed in [`LevelDef`] to the running world.
@@ -1228,21 +1234,27 @@ fn apply_level_change(
     // Generation-affecting changes rebuild the streamed world.
     let sun_changed = sun_dir(&new) != sun_dir(level);
     let generator_changed = new.nodes != level.nodes || sun_changed;
-    // Rebuilt whether or not the program changed: the planning stack and
+    // Rebuilt whether or not the program changed: the planning graph and
     // the facade below need one either way.
     let (program, generator) = build_generator(&new, seed.0);
     if generator_changed {
         render.program = program;
     }
-    if needs_regen(&new, level) {
-        world.config.max_level = new.lod.max_level;
-        world.config.top_radius = new.lod.top_radius;
-        world.config.top_y = new.lod.top_y;
-        world.generator = generator.clone();
+    // A planning-only edit still replaces the planner — that is where the
+    // populations are registered — but leaves the streamed chunks alone.
+    // They were carved by ops this edit cannot have changed, so tearing
+    // them down would regenerate every one of them into itself.
+    if let Some(stale) = staleness(&new, level) {
+        if stale == Invalidates::World {
+            world.config.max_level = new.lod.max_level;
+            world.config.top_radius = new.lod.top_radius;
+            world.config.top_y = new.lod.top_y;
+            world.generator = generator.clone();
+            rebuild.0 = true;
+        }
         world.query = build_world_query(&new, seed.0, &generator, planner.0.as_ref());
         world.level = new.clone();
-        rebuild.0 = true;
-        info!("level reload: generation changed — rebuilding world");
+        info!("level reload: {stale:?} is stale — rebuilding it");
     }
 
     // The host owns the scene: it reads the new definition off this
@@ -1265,6 +1277,12 @@ pub struct LevelReloaded {
 mod tests {
     use super::*;
     use bevy::reflect::TypeInfo;
+
+    /// Does this edit restream the world? What [`schema::Rebuilds`]
+    /// promises, and the question every case below asks.
+    fn needs_regen(new: &LevelDef, old: &LevelDef) -> bool {
+        staleness(new, old) == Some(Invalidates::World)
+    }
 
     fn shipped(name: &str) -> String {
         let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../levels/");
@@ -1435,10 +1453,18 @@ mod tests {
             ("lod.top_y", |l| l.lod.top_y.1 += 1, true),
             ("lod.split_k", |l| l.lod.split_k += 1.0, false),
             ("lod.merge_k", |l| l.lod.merge_k += 1.0, false),
+            // A node that SHAPES the world, chosen deliberately: what an
+            // edit to `nodes` costs is per node now, and popping whatever
+            // happens to be last would make this case's answer content.
             (
                 "nodes",
                 |l| {
-                    l.nodes.pop();
+                    let at = l
+                        .nodes
+                        .iter()
+                        .position(|n| n.node.0.invalidates() == Invalidates::World)
+                        .expect("planet is mostly program");
+                    l.nodes.remove(at);
                 },
                 true,
             ),

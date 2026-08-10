@@ -921,6 +921,51 @@ mod tests {
         assert!(err.contains("element padding"), "{err}");
     }
 
+    /// Tuning a population must not restream the world.
+    ///
+    /// The engine's rule proved on a real level: planet's populations are
+    /// the only nodes in it that reach no voxel, and every other kind it
+    /// ships has to keep the conservative answer. Written against the
+    /// SHIPPED nodes rather than a fixture, because what this protects is
+    /// a live edit to this level.
+    #[test]
+    fn tuning_a_population_does_not_restream_the_world() {
+        use voxel_engine::graph::{changed, node::Invalidates};
+        let planet = shipped("planet.json");
+        assert_eq!(changed(&planet.nodes, &planet.nodes), None);
+
+        let mut edited = planet.clone();
+        let population = edited
+            .nodes
+            .iter_mut()
+            .find_map(|n| n.node.0.as_any_mut().downcast_mut::<super::nodes::Population>())
+            .expect("planet ships populations");
+        population.0.per_tile += 1;
+        assert_eq!(
+            changed(&edited.nodes, &planet.nodes),
+            Some(Invalidates::Plan),
+            "props are entities — the voxels would come back identical"
+        );
+
+        // And every other kind keeps the conservative answer, so a new one
+        // is only cheap when somebody says so in its own impl.
+        for node in &planet.nodes {
+            let is_population = node
+                .node
+                .0
+                .as_any()
+                .downcast_ref::<super::nodes::Population>()
+                .is_some();
+            assert_eq!(
+                node.node.0.invalidates() == Invalidates::Plan,
+                is_population,
+                "{:?} of kind '{}'",
+                node.name,
+                node.node.0.kind()
+            );
+        }
+    }
+
     /// A population is placement-only: classes and variants, no models.
     ///
     /// Asserted as PROPERTIES, not as a list — which classes a level ships

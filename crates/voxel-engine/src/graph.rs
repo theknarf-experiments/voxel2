@@ -374,6 +374,74 @@ pub fn compile(nodes: &[NodeDef]) -> Result<Program, Error> {
     Ok(Program { ops, fields })
 }
 
+/// What an edit to a node list makes stale, or `None` if nothing changed.
+///
+/// The blunt answer — "the list differs, restream everything" — charges a
+/// population edit the price of the whole world, which is the price of
+/// regenerating every chunk to place exactly the voxels it already had.
+/// This asks each node that actually differs what IT invalidates and takes
+/// the worst.
+///
+/// Nodes are paired by NAME where they have one, so inserting or deleting
+/// a population does not read as "every node after it changed". Unnamed
+/// nodes are the long unbranching middles of chains and pair by position,
+/// where an insertion genuinely does shift what follows.
+pub fn changed(new: &[NodeDef], old: &[NodeDef]) -> Option<node::Invalidates> {
+    let (mut a, mut b) = (Vec::new(), Vec::new());
+    scan(new, "", &mut a);
+    scan(old, "", &mut b);
+
+    let mut worst = None;
+    let mut note = |node: &NodeDef| {
+        let effect = node.node.0.invalidates();
+        if worst.is_none_or(|w| effect > w) {
+            worst = Some(effect);
+        }
+    };
+    let by_key: HashMap<&str, &NodeDef> = b.iter().map(|(k, n)| (k.as_str(), *n)).collect();
+    for (key, node) in &a {
+        match by_key.get(key.as_str()) {
+            // A scope's own row is its gate: its children are keys of
+            // their own, so comparing the whole node would report every
+            // district as changed the moment one op inside it moved.
+            Some(was) if same(node, was) => {}
+            Some(was) => {
+                note(node);
+                note(was);
+            }
+            None => note(node),
+        }
+    }
+    let by_key: HashMap<&str, &NodeDef> = a.iter().map(|(k, n)| (k.as_str(), *n)).collect();
+    for (key, node) in &b {
+        if !by_key.contains_key(key.as_str()) {
+            note(node);
+        }
+    }
+    worst
+}
+
+/// Are these the same node, ignoring what a scope CONTAINS?
+fn same(a: &NodeDef, b: &NodeDef) -> bool {
+    if a.node.0.gate().is_some() || b.node.0.gate().is_some() {
+        return a.name == b.name && a.wires == b.wires && a.node.0.gate() == b.node.0.gate();
+    }
+    a == b
+}
+
+/// Every node in the tree, keyed by name where it has one and by position
+/// where it does not.
+fn scan<'a>(nodes: &'a [NodeDef], path: &str, out: &mut Vec<(String, &'a NodeDef)>) {
+    for (i, node) in nodes.iter().enumerate() {
+        let key = match &node.name {
+            Some(name) => name.clone(),
+            None => format!("{path}[{i}]"),
+        };
+        scan(node.node.0.children(), &key, out);
+        out.push((key, node));
+    }
+}
+
 /// Names every node a level defines, for the reference lists an editor
 /// offers. Scopes included: they are nodes too.
 pub fn names(nodes: &[NodeDef]) -> Vec<String> {

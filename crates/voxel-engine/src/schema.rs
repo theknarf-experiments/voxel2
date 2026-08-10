@@ -59,13 +59,17 @@ pub struct Hidden;
 #[derive(Reflect, Clone, Copy, Debug, PartialEq)]
 pub struct OneOf(pub &'static str);
 
-/// Editing this restreams the world.
+/// Editing this MAY restream the world.
 ///
-/// The set of fields carrying it must agree with what
-/// `level::needs_regen` reads; a test asserts it, because both directions
-/// of drift are silent. Missing it means a slider drag restreams the
-/// world once per frame; having it wrongly means an edit applies only on
-/// release, for no reason.
+/// The set of fields carrying it must agree with what `level::staleness`
+/// reads; a test asserts it, because both directions of drift are silent.
+/// Missing it means a slider drag restreams the world once per frame;
+/// having it wrongly means an edit applies only on release, for no reason.
+///
+/// The worst case, not the only one: `nodes` carries it because most nodes
+/// are the program, while a population inside the same list invalidates
+/// only the plan. A widget cannot be half committed-on-release, so the
+/// section answers for the most expensive thing in it.
 #[derive(Reflect, Clone, Copy, Debug, PartialEq)]
 pub struct Rebuilds;
 

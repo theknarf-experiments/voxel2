@@ -14,7 +14,7 @@ use bevy::platform::collections::HashMap;
 use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
 use voxel_core::opgen::{Port, Value};
-use voxel_engine::graph::node::{Domain, Node, Ports, ReflectNode};
+use voxel_engine::graph::node::{Domain, Invalidates, Node, Ports, ReflectNode};
 use voxel_engine::graph::{Wire, Wires};
 use voxel_layers::LayerGraph;
 
@@ -377,6 +377,12 @@ impl Node for Population {
             (true, true) => &[("density", Value::Field), ("gate", Value::Host("biomes"))],
         };
         (ins, &[])
+    }
+    /// Props are entities. A population decides where they go and carves
+    /// nothing, so editing one must not restream a world whose voxels
+    /// would come back identical.
+    fn invalidates(&self) -> Invalidates {
+        Invalidates::Plan
     }
 }
 

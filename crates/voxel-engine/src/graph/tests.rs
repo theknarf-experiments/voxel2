@@ -232,3 +232,117 @@ fn a_read_sees_the_writes_its_own_region_can_reach() {
     .unwrap();
     assert_eq!(compile(&inside).unwrap().ops.len(), 3);
 }
+
+// --- what an edit invalidates ----------------------------------------------
+
+/// A kind that provably reaches no voxel, so the rule can be tested
+/// without the game whose `population` is the real instance of it.
+#[derive(Reflect, serde::Serialize, serde::Deserialize, Clone, Debug, Default, PartialEq)]
+#[reflect(Node, Serialize, Deserialize, Default)]
+struct Props {
+    #[serde(default)]
+    per_tile: u32,
+}
+
+impl Node for Props {
+    fn kind(&self) -> &'static str {
+        "props"
+    }
+    fn domain(&self) -> node::Domain {
+        node::Domain::Region
+    }
+    fn ports(&self) -> Ports {
+        (&[], &[])
+    }
+    fn invalidates(&self) -> node::Invalidates {
+        node::Invalidates::Plan
+    }
+}
+
+fn with_props(json: &str) -> Vec<NodeDef> {
+    let reg = registry::engine_kinds();
+    reg.write().register::<Props>();
+    with_registry(&reg, || serde_json::from_str(json)).unwrap()
+}
+
+/// The point of per-node invalidation: an edit is charged for what it
+/// actually touched, not for being an edit to `nodes`.
+#[test]
+fn an_edit_is_charged_to_the_node_it_changed() {
+    let level = |props: u32, amp: f32| {
+        with_props(&format!(
+            r#"[
+              {{"kind":"height_zero","name":"sea"}},
+              {{"kind":"warp_none","name":"flat"}},
+              {{"kind":"height_fbm","name":"base","in":{{"height":"sea","warp":"flat"}},
+                "scale":5e-5,"amp":{amp},"octaves":3}},
+              {{"kind":"props","name":"trees","per_tile":{props}}}
+            ]"#
+        ))
+    };
+    let base = level(200, 800.0);
+    assert_eq!(changed(&base, &base), None, "an unchanged list is not stale");
+    assert_eq!(
+        changed(&level(201, 800.0), &base),
+        Some(node::Invalidates::Plan),
+        "a population edit must not restream the world"
+    );
+    assert_eq!(
+        changed(&level(200, 801.0), &base),
+        Some(node::Invalidates::World),
+        "a height op is the program"
+    );
+    assert_eq!(
+        changed(&level(201, 801.0), &base),
+        Some(node::Invalidates::World),
+        "the worst of the two"
+    );
+}
+
+/// Nodes pair by NAME, so adding one does not read as "everything after it
+/// changed" — which would charge a population the price of the world for
+/// being declared above a height op.
+#[test]
+fn adding_a_node_only_charges_for_that_node() {
+    let base = with_props(
+        r#"[
+          {"kind":"height_zero","name":"sea"},
+          {"kind":"warp_none","name":"flat"},
+          {"kind":"height_fbm","name":"base","in":{"height":"sea","warp":"flat"},
+            "scale":5e-5,"amp":800,"octaves":3}
+        ]"#,
+    );
+    let mut with_new = base.clone();
+    with_new.insert(0, with_props(r#"[{"kind":"props","name":"trees"}]"#).remove(0));
+    assert_eq!(changed(&with_new, &base), Some(node::Invalidates::Plan));
+    assert_eq!(changed(&base, &with_new), Some(node::Invalidates::Plan));
+}
+
+/// A scope is compared by its GATE, not by what it contains: its children
+/// are nodes in their own right and answer for themselves. Otherwise every
+/// district reports as changed the moment one op inside it moves — and a
+/// population inside a district could never be cheap.
+#[test]
+fn a_scope_answers_for_its_gate_and_not_its_children() {
+    let level = |axes: &str, props: u32| {
+        with_props(&format!(
+            r#"[
+              {{"kind":"sdf_void","name":"void"}},
+              {{"kind":"region","name":"district","axes":{axes},"nodes":[
+                {{"kind":"props","name":"trees","per_tile":{props}}}
+              ]}}
+            ]"#
+        ))
+    };
+    let base = level("[0.0,0.4,0.0,1.0]", 4);
+    assert_eq!(
+        changed(&level("[0.0,0.4,0.0,1.0]", 5), &base),
+        Some(node::Invalidates::Plan),
+        "only the node inside changed"
+    );
+    assert_eq!(
+        changed(&level("[0.0,0.5,0.0,1.0]", 4), &base),
+        Some(node::Invalidates::World),
+        "the gate decides where every op inside applies"
+    );
+}

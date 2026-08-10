@@ -53,6 +53,20 @@ impl<T: Node + Clone> CloneNode for T {
     }
 }
 
+/// What editing a node makes stale.
+///
+/// Ordered worst-last, so the effect of a whole edit is the maximum over
+/// the nodes it touched.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug, Default)]
+pub enum Invalidates {
+    /// The planning graph and nothing under it. What this node produces
+    /// never reaches a voxel.
+    Plan,
+    /// The streamed world: every chunk regenerates.
+    #[default]
+    World,
+}
+
 /// A node of a level's graph.
 #[bevy::reflect::reflect_trait]
 pub trait Node: Reflect + CloneNode {
@@ -83,6 +97,22 @@ pub trait Node: Reflect + CloneNode {
     /// The gate a scope applies to its children.
     fn gate(&self) -> Option<[f32; 4]> {
         None
+    }
+
+    /// What editing this node makes stale.
+    ///
+    /// [`Invalidates::World`] by default, and for almost everything: a
+    /// point node IS the program, and a region node carves the ground with
+    /// the ops it emits. Override it only where what the node produces
+    /// provably never reaches a voxel — a population decides where props
+    /// go, and props are entities.
+    ///
+    /// The two costs are nothing alike. Re-planning is layer work the
+    /// graph was built to do; restreaming is every chunk in the world
+    /// regenerating to place exactly the voxels it already had, which for
+    /// the planet is five seconds of nothing changing on screen.
+    fn invalidates(&self) -> Invalidates {
+        Invalidates::World
     }
 }
 
