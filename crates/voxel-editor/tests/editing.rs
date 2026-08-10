@@ -539,3 +539,73 @@ fn clicking_a_node_selects_it_even_through_its_children() {
         "and a click on the canvas behind them clears it"
     );
 }
+
+/// Two-finger scroll pans the graph, on both axes, and the picture
+/// follows the fingers the way the row list does.
+///
+/// Pinch zooms about the POINTER rather than the corner. Neither can be
+/// performed by hand in a test harness, but both are messages, so what
+/// the systems do with them is not a matter of opinion.
+#[test]
+fn scrolling_pans_the_graph_and_pinching_zooms_it() {
+    use bevy::input::gestures::PinchGesture;
+    use bevy::input::mouse::{MouseScrollUnit, MouseWheel};
+    use voxel_editor::View;
+
+    let mut app = app();
+    app.add_message::<MouseWheel>()
+        .add_message::<PinchGesture>()
+        .init_resource::<voxel_editor::PanelStyle>()
+        .add_systems(Update, (voxel_editor::on_wheel, voxel_editor::on_pinch));
+    // A graph tab, and a pointer over the panel.
+    app.world_mut().resource_mut::<EditorRoots>().0[0].view = View::Graph;
+    let window = app.world_mut().spawn(bevy::window::Window::default()).id();
+    let width = app
+        .world()
+        .entity(window)
+        .get::<bevy::window::Window>()
+        .unwrap()
+        .width();
+    let mut win = app.world_mut().entity_mut(window);
+    let mut win = win.get_mut::<bevy::window::Window>().unwrap();
+    // Over the GRAPH: further right is the properties column, where a
+    // scroll deliberately scrolls instead of panning.
+    win.set_cursor_position(Some(Vec2::new(width - 400.0, 100.0)));
+
+    let was = app.world().resource::<EditorState>().camera;
+    app.world_mut().write_message(MouseWheel {
+        unit: MouseScrollUnit::Pixel,
+        x: 7.0,
+        y: 13.0,
+        window,
+        phase: bevy::input::touch::TouchPhase::Moved,
+    });
+    app.update();
+    let now = app.world().resource::<EditorState>().camera;
+    assert_eq!(
+        now.pan,
+        was.pan + Vec2::new(7.0, 13.0),
+        "the graph follows the fingers, on both axes"
+    );
+
+    // Pinching out zooms in. WHERE it zooms about needs a laid-out
+    // viewport to read the pointer against, which a bare harness has no
+    // reason to have — that arithmetic is `zooming_holds_the_point_it_is_
+    // aimed_at`, and without a viewport the documented fallback is to
+    // hold the pan and zoom about the corner.
+    let before = app.world().resource::<EditorState>().camera;
+    app.world_mut().write_message(PinchGesture(0.05));
+    app.update();
+    let after = app.world().resource::<EditorState>().camera;
+    assert!(after.zoom > before.zoom, "a pinch out zooms in");
+    assert_eq!(
+        after.pan, before.pan,
+        "and holds the corner with nothing to aim at"
+    );
+
+    // Pinching the other way zooms out again.
+    app.world_mut().write_message(PinchGesture(-0.05));
+    app.update();
+    let back = app.world().resource::<EditorState>().camera;
+    assert!(back.zoom < after.zoom, "a pinch in zooms out");
+}
