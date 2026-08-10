@@ -14,6 +14,7 @@ use bevy::feathers::cursor::EntityCursor;
 use bevy::feathers::font_styles::InheritableFont;
 use bevy::feathers::theme::{ThemeBackgroundColor, ThemedText};
 use bevy::feathers::tokens;
+use bevy::picking::hover::Hovered;
 use bevy::prelude::*;
 use bevy::text::FontWeight;
 use bevy::ui::{
@@ -55,6 +56,31 @@ pub fn on_grip_drag(
     // Pinned right: dragging the grip LEFT makes the panel wider.
     state.width = (state.width - drag.delta.x).clamp(style.width.start, style.width.end);
 }
+
+/// Light a node box while the pointer is over it.
+///
+/// Written straight onto the border rather than by respawning: the panel
+/// is rebuilt from the DOCUMENT, and moving a pointer changes no document.
+/// A box the compiler is complaining about, or one that is selected, keeps
+/// the border it has — those say something a hover does not.
+pub fn hover(mut boxes: Query<HoveredBox, HoveredBoxFilter>) {
+    for (hovered, mut border) in &mut boxes {
+        let plain = border.left == canvas::PLAIN_BORDER;
+        let lit = border.left == HOVER_BORDER;
+        if hovered.get() && plain {
+            *border = BorderColor::all(HOVER_BORDER);
+        } else if !hovered.get() && lit {
+            *border = BorderColor::all(canvas::PLAIN_BORDER);
+        }
+    }
+}
+
+/// Bright enough to find, dim enough not to compete with a selection.
+const HOVER_BORDER: Color = Color::srgba(0.55, 0.60, 0.70, 0.9);
+
+/// A node box whose hover state has just changed.
+type HoveredBox = (&'static Hovered, &'static mut BorderColor);
+type HoveredBoxFilter = (Changed<Hovered>, With<canvas::SelectsNode>);
 
 /// Apply the camera to the live canvas.
 ///

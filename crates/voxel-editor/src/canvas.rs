@@ -10,9 +10,11 @@
 //! backend inverse-transforms the cursor, so a box under a zoomed canvas
 //! is still hit where it is drawn — nothing here does that arithmetic.
 
+use bevy::feathers::cursor::EntityCursor;
 use bevy::feathers::font_styles::InheritableFont;
 use bevy::feathers::theme::{InheritableThemeTextColor, ThemeBackgroundColor, ThemedText};
 use bevy::feathers::{constants::fonts, tokens};
+use bevy::picking::hover::Hovered;
 use bevy::prelude::*;
 use bevy::text::{FontSize, FontWeight, LineBreak, TextLayout};
 use bevy::ui::{px, Display, FlexDirection, Node, PositionType, UiRect, UiTransform, Val2};
@@ -160,6 +162,10 @@ pub fn scene(
 }
 
 /// One node: a title bar, then one row per port.
+/// The border a box wears when it is none of the interesting things, and
+/// what [`crate::panel::hover`] puts back.
+pub const PLAIN_BORDER: Color = Color::srgba(0.0, 0.0, 0.0, 0.6);
+
 /// How a box is called out, if it is.
 #[derive(Clone, Copy, PartialEq)]
 enum Mark {
@@ -168,6 +174,16 @@ enum Mark {
     /// Named by the compiler's complaint. Beats selection: a level that
     /// does not compile has one thing worth looking at.
     Blamed,
+}
+
+impl Mark {
+    pub fn border(self) -> Color {
+        match self {
+            Mark::Blamed => Color::srgb(0.85, 0.25, 0.25),
+            Mark::Selected => Color::srgb(0.30, 0.55, 0.92),
+            Mark::None => PLAIN_BORDER,
+        }
+    }
 }
 
 fn node(placed: &Placed, graph: &GraphStyle, style: &PanelStyle, mark: Mark) -> impl Scene {
@@ -185,14 +201,14 @@ fn node(placed: &Placed, graph: &GraphStyle, style: &PanelStyle, mark: Mark) -> 
     let header = px(graph.header);
     let font = FontSize::Px(style.font * 0.9);
     let path = placed.path.clone();
-    let border = match mark {
-        Mark::Blamed => Color::srgb(0.85, 0.25, 0.25),
-        Mark::Selected => Color::srgb(0.30, 0.55, 0.92),
-        Mark::None => Color::srgba(0.0, 0.0, 0.0, 0.6),
-    };
+    let border = mark.border();
 
     bsn! {
         SelectsNode({path})
+        // A box is a thing you click. The cursor says so before you try,
+        // and `Hovered` is what `panel::hover` reads to light the border.
+        EntityCursor::System(bevy::window::SystemCursorIcon::Pointer)
+        Hovered
         Node {
             position_type: PositionType::Absolute,
             left: px(at.x), top: px(at.y),

@@ -783,3 +783,49 @@ fn an_edit_marks_the_document_unsaved_and_a_save_clears_it() {
     edit(&mut app, ".materials[0].id", 12.0, Num::U32);
     assert!(!app.world().resource::<EditorState>().edited);
 }
+
+/// Hovering lights a node box, and leaving it puts the border back —
+/// without touching a box that is selected or blamed, which are saying
+/// something a hover does not.
+#[test]
+fn hovering_lights_a_box_but_never_overrides_what_it_is_saying() {
+    use bevy::picking::hover::Hovered;
+    use voxel_editor::{SelectsNode, PLAIN_BORDER};
+
+    let mut app = app();
+    app.add_systems(Update, voxel_editor::hover);
+
+    let plain = app
+        .world_mut()
+        .spawn((
+            SelectsNode(".nodes[1]".into()),
+            Hovered(false),
+            BorderColor::all(PLAIN_BORDER),
+        ))
+        .id();
+    let selected_colour = Color::srgb(0.30, 0.55, 0.92);
+    let selected = app
+        .world_mut()
+        .spawn((
+            SelectsNode(".nodes[2]".into()),
+            Hovered(false),
+            BorderColor::all(selected_colour),
+        ))
+        .id();
+
+    let border = |app: &App, e: Entity| app.world().entity(e).get::<BorderColor>().unwrap().left;
+
+    app.world_mut().entity_mut(plain).insert(Hovered(true));
+    app.world_mut().entity_mut(selected).insert(Hovered(true));
+    app.update();
+    assert_ne!(border(&app, plain), PLAIN_BORDER, "a plain box lights up");
+    assert_eq!(
+        border(&app, selected),
+        selected_colour,
+        "a selected one keeps what it was saying"
+    );
+
+    app.world_mut().entity_mut(plain).insert(Hovered(false));
+    app.update();
+    assert_eq!(border(&app, plain), PLAIN_BORDER, "and it goes back");
+}

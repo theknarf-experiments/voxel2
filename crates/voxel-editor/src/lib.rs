@@ -44,10 +44,10 @@ mod row;
 mod style;
 mod walk;
 
-pub use canvas::{GraphViewport, SelectsNode};
+pub use canvas::{GraphViewport, SelectsNode, PLAIN_BORDER};
 pub use edit::{on_drag, on_drag_done, on_pick, on_typed, undo, History};
 pub use panel::on_tab;
-pub use panel::{on_pinch, on_select, on_wheel, save};
+pub use panel::{hover, on_pinch, on_select, on_wheel, save};
 pub use row::{DragsNum, FieldPath, PicksOption, SelectsRoot, WritesNum};
 pub use style::PanelStyle;
 pub use walk::{rows, rows_at, rows_in, Num, Row, RowKind};
@@ -308,6 +308,7 @@ impl Plugin for EditorPlugin {
                         // frame gets the dragged width and not the one it
                         // was authored with.
                         panel::apply_width,
+                        panel::hover,
                         panel::on_wheel,
                         panel::on_pinch,
                     )
