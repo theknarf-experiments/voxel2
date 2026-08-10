@@ -256,7 +256,13 @@ pub fn save(
         return;
     }
     if keys.just_pressed(KeyCode::KeyZ) && modifier {
-        state.undo = true;
+        // Shift-Z is the other direction, as everywhere else.
+        let shifted = keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight);
+        if shifted {
+            state.redo = true;
+        } else {
+            state.undo = true;
+        }
     }
     if !(keys.just_pressed(KeyCode::KeyS) && modifier || state.save) {
         return;

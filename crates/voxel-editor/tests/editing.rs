@@ -478,6 +478,43 @@ fn undo_restores_what_the_last_batch_changed() {
     app.update();
 }
 
+/// Redo puts back what undo took away, and a fresh edit forgets it: the
+/// future that was undone is not the future of a document that has since
+/// been edited down a different path.
+#[test]
+fn redo_puts_back_what_undo_took_and_an_edit_forgets_it() {
+    let mut app = app();
+    app.add_systems(Update, voxel_editor::undo);
+
+    let was = app.world().resource::<LevelDef>().materials[0].id();
+    edit(&mut app, ".materials[0].id", 77.0, Num::U32);
+
+    app.world_mut().resource_mut::<EditorState>().undo = true;
+    app.update();
+    assert_eq!(app.world().resource::<LevelDef>().materials[0].id(), was);
+
+    app.world_mut().resource_mut::<EditorState>().redo = true;
+    app.update();
+    assert_eq!(
+        app.world().resource::<LevelDef>().materials[0].id(),
+        77,
+        "redo puts it back"
+    );
+
+    // Undo, then edit: the redo is gone.
+    app.world_mut().resource_mut::<EditorState>().undo = true;
+    app.update();
+    edit(&mut app, ".materials[0].id", 5.0, Num::U32);
+    assert!(!app.world().resource::<voxel_editor::History>().can_redo());
+    app.world_mut().resource_mut::<EditorState>().redo = true;
+    app.update();
+    assert_eq!(
+        app.world().resource::<LevelDef>().materials[0].id(),
+        5,
+        "and nothing comes back"
+    );
+}
+
 /// A click anywhere in a node box selects that node, and a click on the
 /// empty canvas clears the selection.
 ///

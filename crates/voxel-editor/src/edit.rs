@@ -52,36 +52,45 @@ pub struct Pending(pub Vec<Edit>);
 /// The dynamic form, because bevy can `reflect_clone` neither `[f32; 3]`
 /// nor a boxed trait object, and a level is full of both. `try_apply`
 /// takes it back.
-#[derive(Resource, Default)]
+#[derive(Resource)]
 pub struct History {
-    steps: Vec<(usize, Box<dyn PartialReflect>)>,
+    done: Vec<Step>,
+    undone: Vec<Step>,
     /// Enough to undo a session's worth of tuning without holding every
     /// document a long session ever produced.
     pub depth: usize,
 }
 
+/// One document, as it was.
+type Step = (usize, Box<dyn PartialReflect>);
+
+impl Default for History {
+    fn default() -> Self {
+        Self {
+            done: Vec::new(),
+            undone: Vec::new(),
+            depth: 64,
+        }
+    }
+}
+
 impl History {
-    fn remember_dynamic(&mut self, root: usize, snapshot: Box<dyn PartialReflect>) {
-        if self.depth == 0 {
-            self.depth = 64;
-        }
-        self.steps.push((root, snapshot));
-        let over = self.steps.len().saturating_sub(self.depth);
-        self.steps.drain(..over);
+    /// Remember the state before a batch, and forget any redo: the future
+    /// that was undone is not the future of a document that has since been
+    /// edited down a different path.
+    fn remember(&mut self, step: Step) {
+        self.done.push(step);
+        let over = self.done.len().saturating_sub(self.depth);
+        self.done.drain(..over);
+        self.undone.clear();
     }
 
-    #[allow(dead_code)]
-    fn remember(&mut self, root: usize, document: &dyn PartialReflect) {
-        if self.depth == 0 {
-            self.depth = 64;
-        }
-        self.steps.push((root, document.to_dynamic()));
-        let over = self.steps.len().saturating_sub(self.depth);
-        self.steps.drain(..over);
+    pub fn can_undo(&self) -> bool {
+        !self.done.is_empty()
     }
 
-    pub fn is_empty(&self) -> bool {
-        self.steps.is_empty()
+    pub fn can_redo(&self) -> bool {
+        !self.undone.is_empty()
     }
 }
 
@@ -245,24 +254,45 @@ pub fn on_bool(
 /// Exclusive because reaching a resource whose type is only known at
 /// runtime needs the world and the registry at once — the same price the
 /// panel pays to read it.
-/// Put the document back as it was before the last batch of edits.
+/// Step the document back — or forward again.
 ///
 /// Exclusive for the same reason `apply` is: reaching an arbitrary
 /// reflected resource needs the `World` and the registry together.
 pub fn undo(world: &mut World) {
-    if !world.resource::<EditorState>().undo {
+    let state = world.resource::<EditorState>();
+    let (undo, redo) = (state.undo, state.redo);
+    if !(undo || redo) {
         return;
     }
-    world.resource_mut::<EditorState>().undo = false;
-    let Some((root, was)) = world.resource_mut::<History>().steps.pop() else {
-        info!("editor: nothing to undo");
+    {
+        let mut state = world.resource_mut::<EditorState>();
+        state.undo = false;
+        state.redo = false;
+    }
+    let mut history = world.resource_mut::<History>();
+    let step = if undo {
+        history.done.pop()
+    } else {
+        history.undone.pop()
+    };
+    let Some((root, was)) = step else {
+        info!("editor: nothing to {}", if undo { "undo" } else { "redo" });
         return;
     };
     let Some(mut document) = document_mut(world, root) else {
         return;
     };
+    // What is being replaced becomes the way back.
+    let now = document.as_partial_reflect().to_dynamic();
     if let Err(e) = document.as_partial_reflect_mut().try_apply(was.as_ref()) {
-        warn!("editor: undo did not take — {e}");
+        warn!("editor: that did not take — {e}");
+        return;
+    }
+    let mut history = world.resource_mut::<History>();
+    if undo {
+        history.undone.push((root, now));
+    } else {
+        history.done.push((root, now));
     }
 }
 
@@ -364,10 +394,8 @@ pub fn apply(world: &mut World) {
             warn!("editor: '{}' would not take that value — {e}", edit.path);
         }
     }
-    for (root, snapshot) in history {
-        world
-            .resource_mut::<History>()
-            .remember_dynamic(root, snapshot);
+    for step in history {
+        world.resource_mut::<History>().remember(step);
     }
 }
 

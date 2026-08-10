@@ -135,6 +135,8 @@ pub struct EditorState {
     pub save: bool,
     /// Set to put the document back as it was before the last edit.
     pub undo: bool,
+    /// Set to put back what [`EditorState::undo`] took away.
+    pub redo: bool,
     /// Panel width in logical pixels, dragged by the grip on its inner
     /// edge. Here rather than on the node because the panel is respawned
     /// whenever the document changes.
@@ -152,6 +154,7 @@ impl Default for EditorState {
             selected: None,
             save: false,
             undo: false,
+            redo: false,
             width: 620.0,
         }
     }
