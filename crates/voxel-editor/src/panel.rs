@@ -336,7 +336,13 @@ pub fn rebuild(world: &mut World) {
         return;
     }
 
-    let Some(Document { tick, body, props }) = read_document(world) else {
+    let Some(Document {
+        tick,
+        complaint,
+        body,
+        props,
+    }) = read_document(world)
+    else {
         return;
     };
 
@@ -388,6 +394,7 @@ pub fn rebuild(world: &mut World) {
             )})
         }
     };
+    let complaint_scene = complaint_bar(complaint.as_deref(), &style);
     let tab_scenes: Vec<_> = if roots.len() > 1 {
         roots
             .iter()
@@ -443,6 +450,7 @@ pub fn rebuild(world: &mut World) {
                             ThemeBackgroundColor(tokens::PANE_HEADER_BG)
                             Children [ {tab_scenes} ]
                         ),
+                        {complaint_scene},
                         (pane_body() Node { flex_grow: 1.0, min_height: px(0), flex_direction: FlexDirection::Column } Children [ {body_scene} ]),
                     ]
                 ),
@@ -465,6 +473,12 @@ pub fn rebuild(world: &mut World) {
 /// What one tab's document turned into.
 struct Document {
     tick: u32,
+    /// Why the document does not compile, if it does not. The panel can
+    /// now MAKE a level invalid — one menu pick rewires a port to a node
+    /// declared later — and the engine's answer to that is to keep the
+    /// running world and warn. A warning in a log is not an answer to
+    /// somebody looking at the panel that caused it.
+    complaint: Option<String>,
     body: Body,
     /// The selected node's own rows, for the graph view's properties
     /// column. Empty when nothing is selected.
@@ -512,6 +526,28 @@ fn inspector(props: &Option<(String, Vec<walk::Row>)>, style: &PanelStyle) -> im
         BorderColor::all(Color::srgba(0.0, 0.0, 0.0, 0.5))
         ThemeBackgroundColor(tokens::PANE_HEADER_BG)
         Children [ {header}, {body} ]
+    )})
+}
+
+/// What the compiler says is wrong, along the top of the panel.
+///
+/// Absent when there is nothing to say, so the panel does not carry a
+/// permanent empty strip for the sake of the rare moment it is needed.
+fn complaint_bar(complaint: Option<&str>, style: &PanelStyle) -> impl SceneList {
+    let said = complaint?.to_string();
+    let font = bevy::text::FontSize::Px(style.font);
+    let pad = px(style.pad);
+    Some(bsn_list! {(
+        Node {
+            padding: UiRect::all(pad),
+            flex_shrink: 0.0,
+        }
+        BackgroundColor(Color::srgb(0.42, 0.13, 0.13))
+        Children [(
+            Text({said})
+            TextFont { font_size: {font} }
+            ThemedText
+        )]
     )})
 }
 
@@ -607,6 +643,14 @@ fn read_document(world: &mut World) -> Option<Document> {
     let entity = world.resource_entities().get(component_id)?;
     let value = reflect.reflect(world.entity(entity))?;
 
+    // The compiler is cheap and the panel is the thing making the
+    // mistakes, so it asks directly rather than waiting to be told.
+    let complaint = value
+        .as_partial_reflect()
+        .try_downcast_ref::<voxel_engine::LevelDef>()
+        .and_then(|level| voxel_engine::graph::compile(&level.nodes).err())
+        .map(|e| e.to_string());
+
     let body = match root.view {
         View::Rows => Body::Rows(walk::rows_in(
             value.as_partial_reflect(),
@@ -654,5 +698,10 @@ fn read_document(world: &mut World) -> Option<Document> {
             ),
         ))
     });
-    Some(Document { tick, body, props })
+    Some(Document {
+        tick,
+        complaint,
+        body,
+        props,
+    })
 }
