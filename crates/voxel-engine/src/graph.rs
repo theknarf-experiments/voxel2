@@ -84,6 +84,27 @@ pub enum Error {
     },
 }
 
+impl Error {
+    /// The node the complaint is ABOUT, by the name a level gave it.
+    ///
+    /// Every diagnostic names one, because a compiler that says "type
+    /// error" about a hand-written document is a compiler people guess
+    /// against. This is that name, for a tool that can point at it.
+    pub fn at(&self) -> &str {
+        match self {
+            Error::DuplicateName(name) => name,
+            Error::UnknownNode { at, .. }
+            | Error::ForwardReference { at, .. }
+            | Error::UnknownPort { at, .. }
+            | Error::MissingPort { at, .. }
+            | Error::WrongType { at, .. }
+            | Error::StaleRead { at, .. }
+            | Error::TooManyFields { at, .. }
+            | Error::Unnamed { at } => at,
+        }
+    }
+}
+
 impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {

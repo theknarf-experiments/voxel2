@@ -81,6 +81,10 @@ impl GraphCamera {
 
 /// The whole graph, as one scene under a clipping viewport.
 ///
+/// `blamed` names the node the compiler is complaining about, if any: a
+/// level that does not compile has one thing worth looking at, and it is
+/// not the one you happened to select.
+///
 /// The geometry is built once, at 1:1, and the camera scales what is
 /// DRAWN. Bevy's UI does not go through a camera projection — `bevy_ui`
 /// reads a camera's scale factor and viewport size and nothing else — so
@@ -91,6 +95,7 @@ pub fn scene(
     style: &PanelStyle,
     camera: GraphCamera,
     selected: Option<&str>,
+    blamed: Option<&str>,
 ) -> impl Scene {
     // Frames first, then edges, then boxes: a wire passes behind the node
     // it lands on, and a frame behind everything it gates.
@@ -108,7 +113,16 @@ pub fn scene(
     let nodes: Vec<_> = layout
         .nodes
         .iter()
-        .map(|n| node(n, graph, style, selected == Some(n.path.as_str())))
+        .map(|n| {
+            let mark = if blamed.is_some() && blamed == n.name.as_deref() {
+                Mark::Blamed
+            } else if selected == Some(n.path.as_str()) {
+                Mark::Selected
+            } else {
+                Mark::None
+            };
+            node(n, graph, style, mark)
+        })
         .collect();
     let font = FontSize::Px(style.font);
     let pan = camera.pan;
@@ -146,7 +160,17 @@ pub fn scene(
 }
 
 /// One node: a title bar, then one row per port.
-fn node(placed: &Placed, graph: &GraphStyle, style: &PanelStyle, selected: bool) -> impl Scene {
+/// How a box is called out, if it is.
+#[derive(Clone, Copy, PartialEq)]
+enum Mark {
+    None,
+    Selected,
+    /// Named by the compiler's complaint. Beats selection: a level that
+    /// does not compile has one thing worth looking at.
+    Blamed,
+}
+
+fn node(placed: &Placed, graph: &GraphStyle, style: &PanelStyle, mark: Mark) -> impl Scene {
     let title = match &placed.name {
         Some(name) => format!("{name}  {}", placed.kind),
         None => placed.kind.to_string(),
@@ -161,10 +185,10 @@ fn node(placed: &Placed, graph: &GraphStyle, style: &PanelStyle, selected: bool)
     let header = px(graph.header);
     let font = FontSize::Px(style.font * 0.9);
     let path = placed.path.clone();
-    let border = if selected {
-        Color::srgb(0.30, 0.55, 0.92)
-    } else {
-        Color::srgba(0.0, 0.0, 0.0, 0.6)
+    let border = match mark {
+        Mark::Blamed => Color::srgb(0.85, 0.25, 0.25),
+        Mark::Selected => Color::srgb(0.30, 0.55, 0.92),
+        Mark::None => Color::srgba(0.0, 0.0, 0.0, 0.6),
     };
 
     bsn! {

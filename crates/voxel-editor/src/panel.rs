@@ -385,6 +385,7 @@ pub fn rebuild(world: &mut World) {
     let (grip, row_gap) = (px(style.grip), px(style.row_gap));
     // `impl SceneList for Vec<S: Scene>` is what lets a panel whose shape
     // is only known at runtime be expressed in a static macro.
+    let blamed = complaint.as_ref().map(|(at, _)| at.clone());
     let body_scene: Box<dyn SceneList> = match &body {
         Body::Rows(rows) => Box::new(rows_body(rows, &style)),
         Body::Graph(layout) => {
@@ -392,7 +393,14 @@ pub fn rebuild(world: &mut World) {
             let selected = world.resource::<EditorState>().selected.clone();
             let graph_style = world.resource::<graph::GraphStyle>().clone();
             let canvas = bsn_list! {(
-                {canvas::scene(layout, &graph_style, &style, camera, selected.as_deref())}
+                {canvas::scene(
+                    layout,
+                    &graph_style,
+                    &style,
+                    camera,
+                    selected.as_deref(),
+                    blamed.as_deref(),
+                )}
             )};
             let inspector = inspector(&props, &style);
             Box::new(bsn_list! {(
@@ -405,7 +413,7 @@ pub fn rebuild(world: &mut World) {
             )})
         }
     };
-    let complaint_scene = complaint_bar(complaint.as_deref(), &style);
+    let complaint_scene = complaint_bar(complaint.as_ref().map(|(_, said)| said.as_str()), &style);
     let tab_scenes: Vec<_> = if roots.len() > 1 {
         roots
             .iter()
@@ -489,7 +497,7 @@ struct Document {
     /// declared later — and the engine's answer to that is to keep the
     /// running world and warn. A warning in a log is not an answer to
     /// somebody looking at the panel that caused it.
-    complaint: Option<String>,
+    complaint: Option<(String, String)>,
     body: Body,
     /// The selected node's own rows, for the graph view's properties
     /// column. Empty when nothing is selected.
@@ -660,7 +668,7 @@ fn read_document(world: &mut World) -> Option<Document> {
         .as_partial_reflect()
         .try_downcast_ref::<voxel_engine::LevelDef>()
         .and_then(|level| voxel_engine::graph::compile(&level.nodes).err())
-        .map(|e| e.to_string());
+        .map(|e| (e.at().to_string(), e.to_string()));
 
     let body = match root.view {
         View::Rows => Body::Rows(walk::rows_in(
