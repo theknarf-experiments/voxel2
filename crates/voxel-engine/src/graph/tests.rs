@@ -362,3 +362,56 @@ fn a_scope_answers_for_its_gate_and_not_its_children() {
         "the gate decides where every op inside applies"
     );
 }
+
+/// Renaming a node takes its references with it, or the rename IS a
+/// deletion: a name is the only way anything refers to a node.
+#[test]
+fn renaming_a_node_carries_every_wire_that_named_it() {
+    for name in ["planet", "megastructure"] {
+        let mut level = shipped(name);
+        // A node something actually reads.
+        let (from, readers) = level
+            .nodes
+            .iter()
+            .filter_map(|n| n.name.as_deref())
+            .map(|n| {
+                let mut flat = Vec::new();
+                super::scan(&level.nodes, "", &mut flat);
+                let readers = flat
+                    .iter()
+                    .flat_map(|(_, node)| node.wires.iter())
+                    .filter(|(_, w)| w.sources().iter().any(|s| s == n))
+                    .count();
+                (n.to_string(), readers)
+            })
+            .max_by_key(|(_, readers)| *readers)
+            .expect("something is wired");
+        assert!(readers > 0, "{name} wires nothing");
+
+        let moved = rename(&mut level.nodes, &from, "renamed-by-the-editor");
+        assert_eq!(moved, readers, "{name}: every reader follows");
+        assert!(
+            compile(&level.nodes).is_ok(),
+            "{name}: a renamed level still compiles"
+        );
+        // And the old name is gone from the document entirely.
+        assert!(!names(&level.nodes).contains(&from));
+    }
+}
+
+/// Renaming reaches inside a scope: a district's nodes are nodes, and
+/// they refer to the outside by the same names.
+#[test]
+fn renaming_reaches_inside_a_scope() {
+    let mut level = shipped("megastructure");
+    let moved = rename(&mut level.nodes, "void", "nothing");
+    assert!(moved > 0, "the districts read `void`");
+    assert!(compile(&level.nodes).is_ok());
+    let mut flat = Vec::new();
+    super::scan(&level.nodes, "", &mut flat);
+    let inside_still_says_void = flat
+        .iter()
+        .flat_map(|(_, n)| n.wires.iter())
+        .any(|(_, w)| w.sources().iter().any(|s| s == "void"));
+    assert!(!inside_still_says_void, "a scope's wires follow too");
+}

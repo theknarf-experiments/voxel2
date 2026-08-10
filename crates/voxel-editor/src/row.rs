@@ -13,13 +13,14 @@ use bevy::feathers::constants::{fonts, size};
 use bevy::feathers::controls::{
     ButtonVariant, ColorSwatchValue, FeathersButton, FeathersCheckbox, FeathersColorSwatch,
     FeathersDisclosureToggle, FeathersMenu, FeathersMenuButton, FeathersMenuItem,
-    FeathersMenuPopup, FeathersSlider,
+    FeathersMenuPopup, FeathersSlider, FeathersTextInput, FeathersTextInputContainer,
 };
 use bevy::feathers::cursor::EntityCursor;
 use bevy::feathers::font_styles::InheritableFont;
 use bevy::feathers::theme::{InheritableThemeTextColor, ThemedText};
 use bevy::feathers::tokens;
 use bevy::prelude::*;
+use bevy::text::EditableText;
 use bevy::text::{FontSize, FontWeight, LineBreak, TextLayout};
 use bevy::ui::{px, AlignItems, Checked, Display, FlexDirection, Node, Overflow, UiRect};
 use bevy::ui_widgets::{SliderPrecision, SliderStep};
@@ -416,8 +417,20 @@ fn value_widget(row: &Row, style: &PanelStyle) -> Box<dyn SceneList> {
         },
 
         RowKind::Text(s) => {
-            let s = s.clone();
-            Box::new(vec![cell(style.value, self::text(s, style.font))])
+            let value = s.clone();
+            Box::new(bsn_list!(
+                @FeathersTextInputContainer
+                Node { width: {px(style.value)}, flex_shrink: 0.0, height: px(style.tab) }
+                FieldPath({p})
+                Children [(
+                    @FeathersTextInput
+                    // Seeded with what the document holds, and read back
+                    // when the edit is COMMITTED — never per keystroke: a
+                    // name is a reference, and half a name refers to
+                    // nothing.
+                    EditableText::new(value)
+                )]
+            ))
         }
 
         RowKind::Color { rgb, .. } => {

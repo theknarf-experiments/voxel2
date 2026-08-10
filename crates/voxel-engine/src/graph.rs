@@ -24,6 +24,7 @@
 
 use bevy::platform::collections::{HashMap, HashSet};
 use bevy::prelude::*;
+use bevy::reflect::ReflectMut;
 use serde::{Deserialize, Serialize};
 use voxel_core::opgen::Value;
 use voxel_core::worldop::{WorldOp, FIELD_SLOTS};
@@ -461,6 +462,51 @@ fn scan<'a>(nodes: &'a [NodeDef], path: &str, out: &mut Vec<(String, &'a NodeDef
         scan(node.node.0.children(), &key, out);
         out.push((key, node));
     }
+}
+
+/// Rename a node, and every wire that named it.
+///
+/// A name is not a label: it is the only way anything refers to a node, so
+/// renaming one WITHOUT its references is the same edit as deleting it.
+/// An editor that offered the first and left the second is offering a
+/// trap, so this is the operation, and renaming is not a field write.
+///
+/// Returns how many wires followed.
+pub fn rename(nodes: &mut [NodeDef], from: &str, to: &str) -> usize {
+    fn walk(nodes: &mut [NodeDef], from: &str, to: &str, moved: &mut usize) {
+        for node in nodes {
+            if node.name.as_deref() == Some(from) {
+                node.name = Some(to.to_string());
+            }
+            for (_, wire) in node.wires.0.iter_mut() {
+                match wire {
+                    Wire::One(name) if name == from => {
+                        *name = to.to_string();
+                        *moved += 1;
+                    }
+                    Wire::Many(names) => {
+                        for name in names.iter_mut().filter(|n| *n == from) {
+                            *name = to.to_string();
+                            *moved += 1;
+                        }
+                    }
+                    Wire::One(_) => {}
+                }
+            }
+            // A scope's children are nodes, and refer by the same names.
+            if let ReflectMut::Struct(s) = node.node.0.as_partial_reflect_mut().reflect_mut() {
+                if let Some(inner) = s
+                    .field_mut("nodes")
+                    .and_then(|f| f.try_downcast_mut::<Vec<NodeDef>>())
+                {
+                    walk(inner, from, to, moved);
+                }
+            }
+        }
+    }
+    let mut moved = 0;
+    walk(nodes, from, to, &mut moved);
+    moved
 }
 
 /// Names every node a level defines, for the reference lists an editor

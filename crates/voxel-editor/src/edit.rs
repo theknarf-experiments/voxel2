@@ -10,6 +10,7 @@
 
 use bevy::prelude::*;
 use bevy::reflect::{TypeInfo, TypeRegistry};
+use bevy::text::EditableText;
 use bevy::ui_widgets::ValueChange;
 
 use crate::path;
@@ -92,6 +93,39 @@ impl History {
     pub fn can_redo(&self) -> bool {
         !self.undone.is_empty()
     }
+}
+
+/// Commit what has been typed, on Enter.
+///
+/// Not per keystroke. A name is a REFERENCE — the only way anything refers
+/// to a node — so a half-typed one refers to nothing, and every
+/// intermediate would be a document that does not compile and an entry in
+/// the undo stack.
+pub fn on_typed(
+    keys: Res<ButtonInput<KeyCode>>,
+    focus: Res<bevy::input_focus::InputFocus>,
+    typed: Query<(&EditableText, &ChildOf)>,
+    fields: Query<&FieldPath>,
+    state: Res<EditorState>,
+    mut pending: ResMut<Pending>,
+) {
+    if !keys.just_pressed(KeyCode::Enter) {
+        return;
+    }
+    let Some(at) = focus.get() else { return };
+    let Ok((text, parent)) = typed.get(at) else {
+        return;
+    };
+    // The path is on the CONTAINER: the editable part is a child, which is
+    // where focus lands.
+    let Ok(FieldPath(path)) = fields.get(parent.parent()) else {
+        return;
+    };
+    pending.0.push(Edit {
+        root: state.root,
+        path: path.clone(),
+        value: Value::Text(text.value().to_string()),
+    });
 }
 
 /// A number was dragged sideways.
@@ -356,6 +390,17 @@ pub fn apply(world: &mut World) {
             history.push((edit.root, snapshot));
         }
 
+        // Renaming a node is not a field write. A name is the only way
+        // anything refers to a node, so writing one without its references
+        // is the same edit as deleting the node — see `graph::rename`.
+        if let Value::Text(to) = &edit.value {
+            if let Some(renamed) = rename_node(&mut *document, &edit.path, to) {
+                if renamed > 0 {
+                    info!("editor: renamed, and {renamed} wires followed");
+                }
+                continue;
+            }
+        }
         let slot = match path::resolve_mut(document.as_partial_reflect_mut(), &edit.path) {
             Ok(slot) => slot,
             // A path that does not resolve is a bug in the walk that made
@@ -397,6 +442,32 @@ pub fn apply(world: &mut World) {
     for step in history {
         world.resource_mut::<History>().remember(step);
     }
+}
+
+/// If `path` names a NODE's name, rename it and every wire that said it.
+///
+/// `None` when the path is some other string — a class, a marker kind —
+/// which is an ordinary field write.
+fn rename_node(document: &mut dyn Reflect, path: &str, to: &str) -> Option<usize> {
+    // `.nodes[3].name.0`, and nothing else. A scope's children live at
+    // `.nodes[3].node.nodes[1].name.0`, which ends the same way.
+    let suffix = ".name.0";
+    if !path.starts_with(".nodes[") || !path.ends_with(suffix) {
+        return None;
+    }
+    let level = document
+        .as_any_mut()
+        .downcast_mut::<voxel_engine::LevelDef>()?;
+    let from = level
+        .as_reflect()
+        .reflect_path(path)
+        .ok()?
+        .try_downcast_ref::<String>()?
+        .clone();
+    if from == to {
+        return Some(0);
+    }
+    Some(voxel_engine::graph::rename(&mut level.nodes, &from, to))
 }
 
 /// The value at the field's own type.

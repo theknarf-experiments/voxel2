@@ -45,7 +45,7 @@ mod style;
 mod walk;
 
 pub use canvas::{GraphViewport, SelectsNode};
-pub use edit::{on_drag, on_drag_done, on_pick, undo, History};
+pub use edit::{on_drag, on_drag_done, on_pick, on_typed, undo, History};
 pub use panel::on_tab;
 pub use panel::{on_pinch, on_select, on_wheel, save};
 pub use row::{DragsNum, FieldPath, PicksOption, SelectsRoot, WritesNum};
@@ -293,6 +293,7 @@ impl Plugin for EditorPlugin {
                     // so a shut panel costs no frames at all — see
                     // `panel::active`.
                     (
+                        edit::on_typed,
                         edit::apply,
                         edit::undo,
                         panel::rebuild,

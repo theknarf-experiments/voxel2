@@ -646,3 +646,111 @@ fn scrolling_pans_the_graph_and_pinching_zooms_it() {
     let back = app.world().resource::<EditorState>().camera;
     assert!(back.zoom < after.zoom, "a pinch in zooms out");
 }
+
+/// Typing a new name for a node takes every wire with it.
+///
+/// A name is the only way anything refers to a node, so writing one as an
+/// ordinary field would be the same edit as deleting the node: the level
+/// would stop compiling on the first keystroke that lands.
+#[test]
+fn renaming_a_node_rewires_the_level() {
+    let mut app = app();
+    let at = app
+        .world()
+        .resource::<LevelDef>()
+        .nodes
+        .iter()
+        .position(|n| n.name.as_deref() == Some("sea"))
+        .expect("planet names its sea level");
+    let readers: Vec<String> = app
+        .world()
+        .resource::<LevelDef>()
+        .nodes
+        .iter()
+        .filter(|n| {
+            n.wires
+                .iter()
+                .any(|(_, w)| w.sources().iter().any(|s| s == "sea"))
+        })
+        .filter_map(|n| n.name.clone())
+        .collect();
+    assert!(!readers.is_empty(), "something reads it");
+
+    app.world_mut().resource_mut::<Pending>().0.push(Edit {
+        root: 0,
+        path: format!(".nodes[{at}].name.0"),
+        value: Value::Text("ocean".into()),
+    });
+    app.update();
+
+    let level = app.world().resource::<LevelDef>();
+    assert_eq!(level.nodes[at].name.as_deref(), Some("ocean"));
+    for name in &readers {
+        let node = level
+            .nodes
+            .iter()
+            .find(|n| n.name.as_deref() == Some(name.as_str()))
+            .unwrap();
+        assert!(
+            node.wires
+                .iter()
+                .any(|(_, w)| w.sources().iter().any(|s| s == "ocean")),
+            "{name} still points at the old name"
+        );
+    }
+    assert!(
+        voxel_engine::graph::compile(&level.nodes).is_ok(),
+        "and the level still compiles"
+    );
+}
+
+/// Typing commits on ENTER, not per keystroke.
+///
+/// A name is a reference, so every intermediate would be a document that
+/// does not compile and a step in the undo stack.
+#[test]
+fn text_commits_on_enter_and_only_then() {
+    use bevy::input::ButtonInput;
+    use bevy::input_focus::{FocusCause, InputFocus};
+    use bevy::text::EditableText;
+    use voxel_editor::FieldPath;
+
+    let mut app = app();
+    app.init_resource::<ButtonInput<KeyCode>>()
+        .init_resource::<InputFocus>()
+        .add_systems(Update, voxel_editor::on_typed);
+
+    let container = app
+        .world_mut()
+        .spawn(FieldPath(".nodes[0].name.0".into()))
+        .id();
+    let input = app
+        .world_mut()
+        .spawn((EditableText::new("ocean"), ChildOf(container)))
+        .id();
+    app.world_mut()
+        .resource_mut::<InputFocus>()
+        .set(input, FocusCause::Pressed);
+
+    // Focused, but nothing pressed: the document is untouched.
+    let before = app.world().resource::<LevelDef>().nodes[0].name.clone();
+    app.update();
+    assert_eq!(app.world().resource::<LevelDef>().nodes[0].name, before);
+
+    app.world_mut()
+        .resource_mut::<ButtonInput<KeyCode>>()
+        .press(KeyCode::Enter);
+    app.update();
+    // Queued AND applied in the same frame — the harness runs `apply` too,
+    // which is the whole path this is here to check.
+    let level = app.world().resource::<LevelDef>();
+    assert_eq!(
+        level.nodes[0].name.as_deref(),
+        Some("ocean"),
+        "Enter commits what was typed"
+    );
+    assert!(
+        voxel_engine::graph::compile(&level.nodes).is_ok(),
+        "and the rename took its wires with it"
+    );
+}
