@@ -21,9 +21,10 @@ mod row;
 mod style;
 mod walk;
 
+pub use canvas::{GraphViewport, SelectsNode};
 pub use edit::{on_drag, on_drag_done, on_pick, undo, History};
 pub use panel::on_tab;
-pub use panel::save;
+pub use panel::{on_select, save};
 pub use row::{DragsNum, FieldPath, PicksOption, SelectsRoot, WritesNum};
 pub use style::PanelStyle;
 pub use walk::{rows, rows_at, rows_in, Num, Row, RowKind};

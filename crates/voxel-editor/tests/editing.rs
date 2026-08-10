@@ -477,3 +477,65 @@ fn undo_restores_what_the_last_batch_changed() {
     app.world_mut().resource_mut::<EditorState>().undo = true;
     app.update();
 }
+
+/// A click anywhere in a node box selects that node, and a click on the
+/// empty canvas clears the selection.
+///
+/// The case that matters is a click on a CHILD — a title bar, a port row
+/// — because a pointer event bubbles and this observer runs once per
+/// ancestor. Selecting on the way up is what makes any part of a box
+/// work; the viewport at the END of that chain used to clear what the box
+/// had just set, so selection never worked by clicking at all.
+#[test]
+fn clicking_a_node_selects_it_even_through_its_children() {
+    use bevy::picking::events::{Click, Pointer};
+    use bevy::picking::pointer::{Location, PointerButton, PointerId};
+    use voxel_editor::{GraphViewport, SelectsNode};
+
+    let mut app = app();
+    app.add_observer(voxel_editor::on_select);
+
+    let viewport = app.world_mut().spawn(GraphViewport).id();
+    let boxed = app
+        .world_mut()
+        .spawn((SelectsNode(".nodes[3]".into()), ChildOf(viewport)))
+        .id();
+    let title = app.world_mut().spawn(ChildOf(boxed)).id();
+
+    let click = |app: &mut App, at: Entity| {
+        let window = app.world_mut().spawn(bevy::window::Window::default()).id();
+        let location = Location {
+            target: bevy::window::WindowRef::Entity(window)
+                .normalize(None)
+                .unwrap()
+                .into(),
+            position: Vec2::ZERO,
+        };
+        app.world_mut().trigger(Pointer::<Click>::new(
+            PointerId::Mouse,
+            location,
+            Click {
+                button: PointerButton::Primary,
+                hit: bevy::picking::backend::HitData::new(Entity::PLACEHOLDER, 0.0, None, None),
+                duration: std::time::Duration::ZERO,
+                count: 1,
+            },
+            at,
+        ));
+        app.update();
+    };
+
+    click(&mut app, title);
+    assert_eq!(
+        app.world().resource::<EditorState>().selected.as_deref(),
+        Some(".nodes[3]"),
+        "a click on a node's title selects the node"
+    );
+
+    click(&mut app, viewport);
+    assert_eq!(
+        app.world().resource::<EditorState>().selected,
+        None,
+        "and a click on the canvas behind them clears it"
+    );
+}
