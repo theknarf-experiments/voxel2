@@ -6,7 +6,14 @@
 //!
 //! Observers cannot reach an arbitrary reflected resource — that needs the
 //! `World` and the type registry together — so they queue and an exclusive
-//! system applies. The queue is also where undo will hang.
+//! system applies. The queue is where undo hangs: one snapshot per BATCH,
+//! taken before the first edit of it lands.
+//!
+//! Two edits are not field writes and say so here rather than pretending.
+//! Switching an enum VARIANT changes what the field is, so the new
+//! variant's fields are built from the registry. Renaming a NODE is
+//! `graph::rename`, because a name is the only way anything refers to one
+//! and writing it alone is the same edit as deleting the node.
 
 use bevy::prelude::*;
 use bevy::reflect::{TypeInfo, TypeRegistry};

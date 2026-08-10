@@ -7,7 +7,12 @@
 //! resizable now, so widening it reveals more of the sentence.
 //!
 //! Every row carries [`FieldPath`], which is what makes editing one
-//! observer rather than one per field.
+//! observer rather than one per field. What a row can be told to become
+//! is the widget's business: a slider where the field declares bounds, a
+//! drag where it does not, a menu of the level's own answers for a
+//! reference, a menu of an enum's own variants, a text field for a name.
+//! A kind with no widget renders as a greyed line saying so — a row that
+//! silently vanished would read as a field that does not exist.
 
 use bevy::feathers::constants::{fonts, size};
 use bevy::feathers::controls::{
