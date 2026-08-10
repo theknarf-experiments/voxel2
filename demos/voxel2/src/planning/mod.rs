@@ -8,6 +8,7 @@
 //! only [`StackPlanning`] through [`HostPlanning`].
 
 pub mod layers;
+pub mod nodes;
 pub mod schema;
 pub mod structure;
 pub mod world;

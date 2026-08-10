@@ -17,7 +17,7 @@ use super::layers;
 use super::structure;
 
 /// The `planning` block of a level file.
-#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
+#[derive(Reflect, Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
 pub struct PlanningDef {
     /// The planning stack: generic layers composed into one LayerManager.
     #[serde(default)]
@@ -41,7 +41,7 @@ impl PlanningDef {
 /// A structure: what `site_structure` emits at each site. Authored as
 /// data — weighted variants of parts, each placing one shape at every
 /// position of an arrangement. See `structure`.
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[derive(Reflect, Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct StructureDef {
     /// Sampled once per site; arrangements scale their radius by it, so
     /// a structure's parts agree with each other.
@@ -49,14 +49,14 @@ pub struct StructureDef {
     pub variants: Vec<VariantDef>,
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[derive(Reflect, Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct VariantDef {
     #[serde(default = "default_one")]
     pub weight: f32,
     pub parts: Vec<PartDef>,
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[derive(Reflect, Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct PartDef {
     pub arrange: ArrangeDef,
     pub shape: ShapeDef,
@@ -83,7 +83,7 @@ pub struct PartDef {
     pub link: Option<LinkDef>,
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[derive(Reflect, Serialize, Deserialize, Clone, Debug, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ArrangeDef {
     Single,
@@ -116,20 +116,20 @@ pub enum ArrangeDef {
 
 /// A box half-extent: a range, or `"arc"` for the ring's tangential
 /// half-length (wall segments that meet without authored trigonometry).
-#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
+#[derive(Reflect, Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
 #[serde(untagged)]
 pub enum ExtentDef {
     Range([f32; 2]),
     Keyword(ExtentKeyword),
 }
 
-#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
+#[derive(Reflect, Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub enum ExtentKeyword {
     Arc,
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[derive(Reflect, Serialize, Deserialize, Clone, Debug, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ShapeDef {
     Boxy {
@@ -144,7 +144,7 @@ pub enum ShapeDef {
     },
 }
 
-#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Default)]
+#[derive(Reflect, Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum SeatDef {
     /// The generator's heightfield (surface structures).
@@ -154,7 +154,7 @@ pub enum SeatDef {
     Site,
 }
 
-#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Default)]
+#[derive(Reflect, Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum AnchorDef {
     /// The shape's base rests on the seat.
@@ -164,7 +164,7 @@ pub enum AnchorDef {
     Center,
 }
 
-#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Default)]
+#[derive(Reflect, Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum YawDef {
     #[default]
@@ -174,7 +174,7 @@ pub enum YawDef {
     Tangent,
 }
 
-#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
+#[derive(Reflect, Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
 pub struct LinkDef {
     pub half_w: f32,
     pub half_h: f32,
@@ -186,13 +186,13 @@ pub struct LinkDef {
     pub cut: bool,
 }
 
-fn d_full_frac() -> [f32; 2] {
+pub fn d_full_frac() -> [f32; 2] {
     [1.0, 1.0]
 }
-fn d_turn() -> f32 {
+pub fn d_turn() -> f32 {
     45.0
 }
-fn d_link_step() -> f32 {
+pub fn d_link_step() -> f32 {
     3.0
 }
 
@@ -301,7 +301,7 @@ impl PartDef {
 /// changes or even notices. LayerProcGen would spell this as internal
 /// levels of one layer; instances keep each stage's reads inside a
 /// declared dependency, which is checked.
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[derive(Reflect, Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct RelaxDef {
     /// Fraction of the wanted correction applied per iteration. Above
     /// ~0.5 a site tends to overshoot into the neighbour that pushed it.
@@ -311,15 +311,15 @@ pub struct RelaxDef {
     pub iterations: u32,
 }
 
-fn d_relax_strength() -> f32 {
+pub fn d_relax_strength() -> f32 {
     0.35
 }
 
-fn d_relax_iterations() -> u32 {
+pub fn d_relax_iterations() -> u32 {
     1
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[derive(Reflect, Serialize, Deserialize, Clone, Debug, PartialEq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum StackLayerDef {
     /// Hash-gated candidate sites per cell, filtered by terrain.
@@ -461,7 +461,7 @@ pub enum StackLayerDef {
 }
 
 /// The emission shape of an `emit` stack layer.
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[derive(Reflect, Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum EmitDef {
     /// Terrain-seated slabs along a `connect` source (roads).
@@ -492,6 +492,10 @@ pub enum EmitDef {
         width: [f32; 2],
     },
     /// Sphere-cut chains from a `worm` source (caves).
+    ///
+    /// The default because it is the only emit with nothing to configure:
+    /// a node created empty in an editor should not also be half-filled.
+    #[default]
     WormCuts,
     /// Build a named structure (from the level's `structures` table) at
     /// each site, with an optional marker.
@@ -518,79 +522,79 @@ pub enum EmitDef {
     },
 }
 
-fn d_cell() -> i32 {
+pub fn d_cell() -> i32 {
     256
 }
-fn d_flow_cell() -> i32 {
+pub fn d_flow_cell() -> i32 {
     512
 }
-fn d_margin() -> f32 {
+pub fn d_margin() -> f32 {
     32.0
 }
-fn d_altitude() -> [f32; 2] {
+pub fn d_altitude() -> [f32; 2] {
     [f32::MIN, f32::MAX]
 }
-fn d_up_interval() -> [f32; 2] {
+pub fn d_up_interval() -> [f32; 2] {
     [0.0, 1.0]
 }
-fn d_reach() -> f32 {
+pub fn d_reach() -> f32 {
     700.0
 }
-fn d_corridor() -> f32 {
+pub fn d_corridor() -> f32 {
     192.0
 }
-fn d_slope_penalty() -> f32 {
+pub fn d_slope_penalty() -> f32 {
     60.0
 }
-fn d_path_step() -> f32 {
+pub fn d_path_step() -> f32 {
     8.0
 }
-fn d_flow_steps() -> usize {
+pub fn d_flow_steps() -> usize {
     400
 }
-fn d_spill() -> f32 {
+pub fn d_spill() -> f32 {
     7.0
 }
-fn d_worm_steps() -> u32 {
+pub fn d_worm_steps() -> u32 {
     70
 }
-fn d_worm_radius() -> [f32; 2] {
+pub fn d_worm_radius() -> [f32; 2] {
     [2.2, 3.6]
 }
-fn d_burial() -> f32 {
+pub fn d_burial() -> f32 {
     2.4
 }
-fn d_half_w() -> f32 {
+pub fn d_half_w() -> f32 {
     2.4
 }
-fn d_thickness() -> f32 {
+pub fn d_thickness() -> f32 {
     0.5
 }
-fn d_true() -> bool {
+pub fn d_true() -> bool {
     true
 }
-fn d_course_width() -> [f32; 2] {
+pub fn d_course_width() -> [f32; 2] {
     [2.0, 7.0]
 }
-fn d_cell3() -> i32 {
+pub fn d_cell3() -> i32 {
     128
 }
-fn d_cell3_y() -> i32 {
+pub fn d_cell3_y() -> i32 {
     132
 }
-fn d_margin3() -> f32 {
+pub fn d_margin3() -> f32 {
     24.0
 }
-fn d_reach3() -> f32 {
+pub fn d_reach3() -> f32 {
     400.0
 }
-fn d_tube_material() -> u32 {
+pub fn d_tube_material() -> u32 {
     2
 }
-fn d_tube_bore() -> f32 {
+pub fn d_tube_bore() -> f32 {
     1.5
 }
-fn d_tube_lift() -> f32 {
+pub fn d_tube_lift() -> f32 {
     3.0
 }
 impl EmitDef {

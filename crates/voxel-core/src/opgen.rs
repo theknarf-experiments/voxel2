@@ -52,6 +52,13 @@ pub enum Value {
     /// A named scalar field. CPU-side consumers only: the GPU interpreter
     /// skips the op that fills it.
     Field,
+    /// A value the ENGINE has no opinion about: sites, paths, a biome
+    /// table — whatever a host's region nodes pass between themselves.
+    ///
+    /// Open on purpose. The engine compares these by name and never
+    /// interprets them, which is what lets a host add a value type without
+    /// this enum learning its vocabulary.
+    Host(&'static str),
 }
 
 impl Value {
@@ -69,7 +76,19 @@ impl Value {
             Value::Lattice => &["level", "fy"],
             Value::Shafts => &["sxz", "sr", "shaft"],
             Value::Field => &["fields"],
+            // Not in the register file at all: a host value is addressed
+            // by NAME, and any number of consumers may read one.
+            Value::Host(_) => &[],
         }
+    }
+
+    /// Does this value live in the interpreter's register file?
+    ///
+    /// The distinction the compiler turns on. A register holds one thing
+    /// at a time, so point values have liveness; a host value is a named
+    /// layer that every consumer reads the same one of.
+    pub const fn is_register(self) -> bool {
+        !matches!(self, Value::Host(_))
     }
 
     /// Every value, for the guard test and for the compiler's allocator.

@@ -267,6 +267,13 @@ pub fn compile(nodes: &[NodeDef]) -> Result<Program, Error> {
                 resolved.push(j);
             }
 
+            // A host value is addressed by name and read by as many
+            // consumers as like: it is a layer, not a register, so there
+            // is nothing to be stale about.
+            if !want.is_register() {
+                continue;
+            }
+
             // What this node can actually see: the still-standing writes
             // of this value whose region overlaps its own. A district's
             // `slabs_y` sees its own district's lattice and no other, so
@@ -302,6 +309,9 @@ pub fn compile(nodes: &[NodeDef]) -> Result<Program, Error> {
         // one only where it applies, which is what lets nine districts each
         // define a lattice and one `shafts_cut` read seven shafts.
         for (_, produced) in outs {
+            if !produced.is_register() {
+                continue;
+            }
             let standing = live.entry(*produced).or_default();
             standing.retain(|&j| !covers(f.region, flat[j].region));
             standing.push(i);

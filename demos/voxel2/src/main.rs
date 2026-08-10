@@ -258,6 +258,9 @@ fn main() {
     // before there is one; a host with its own kinds registers them onto
     // this before parsing.
     let kinds = voxel_engine::graph::registry::engine_kinds();
+    // This game's own node kinds, registered before anything is parsed:
+    // a kind that is not registered is a `"kind"` no level can name.
+    planning::nodes::register(&mut kinds.write());
     let level = match LevelDef::from_json(&json, &kinds) {
         Ok(level) => level,
         Err(e) => {
