@@ -22,19 +22,22 @@ use crate::{LodConfig, VoxelEnginePlugin};
 #[derive(Reflect, Serialize, Deserialize, Clone, Debug)]
 pub struct LodDef {
     /// How many times the voxel size doubles above the finest level.
-    #[reflect(@schema::Rebuilds, @schema::Range(1.0, 12.0))]
+    ///
+    /// No [`schema::Range`]: what this can be is a fact about the ENGINE,
+    /// and a bound invented for the slider's benefit is a bound that can
+    /// exclude a value the level already ships. One did — 12, against a
+    /// planet that has always been 14.
+    #[reflect(@schema::Rebuilds)]
     pub max_level: u8,
     /// Chunks of the top level kept around the camera.
-    #[reflect(@schema::Rebuilds, @schema::Range(1.0, 32.0))]
+    #[reflect(@schema::Rebuilds)]
     pub top_radius: i32,
     /// Vertical extent of the top level, in chunks.
     #[reflect(@schema::Rebuilds)]
     pub top_y: (i32, i32),
     /// Refinement thresholds — tuning, not topology, so they apply
     /// without restreaming.
-    #[reflect(@schema::Range(0.5, 8.0))]
     pub split_k: f64,
-    #[reflect(@schema::Range(0.5, 8.0))]
     pub merge_k: f64,
 }
 

@@ -12,11 +12,13 @@ use bevy::feathers::{dark_theme::create_dark_theme, theme::UiTheme, FeathersPlug
 use bevy::platform::collections::HashSet;
 use bevy::prelude::*;
 
+pub mod edit;
 mod panel;
+mod path;
 mod row;
 mod walk;
 
-pub use walk::{Row, RowKind};
+pub use walk::{rows, Num, Row, RowKind};
 
 /// The key that opens the editor.
 ///
@@ -114,8 +116,25 @@ impl Plugin for EditorPlugin {
 
         app.insert_resource(EditorRoots(self.roots.clone()))
             .init_resource::<EditorState>()
+            .init_resource::<edit::Pending>()
             .register_type::<EditorState>()
             .add_observer(panel::on_disclosure)
-            .add_systems(Update, (panel::toggle, panel::rebuild).chain());
+            .add_observer(edit::on_f32)
+            .add_observer(edit::on_bool)
+            .add_systems(
+                Update,
+                (
+                    panel::toggle,
+                    // Ordered: an edit queued this frame is applied before
+                    // the panel is rebuilt from it, so a row never shows
+                    // the value it had a frame after you changed it. Gated
+                    // so a shut panel costs no frames at all — see
+                    // `panel::active`.
+                    (edit::apply, panel::rebuild)
+                        .chain()
+                        .run_if(panel::active),
+                )
+                    .chain(),
+            );
     }
 }

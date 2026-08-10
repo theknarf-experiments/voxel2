@@ -22,6 +22,9 @@ pub struct Row {
     /// The rationale written above the field, via `reflect_documentation`.
     pub docs: Option<&'static str>,
     pub depth: usize,
+    /// Editing this restreams the world ([`schema::Rebuilds`]), so its
+    /// widget commits on release rather than continuously.
+    pub rebuilds: bool,
     pub kind: RowKind,
 }
 
@@ -104,6 +107,9 @@ struct Hints {
     color: bool,
     range: Option<schema::Range>,
     one_of: Option<schema::OneOf>,
+    /// Inherited all the way down: every number inside a section that
+    /// restreams the world restreams it too.
+    rebuilds: bool,
 }
 
 /// Everything the walk needs that is not the value in hand.
@@ -157,6 +163,7 @@ fn emit(
             label,
             docs,
             depth,
+            rebuilds: hints.rebuilds,
             kind: RowKind::Choice {
                 current,
                 options,
@@ -182,6 +189,7 @@ fn emit(
             label,
             docs,
             depth,
+            rebuilds: hints.rebuilds,
             kind: RowKind::Color(rgb),
         });
         return;
@@ -193,6 +201,7 @@ fn emit(
             label,
             docs,
             depth,
+            rebuilds: hints.rebuilds,
             kind: RowKind::Number {
                 value: value_f,
                 num,
@@ -207,6 +216,7 @@ fn emit(
             label,
             docs,
             depth,
+            rebuilds: hints.rebuilds,
             kind: RowKind::Bool(*b),
         });
         return;
@@ -217,6 +227,7 @@ fn emit(
             label,
             docs,
             depth,
+            rebuilds: hints.rebuilds,
             kind: RowKind::Text(s.clone()),
         });
         return;
@@ -261,6 +272,7 @@ fn emit(
         label,
         docs,
         depth,
+        rebuilds: hints.rebuilds,
         kind,
     });
     if container && expanded {
@@ -290,7 +302,7 @@ fn children(cx: &mut Cx, value: &dyn PartialReflect, path: &str, depth: usize, h
                     named.name().to_string(),
                     named.docs(),
                     depth,
-                    field_hints(named),
+                    field_hints(named, hints),
                 );
             }
         }
@@ -311,7 +323,7 @@ fn children(cx: &mut Cx, value: &dyn PartialReflect, path: &str, depth: usize, h
                         name.to_string(),
                         named.and_then(|f| f.docs()),
                         depth,
-                        named.map_or(hints, field_hints),
+                        named.map_or(hints, |f| field_hints(f, hints)),
                     );
                 }
             }
@@ -433,11 +445,14 @@ fn item_label(item: &dyn PartialReflect, index: usize) -> String {
 /// through. Inheritance happens on the way through anonymous containers —
 /// an array element has no annotations of its own, so a colour pair stays
 /// a colour pair — not on the way into a new field.
-fn field_hints(field: &NamedField) -> Hints {
+fn field_hints(field: &NamedField, inherited: Hints) -> Hints {
     Hints {
         color: field.has_attribute::<schema::AsColor>(),
         range: field.get_attribute::<schema::Range>().copied(),
         one_of: field.get_attribute::<schema::OneOf>().copied(),
+        // Not replaced: a section marked as restreaming contains only
+        // fields that restream, however deep.
+        rebuilds: inherited.rebuilds || field.has_attribute::<schema::Rebuilds>(),
     }
 }
 

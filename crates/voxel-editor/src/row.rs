@@ -12,6 +12,7 @@ use bevy::feathers::theme::ThemedText;
 use bevy::prelude::*;
 use bevy::text::{FontSize, LineBreak, TextLayout};
 use bevy::ui::{px, AlignItems, Checked, Display, FlexDirection, Node, Overflow, UiRect};
+use bevy::ui_widgets::{SliderPrecision, SliderStep};
 
 use crate::walk::{format_num, Num, Row, RowKind};
 
@@ -34,6 +35,17 @@ pub struct TogglesPath(pub String);
 /// by `try_apply` rather than rounded.
 #[derive(Component, Clone, Copy, Debug, Default)]
 pub struct WritesNum(pub Num);
+
+/// This widget's field restreams the world, so only its FINAL value is
+/// applied.
+///
+/// Dragging a slider emits a value per frame; rebuilding a streamed world
+/// at that rate makes the drag useless and the change invisible. Which
+/// fields those are is the level's own declaration
+/// (`voxel_engine::schema::Rebuilds`), never a guess made here.
+#[derive(Component, Clone, Copy, Debug, Default)]
+pub struct CommitOnRelease;
+
 
 /// Indent per nesting level. The rows are a flat list, so this is the only
 /// thing that says what contains what.
@@ -120,6 +132,11 @@ fn text(s: String) -> impl Scene {
 /// widget per kind, so it comes back boxed. `Vec<Box<dyn SceneList>>` is
 /// what makes a reflection-driven panel expressible in a static macro.
 fn value_widget(row: &Row) -> Box<dyn SceneList> {
+    // `FieldPath` goes on the WIDGET as well as the row: a `ValueChange`
+    // fires on the checkbox or slider, which is a child, and an observer
+    // that looked only at the row would never find the path.
+    let p = row.path.clone();
+    let hold = row.rebuilds;
     match &row.kind {
         RowKind::Group { expanded, summary } => {
             disclosure(&row.path, *expanded, summary.clone())
@@ -132,29 +149,63 @@ fn value_widget(row: &Row) -> Box<dyn SceneList> {
             Some(r) => {
                 let (v, lo, hi) = (*value as f32, r.0, r.1);
                 let writes = *num;
-                Box::new(bsn_list!(
-                    @FeathersSlider { @value: {v}, @min: {lo}, @max: {hi} }
-                    Node { width: px(150) }
-                    WritesNum({writes})
-                ))
+                // `SliderPrecision` and `SliderStep` are NOT part of the
+                // Feathers slider scene, and `update_slider_pos` queries
+                // for the former — without it the fill never moves and the
+                // label keeps the literal placeholder the scene ships,
+                // which is the string "10.0". Four different fields all
+                // reading 10.0 is what that looks like.
+                let (step, digits) = match writes {
+                    Num::F32 | Num::F64 => ((hi - lo) / 100.0, 3),
+                    _ => (1.0, 0),
+                };
+                if hold {
+                    Box::new(bsn_list!(
+                        @FeathersSlider { @value: {v}, @min: {lo}, @max: {hi} }
+                        Node { width: px(150) }
+                        SliderStep({step}) SliderPrecision({digits})
+                        WritesNum({writes}) FieldPath({p}) CommitOnRelease
+                    ))
+                } else {
+                    Box::new(bsn_list!(
+                        @FeathersSlider { @value: {v}, @min: {lo}, @max: {hi} }
+                        Node { width: px(150) }
+                        SliderStep({step}) SliderPrecision({digits})
+                        WritesNum({writes}) FieldPath({p})
+                    ))
+                }
             }
-            // Unbounded numbers are shown, not yet edited: a text input
-            // wants a commit story (blur? enter? every keystroke?) and
-            // getting that wrong on a field that restreams the world is
-            // worse than reading the number.
+            // Always `CommitOnRelease`. A number input emits a
+            // non-final `ValueChange` for every text change — including
+            // the one that gives it its initial value, and including each
+            // keystroke of a number being typed. Taking those would write
+            // `1` on the way to `14` and rebuild the panel out from under
+            // the cursor. Enter and focus-loss are the final ones.
+            // Shown, not yet edited in the panel.
+            //
+            // `FeathersNumberInput` displayed `14` as `4` and `2.5` as
+            // `5` — it keeps its text in a child it manages, and only the
+            // last character survived. Rendered beside our own text the
+            // two disagreed in the same row. A tool opened to check a
+            // number must not be the thing that gets it wrong, so the
+            // control is gone and the value stands on its own until there
+            // is one that can be trusted. These fields are still reachable
+            // by file edit and by `world.mutate_resources`.
             None => {
-                let text = format_num(*value, *num);
-                Box::new(bsn_list!(Node { width: px(150) } {self::text(text)}))
+                let shown = format_num(*value, *num);
+                Box::new(bsn_list!(
+                    Node { width: px(150) }
+                    {self::text(shown)}
+                ))
             }
         },
 
-        RowKind::Bool(v) => {
-            if *v {
-                Box::new(bsn_list!(@FeathersCheckbox Checked))
-            } else {
-                Box::new(bsn_list!(@FeathersCheckbox))
-            }
-        }
+        RowKind::Bool(v) => match (*v, hold) {
+            (true, true) => Box::new(bsn_list!(@FeathersCheckbox Checked FieldPath({p}) CommitOnRelease)),
+            (true, false) => Box::new(bsn_list!(@FeathersCheckbox Checked FieldPath({p}))),
+            (false, true) => Box::new(bsn_list!(@FeathersCheckbox FieldPath({p}) CommitOnRelease)),
+            (false, false) => Box::new(bsn_list!(@FeathersCheckbox FieldPath({p}))),
+        },
 
         RowKind::Text(s) => {
             let s = s.clone();

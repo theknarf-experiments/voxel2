@@ -29,12 +29,27 @@ pub struct EditorPanel;
 /// The panel respawns when this stops matching, so it has to be everything
 /// the rows depend on: which document, what is open in it, and whether the
 /// document itself changed.
-#[derive(Resource, Default, PartialEq)]
+#[derive(Resource, PartialEq)]
 pub struct Shown {
     root: usize,
     expanded: Vec<String>,
     /// The change tick of the document resource the rows were read from.
     tick: u32,
+    /// The panel entity, so finding it again is not a fresh `QueryState`
+    /// built and matched against every archetype in the world — of which a
+    /// streaming voxel world has a great many.
+    entity: Entity,
+}
+
+/// Is there anything for the panel systems to do?
+///
+/// A closed dev tool has to cost NOTHING. These systems are exclusive, so
+/// running them every frame splits the schedule at two more sync points,
+/// and the frames that costs come out of the streamer's budget: `fly`
+/// exhausted the mesh slabs on planet with the panel shut, because chunks
+/// are released per frame and there were fewer frames to do it in.
+pub fn active(state: Res<EditorState>, shown: Option<Res<Shown>>) -> bool {
+    state.open || shown.is_some()
 }
 
 pub fn toggle(keys: Res<ButtonInput<KeyCode>>, mut state: ResMut<EditorState>) {
@@ -72,9 +87,8 @@ pub fn on_disclosure(
 pub fn rebuild(world: &mut World) {
     let open = world.resource::<EditorState>().open;
     if !open {
-        if let Some(panel) = panel_entity(world) {
-            world.entity_mut(panel).despawn();
-            world.remove_resource::<Shown>();
+        if let Some(shown) = world.remove_resource::<Shown>() {
+            world.entity_mut(shown.entity).despawn();
         }
         return;
     }
@@ -86,17 +100,20 @@ pub fn rebuild(world: &mut World) {
     let state = world.resource::<EditorState>();
     let mut expanded: Vec<String> = state.expanded.iter().cloned().collect();
     expanded.sort();
-    let wanted = Shown {
+    let mut wanted = Shown {
         root: state.root,
         expanded,
         tick,
+        entity: Entity::PLACEHOLDER,
     };
-    if world.get_resource::<Shown>() == Some(&wanted) {
-        return;
-    }
-
-    if let Some(panel) = panel_entity(world) {
-        world.entity_mut(panel).despawn();
+    // The entity is an OUTPUT of this rebuild, not part of what decides
+    // whether one is needed.
+    if let Some(shown) = world.get_resource::<Shown>() {
+        wanted.entity = shown.entity;
+        if *shown == wanted {
+            return;
+        }
+        world.entity_mut(shown.entity).despawn();
     }
     let header = format!("{label}  —  {} rows  (F10)", rows.len());
     // `impl SceneList for Vec<S: Scene>` is what lets a panel whose shape
@@ -150,6 +167,7 @@ pub fn rebuild(world: &mut World) {
     match panel {
         Ok(panel) => {
             world.entity_mut(panel).insert(EditorPanel);
+            wanted.entity = panel;
             world.insert_resource(wanted);
         }
         // A scene that fails to resolve is a bug in this crate, not in the
@@ -158,13 +176,6 @@ pub fn rebuild(world: &mut World) {
         Err(e) => warn_once!("editor panel did not spawn: {e}"),
     }
 
-}
-
-fn panel_entity(world: &mut World) -> Option<Entity> {
-    world
-        .query_filtered::<Entity, With<EditorPanel>>()
-        .iter(world)
-        .next()
 }
 
 /// Read the selected document and walk it into rows.
