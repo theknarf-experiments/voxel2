@@ -433,6 +433,9 @@ fn main() {
         voxel_editor::EditorPlugin::default()
             .root::<LevelDef>("Nodes")
             .only(&["nodes"])
+            .root::<LevelDef>("Graph")
+            .only(&["nodes"])
+            .as_graph()
             .root::<LevelDef>("Level")
             .except(&["nodes"]),
     );

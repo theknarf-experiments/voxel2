@@ -42,6 +42,7 @@ fn app() -> App {
         .init_resource::<Rebuilt>()
         .insert_resource(EditorRoots(vec![Root {
             sections: voxel_editor::Sections::All,
+            view: voxel_editor::View::Rows,
             label: "Level".into(),
             type_path: <LevelDef as TypePath>::type_path(),
         }]))
@@ -165,6 +166,7 @@ fn activating_a_tab_selects_its_root() {
         label: "Nodes".into(),
         type_path: <LevelDef as TypePath>::type_path(),
         sections: voxel_editor::Sections::Only(vec!["nodes".into()]),
+        view: voxel_editor::View::Rows,
     });
     app.add_observer(voxel_editor::on_tab);
 

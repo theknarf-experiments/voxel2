@@ -18,14 +18,13 @@ use bevy::prelude::*;
 use bevy::text::FontWeight;
 use bevy::ui::{
     percent, px, Display, FlexDirection, Node, Overflow, OverflowAxis, PositionType,
-    ScrollPosition, UiRect,
+    ScrollPosition, UiRect, UiTransform, Val2,
 };
 use bevy::window::SystemCursorIcon;
 
-use crate::row;
 use crate::style::PanelStyle;
-use crate::walk;
-use crate::{EditorRoots, EditorState, TOGGLE_KEY};
+use crate::{canvas, graph, row, walk};
+use crate::{EditorRoots, EditorState, View, TOGGLE_KEY};
 
 /// The panel's root entity. One at a time.
 #[derive(Component)]
@@ -57,6 +56,22 @@ pub fn on_grip_drag(
     state.width = (state.width - drag.delta.x).clamp(style.width.start, style.width.end);
 }
 
+/// Apply the camera to the live canvas.
+///
+/// Directly, for the same reason the width is: a rebuild per drag frame
+/// would throw away every box in the graph to move the picture a pixel.
+pub fn apply_camera(
+    state: Res<EditorState>,
+    mut canvases: Query<&mut UiTransform, With<canvas::GraphCanvas>>,
+) {
+    if !state.is_changed() {
+        return;
+    }
+    for mut transform in &mut canvases {
+        transform.translation = Val2::px(state.camera.pan.x, state.camera.pan.y);
+    }
+}
+
 /// Apply the width to the live panel.
 ///
 /// Directly, not by respawning: a rebuild per drag frame would throw away
@@ -75,15 +90,17 @@ pub fn apply_width(
     }
 }
 
-/// Scroll the list under the pointer.
+/// Two-finger scroll: down the list, or across the graph.
 ///
-/// Bevy clamps `ScrollPosition` during layout, so this can add freely and
-/// never has to know how tall the content is.
+/// The graph PANS rather than scrolls, on both axes, because a graph has
+/// no reading direction — and because the mouse drag that would otherwise
+/// do it is reserved for dragging nodes.
 pub fn on_wheel(
     mut wheel: MessageReader<bevy::input::mouse::MouseWheel>,
     windows: Query<&Window>,
-    state: Res<EditorState>,
+    roots: Res<EditorRoots>,
     style: Res<PanelStyle>,
+    mut state: ResMut<EditorState>,
     mut bodies: Query<&mut ScrollPosition, With<EditorBody>>,
 ) {
     let Ok(window) = windows.single() else { return };
@@ -96,19 +113,69 @@ pub fn on_wheel(
         wheel.clear();
         return;
     }
-    let mut delta = 0.0;
+    let mut delta = Vec2::ZERO;
     for ev in wheel.read() {
-        delta += match ev.unit {
-            bevy::input::mouse::MouseScrollUnit::Line => ev.y * style.wheel_line,
-            bevy::input::mouse::MouseScrollUnit::Pixel => ev.y,
+        let scale = match ev.unit {
+            bevy::input::mouse::MouseScrollUnit::Line => style.wheel_line,
+            bevy::input::mouse::MouseScrollUnit::Pixel => 1.0,
         };
+        delta += Vec2::new(ev.x, ev.y) * scale;
     }
-    if delta == 0.0 {
+    if delta == Vec2::ZERO {
+        return;
+    }
+    if graph_view(&roots, state.root) {
+        // The gesture is in screen pixels and so is the pan: the zoom is
+        // already in the geometry underneath it.
+        state.camera.pan += delta;
         return;
     }
     for mut scroll in &mut bodies {
-        scroll.0.y -= delta;
+        scroll.0.y -= delta.y;
     }
+}
+
+/// Pinch to zoom the graph.
+///
+/// macOS and iOS only — Bevy reports the gesture nowhere else — so a
+/// platform without it keeps whatever zoom it was left at rather than
+/// losing the view entirely.
+pub fn on_pinch(
+    mut pinch: MessageReader<bevy::input::gestures::PinchGesture>,
+    windows: Query<&Window>,
+    viewports: Query<(&ComputedNode, &UiGlobalTransform), With<canvas::GraphViewport>>,
+    roots: Res<EditorRoots>,
+    mut state: ResMut<EditorState>,
+) {
+    let notches: f32 = pinch.read().map(|p| p.0).sum();
+    if notches == 0.0 || !graph_view(&roots, state.root) {
+        return;
+    }
+    // About the POINTER, not the corner. Zooming about the origin slides
+    // whatever you were looking at off the screen, which reads as the
+    // graph running away from the gesture.
+    let at = windows
+        .single()
+        .ok()
+        .and_then(|w| w.cursor_position())
+        .zip(viewports.single().ok())
+        .map(|(cursor, (node, transform))| {
+            // `UiGlobalTransform` is the node's CENTRE in physical pixels
+            // and the cursor is in logical ones, so the viewport's
+            // top-left has to come back through the scale factor.
+            let top_left = (transform.translation - node.size() * 0.5) * node.inverse_scale_factor;
+            cursor - top_left
+        });
+    state.camera = state.camera.zoomed(notches * PINCH_NOTCHES, at);
+}
+
+/// A pinch reports a fraction of the screen; a zoom notch is coarser than
+/// that or a small gesture does nothing at all.
+const PINCH_NOTCHES: f32 = 12.0;
+
+/// Is the showing tab a graph?
+fn graph_view(roots: &EditorRoots, root: usize) -> bool {
+    roots.0.get(root).map(|r| r.view) == Some(View::Graph)
 }
 
 /// What the rows on screen were built from.
@@ -120,6 +187,9 @@ pub fn on_wheel(
 pub struct Shown {
     root: usize,
     expanded: Vec<String>,
+    /// Zoom is in the GEOMETRY, so changing it rebuilds. Pan is not — it
+    /// is one transform, written by [`apply_camera`] without a respawn.
+    zoom: f32,
     /// The change tick of the document resource the rows were read from.
     tick: u32,
     /// The panel entity, so finding it again is not a fresh `QueryState`
@@ -195,7 +265,7 @@ pub fn rebuild(world: &mut World) {
         return;
     }
 
-    let Some((label, tick, rows)) = read_document(world) else {
+    let Some(Document { label, tick, body }) = read_document(world) else {
         return;
     };
 
@@ -205,6 +275,7 @@ pub fn rebuild(world: &mut World) {
     let mut wanted = Shown {
         root: state.root,
         expanded,
+        zoom: state.camera.zoom,
         tick,
         entity: Entity::PLACEHOLDER,
     };
@@ -217,11 +288,7 @@ pub fn rebuild(world: &mut World) {
         }
         world.entity_mut(shown.entity).despawn();
     }
-    let n = rows.len();
-    let header = format!(
-        "{label}  —  {n} row{}  (F10)",
-        if n == 1 { "" } else { "s" }
-    );
+    let header = format!("{label}  —  {}  (F10)", body.summary());
     // Only where there is a choice: a single-document app should not grow
     // a strip with one thing in it.
     let roots = world.resource::<EditorRoots>().0.clone();
@@ -229,10 +296,18 @@ pub fn rebuild(world: &mut World) {
     let width = px(world.resource::<EditorState>().width);
     let style = world.resource::<PanelStyle>().clone();
     let (grip, pad, row_gap) = (px(style.grip), px(style.pad), px(style.row_gap));
-    let body_font = bevy::text::FontSize::Px(style.font);
     // `impl SceneList for Vec<S: Scene>` is what lets a panel whose shape
     // is only known at runtime be expressed in a static macro.
-    let row_scenes: Vec<_> = rows.iter().map(|r| row::scene(r, &style)).collect();
+    let body_scene: Box<dyn SceneList> = match &body {
+        Body::Rows(rows) => Box::new(rows_body(rows, &style)),
+        Body::Graph(layout) => {
+            let camera = world.resource::<EditorState>().camera;
+            let graph_style = world.resource::<graph::GraphStyle>().scaled(camera.zoom);
+            Box::new(bsn_list! {(
+                {canvas::scene(layout, &graph_style, &style, camera)}
+            )})
+        }
+    };
     let tab_scenes: Vec<_> = if roots.len() > 1 {
         roots
             .iter()
@@ -289,35 +364,7 @@ pub fn rebuild(world: &mut World) {
                             ThemeBackgroundColor(tokens::PANE_HEADER_BG)
                             Children [ {tab_scenes} ]
                         ),
-                        (
-                            pane_body()
-                            EditorBody
-                            ScrollPosition
-                            // Feathers propagates `TextFont` only from an
-                            // ancestor carrying this; without it every row
-                            // rendered at Bevy's default 20px and a level's
-                            // worth of them was three screens tall.
-                            InheritableFont {
-                                font: fonts::MONO,
-                                font_size: {body_font},
-                                weight: FontWeight::NORMAL,
-                            }
-                            Node {
-                                // The body takes the rest of the height and
-                                // scrolls, or a level with an open section
-                                // runs off the bottom of the screen.
-                                flex_grow: 1.0,
-                                min_height: px(0),
-                                flex_direction: FlexDirection::Column,
-                                row_gap: {row_gap},
-                                padding: UiRect::all(pad),
-                                // Clip across, scroll down: a long doc line
-                                // must not paint over the world beside the
-                                // panel.
-                                overflow: Overflow { x: OverflowAxis::Clip, y: OverflowAxis::Scroll },
-                            }
-                            Children [ {row_scenes} ]
-                        ),
+                        (pane_body() Node { flex_grow: 1.0, min_height: px(0), flex_direction: FlexDirection::Column } Children [ {body_scene} ]),
                     ]
                 ),
             ]
@@ -336,6 +383,66 @@ pub fn rebuild(world: &mut World) {
     }
 }
 
+/// What one tab's document turned into.
+struct Document {
+    label: String,
+    tick: u32,
+    body: Body,
+}
+
+/// The two things a tab can be.
+enum Body {
+    Rows(Vec<walk::Row>),
+    Graph(graph::Layout),
+}
+
+impl Body {
+    /// What the header says there is, in the units the view is measured in.
+    fn summary(&self) -> String {
+        match self {
+            Body::Rows(rows) => match rows.len() {
+                1 => "1 row".to_string(),
+                n => format!("{n} rows"),
+            },
+            Body::Graph(layout) => {
+                format!("{} nodes, {} wires", layout.nodes.len(), layout.edges.len())
+            }
+        }
+    }
+}
+
+/// The scrolling list of rows.
+fn rows_body(rows: &[walk::Row], style: &PanelStyle) -> impl SceneList {
+    let scenes: Vec<_> = rows.iter().map(|r| row::scene(r, style)).collect();
+    let (pad, row_gap) = (px(style.pad), px(style.row_gap));
+    let body_font = bevy::text::FontSize::Px(style.font);
+    bsn_list! {(
+        EditorBody
+        ScrollPosition
+        // Feathers propagates `TextFont` only from an ancestor carrying
+        // this; without it every row rendered at Bevy's default 20px and a
+        // level's worth of them was three screens tall.
+        InheritableFont {
+            font: fonts::MONO,
+            font_size: {body_font},
+            weight: FontWeight::NORMAL,
+        }
+        Node {
+            // The body takes the rest of the height and scrolls, or a
+            // level with an open section runs off the bottom of the screen.
+            flex_grow: 1.0,
+            min_height: px(0),
+            flex_direction: FlexDirection::Column,
+            row_gap: {row_gap},
+            padding: UiRect::all(pad),
+            // Clip across, scroll down: a long doc line must not paint over
+            // the world beside the panel.
+            overflow: Overflow { x: OverflowAxis::Clip, y: OverflowAxis::Scroll },
+        }
+        Children [ {scenes} ]
+    )}
+}
+
 /// Read the selected document and walk it into rows.
 ///
 /// A resource is an entity in Bevy 0.19 and `ReflectResource` is only a
@@ -346,7 +453,7 @@ pub fn rebuild(world: &mut World) {
 /// Returns `None` when the root is not a registered reflected resource.
 /// Reported, because a tab that is silently empty is exactly the failure
 /// this crate exists to stop making.
-fn read_document(world: &mut World) -> Option<(String, u32, Vec<walk::Row>)> {
+fn read_document(world: &mut World) -> Option<Document> {
     let index = world.resource::<EditorState>().root;
     let root = world.resource::<EditorRoots>().0.get(index)?.clone();
     let expanded = world.resource::<EditorState>().expanded.clone();
@@ -377,6 +484,30 @@ fn read_document(world: &mut World) -> Option<(String, u32, Vec<walk::Row>)> {
     let entity = world.resource_entities().get(component_id)?;
     let value = reflect.reflect(world.entity(entity))?;
 
-    let rows = walk::rows_in(value.as_partial_reflect(), &expanded, &root.sections);
-    Some((root.label, tick, rows))
+    let body = match root.view {
+        View::Rows => Body::Rows(walk::rows_in(
+            value.as_partial_reflect(),
+            &expanded,
+            &root.sections,
+        )),
+        // The graph is of the LEVEL's nodes, so this is the one place the
+        // panel asks what it is showing. A root that is not a level draws
+        // an empty graph rather than pretending otherwise.
+        View::Graph => {
+            let zoom = world.resource::<EditorState>().camera.zoom;
+            let style = world.resource::<graph::GraphStyle>().scaled(zoom);
+            Body::Graph(
+                value
+                    .as_partial_reflect()
+                    .try_downcast_ref::<voxel_engine::LevelDef>()
+                    .map(|level| graph::layout(&level.nodes, &style))
+                    .unwrap_or_default(),
+            )
+        }
+    };
+    Some(Document {
+        label: root.label,
+        tick,
+        body,
+    })
 }

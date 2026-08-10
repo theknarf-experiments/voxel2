@@ -12,7 +12,9 @@ use bevy::feathers::{dark_theme::create_dark_theme, theme::UiTheme, FeathersPlug
 use bevy::platform::collections::HashSet;
 use bevy::prelude::*;
 
+pub mod canvas;
 pub mod edit;
+pub mod graph;
 mod panel;
 mod path;
 mod row;
@@ -46,6 +48,20 @@ pub struct Root {
     pub type_path: &'static str,
     /// Which of the document's top-level sections this tab shows.
     pub sections: Sections,
+    /// How this tab draws them.
+    pub view: View,
+}
+
+/// How a tab draws its document.
+///
+/// The rows work on ANY annotated type; the graph is a view of
+/// `voxel_engine::graph` specifically, because a picture of a graph needs
+/// ports, wires and scopes and those belong to that language.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum View {
+    #[default]
+    Rows,
+    Graph,
 }
 
 /// Which top-level fields a tab shows.
@@ -93,6 +109,8 @@ pub struct EditorState {
     pub open: bool,
     pub root: usize,
     pub expanded: HashSet<String>,
+    /// Where the graph view is looked at from.
+    pub camera: canvas::GraphCamera,
     /// Panel width in logical pixels, dragged by the grip on its inner
     /// edge. Here rather than on the node because the panel is respawned
     /// whenever the document changes.
@@ -106,6 +124,7 @@ impl Default for EditorState {
             root: 0,
             // The root itself is always open, or the panel is one row.
             expanded: HashSet::from_iter([String::new()]),
+            camera: canvas::GraphCamera::default(),
             width: 620.0,
         }
     }
@@ -128,7 +147,17 @@ impl EditorPlugin {
             label: label.into(),
             type_path: T::type_path(),
             sections: Sections::All,
+            view: View::Rows,
         });
+        self
+    }
+
+    /// Draw the root just added as a 2D graph rather than as rows.
+    pub fn as_graph(mut self) -> Self {
+        match self.roots.last_mut() {
+            Some(root) => root.view = View::Graph,
+            None => warn!("editor: a view declared before any root — ignored"),
+        }
         self
     }
 
@@ -182,8 +211,10 @@ impl Plugin for EditorPlugin {
             .init_resource::<EditorState>()
             .init_resource::<edit::Pending>()
             .init_resource::<PanelStyle>()
+            .init_resource::<graph::GraphStyle>()
             .register_type::<EditorState>()
             .register_type::<PanelStyle>()
+            .register_type::<graph::GraphStyle>()
             .add_observer(panel::on_disclosure)
             .add_observer(panel::on_tab)
             .add_observer(panel::on_grip_drag)
@@ -201,11 +232,13 @@ impl Plugin for EditorPlugin {
                     (
                         edit::apply,
                         panel::rebuild,
+                        panel::apply_camera,
                         // After the rebuild, so a panel respawned this
                         // frame gets the dragged width and not the one it
                         // was authored with.
                         panel::apply_width,
                         panel::on_wheel,
+                        panel::on_pinch,
                     )
                         .chain()
                         .run_if(panel::active),

@@ -10,3 +10,4 @@ voxel-engine.workspace = true
 
 [dev-dependencies]
 voxel-engine.workspace = true
+serde_json.workspace = true
