@@ -476,25 +476,6 @@ pub fn validate_level(level: &LevelDef) -> Result<(), String> {
         })
         .collect();
 
-    let biome_ref = |owner: &str, reference: &str| -> Result<(), String> {
-        let Some((instance, biome)) = reference.rsplit_once(':') else {
-            return Err(format!(
-                "spawner {owner}: biome ref {reference:?} is not \"instance:biome\""
-            ));
-        };
-        let Some((_, table)) = biomes.iter().find(|(n, _)| *n == instance) else {
-            return Err(format!(
-                "spawner {owner}: biome layer {instance:?} is not a node in this level"
-            ));
-        };
-        if table.iter().any(|(n, _)| n == biome) {
-            return Ok(());
-        }
-        Err(format!(
-            "spawner {owner}: biome {biome:?} not in layer {instance:?}"
-        ))
-    };
-
     // A biomes table may not be empty: every gate through it would be a
     // reference to nothing.
     for (name, table) in &biomes {
@@ -507,27 +488,29 @@ pub fn validate_level(level: &LevelDef) -> Result<(), String> {
     // it names is in that layer's table. The compiler cannot check the
     // second, because it is a parameter rather than a wire.
     for node in &level.nodes {
-        let member = node
-            .node
-            .0
-            .as_any()
+        let any = node.node.0.as_any();
+        // The port a kind reads its table through, and the member it
+        // names. A population calls the port `gate` because what it gates
+        // on is a weight; a layer calls it `biome` because it IS one.
+        let named = any
             .downcast_ref::<super::nodes::Scatter>()
-            .and_then(|n| n.biome.clone())
+            .map(|n| ("biome", n.biome.clone()))
             .or_else(|| {
-                node.node
-                    .0
-                    .as_any()
-                    .downcast_ref::<super::nodes::Scatter3>()
-                    .and_then(|n| n.biome.clone())
+                any.downcast_ref::<super::nodes::Scatter3>()
+                    .map(|n| ("biome", n.biome.clone()))
+            })
+            .or_else(|| {
+                any.downcast_ref::<super::nodes::Population>()
+                    .map(|n| ("gate", n.0.region.clone()))
             });
-        let (Some(member), Some(name)) = (member, node.name.as_deref()) else {
+        let (Some((port, Some(member))), Some(name)) = (named, node.name.as_deref()) else {
             continue;
         };
         let instance = node
             .wires
-            .get("biome")
+            .get(port)
             .and_then(|w| w.sources().first())
-            .ok_or_else(|| format!("layer {name:?} names a biome but wires no biome port"))?;
+            .ok_or_else(|| format!("layer {name:?} names a region but wires no {port} port"))?;
         let (_, table) = biomes
             .iter()
             .find(|(n, _)| n == instance)
@@ -562,7 +545,12 @@ pub fn validate_level(level: &LevelDef) -> Result<(), String> {
     // one; how far the thing it names reaches is geometry, and only this
     // can measure it.
     for node in &level.nodes {
-        let Some(s) = node.node.0.as_any().downcast_ref::<super::nodes::Structure>() else {
+        let Some(s) = node
+            .node
+            .0
+            .as_any()
+            .downcast_ref::<super::nodes::Structure>()
+        else {
             continue;
         };
         let name = node.name.as_deref().unwrap_or("?");
@@ -583,12 +571,23 @@ pub fn validate_level(level: &LevelDef) -> Result<(), String> {
         }
     }
 
-    for def in &level.scatter {
-        if let Some(reference) = &def.gate {
-            biome_ref(&def.class, reference)?;
-        }
-        if def.output == voxel_engine::level::ScatterOutput::Entities && def.variants.is_empty() {
-            return Err(format!("scatter class {:?} has no variants", def.class));
+    // A population that spawns entities has to say what they are; one
+    // that emits points does not, because a point is a position and the
+    // host decides what it draws there.
+    for node in &level.nodes {
+        let Some(p) = node
+            .node
+            .0
+            .as_any()
+            .downcast_ref::<super::nodes::Population>()
+        else {
+            continue;
+        };
+        if p.0.output == voxel_engine::level::ScatterOutput::Entities && p.0.variants.is_empty() {
+            return Err(format!(
+                "population {:?} has no variants",
+                node.name.as_deref().unwrap_or("?")
+            ));
         }
     }
     Ok(())

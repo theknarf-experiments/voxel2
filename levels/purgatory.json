@@ -512,6 +512,92 @@
       "emit": {
         "type": "worm_cuts"
       }
+    },
+    {
+      "kind": "population",
+      "name": "bones",
+      "in": {
+        "density": "field.1",
+        "gate": "biomes"
+      },
+      "per_tile": 6,
+      "chance": 0.5,
+      "altitude": [
+        8.0,
+        520.0
+      ],
+      "min_up": 0.8,
+      "density": {},
+      "placement": {
+        "align": "normal",
+        "tilt_deg": 11.0
+      },
+      "sink_scaled": 0.25,
+      "scale_bias": 1.6,
+      "variants": [
+        {
+          "weight": 0.6,
+          "scale": [
+            0.5,
+            1.9
+          ]
+        },
+        {
+          "weight": 0.4,
+          "scale": [
+            0.9,
+            2.8
+          ]
+        }
+      ],
+      "region": "boneyard"
+    },
+    {
+      "kind": "population",
+      "name": "boulder",
+      "in": {
+        "gate": "biomes"
+      },
+      "per_tile": 4,
+      "chance": 0.42,
+      "altitude": [
+        4.0,
+        700.0
+      ],
+      "min_up": 0.55,
+      "placement": {
+        "align": "normal",
+        "tilt_deg": 8.0
+      },
+      "sink_scaled": 0.2,
+      "scale_bias": 2.0,
+      "variants": [
+        {
+          "scale": [
+            0.4,
+            3.0
+          ]
+        }
+      ],
+      "region": "ashfield"
+    },
+    {
+      "kind": "population",
+      "name": "cinder",
+      "in": {
+        "density": "field.2"
+      },
+      "output": "points",
+      "tile_m": 16.0,
+      "radius_tiles": 7,
+      "per_tile": 420,
+      "altitude": [
+        2.0,
+        420.0
+      ],
+      "min_up": 0.86,
+      "detail_vs": 1.0,
+      "density": {}
     }
   ],
   "materials": [
@@ -643,84 +729,5 @@
     }
   ],
   "prefabs": {},
-  "placements": [],
-  "scatter": [
-    {
-      "class": "bones",
-      "per_tile": 6,
-      "chance": 0.5,
-      "altitude": [
-        8.0,
-        520.0
-      ],
-      "min_up": 0.8,
-      "density": {
-        "field": 0
-      },
-      "placement": {
-        "align": "normal",
-        "tilt_deg": 11.0
-      },
-      "sink_scaled": 0.25,
-      "scale_bias": 1.6,
-      "variants": [
-        {
-          "weight": 0.6,
-          "scale": [
-            0.5,
-            1.9
-          ]
-        },
-        {
-          "weight": 0.4,
-          "scale": [
-            0.9,
-            2.8
-          ]
-        }
-      ],
-      "gate": "biomes:boneyard"
-    },
-    {
-      "class": "boulder",
-      "per_tile": 4,
-      "chance": 0.42,
-      "altitude": [
-        4.0,
-        700.0
-      ],
-      "min_up": 0.55,
-      "placement": {
-        "align": "normal",
-        "tilt_deg": 8.0
-      },
-      "sink_scaled": 0.2,
-      "scale_bias": 2.0,
-      "variants": [
-        {
-          "scale": [
-            0.4,
-            3.0
-          ]
-        }
-      ],
-      "gate": "biomes:ashfield"
-    },
-    {
-      "class": "cinder",
-      "output": "points",
-      "tile_m": 16.0,
-      "radius_tiles": 7,
-      "per_tile": 420,
-      "altitude": [
-        2.0,
-        420.0
-      ],
-      "min_up": 0.86,
-      "detail_vs": 1.0,
-      "density": {
-        "field": 1
-      }
-    }
-  ]
+  "placements": []
 }

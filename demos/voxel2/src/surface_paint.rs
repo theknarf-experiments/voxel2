@@ -397,9 +397,8 @@ impl CoverJob {
         planner: &crate::planning::StackPlanner,
         origin: Vec2,
     ) -> Self {
-        let populations = world
-            .level
-            .scatter
+        let populations = planner
+            .populations
             .iter()
             .filter_map(|def| {
                 let cover = def.cover.as_ref()?;

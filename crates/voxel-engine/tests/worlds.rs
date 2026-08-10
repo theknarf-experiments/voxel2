@@ -26,8 +26,11 @@ fn shipped(name: &str) -> LevelDef {
 /// a kind is only a name until a registry says what type it is — and the
 /// kinds the GAME defines are not this crate's to know, so they drop.
 fn from_json_value(v: serde_json::Value) -> LevelDef {
-    LevelDef::from_json_known(&v.to_string(), &voxel_engine::graph::registry::engine_kinds())
-        .unwrap()
+    LevelDef::from_json_known(
+        &v.to_string(),
+        &voxel_engine::graph::registry::engine_kinds(),
+    )
+    .unwrap()
 }
 
 /// A shipped level with one field replaced. Patching the JSON keeps these
@@ -87,7 +90,11 @@ fn loading_keeps_both_registries_aligned() {
     let worlds = app.world().resource::<Worlds>();
     let render = app.world().resource::<RenderWorlds>();
     assert_eq!(worlds.len(), 2);
-    assert_eq!(render.len(), worlds.len(), "the registries stay the same length");
+    assert_eq!(
+        render.len(),
+        worlds.len(),
+        "the registries stay the same length"
+    );
     for world in worlds.iter() {
         assert_eq!(world.id, worlds.get(world.id).unwrap().id);
         assert!(
@@ -252,7 +259,10 @@ fn a_world_with_nothing_to_plan_gets_no_provider() {
 fn an_absent_world_is_absent() {
     let mut app = app();
     let planet = shipped("planet.json");
-    load_in(&mut app, vec![(planet.clone(), LodConfig::from(&planet.lod))]);
+    load_in(
+        &mut app,
+        vec![(planet.clone(), LodConfig::from(&planet.lod))],
+    );
 
     let worlds = app.world().resource::<Worlds>();
     assert!(worlds.get(0).is_some());
@@ -354,7 +364,10 @@ fn the_first_world_streams_at_its_authored_detail() {
         full.max_level,
         "the only loaded world was capped — the slab is too small for it",
     );
-    assert!(worlds.get(0).unwrap().slab_demand > 0, "demand was measured");
+    assert!(
+        worlds.get(0).unwrap().slab_demand > 0,
+        "demand was measured"
+    );
 }
 
 /// Capping is monotone and bounded: it only ever reduces detail, it

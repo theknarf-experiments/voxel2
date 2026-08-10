@@ -28,8 +28,6 @@ use serde::{Deserialize, Serialize};
 use voxel_core::opgen::Value;
 use voxel_core::worldop::{WorldOp, FIELD_SLOTS};
 
-
-
 /// A compiled level graph.
 #[derive(Debug)]
 pub struct Program {
@@ -46,19 +44,44 @@ pub struct Program {
 #[derive(Debug, PartialEq)]
 pub enum Error {
     DuplicateName(String),
-    UnknownNode { at: String, port: String, name: String },
-    ForwardReference { at: String, port: String, name: String },
-    UnknownPort { at: String, port: String },
-    MissingPort { at: String, port: String, value: Value },
-    WrongType { at: String, port: String, want: Value, got: Value },
+    UnknownNode {
+        at: String,
+        port: String,
+        name: String,
+    },
+    ForwardReference {
+        at: String,
+        port: String,
+        name: String,
+    },
+    UnknownPort {
+        at: String,
+        port: String,
+    },
+    MissingPort {
+        at: String,
+        port: String,
+        value: Value,
+    },
+    WrongType {
+        at: String,
+        port: String,
+        want: Value,
+        got: Value,
+    },
     StaleRead {
         at: String,
         port: String,
         wired: Vec<String>,
         live: Vec<String>,
     },
-    TooManyFields { at: String, limit: usize },
-    Unnamed { at: String },
+    TooManyFields {
+        at: String,
+        limit: usize,
+    },
+    Unnamed {
+        at: String,
+    },
 }
 
 impl std::fmt::Display for Error {
@@ -66,7 +89,10 @@ impl std::fmt::Display for Error {
         match self {
             Error::DuplicateName(n) => write!(f, "two nodes are called '{n}'"),
             Error::UnknownNode { at, port, name } => {
-                write!(f, "'{at}' wires port '{port}' to '{name}', which is not a node")
+                write!(
+                    f,
+                    "'{at}' wires port '{port}' to '{name}', which is not a node"
+                )
             }
             Error::ForwardReference { at, port, name } => write!(
                 f,
@@ -80,7 +106,12 @@ impl std::fmt::Display for Error {
                 f,
                 "'{at}' consumes {value:?} through port '{port}' and nothing is wired to it"
             ),
-            Error::WrongType { at, port, want, got } => write!(
+            Error::WrongType {
+                at,
+                port,
+                want,
+                got,
+            } => write!(
                 f,
                 "'{at}' port '{port}' wants {want:?} but is wired to a {got:?}"
             ),
@@ -96,7 +127,11 @@ impl std::fmt::Display for Error {
                  so whatever reads a value has to come before what overwrites it"
             ),
             Error::TooManyFields { at, limit } => {
-                write!(f, "'{at}' is field {} and there are only {limit}", limit + 1)
+                write!(
+                    f,
+                    "'{at}' is field {} and there are only {limit}",
+                    limit + 1
+                )
             }
             Error::Unnamed { at } => {
                 write!(f, "{at} is referred to by name but has none")
@@ -119,7 +154,12 @@ struct Flat<'a> {
 ///
 /// A box inside a box is a box, so any depth of nesting still lands in the
 /// single packed gate a `WorldOp` carries.
-fn flatten<'a>(nodes: &'a [NodeDef], region: Option<[f32; 4]>, path: &str, out: &mut Vec<Flat<'a>>) {
+fn flatten<'a>(
+    nodes: &'a [NodeDef],
+    region: Option<[f32; 4]>,
+    path: &str,
+    out: &mut Vec<Flat<'a>>,
+) {
     for (i, node) in nodes.iter().enumerate() {
         let label = match &node.name {
             Some(n) => n.to_string(),
@@ -148,9 +188,6 @@ fn flatten<'a>(nodes: &'a [NodeDef], region: Option<[f32; 4]>, path: &str, out: 
     }
 }
 
-
-
-
 /// Does gate `outer` contain every point of gate `inner`?
 ///
 /// `None` is everywhere: an ungated write covers any region, and nothing
@@ -165,7 +202,9 @@ fn covers(outer: Option<[f32; 4]>, inner: Option<[f32; 4]>) -> bool {
 ///
 /// `None` is everywhere, so it overlaps anything.
 fn gates_overlap(a: Option<[f32; 4]>, b: Option<[f32; 4]>) -> bool {
-    let (Some(a), Some(b)) = (a, b) else { return true };
+    let (Some(a), Some(b)) = (a, b) else {
+        return true;
+    };
     let axis = |lo_a: f32, hi_a: f32, lo_b: f32, hi_b: f32| lo_a < hi_b && lo_b < hi_a;
     axis(a[0], a[1], b[0], b[1]) && axis(a[2], a[3], b[2], b[3])
 }
@@ -194,7 +233,9 @@ pub fn compile(nodes: &[NodeDef]) -> Result<Program, Error> {
             continue;
         }
         let Some(name) = f.name else {
-            return Err(Error::Unnamed { at: f.label.clone() });
+            return Err(Error::Unnamed {
+                at: f.label.clone(),
+            });
         };
         if fields.len() >= FIELD_SLOTS {
             return Err(Error::TooManyFields {
@@ -267,10 +308,10 @@ pub fn compile(nodes: &[NodeDef]) -> Result<Program, Error> {
                 resolved.push(j);
             }
 
-            // A host value is addressed by name and read by as many
-            // consumers as like: it is a layer, not a register, so there
-            // is nothing to be stale about.
-            if !want.is_register() {
+            // A host value is addressed by name, and so is a field slot:
+            // several stand at once and every consumer reads the one it
+            // named, so there is nothing to be stale about.
+            if !want.is_single() {
                 continue;
             }
 
@@ -309,7 +350,7 @@ pub fn compile(nodes: &[NodeDef]) -> Result<Program, Error> {
         // one only where it applies, which is what lets nine districts each
         // define a lattice and one `shafts_cut` read seven shafts.
         for (_, produced) in outs {
-            if !produced.is_register() {
+            if !produced.is_single() {
                 continue;
             }
             let standing = live.entry(*produced).or_default();
@@ -417,7 +458,6 @@ impl Wire {
         }
     }
 }
-
 
 #[cfg(test)]
 mod tests;

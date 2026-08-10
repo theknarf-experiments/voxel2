@@ -82,13 +82,18 @@ impl Value {
         }
     }
 
-    /// Does this value live in the interpreter's register file?
+    /// Is there exactly ONE of this value, so that writing it replaces
+    /// what was there?
     ///
-    /// The distinction the compiler turns on. A register holds one thing
-    /// at a time, so point values have liveness; a host value is a named
-    /// layer that every consumer reads the same one of.
-    pub const fn is_register(self) -> bool {
-        !matches!(self, Value::Host(_))
+    /// The distinction the compiler turns on. A single-slot value has
+    /// liveness: whatever reads it must come before what overwrites it. A
+    /// host value is a named layer, and a field is one of [`FIELD_SLOTS`]
+    /// named slots the compiler allocates — of both there can be several
+    /// standing at once, each read by as many consumers as like.
+    ///
+    /// [`FIELD_SLOTS`]: crate::worldop::FIELD_SLOTS
+    pub const fn is_single(self) -> bool {
+        !matches!(self, Value::Host(_) | Value::Field)
     }
 
     /// Every value, for the guard test and for the compiler's allocator.
@@ -760,6 +765,9 @@ mod port_tests {
         for op in OPS {
             assert!(ports(op.kind).is_some(), "{}", op.name);
         }
-        assert!(ports(WOP_FIELD).is_some(), "WOP_FIELD is CPU-only, not absent");
+        assert!(
+            ports(WOP_FIELD).is_some(),
+            "WOP_FIELD is CPU-only, not absent"
+        );
     }
 }

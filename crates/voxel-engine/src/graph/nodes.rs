@@ -17,9 +17,9 @@ use voxel_core::worldop::*;
 
 use super::node::{Node, Ports, ReflectNode};
 use super::NodeDef;
-use crate::level::{DoorDef, LodGateDef, NoiseModeDef};
 use crate::level::gate_flags;
 use crate::level::{d_band_octaves, d_full_band, default_one, mat_concrete, mat_grass};
+use crate::level::{DoorDef, LodGateDef, NoiseModeDef};
 use crate::schema;
 
 /// A region gate and the nodes it applies to.
@@ -122,15 +122,17 @@ impl Node for HeightFbm {
     fn op(&self, field_slot: u32) -> Option<WorldOp> {
         let _ = field_slot;
         let Self {
-                offset,
-                scale,
-                amp,
-                octaves,
-                mode,
-            } = *self;
-        Some(WorldOp::new(WOP_HEIGHT_FBM)
+            offset,
+            scale,
+            amp,
+            octaves,
+            mode,
+        } = *self;
+        Some(
+            WorldOp::new(WOP_HEIGHT_FBM)
                 .p0([offset[0], offset[1], scale, amp])
-                .p1([octaves as f32, mode as u32 as f32, 0.0, 0.0]))
+                .p1([octaves as f32, mode as u32 as f32, 0.0, 0.0]),
+        )
     }
 }
 
@@ -157,14 +159,16 @@ impl Node for WarpXz {
     fn op(&self, field_slot: u32) -> Option<WorldOp> {
         let _ = field_slot;
         let Self {
-                offset,
-                scale,
-                amp,
-                octaves,
-            } = *self;
-        Some(WorldOp::new(WOP_WARP_XZ)
+            offset,
+            scale,
+            amp,
+            octaves,
+        } = *self;
+        Some(
+            WorldOp::new(WOP_WARP_XZ)
                 .p0([scale, amp, offset[0], offset[1]])
-                .p1([octaves as f32, 0.0, 0.0, 0.0]))
+                .p1([octaves as f32, 0.0, 0.0, 0.0]),
+        )
     }
 }
 
@@ -202,16 +206,17 @@ impl Node for Fbm3 {
     fn op(&self, field_slot: u32) -> Option<WorldOp> {
         let _ = field_slot;
         let Self {
-                scale,
-                y_ratio,
-                octaves,
-                threshold,
-                width,
-                offset,
-                carve,
-                material,
-            } = *self;
-        Some(WorldOp::new(WOP_FBM3)
+            scale,
+            y_ratio,
+            octaves,
+            threshold,
+            width,
+            offset,
+            carve,
+            material,
+        } = *self;
+        Some(
+            WorldOp::new(WOP_FBM3)
                 .material(material)
                 .p0([scale, scale * y_ratio, threshold, width])
                 .p1([
@@ -220,7 +225,8 @@ impl Node for Fbm3 {
                     offset[2],
                     if carve { 1.0 } else { 0.0 },
                 ])
-                .p2([octaves as f32, 0.0, 0.0, 0.0]))
+                .p2([octaves as f32, 0.0, 0.0, 0.0]),
+        )
     }
 }
 
@@ -228,7 +234,7 @@ impl Node for Fbm3 {
 #[derive(Reflect, Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
 #[reflect(Node, Serialize, Deserialize, Default)]
 pub struct HeightOffset {
- value: f32
+    value: f32,
 }
 
 impl Node for HeightOffset {
@@ -241,9 +247,7 @@ impl Node for HeightOffset {
     fn op(&self, field_slot: u32) -> Option<WorldOp> {
         let _ = field_slot;
         let Self { value } = *self;
-        Some({
-                WorldOp::new(WOP_HEIGHT_OFFSET).p0([value, 0.0, 0.0, 0.0])
-            })
+        Some(WorldOp::new(WOP_HEIGHT_OFFSET).p0([value, 0.0, 0.0, 0.0]))
     }
 }
 
@@ -252,7 +256,9 @@ impl Node for HeightOffset {
 #[derive(Reflect, Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
 #[reflect(Node, Serialize, Deserialize, Default)]
 pub struct HeightStep {
- start: f32, end: f32, amp: f32
+    start: f32,
+    end: f32,
+    amp: f32,
 }
 
 impl Node for HeightStep {
@@ -265,9 +271,7 @@ impl Node for HeightStep {
     fn op(&self, field_slot: u32) -> Option<WorldOp> {
         let _ = field_slot;
         let Self { start, end, amp } = *self;
-        Some({
-                WorldOp::new(WOP_HEIGHT_STEP).p0([start, end, amp, 0.0])
-            })
+        Some(WorldOp::new(WOP_HEIGHT_STEP).p0([start, end, amp, 0.0]))
     }
 }
 
@@ -296,16 +300,18 @@ impl Node for Field {
     }
     fn op(&self, field_slot: u32) -> Option<WorldOp> {
         let Self {
-                offset,
-                scale,
-                amp,
-                octaves,
-                mode,
-                bias,
-            } = *self;
-        Some(WorldOp::new(WOP_FIELD)
+            offset,
+            scale,
+            amp,
+            octaves,
+            mode,
+            bias,
+        } = *self;
+        Some(
+            WorldOp::new(WOP_FIELD)
                 .p0([offset[0], offset[1], scale, amp])
-                .p1([octaves as f32, mode as u32 as f32, field_slot as f32, bias]))
+                .p1([octaves as f32, mode as u32 as f32, field_slot as f32, bias]),
+        )
     }
 }
 
@@ -333,13 +339,15 @@ impl Node for RegionAxes {
     fn op(&self, field_slot: u32) -> Option<WorldOp> {
         let _ = field_slot;
         let Self {
-                scale,
-                offset,
-                octaves,
-            } = *self;
-        Some(WorldOp::new(WOP_REGION_AXES)
+            scale,
+            offset,
+            octaves,
+        } = *self;
+        Some(
+            WorldOp::new(WOP_REGION_AXES)
                 .p0([offset[0], offset[1], scale[0], scale[1]])
-                .p1([offset[2], offset[3], octaves as f32, 0.0]))
+                .p1([offset[2], offset[3], octaves as f32, 0.0]),
+        )
     }
 }
 
@@ -386,17 +394,18 @@ impl Node for HeightBandFbm {
     fn op(&self, field_slot: u32) -> Option<WorldOp> {
         let _ = field_slot;
         let Self {
-                a,
-                b,
-                offset,
-                scale,
-                amp,
-                octaves,
-                mode,
-                lift,
-                feather,
-            } = *self;
-        Some(WorldOp::new(WOP_HEIGHT_BAND_FBM)
+            a,
+            b,
+            offset,
+            scale,
+            amp,
+            octaves,
+            mode,
+            lift,
+            feather,
+        } = *self;
+        Some(
+            WorldOp::new(WOP_HEIGHT_BAND_FBM)
                 .p0([offset[0], offset[1], scale, amp])
                 .p1([
                     octaves as f32,
@@ -404,7 +413,8 @@ impl Node for HeightBandFbm {
                     feather.unwrap_or_else(|| voxel_worldgen::program::band_feather(a)),
                     lift,
                 ])
-                .p2([a[0], a[1], b[0], b[1]]))
+                .p2([a[0], a[1], b[0], b[1]]),
+        )
     }
 }
 
@@ -440,15 +450,17 @@ impl Node for MaterialBand {
     fn op(&self, field_slot: u32) -> Option<WorldOp> {
         let _ = field_slot;
         let Self {
-                from,
-                material,
-                a,
-                b,
-            } = *self;
-        Some(WorldOp::new(WOP_MATERIAL_BAND)
+            from,
+            material,
+            a,
+            b,
+        } = *self;
+        Some(
+            WorldOp::new(WOP_MATERIAL_BAND)
                 .material(material)
                 .p0([a[0], a[1], b[0], b[1]])
-                .p1([0.0, 0.0, from as f32, 0.0]))
+                .p1([0.0, 0.0, from as f32, 0.0]),
+        )
     }
 }
 
@@ -471,9 +483,7 @@ impl Node for HeightSurface {
     fn op(&self, field_slot: u32) -> Option<WorldOp> {
         let _ = field_slot;
         let Self { material } = *self;
-        Some({
-                WorldOp::new(WOP_HEIGHT_SURFACE).material(material)
-            })
+        Some(WorldOp::new(WOP_HEIGHT_SURFACE).material(material))
     }
 }
 
@@ -496,9 +506,11 @@ impl Node for CoarseSolid {
     fn op(&self, field_slot: u32) -> Option<WorldOp> {
         let _ = field_slot;
         let Self { material } = *self;
-        Some(WorldOp::new(WOP_COARSE_SOLID)
+        Some(
+            WorldOp::new(WOP_COARSE_SOLID)
                 .flags(WOP_FLAG_COARSE_ONLY)
-                .material(material))
+                .material(material),
+        )
     }
 }
 
@@ -527,9 +539,11 @@ impl Node for LatticeY {
     fn op(&self, field_slot: u32) -> Option<WorldOp> {
         let _ = field_slot;
         let Self { spacing, lod } = *self;
-        Some(WorldOp::new(WOP_LATTICE_Y)
+        Some(
+            WorldOp::new(WOP_LATTICE_Y)
                 .flags(gate_flags(lod, WOP_FLAG_FINE_ONLY))
-                .p0([spacing, 0.0, 0.0, 0.0]))
+                .p0([spacing, 0.0, 0.0, 0.0]),
+        )
     }
 }
 
@@ -555,14 +569,16 @@ impl Node for SlabsY {
     fn op(&self, field_slot: u32) -> Option<WorldOp> {
         let _ = field_slot;
         let Self {
-                half_thickness,
-                material,
-                lod,
-            } = *self;
-        Some(WorldOp::new(WOP_SLABS_Y)
+            half_thickness,
+            material,
+            lod,
+        } = *self;
+        Some(
+            WorldOp::new(WOP_SLABS_Y)
                 .flags(gate_flags(lod, WOP_FLAG_FINE_ONLY))
                 .material(material)
-                .p0([half_thickness, 0.0, 0.0, 0.0]))
+                .p0([half_thickness, 0.0, 0.0, 0.0]),
+        )
     }
 }
 
@@ -587,15 +603,17 @@ impl Node for GridHoles {
     fn op(&self, field_slot: u32) -> Option<WorldOp> {
         let _ = field_slot;
         let Self {
-                cell,
-                chance,
-                half,
-                lod,
-            } = *self;
-        Some(WorldOp::new(WOP_GRID_HOLES)
+            cell,
+            chance,
+            half,
+            lod,
+        } = *self;
+        Some(
+            WorldOp::new(WOP_GRID_HOLES)
                 .flags(gate_flags(lod, WOP_FLAG_FINE_ONLY))
                 .p0([cell, chance, 0.0, 0.0])
-                .p1([half[0], half[1], half[2], 0.0]))
+                .p1([half[0], half[1], half[2], 0.0]),
+        )
     }
 }
 
@@ -624,16 +642,18 @@ impl Node for PillarsXz {
     fn op(&self, field_slot: u32) -> Option<WorldOp> {
         let _ = field_slot;
         let Self {
-                spacing,
-                jitter,
-                girth,
-                material,
-                lod,
-            } = *self;
-        Some(WorldOp::new(WOP_PILLARS_XZ)
+            spacing,
+            jitter,
+            girth,
+            material,
+            lod,
+        } = *self;
+        Some(
+            WorldOp::new(WOP_PILLARS_XZ)
                 .flags(gate_flags(lod, WOP_FLAG_FINE_ONLY))
                 .material(material)
-                .p0([spacing, jitter, girth[0], girth[1]]))
+                .p0([spacing, jitter, girth[0], girth[1]]),
+        )
     }
 }
 
@@ -668,31 +688,31 @@ impl Node for Walls {
     fn op(&self, field_slot: u32) -> Option<WorldOp> {
         let _ = field_slot;
         let Self {
-                ref axis,
-                spacing,
-                half_thickness,
-                chance,
-                salt,
-                ref door,
-                material,
-                lod,
-            } = *self;
+            ref axis,
+            spacing,
+            half_thickness,
+            chance,
+            salt,
+            ref door,
+            material,
+            lod,
+        } = *self;
         Some({
-                let axis_flag = if axis == "z" { 1.0 } else { 0.0 };
-                let mut op = WorldOp::new(WOP_WALLS)
-                    .flags(gate_flags(lod, WOP_FLAG_FINE_ONLY))
-                    .material(material)
-                    .p0([spacing, half_thickness, chance, axis_flag]);
-                if let Some(d) = door {
-                    op = op
-                        .p1([salt as f32, d.cell, d.chance, d.salt as f32])
-                        .p2([d.half[0], d.half[1], d.half[2], d.y]);
-                } else {
-                    // No doorways: chance 0 never passes the hash gate.
-                    op = op.p1([salt as f32, 1.0, 0.0, 0.0]);
-                }
-                op
-            })
+            let axis_flag = if axis == "z" { 1.0 } else { 0.0 };
+            let mut op = WorldOp::new(WOP_WALLS)
+                .flags(gate_flags(lod, WOP_FLAG_FINE_ONLY))
+                .material(material)
+                .p0([spacing, half_thickness, chance, axis_flag]);
+            if let Some(d) = door {
+                op = op
+                    .p1([salt as f32, d.cell, d.chance, d.salt as f32])
+                    .p2([d.half[0], d.half[1], d.half[2], d.y]);
+            } else {
+                // No doorways: chance 0 never passes the hash gate.
+                op = op.p1([salt as f32, 1.0, 0.0, 0.0]);
+            }
+            op
+        })
     }
 }
 
@@ -717,10 +737,10 @@ impl Node for ShaftsXz {
     fn op(&self, field_slot: u32) -> Option<WorldOp> {
         let _ = field_slot;
         let Self {
-                spacing,
-                jitter,
-                radius,
-            } = *self;
+            spacing,
+            jitter,
+            radius,
+        } = *self;
         Some(WorldOp::new(WOP_SHAFTS_XZ).p0([spacing, jitter, radius[0], radius[1]]))
     }
 }
@@ -772,19 +792,21 @@ impl Node for Beams {
     fn op(&self, field_slot: u32) -> Option<WorldOp> {
         let _ = field_slot;
         let Self {
-                every,
-                half_width,
-                y,
-                half_height,
-                reach,
-                material,
-                lod,
-            } = *self;
-        Some(WorldOp::new(WOP_BEAMS)
+            every,
+            half_width,
+            y,
+            half_height,
+            reach,
+            material,
+            lod,
+        } = *self;
+        Some(
+            WorldOp::new(WOP_BEAMS)
                 .flags(gate_flags(lod, WOP_FLAG_FINE_ONLY))
                 .material(material)
                 .p0([every as f32, half_width, y, half_height])
-                .p1([reach, 0.0, 0.0, 0.0]))
+                .p1([reach, 0.0, 0.0, 0.0]),
+        )
     }
 }
 

@@ -14,8 +14,8 @@ use serde::{Deserialize, Serialize};
 use voxel_core::csg::CsgOp;
 use voxel_core::worldop::*;
 
-use crate::planning::{HostPlanning, OpsSource, WorldQuery};
 use crate::graph::NodeDef;
+use crate::planning::{HostPlanning, OpsSource, WorldQuery};
 use crate::schema;
 use crate::streaming::StreamingRebuild;
 use crate::{LodConfig, VoxelEnginePlugin};
@@ -53,7 +53,6 @@ impl From<&LodDef> for LodConfig {
         }
     }
 }
-
 
 /// Lighting + atmosphere for the chunk draw. Every field has the sun-lit
 /// outdoor default, so levels only state what differs.
@@ -100,11 +99,23 @@ pub enum ScatterOutput {
 /// A scatter population: WHERE props go. What they look like is the
 /// host's business — the engine spawns entities carrying
 /// [`crate::scatter::ScatterInstance`] and the host dresses them.
-#[derive(Reflect, Serialize, Deserialize, Clone, Debug, PartialEq)]
+///
+/// A host wraps this in a node of its own — the gate names something in
+/// the HOST's vocabulary, so the node that carries it is the host's — and
+/// three of these fields are that node's WIRING rather than a level's
+/// text: `class` is the node's name, `gate` is its gate wire plus
+/// [`ScatterDef::region`], and the slot behind `density` is the field node
+/// its density wire names. Each was a number or a string a level used to
+/// write twice and keep agreeing by hand.
+#[derive(Reflect, Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
+#[reflect(Serialize, Deserialize, Default)]
 pub struct ScatterDef {
-    /// Host-facing name for this population. Any string: the engine never
-    /// interprets it, it only tags the placements so the host can decide
-    /// what a member of this population is.
+    /// Host-facing name for this population: the node's own name. Any
+    /// string — the engine never interprets it, it only tags the
+    /// placements so the host can decide what a member of this population
+    /// is.
+    #[serde(skip)]
+    #[reflect(@schema::Hidden)]
     pub class: String,
     /// What a placement becomes: an entity the host dresses, or a point
     /// in a bulk buffer the host draws. Both are just placements.
@@ -137,12 +148,18 @@ pub struct ScatterDef {
     /// Density from a generator field register.
     #[serde(default)]
     pub density: Option<FieldDensityDef>,
-    /// An opaque `"instance:member"` reference to a host weight source,
-    /// gating placement by its blended weight at the point. The engine
-    /// never interprets either half — what a "member" of a host field
-    /// means is the host's business (this demo's are biomes; another
-    /// game's could be factions or pollution).
+    /// Which member of the wired weight source gates this population.
+    ///
+    /// The wire says WHICH source; this says which of its members. The
+    /// engine never interprets the name — what a member means is the
+    /// host's business (this demo's are biomes; another game's could be
+    /// factions or pollution) — it only asks the host for the weight.
     #[serde(default)]
+    pub region: Option<String>,
+    /// The two halves above, joined: the `"instance:member"` reference the
+    /// host resolves. Written by the compiler, never by a level.
+    #[serde(skip)]
+    #[reflect(@schema::Hidden)]
     pub gate: Option<String>,
     /// Respect planning clearance (roadbeds, riverbeds).
     #[serde(default = "d_true")]
@@ -317,6 +334,11 @@ pub struct PlacementDef {
 /// several spawners (and future consumers) can reference one field.
 #[derive(Reflect, Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct FieldDensityDef {
+    /// The slot the wired `field` node was allocated. The compiler writes
+    /// it; a level names the node instead, which is what stopped a slot
+    /// number being written once in the generator and once here.
+    #[serde(skip)]
+    #[reflect(@schema::Hidden)]
     pub field: u32,
     #[serde(default = "default_one")]
     pub scale: f32,
@@ -367,8 +389,6 @@ pub struct PatchDef {
     pub contrast: f32,
     pub bias: f32,
 }
-
-
 
 /// One material recipe, referenced by the material ids generator ops emit.
 #[derive(Reflect, Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -590,11 +610,14 @@ impl MaterialDef {
                 }
                 // The strip spacings default to 1 rather than 0 even with
                 // no emissive block: the shader divides by them.
-                m.set("strip_spacing", emissive.as_ref().map_or(1.0, |e| e.spacing))
-                    .set(
-                        "strip_level_spacing",
-                        emissive.as_ref().map_or(1.0, |e| e.level_spacing),
-                    );
+                m.set(
+                    "strip_spacing",
+                    emissive.as_ref().map_or(1.0, |e| e.spacing),
+                )
+                .set(
+                    "strip_level_spacing",
+                    emissive.as_ref().map_or(1.0, |e| e.level_spacing),
+                );
                 if let Some(e) = emissive {
                     m.rgb_w("emissive_color", e.color, "emissive_intensity", e.intensity)
                         .set("strip_chance", e.chance)
@@ -688,11 +711,6 @@ pub struct LevelDef {
     #[serde(default)]
     #[reflect(@schema::Rebuilds)]
     pub placements: Vec<PlacementDef>,
-    /// Prop populations: WHERE things go. The host decides what they
-    /// look like (see [`crate::scatter::ScatterInstance`]).
-    #[serde(default)]
-    #[reflect(@schema::Rebuilds)]
-    pub scatter: Vec<ScatterDef>,
 }
 
 /// When a generator op applies across the LOD range.
@@ -724,7 +742,6 @@ pub struct DoorDef {
     #[serde(default)]
     pub salt: i32,
 }
-
 
 /// Octave shaping for `height_fbm`.
 #[derive(Reflect, Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
@@ -758,7 +775,6 @@ pub(crate) fn gate_flags(lod: LodGateDef, auto: u32) -> u32 {
         LodGateDef::Coarse => WOP_FLAG_COARSE_ONLY,
     }
 }
-
 
 impl LevelDef {
     /// Read a level, resolving each node's `"kind"` through `registry`.
@@ -817,8 +833,8 @@ impl LevelDef {
     /// world they are planning on top of; at runtime the engine hands the
     /// same value to [`crate::planning::HostPlanning::build`].
     pub fn generator(&self, seed: u64) -> voxel_worldgen::Generator {
-        let program = crate::graph::compile(&self.nodes)
-            .unwrap_or_else(|e| panic!("level graph: {e}"));
+        let program =
+            crate::graph::compile(&self.nodes).unwrap_or_else(|e| panic!("level graph: {e}"));
         assert_region_axes_first(&program.ops);
         voxel_worldgen::Generator::new(program.ops, seed as u32, sun_dir(self))
     }
@@ -888,7 +904,6 @@ pub(crate) fn build_generator(
     )
 }
 
-
 fn env_params(_level: &LevelDef) -> voxel_render::EnvParams {
     voxel_render::EnvParams {
         flags: Vec4::new(if eval_holes_mode() { 1.0 } else { 0.0 }, 0.0, 0.0, 0.0),
@@ -896,7 +911,6 @@ fn env_params(_level: &LevelDef) -> voxel_render::EnvParams {
         ..default()
     }
 }
-
 
 /// Presents a [`LevelDef`]: generation, streaming, meshing, materials
 /// and the planning providers. Presentation the *host* owns — camera,
@@ -1171,7 +1185,6 @@ fn needs_regen(new: &LevelDef, old: &LevelDef) -> bool {
         || sun_dir(new) != sun_dir(old)
         || new.placements != old.placements
         || new.prefabs != old.prefabs
-        || new.scatter != old.scatter
         || new.lod.max_level != old.lod.max_level
         || new.lod.top_radius != old.lod.top_radius
         || new.lod.top_y != old.lod.top_y
@@ -1267,7 +1280,11 @@ mod tests {
     /// the canopy layout: every number here is visible in the level file.
     #[test]
     fn a_recipe_packs_into_the_components_the_shader_reads() {
-        let planet = LevelDef::from_json_known(&shipped("planet.json"), &crate::graph::registry::engine_kinds()).unwrap();
+        let planet = LevelDef::from_json_known(
+            &shipped("planet.json"),
+            &crate::graph::registry::engine_kinds(),
+        )
+        .unwrap();
         let canopy = planet
             .materials
             .iter()
@@ -1300,24 +1317,15 @@ mod tests {
     /// instead of asking why.
     #[test]
     fn an_edit_to_anything_the_world_is_built_from_rebuilds_it() {
-        let planet = LevelDef::from_json_known(&shipped("planet.json"), &crate::graph::registry::engine_kinds()).unwrap();
+        let planet = LevelDef::from_json_known(
+            &shipped("planet.json"),
+            &crate::graph::registry::engine_kinds(),
+        )
+        .unwrap();
         assert!(
             !needs_regen(&planet, &planet),
             "an unchanged level must not rebuild — a repaint would loop"
         );
-
-        let mut scatter = planet.clone();
-        scatter.scatter[0].per_tile += 1;
-        assert!(needs_regen(&scatter, &planet), "scatter");
-
-        let mut cover = planet.clone();
-        let def = cover
-            .scatter
-            .iter_mut()
-            .find(|s| s.cover.is_some())
-            .expect("planet has a population that paints");
-        def.cover.as_mut().unwrap().full_at *= 2.0;
-        assert!(needs_regen(&cover, &planet), "scatter cover");
 
         let mut placements = planet.clone();
         placements.placements.clear();
@@ -1326,7 +1334,6 @@ mod tests {
         let mut prefabs = planet.clone();
         prefabs.prefabs.clear();
         assert!(needs_regen(&prefabs, &planet), "prefabs");
-
 
         let mut lod = planet.clone();
         lod.lod.max_level -= 1;
@@ -1406,7 +1413,11 @@ mod tests {
     fn the_rebuilds_attribute_says_what_needs_regen_does() {
         use bevy::reflect::Typed;
 
-        let planet = LevelDef::from_json_known(&shipped("planet.json"), &crate::graph::registry::engine_kinds()).unwrap();
+        let planet = LevelDef::from_json_known(
+            &shipped("planet.json"),
+            &crate::graph::registry::engine_kinds(),
+        )
+        .unwrap();
         let root = LevelDef::type_info();
 
         /// A field, an edit big enough for `PartialEq` to see, and whether
@@ -1440,7 +1451,6 @@ mod tests {
             ),
             ("prefabs", |l| l.prefabs.clear(), true),
             ("placements", |l| l.placements.clear(), true),
-            ("scatter", |l| l.scatter.clear(), true),
         ];
 
         for (path, edit, restreams) in cases {
@@ -1472,10 +1482,9 @@ mod tests {
         let sections: Vec<&str> = info.iter().map(|f| f.name()).collect();
         for section in sections {
             assert!(
-                cases.iter().any(|(path, ..)| path
-                    .split('.')
-                    .next()
-                    .is_some_and(|top| top == section)),
+                cases
+                    .iter()
+                    .any(|(path, ..)| path.split('.').next().is_some_and(|top| top == section)),
                 "LevelDef gained '{section}' and nothing here says whether \
                  editing it restreams the world"
             );
@@ -1488,7 +1497,11 @@ mod tests {
     #[test]
     fn a_level_can_be_reached_by_field_path() {
         use bevy::reflect::GetPath;
-        let mut planet = LevelDef::from_json_known(&shipped("planet.json"), &crate::graph::registry::engine_kinds()).unwrap();
+        let mut planet = LevelDef::from_json_known(
+            &shipped("planet.json"),
+            &crate::graph::registry::engine_kinds(),
+        )
+        .unwrap();
 
         // The path BRP would address, on the real shipped schema. Found by
         // VARIANT, not by index: a path only reaches the fields the
@@ -1516,9 +1529,9 @@ mod tests {
         registry.register::<LevelDef>();
         assert!(
             registry
-                .get_type_data::<bevy::ecs::reflect::ReflectResource>(
-                    std::any::TypeId::of::<LevelDef>()
-                )
+                .get_type_data::<bevy::ecs::reflect::ReflectResource>(std::any::TypeId::of::<
+                    LevelDef,
+                >())
                 .is_some(),
             "LevelDef needs #[reflect(Resource)] to be reachable remotely"
         );
@@ -1526,35 +1539,11 @@ mod tests {
 
     #[test]
     fn shipped_levels_parse() {
-        let planet = LevelDef::from_json_known(&shipped("planet.json"), &crate::graph::registry::engine_kinds()).unwrap();
-        // Planning is the host's: the engine carries the block
-        // without ever parsing it.
-        // Scatter is placement-only: classes and variants, no models.
-        // Asserted as PROPERTIES, not as a list — which classes a level
-        // ships is content and changes whenever the world is dressed.
-        let classes: Vec<&str> = planet.scatter.iter().map(|s| s.class.as_str()).collect();
-        for want in ["tree", "boulder", "groundcover"] {
-            assert!(classes.contains(&want), "planet lost its {want} scatter");
-        }
-        // A class name IS a layer instance name, so a duplicate is a
-        // registration panic at load rather than a merge.
-        let mut unique = classes.clone();
-        unique.sort_unstable();
-        unique.dedup();
-        assert_eq!(unique.len(), classes.len(), "duplicate scatter class: {classes:?}");
-        for def in &planet.scatter {
-            assert!(
-                def.output == ScatterOutput::Points || !def.variants.is_empty(),
-                "{} draws entities but declares no variant",
-                def.class
-            );
-        }
-        // Ground cover is just another scatter population that outputs
-        // points instead of entities.
-        assert!(planet
-            .scatter
-            .iter()
-            .any(|d| d.output == ScatterOutput::Points));
+        let planet = LevelDef::from_json_known(
+            &shipped("planet.json"),
+            &crate::graph::registry::engine_kinds(),
+        )
+        .unwrap();
         // The planet's geometry comes from height ops; sea level is the
         // host's business and no longer part of the program.
         let packed = crate::graph::compile(&planet.nodes).unwrap().ops;
@@ -1563,9 +1552,12 @@ mod tests {
         assert!(planet.materials.iter().any(|m| m.id() == 1));
         assert!(planet.materials.iter().any(|m| m.id() == 3));
 
-        let mega = LevelDef::from_json_known(&shipped("megastructure.json"), &crate::graph::registry::engine_kinds()).unwrap();
+        let mega = LevelDef::from_json_known(
+            &shipped("megastructure.json"),
+            &crate::graph::registry::engine_kinds(),
+        )
+        .unwrap();
         let packed = crate::graph::compile(&mega.nodes).unwrap().ops;
-        assert!(mega.scatter.is_empty());
         assert!(mega.materials.iter().any(|m| m.id() == 2));
         // Sunless interior: no height ops, so the horizon-shadow bake
         // self-disables and the sun direction is unused.
@@ -1577,14 +1569,17 @@ mod tests {
 
     #[test]
     fn levels_roundtrip() {
-        let planet = LevelDef::from_json_known(&shipped("planet.json"), &crate::graph::registry::engine_kinds()).unwrap();
+        let planet = LevelDef::from_json_known(
+            &shipped("planet.json"),
+            &crate::graph::registry::engine_kinds(),
+        )
+        .unwrap();
         let reg = crate::graph::registry::engine_kinds();
         let json = planet.to_json(&reg).unwrap();
         let back = LevelDef::from_json(&json, &reg).unwrap();
         assert_eq!(back.nodes, planet.nodes);
         assert_eq!(back.materials, planet.materials);
         assert_eq!(back.environment, planet.environment);
-        assert_eq!(back.scatter, planet.scatter);
     }
 
     #[test]
@@ -1596,7 +1591,11 @@ mod tests {
         //
         // The megastructure has no such oracle — see the test below,
         // which asserts what is actually true of it instead.
-        let planet = LevelDef::from_json_known(&shipped("planet.json"), &crate::graph::registry::engine_kinds()).unwrap();
+        let planet = LevelDef::from_json_known(
+            &shipped("planet.json"),
+            &crate::graph::registry::engine_kinds(),
+        )
+        .unwrap();
         let packed = crate::graph::compile(&planet.nodes).unwrap().ops;
         assert_eq!(packed, voxel_worldgen::program::planet_program());
     }
@@ -1610,17 +1609,29 @@ mod tests {
     /// architecture, a band nothing paints, a material with no recipe.
     #[test]
     fn every_megastructure_district_is_whole() {
-        let mega = LevelDef::from_json_known(&shipped("megastructure.json"), &crate::graph::registry::engine_kinds()).unwrap();
+        let mega = LevelDef::from_json_known(
+            &shipped("megastructure.json"),
+            &crate::graph::registry::engine_kinds(),
+        )
+        .unwrap();
         let ops = crate::graph::compile(&mega.nodes).unwrap().ops;
 
-        assert_eq!(ops[0].kind, WOP_REGION_AXES, "the axes must be filled first");
+        assert_eq!(
+            ops[0].kind, WOP_REGION_AXES,
+            "the axes must be filled first"
+        );
 
         // Every band that paints a district must also BUILD one, or the
         // district is a colour swatch with no architecture in it.
         let painted: Vec<_> = ops
             .iter()
             .filter(|op| op.kind == WOP_MATERIAL_BAND)
-            .map(|op| (op.material, pack_region([op.p0[0], op.p0[1], op.p0[2], op.p0[3]])))
+            .map(|op| {
+                (
+                    op.material,
+                    pack_region([op.p0[0], op.p0[1], op.p0[2], op.p0[3]]),
+                )
+            })
             .collect();
         assert!(painted.len() >= 8, "only {} districts", painted.len());
         for (mat, band) in &painted {
@@ -1642,7 +1653,10 @@ mod tests {
         // registers are per-sample, and only one gate can pass at a point.
         let cut = ops.iter().rposition(|op| op.kind == WOP_SHAFTS_CUT);
         let last_bore = ops.iter().rposition(|op| op.kind == WOP_SHAFTS_XZ);
-        assert!(cut > last_bore, "shafts are cut before the last one is defined");
+        assert!(
+            cut > last_bore,
+            "shafts are cut before the last one is defined"
+        );
     }
 
     /// No district may be a sliver of the world.
@@ -1655,7 +1669,11 @@ mod tests {
     /// them honest when somebody retunes the axis scale or octaves.
     #[test]
     fn no_megastructure_district_is_a_sliver() {
-        let mega = LevelDef::from_json_known(&shipped("megastructure.json"), &crate::graph::registry::engine_kinds()).unwrap();
+        let mega = LevelDef::from_json_known(
+            &shipped("megastructure.json"),
+            &crate::graph::registry::engine_kinds(),
+        )
+        .unwrap();
         let gen = mega.generator(0);
         // Through `surface_material_weight`, which is the same query the
         // host gates content with — so this measures the districts as
@@ -1694,7 +1712,11 @@ mod tests {
         let total = f64::from(N * N);
         for (mat, n) in mats.iter().zip(&hits) {
             let share = *n as f64 / total;
-            assert!(share > 0.03, "district {mat} covers {:.1}% of the world", share * 100.0);
+            assert!(
+                share > 0.03,
+                "district {mat} covers {:.1}% of the world",
+                share * 100.0
+            );
         }
     }
 

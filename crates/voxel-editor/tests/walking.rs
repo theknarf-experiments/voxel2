@@ -6,6 +6,7 @@
 //! and the reference list each row is built with.
 
 use bevy::platform::collections::HashSet;
+use bevy::reflect::Typed;
 use voxel_editor::{rows, Num, RowKind};
 use voxel_engine::graph::registry;
 use voxel_engine::LevelDef;
@@ -99,7 +100,14 @@ fn everything(level: &LevelDef) -> HashSet<String> {
 fn nothing_is_walked_that_is_not_open() {
     let level = planet();
     let shut = rows(&level, &HashSet::default());
-    assert_eq!(shut.len(), 7, "just the sections");
+    // Counted off the type rather than written down: what a level's
+    // sections ARE is the schema's business, and a hard number here fails
+    // the day one is added for no reason a reader could learn from it.
+    let sections = match LevelDef::type_info() {
+        bevy::reflect::TypeInfo::Struct(s) => s.field_len(),
+        _ => unreachable!("LevelDef is a struct"),
+    };
+    assert_eq!(shut.len(), sections, "just the sections");
     assert!(rows(&level, &open(&[".lod"])).len() > shut.len());
 }
 

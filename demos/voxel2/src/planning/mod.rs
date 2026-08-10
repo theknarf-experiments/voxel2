@@ -52,6 +52,9 @@ pub struct StackPlanner {
     ctx: Option<Arc<world::WorldCtx>>,
     /// Emit instances and what each one can produce.
     emitters: Vec<Emitter>,
+    /// The level's populations, compiled: what a level wrote as nodes,
+    /// in the form the placer and the cover painter read.
+    pub populations: Vec<voxel_engine::level::ScatterDef>,
     /// Biome layers: (instance name, ordered biome names).
     /// Region dictionaries: (instance, [(region name, its material)]).
     /// A region IS a generator band; this only names them.
@@ -649,9 +652,16 @@ impl StackPlanner {
         ) {
             deps.push(top);
         }
+        // Field slots come from the compiler, which is also what checked
+        // this level before it got here: a population names the field node
+        // it reads instead of writing the slot number the generator wrote.
+        let fields = voxel_engine::graph::compile(&level.nodes)
+            .expect("the level compiled when it was validated")
+            .fields;
+        let defs = nodes::populations(&level.nodes, &fields);
         let emit_names: Vec<String> = emitters.iter().map(|e| e.name.clone()).collect();
         let (scatter_tops, populations) =
-            crate::scatter::register(&mut graph, level, emit_names, &biome_tables);
+            crate::scatter::register(&mut graph, &defs, emit_names, &biome_tables);
         deps.extend(scatter_tops);
         *ctx.populations.lock().unwrap() = Some(populations);
 
@@ -662,6 +672,7 @@ impl StackPlanner {
             ctx: Some(ctx),
             tops,
             emitters,
+            populations: defs,
             biome_tables,
             focused: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         })
@@ -910,13 +921,72 @@ mod tests {
         assert!(err.contains("element padding"), "{err}");
     }
 
+    /// A population is placement-only: classes and variants, no models.
+    ///
+    /// Asserted as PROPERTIES, not as a list — which classes a level ships
+    /// is content and changes whenever the world is dressed. What must
+    /// hold is that the compiler fills in the three things a level stopped
+    /// writing.
+    #[test]
+    fn planet_compiles_the_populations_it_ships() {
+        let planet = shipped("planet.json");
+        let program = voxel_engine::graph::compile(&planet.nodes).unwrap();
+        let defs = super::nodes::populations(&planet.nodes, &program.fields);
+
+        let classes: Vec<&str> = defs.iter().map(|d| d.class.as_str()).collect();
+        for want in ["tree", "boulder", "groundcover"] {
+            assert!(classes.contains(&want), "planet lost its {want} population");
+        }
+        // A class is the NODE's name, so the compiler rejects a duplicate
+        // before it can become two layers registered under one name.
+        let mut unique = classes.clone();
+        unique.sort_unstable();
+        unique.dedup();
+        assert_eq!(unique.len(), classes.len(), "duplicate class: {classes:?}");
+
+        // Ground cover is just another population that outputs points
+        // instead of entities.
+        use voxel_engine::level::ScatterOutput;
+        assert!(defs.iter().any(|d| d.output == ScatterOutput::Points));
+
+        // The wiring, in the form the placer reads it.
+        let tree = defs.iter().find(|d| d.class == "tree").unwrap();
+        assert_eq!(tree.gate.as_deref(), Some("biomes:forest"));
+        assert_eq!(
+            tree.density.as_ref().map(|d| d.field),
+            Some(0),
+            "the tree density wire must resolve to the field node's slot"
+        );
+
+        assert!(
+            super::nodes::populations(&shipped("megastructure.json").nodes, &program.fields)
+                .is_empty(),
+            "the megastructure scatters nothing"
+        );
+    }
+
+    /// A population's gate is half wire, half parameter, and only the
+    /// wire half is the compiler's. The member has to be checked here or
+    /// a typo is a population that silently grows nowhere.
     #[test]
     fn spawner_biome_refs_are_validated() {
         let mut planet = shipped("planet.json");
         validate_level(&planet).unwrap();
-        if let Some(def) = planet.scatter.first_mut() {
-            def.gate = Some("biomes:forrest".into());
-        }
+        let found = planet.nodes.iter_mut().any(|n| {
+            match n
+                .node
+                .0
+                .as_any_mut()
+                .downcast_mut::<super::nodes::Population>()
+            {
+                Some(p) if p.0.region.is_some() => {
+                    p.0.region = Some("forrest".into());
+                    true
+                }
+                _ => false,
+            }
+        });
+        assert!(found, "planet gates a population on a region");
         let err = validate_level(&planet).unwrap_err();
         assert!(err.contains("forrest"), "typo not caught: {err}");
     }

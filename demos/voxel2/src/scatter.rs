@@ -19,7 +19,7 @@ use std::sync::Arc;
 use bevy::math::DVec3;
 use bevy::prelude::*;
 use voxel_engine::{
-    level::{LevelDef, ScatterDef, ScatterOutput},
+    level::{ScatterDef, ScatterOutput},
     scatter::{tile_placements, Placement, PlacementInputs, ScatterInstance},
 };
 use voxel_layers::{ChunkCtx, Dep, Layer, LayerChunk, LayerGraph, TopDep};
@@ -208,16 +208,16 @@ pub fn gate_material(
     table.1.iter().find(|(n, _)| n == name).map(|(_, m)| *m)
 }
 
-/// Register one layer per scatter class and return their top dependencies.
+/// Register one layer per population and return their top dependencies.
 pub fn register(
     graph: &mut LayerGraph,
-    level: &LevelDef,
+    populations: &[ScatterDef],
     emit_sources: Vec<String>,
     biome_tables: &[(String, Vec<(String, u32)>)],
 ) -> (Vec<TopDep>, Populations) {
     let mut tops = Vec::new();
     let mut handles = Vec::new();
-    for def in &level.scatter {
+    for def in populations {
         let biome = gate_material(def, biome_tables);
         let sink = Sink::default();
         let population = ScatterPopulation {

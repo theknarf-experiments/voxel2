@@ -53,7 +53,11 @@ const SCATTER_SALT: u64 = 0x5CA7;
 /// `falloff` meters at each edge (0 falloff = hard band).
 fn altitude_gate(alt: [f32; 2], falloff: f32, y: f32) -> f32 {
     if falloff <= 0.0 {
-        return if (alt[0]..alt[1]).contains(&y) { 1.0 } else { 0.0 };
+        return if (alt[0]..alt[1]).contains(&y) {
+            1.0
+        } else {
+            0.0
+        };
     }
     (((y - alt[0]) / falloff).clamp(0.0, 1.0)).min(((alt[1] - y) / falloff).clamp(0.0, 1.0))
 }
@@ -128,7 +132,11 @@ fn placement_rotation(
 /// Every placement of `def` in one tile — deterministic from the world
 /// seed and the tile coordinate, so any consumer (the entity streamer,
 /// a host's impostor batcher) sees exactly the same props.
-pub fn tile_placements(def: &ScatterDef, inputs: &PlacementInputs<'_>, tile: IVec2) -> Vec<Placement> {
+pub fn tile_placements(
+    def: &ScatterDef,
+    inputs: &PlacementInputs<'_>,
+    tile: IVec2,
+) -> Vec<Placement> {
     let generator = inputs.generator;
     let size = def.tile_m;
     let mut rng = Rng::new(chunk_seed(
@@ -246,7 +254,8 @@ pub fn coverage(def: &ScatterDef, inputs: &PlacementInputs<'_>, xz: Vec2) -> f32
 
 /// Weighted pick among the variants whose altitude band contains `y`.
 fn pick_variant(def: &ScatterDef, y: f32, roll: f32) -> Option<usize> {
-    let eligible = |v: &crate::level::ScatterVariantDef| (v.altitude[0]..v.altitude[1]).contains(&y);
+    let eligible =
+        |v: &crate::level::ScatterVariantDef| (v.altitude[0]..v.altitude[1]).contains(&y);
     let total: f32 = def
         .variants
         .iter()
@@ -304,11 +313,30 @@ mod tests {
     fn coverage_predicts_where_the_placer_actually_places() {
         let level = shipped_planet();
         let generator = level.generator(0);
-        let def = level
-            .scatter
-            .iter()
-            .find(|s| s.cover.is_some())
-            .expect("planet has a population that paints");
+        // Planet's painted ground cover, written out rather than read out
+        // of the level: a `population` node is the HOST's, so this crate
+        // can parse the terrain that decides where the population lives
+        // but not the population itself. The generator is the shipped one,
+        // which is what the probe below depends on.
+        //
+        // Parsed rather than built with `..default()`, because a
+        // population's serde defaults are not its `Default`: `chance`
+        // defaults to 1 in a level and 0 in Rust, and a fixture built the
+        // other way places nothing while looking correct.
+        let def = &mut serde_json::from_str::<ScatterDef>(
+            r#"{
+                "output": "points",
+                "tile_m": 64.0, "radius_tiles": 80, "per_tile": 900,
+                "altitude": [3.0, 340.0], "min_up": 0.86, "detail_vs": 8.0,
+                "density": {},
+                "cover": { "material": 8, "from_m": 3300.0, "full_at": 0.02 }
+            }"#,
+        )
+        .unwrap();
+        // The two the host's node would have filled in.
+        def.class = "treecover".into();
+        def.density.as_mut().unwrap().field = 0;
+        let def = &*def;
         let gen = &generator;
         let inputs = PlacementInputs {
             generator: &generator,
@@ -359,8 +387,16 @@ mod tests {
             pairs.iter().map(|p| p.1).sum::<f32>() / n,
         );
         let cov = pairs.iter().map(|(x, y)| (x - mx) * (y - my)).sum::<f32>();
-        let sx = pairs.iter().map(|(x, _)| (x - mx).powi(2)).sum::<f32>().sqrt();
-        let sy = pairs.iter().map(|(_, y)| (y - my).powi(2)).sum::<f32>().sqrt();
+        let sx = pairs
+            .iter()
+            .map(|(x, _)| (x - mx).powi(2))
+            .sum::<f32>()
+            .sqrt();
+        let sy = pairs
+            .iter()
+            .map(|(_, y)| (y - my).powi(2))
+            .sum::<f32>()
+            .sqrt();
         let r = cov / (sx * sy);
         assert!(
             r > 0.8,

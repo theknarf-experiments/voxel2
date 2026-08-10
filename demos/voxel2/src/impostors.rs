@@ -173,8 +173,9 @@ fn sync_impostor_style(
         .iter()
         .filter_map(|world| {
             let def = world
-                .level
-                .scatter
+                .query
+                .planner_as::<crate::planning::StackPlanner>()?
+                .populations
                 .iter()
                 .find(|def| def.class == IMPOSTOR_CLASS)?;
             let from = def.cover.as_ref()?.from_m;

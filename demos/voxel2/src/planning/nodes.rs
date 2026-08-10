@@ -25,6 +25,7 @@ use super::schema::{
     d_worm_radius, d_worm_steps,
 };
 use super::schema::{EmitDef, RelaxDef, StructureDef, VariantDef};
+use voxel_engine::level::ScatterDef;
 
 /// A named structure the stack can build at a site.
 ///
@@ -342,6 +343,91 @@ impl Node for Emit {
     }
 }
 
+/// A population of props: where a class of thing grows.
+///
+/// The engine owns everything about one — the placer, the tiles, the
+/// coverage, the entities — and this owns the two references that are
+/// THIS game's: which weight source gates it, and which field node drives
+/// its density. That is why the node is here and the schema is there; an
+/// engine node cannot wire to a host value without making a level's engine
+/// half unreadable on its own.
+///
+/// Transparent, so a level writes the population's fields directly rather
+/// than nesting them under a wrapper that carries nothing.
+#[derive(Reflect, Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
+#[reflect(Node, RegionLayer, Serialize, Deserialize, Default)]
+#[serde(transparent)]
+pub struct Population(pub ScatterDef);
+
+impl Node for Population {
+    fn kind(&self) -> &'static str {
+        "population"
+    }
+    fn domain(&self) -> Domain {
+        Domain::Region
+    }
+    fn ports(&self) -> Ports {
+        // A port only where there is something to name: a population with
+        // no region reads no biomes, and one with no density reads no
+        // field.
+        let ins: &'static [Port] = match (self.0.region.is_some(), self.0.density.is_some()) {
+            (false, false) => &[],
+            (true, false) => &[("gate", Value::Host("biomes"))],
+            (false, true) => &[("density", Value::Field)],
+            (true, true) => &[("density", Value::Field), ("gate", Value::Host("biomes"))],
+        };
+        (ins, &[])
+    }
+}
+
+impl RegionLayer for Population {
+    /// Registered in bulk by [`crate::scatter::register`], which needs
+    /// every emit name and the whole set at once to size the dependencies
+    /// they share. Nothing to do per node.
+    fn register(&self, _ctx: &RegionCtx, _mgr: &mut LayerGraph) {}
+}
+
+/// Every population a level declares, in the form the placer reads.
+///
+/// The three things a level stopped writing — the class, the
+/// `"instance:member"` gate, the field slot — come from the node's name
+/// and its wires. `fields` is the compiler's allocation, which is what
+/// removed the slot number a level used to write twice.
+pub fn populations(
+    nodes: &[voxel_engine::graph::NodeDef],
+    fields: &bevy::platform::collections::HashMap<String, u32>,
+) -> Vec<ScatterDef> {
+    let mut out = Vec::new();
+    for node in nodes {
+        let Some(p) = node.node.0.as_any().downcast_ref::<Population>() else {
+            continue;
+        };
+        let Some(name) = node.name.as_deref() else {
+            continue;
+        };
+        let source = |port: &str| {
+            node.wires
+                .get(port)
+                .and_then(|w| w.sources().first())
+                .cloned()
+        };
+        let mut def = p.0.clone();
+        def.class = name.to_string();
+        def.gate = def
+            .region
+            .as_ref()
+            .zip(source("gate"))
+            .map(|(member, src)| format!("{src}:{member}"));
+        if let Some(density) = &mut def.density {
+            density.field = source("density")
+                .and_then(|n| fields.get(&n).copied())
+                .unwrap_or_default();
+        }
+        out.push(def);
+    }
+    out
+}
+
 /// What a region node needs from the rest of the graph to build itself.
 ///
 /// Everything it used to reach for by scanning the whole stack — the
@@ -656,4 +742,5 @@ pub fn register(registry: &mut bevy::reflect::TypeRegistry) {
     registry.register::<Scatter3>();
     registry.register::<Connect3>();
     registry.register::<Emit>();
+    registry.register::<Population>();
 }
