@@ -833,11 +833,30 @@ impl LevelDef {
     /// This level's generator at `seed`. Layers need one to sample the
     /// world they are planning on top of; at runtime the engine hands the
     /// same value to [`crate::planning::HostPlanning::build`].
+    ///
+    /// Panics on a level whose graph does not compile. Anything that
+    /// accepts a level from OUTSIDE — a watched file, a tool writing the
+    /// resource, an editor — must ask [`LevelDef::try_generator`] first: a
+    /// mistyped wire is an authoring error, and an authoring error must
+    /// never take down a live session.
     pub fn generator(&self, seed: u64) -> voxel_worldgen::Generator {
-        let program =
-            crate::graph::compile(&self.nodes).unwrap_or_else(|e| panic!("level graph: {e}"));
+        self.try_generator(seed)
+            .unwrap_or_else(|e| panic!("level graph: {e}"))
+    }
+
+    /// This level's generator, or the compiler's complaint about why there
+    /// is none.
+    pub fn try_generator(
+        &self,
+        seed: u64,
+    ) -> Result<voxel_worldgen::Generator, crate::graph::Error> {
+        let program = crate::graph::compile(&self.nodes)?;
         assert_region_axes_first(&program.ops);
-        voxel_worldgen::Generator::new(program.ops, seed as u32, sun_dir(self))
+        Ok(voxel_worldgen::Generator::new(
+            program.ops,
+            seed as u32,
+            sun_dir(self),
+        ))
     }
 }
 
@@ -1159,6 +1178,10 @@ fn watch_level_file(
     };
     // Authoring errors must never take down a live session: keep the
     // running world and report, exactly like a parse error.
+    if let Err(e) = crate::graph::compile(&new.nodes) {
+        warn!("level reload: {e}");
+        return;
+    }
     if let Some(host) = &planner.0 {
         if let Err(e) = host.validate(&new) {
             warn!("level reload: invalid planning data — {e}");
@@ -1218,6 +1241,14 @@ fn apply_level_change(
         return;
     }
     let new = level.clone();
+    // Every writer of the resource arrives here — the watched file, a tool
+    // poking a value over BRP, the editor. A level that does not compile
+    // is an authoring error: report it, keep the running world, and leave
+    // `applied` alone so the next good edit diffs against what is live.
+    if let Err(e) = crate::graph::compile(&new.nodes) {
+        warn!("level: {e} — keeping the running world");
+        return;
+    }
     let level = &applied.0;
     // Only the world this plugin loaded reloads. A portal's far side was
     // loaded from its own file and is nobody's business here.
@@ -1567,6 +1598,43 @@ mod tests {
                 .is_some(),
             "LevelDef needs #[reflect(Resource)] to be reachable remotely"
         );
+    }
+
+    /// An authoring mistake must be a message, not a dead session.
+    ///
+    /// The editor makes this reachable by CLICKING — rewiring a port to a
+    /// node declared later is one menu pick — and the watched file always
+    /// could. Before this, either one panicked the running app from
+    /// `generator()`, three calls below where the level was accepted.
+    #[test]
+    fn a_level_that_does_not_compile_is_refused_not_fatal() {
+        let mut planet = LevelDef::from_json_known(
+            &shipped("planet.json"),
+            &crate::graph::registry::engine_kinds(),
+        )
+        .unwrap();
+        assert!(
+            planet.try_generator(0).is_ok(),
+            "the shipped level compiles"
+        );
+
+        // Rewire a port to something that is not a node.
+        let wired = planet
+            .nodes
+            .iter_mut()
+            .find(|n| !n.wires.is_empty())
+            .expect("planet wires its nodes");
+        let port = wired.wires.iter().next().map(|(p, _)| p.clone()).unwrap();
+        wired
+            .wires
+            .0
+            .insert(port.clone(), crate::graph::Wire::One("nope".into()));
+
+        let Err(err) = planet.try_generator(0) else {
+            panic!("a dangling wire has to be refused");
+        };
+        let said = err.to_string();
+        assert!(said.contains("nope") && said.contains(&port), "{said}");
     }
 
     #[test]
