@@ -13,7 +13,11 @@ use voxel_engine::LevelDef;
 
 fn planet() -> LevelDef {
     let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../levels/planet.json");
-    LevelDef::from_json_known(&std::fs::read_to_string(path).unwrap(), &registry::engine_kinds()).unwrap()
+    LevelDef::from_json_known(
+        &std::fs::read_to_string(path).unwrap(),
+        &registry::engine_kinds(),
+    )
+    .unwrap()
 }
 
 fn open(paths: &[&str]) -> HashSet<String> {
@@ -54,11 +58,12 @@ fn a_number_row_carries_the_levels_own_value_and_type() {
 #[test]
 fn no_declared_range_excludes_a_value_a_level_ships() {
     for name in ["planet", "megastructure", "purgatory"] {
-        let path = format!(
-            "{}/../../levels/{name}.json",
-            env!("CARGO_MANIFEST_DIR")
-        );
-        let level = LevelDef::from_json_known(&std::fs::read_to_string(&path).unwrap(), &registry::engine_kinds()).unwrap();
+        let path = format!("{}/../../levels/{name}.json", env!("CARGO_MANIFEST_DIR"));
+        let level = LevelDef::from_json_known(
+            &std::fs::read_to_string(&path).unwrap(),
+            &registry::engine_kinds(),
+        )
+        .unwrap();
         for row in rows(&level, &everything(&level)) {
             let RowKind::Number {
                 value,
@@ -125,7 +130,10 @@ fn the_vocabulary_is_whatever_is_registered() {
     };
     assert!(names.len() > 15, "the whole shipped set: {names:?}");
     for expected in ["height_fbm", "region", "sdf_void", "shafts_cut"] {
-        assert!(names.contains(&expected), "{expected} missing from {names:?}");
+        assert!(
+            names.contains(&expected),
+            "{expected} missing from {names:?}"
+        );
     }
 }
 
@@ -165,7 +173,10 @@ fn a_material_field_offers_the_levels_own_ids() {
     };
     let ids: Vec<String> = level.materials.iter().map(|m| m.id().to_string()).collect();
     assert_eq!(options, ids, "the options are the level's material ids");
-    assert!(options.contains(&current), "the op paints a defined material");
+    assert!(
+        options.contains(&current),
+        "the op paints a defined material"
+    );
 }
 
 /// `AsColor` reaches the leaves, so a pair of hues is two swatches and not
@@ -205,7 +216,10 @@ fn rebuilds_reaches_the_numbers_inside_a_restreaming_section() {
     assert!(row_at(&rows, ".nodes[4].node.amp").rebuilds);
     // And does not leak sideways into the cheap sections.
     let rows = rows_of_materials(&level);
-    assert!(!rows.iter().any(|r| r.rebuilds), "a material is a table upload");
+    assert!(
+        !rows.iter().any(|r| r.rebuilds),
+        "a material is a table upload"
+    );
 }
 
 fn rows_of_materials(level: &LevelDef) -> Vec<voxel_editor::Row> {
@@ -213,4 +227,90 @@ fn rows_of_materials(level: &LevelDef) -> Vec<voxel_editor::Row> {
         .into_iter()
         .filter(|r| r.path.starts_with(".materials"))
         .collect()
+}
+
+/// A node names itself in the list, by what a level calls it and what it
+/// IS. Fifty-five rows of an index is a document you cannot read.
+#[test]
+fn a_node_is_labelled_by_its_name_and_its_kind() {
+    let level = planet();
+    let rows = rows(&level, &open(&[".nodes"]));
+    let labels: Vec<&str> = rows
+        .iter()
+        .filter(|r| r.path.starts_with(".nodes["))
+        .map(|r| r.label.as_str())
+        .collect();
+    assert!(labels.len() > 20, "the whole list: {labels:?}");
+    // The kind is the type behind the box, so a row says what the level
+    // wrote in `"kind"` and not that it is a node.
+    assert!(
+        labels.iter().any(|l| l.contains("HeightFbm")),
+        "no kind in {labels:?}"
+    );
+    // And the name it declared, which is what everything else refers to.
+    let named = level
+        .nodes
+        .iter()
+        .find_map(|n| n.name.clone())
+        .expect("planet names its nodes");
+    assert!(
+        labels.iter().any(|l| l.contains(&named)),
+        "'{named}' missing from {labels:?}"
+    );
+}
+
+/// A port is a reference, and the panel offers what it can refer to: the
+/// same names the compiler resolves, at any depth.
+#[test]
+fn a_wire_offers_the_levels_own_node_names() {
+    let level = planet();
+    // Whichever node has wires — which one does is content.
+    let at = level
+        .nodes
+        .iter()
+        .position(|n| !n.wires.is_empty())
+        .expect("planet wires its nodes");
+    let rows = rows(
+        &level,
+        &open(&[
+            ".nodes",
+            &format!(".nodes[{at}]"),
+            &format!(".nodes[{at}].wires.0"),
+        ]),
+    );
+    let wire = rows
+        .iter()
+        .find(|r| r.path.starts_with(&format!(".nodes[{at}].wires.0{{")))
+        .expect("a row per port");
+    let RowKind::Choice {
+        current, options, ..
+    } = &wire.kind
+    else {
+        panic!("a wire is a reference, not {:?}", wire.path)
+    };
+    assert!(
+        options.contains(current),
+        "'{current}' is wired to something the menu does not offer: {options:?}"
+    );
+    assert!(options.len() > 10, "every node in the level: {options:?}");
+}
+
+/// A newtype costs no row. `Wires` and the demo's `Population` are
+/// spellings Rust needs; a reader looking for a port should not have to
+/// open "1 fields" to find one.
+#[test]
+fn a_newtype_does_not_cost_a_row() {
+    let level = planet();
+    let at = level
+        .nodes
+        .iter()
+        .position(|n| !n.wires.is_empty())
+        .expect("planet wires its nodes");
+    let rows = rows(&level, &open(&[".nodes", &format!(".nodes[{at}]")]));
+    let wires = row_at(&rows, &format!(".nodes[{at}].wires.0"));
+    assert!(
+        matches!(wires.kind, RowKind::Group { .. }),
+        "the wires row IS the map"
+    );
+    assert_eq!(wires.label, "wires", "and keeps the field's own name");
 }

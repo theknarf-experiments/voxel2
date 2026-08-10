@@ -474,13 +474,16 @@ pub struct NodeDef {
     /// What other nodes call this one. Required only where something
     /// refers to it, so the long unbranching middle of a chain need not
     /// invent names nothing uses.
+    #[reflect(@crate::schema::Title)]
     pub name: Option<String>,
     /// Port name to the node feeding it. A port may take several sources
     /// where the domain genuinely merges — the megastructure's seven
     /// region-gated `shafts_xz` into one `shafts_cut` — and the compiler
     /// checks those gates are disjoint.
+    #[reflect(@crate::schema::NodeRef)]
     pub wires: Wires,
     /// What this node IS. Its type is the kind, its fields are the schema.
+    #[reflect(@crate::schema::Title)]
     pub node: AnyNode,
 }
 

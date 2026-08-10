@@ -8,8 +8,8 @@
 
 use bevy::platform::collections::HashSet;
 use bevy::prelude::*;
-use bevy::reflect::{NamedField, PartialReflect, ReflectRef, TypeInfo};
 use bevy::reflect::enums::{VariantInfo, VariantType};
+use bevy::reflect::{NamedField, PartialReflect, ReflectRef, TypeInfo};
 use voxel_engine::schema;
 
 /// One line of the panel.
@@ -32,7 +32,10 @@ pub struct Row {
 pub enum RowKind {
     /// A struct, tuple, list, map or array: a disclosure and a summary of
     /// what is inside, so a collapsed row still says something.
-    Group { expanded: bool, summary: String },
+    Group {
+        expanded: bool,
+        summary: String,
+    },
     /// An enum: a disclosure AND a variant choice, because those are the
     /// same row — picking a variant changes what is inside it.
     Variant {
@@ -110,6 +113,10 @@ struct Hints {
     /// Inherited all the way down: every number inside a section that
     /// restreams the world restreams it too.
     rebuilds: bool,
+    /// [`schema::NodeRef`], inherited the same way `color` is: the strings
+    /// it applies to sit inside a map and an enum, neither of which is a
+    /// named field that could carry it.
+    node_ref: bool,
 }
 
 /// Everything the walk needs that is not the value in hand.
@@ -142,10 +149,41 @@ fn emit(
     depth: usize,
     hints: Hints,
 ) {
+    // A newtype is its contents. `Wires(BTreeMap<..>)` and the demo's
+    // `Population(ScatterDef)` are spellings Rust needs and the document
+    // does not; shown as themselves they cost a disclosure and a row
+    // saying "1 fields" before the level resumes. The path keeps the `.0`,
+    // so reflection still resolves what the row addresses.
+    let mut path = path.to_string();
+    let mut value = value;
+    while let Some(inner) = newtype(value) {
+        path.push_str(".0");
+        value = inner;
+    }
+    let path = path.as_str();
+
     let expanded = cx.expanded.contains(path);
 
     // A reference beats the value's own type: a material id is a choice
     // among the ids this level defines, not a number to be typed.
+    if hints.node_ref && value.try_downcast_ref::<String>().is_some() {
+        cx.out.push(Row {
+            path: path.to_string(),
+            label,
+            docs,
+            depth,
+            rebuilds: hints.rebuilds,
+            kind: RowKind::Choice {
+                current: value
+                    .try_downcast_ref::<String>()
+                    .cloned()
+                    .unwrap_or_default(),
+                options: schema::node_names(cx.root),
+                num: None,
+            },
+        });
+        return;
+    }
     if let Some(schema::OneOf(pattern)) = hints.one_of {
         let options = schema::resolve_options(cx.root, pattern);
         let (num, current) = match Num::of(value) {
@@ -423,15 +461,26 @@ fn children(cx: &mut Cx, value: &dyn PartialReflect, path: &str, depth: usize, h
     }
 }
 
-/// A list item names itself when it can — an op's variant, a material's
-/// recipe — because "3" is not what you are looking for in a list of forty.
+/// A list item names itself when it can — a node's name and kind, an op's
+/// variant, a material's recipe — because "3" is not what you are looking
+/// for in a list of fifty-five.
 fn item_label(item: &dyn PartialReflect, index: usize) -> String {
     if let ReflectRef::Enum(e) = item.reflect_ref() {
         return format!("{index}  {}", e.variant_name());
     }
-    // A struct that flattens an enum (a generator entry holding an op)
-    // shows the inner variant instead of its own field count.
     if let ReflectRef::Struct(s) = item.reflect_ref() {
+        // What the type asked to be called by, if it asked.
+        let titled: Vec<String> = (0..s.field_len())
+            .filter(|&i| {
+                struct_field_info(item, i).is_some_and(|f| f.has_attribute::<schema::Title>())
+            })
+            .filter_map(|i| s.field_at(i).and_then(title_of))
+            .collect();
+        if !titled.is_empty() {
+            return format!("{index}  {}", titled.join("  "));
+        }
+        // A struct that flattens an enum shows the inner variant instead
+        // of its own field count.
         for i in 0..s.field_len() {
             if let Some(ReflectRef::Enum(e)) = s.field_at(i).map(|f| f.reflect_ref()) {
                 return format!("{index}  {}", e.variant_name());
@@ -439,6 +488,46 @@ fn item_label(item: &dyn PartialReflect, index: usize) -> String {
         }
     }
     index.to_string()
+}
+
+/// What a [`schema::Title`] field contributes to its row's label: the text
+/// if it holds text, and otherwise WHAT IT IS — which for a node is the
+/// concrete kind behind the box, because a dynamic value reports the type
+/// it actually holds.
+fn title_of(value: &dyn PartialReflect) -> Option<String> {
+    if let Some(s) = value.try_downcast_ref::<String>() {
+        return Some(s.clone());
+    }
+    match value.reflect_ref() {
+        // An absent `Option` contributes nothing rather than "None": an
+        // unnamed node is one the level did not need to name.
+        ReflectRef::Enum(e) if e.field_len() == 1 => e.field_at(0).and_then(title_of),
+        ReflectRef::Enum(_) => None,
+        _ => Some(
+            value
+                .get_represented_type_info()?
+                .type_path_table()
+                .short_path()
+                .to_string(),
+        ),
+    }
+}
+
+/// The single unnamed field a value WRAPS, or `None` for anything else.
+///
+/// A one-field tuple struct (`Wires`, the demo's `Population`) and a
+/// one-field tuple variant (`Some(name)`, `Wire::One(source)`) are the same
+/// thing to a reader: a spelling Rust needs around the value they came to
+/// see. Struct variants and multi-field ones are not — those carry a
+/// choice, and collapsing them would hide it.
+fn newtype(value: &dyn PartialReflect) -> Option<&dyn PartialReflect> {
+    match value.reflect_ref() {
+        ReflectRef::TupleStruct(t) if t.field_len() == 1 => t.field(0),
+        ReflectRef::Enum(e) if e.variant_type() == VariantType::Tuple && e.field_len() == 1 => {
+            e.field_at(0)
+        }
+        _ => None,
+    }
 }
 
 /// A named field's own annotations replace whatever it was reached
@@ -453,13 +542,11 @@ fn field_hints(field: &NamedField, inherited: Hints) -> Hints {
         // Not replaced: a section marked as restreaming contains only
         // fields that restream, however deep.
         rebuilds: inherited.rebuilds || field.has_attribute::<schema::Rebuilds>(),
+        node_ref: field.has_attribute::<schema::NodeRef>(),
     }
 }
 
-fn struct_field_info(
-    value: &dyn PartialReflect,
-    index: usize,
-) -> Option<&'static NamedField> {
+fn struct_field_info(value: &dyn PartialReflect, index: usize) -> Option<&'static NamedField> {
     match value.get_represented_type_info()? {
         TypeInfo::Struct(info) => info.field_at(index),
         _ => None,
@@ -493,7 +580,8 @@ fn is_rgb(value: &dyn PartialReflect) -> bool {
     match value.reflect_ref() {
         ReflectRef::Array(a) => {
             (a.len() == 3 || a.len() == 4)
-                && a.get(0).is_some_and(|c| c.try_downcast_ref::<f32>().is_some())
+                && a.get(0)
+                    .is_some_and(|c| c.try_downcast_ref::<f32>().is_some())
         }
         _ => false,
     }

@@ -59,6 +59,25 @@ pub struct Hidden;
 #[derive(Reflect, Clone, Copy, Debug, PartialEq)]
 pub struct OneOf(pub &'static str);
 
+/// A reference to another NODE, by the name it declared.
+///
+/// A [`OneOf`] pattern cannot say this: a name may sit at any depth,
+/// because a `region` scope holds nodes too and the compiler resolves
+/// through it. Everything it reaches — a map's values, an enum's payload —
+/// inherits it, so the attribute goes on the field that HOLDS references
+/// rather than on every string one can be spelled as.
+#[derive(Reflect, Clone, Copy, Debug, PartialEq)]
+pub struct NodeRef;
+
+/// This field is what the row it sits in is CALLED.
+///
+/// Fifty-five nodes labelled by their index is a list you open one at a
+/// time to find anything. Labelled by the name and the kind the level
+/// wrote, it reads like the document it is — which is the whole claim of
+/// building the panel out of the document.
+#[derive(Reflect, Clone, Copy, Debug, PartialEq)]
+pub struct Title;
+
 /// Editing this MAY restream the world.
 ///
 /// The set of fields carrying it must agree with what `level::staleness`
@@ -87,6 +106,14 @@ pub struct Rebuilds;
 /// This is deliberately a pattern rather than a callback: a host adds a
 /// reference space by annotating a field, not by implementing a trait and
 /// remembering to register it.
+/// Every name a [`NodeRef`] could hold: the level's own nodes, at any
+/// depth. The compiler's list, so the menu and the checker agree.
+pub fn node_names(root: &dyn PartialReflect) -> Vec<String> {
+    root.try_downcast_ref::<crate::level::LevelDef>()
+        .map(|level| crate::graph::names(&level.nodes))
+        .unwrap_or_default()
+}
+
 pub fn resolve_options(root: &dyn PartialReflect, pattern: &str) -> Vec<String> {
     let steps: Vec<&str> = pattern.split('.').collect();
     let mut out = Vec::new();
