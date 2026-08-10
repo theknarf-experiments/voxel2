@@ -52,7 +52,11 @@ architecture. Design plan: `~/.claude/plans/binary-twirling-brooks.md`.
   frame is megabytes, a black one ~57 KB) rather than trusting the shot.
   Drive the editor from tooling with
   `raw world.mutate_resources '{"resource":"voxel_editor::EditorState",
-  "path":".open","value":true}'` (and `.expanded` for which rows are open).
+  "path":".open","value":true}'`. `EditorState` also carries `.expanded`
+  (which rows are open), `.selected` (the node the graph is inspecting, by
+  reflect path), `.camera` (`{pan,zoom}`), `.width`, and `.save`/`.undo`/
+  `.redo` — flags so the keystrokes are drivable from a script, which is
+  the only way any of it is testable on a running panel.
 - Zero `Validation Error` lines in the log is part of "verified".
 - Kill running app processes before spawning another and after each
   capture.

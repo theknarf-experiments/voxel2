@@ -69,12 +69,21 @@ reflection — no widget code per field and no schema restated. `TypeInfo`
 says what is in a level, the field's own doc comment supplies the label's
 explanation (`reflect_documentation`), and a small attribute vocabulary
 (`voxel_engine::schema`) says what the types cannot: which numbers are
-bounded, which `[f32; 3]` is a colour, which `u32` is a reference to a
-material id rather than a number, and which fields restream the world when
-edited. Every row carries the reflect path it came from, so editing is one
-observer rather than one per field — the same path `world.mutate_resources`
-takes over BRP. A new node kind is editable the moment it is
-registered.
+bounded, how fast an unbounded one drags, which `[f32; 3]` is a colour,
+which `u32` is a reference to a material id rather than a number, and which
+fields restream the world when edited. Every row carries the reflect path
+it came from, so editing is one observer per value type rather than one per
+field — the same path `world.mutate_resources` takes over BRP. A new node
+kind is editable the moment it is registered.
+
+The level itself is drawn as a **graph**: one box per node with its ports,
+wires between them, a frame around each `region` scope, and the level's own
+box at the head. Two-finger scroll pans and pinch zooms; clicking a node
+shows its fields beside the picture. Numbers drag, references and enum
+variants are menus of what the document actually contains, and colours open
+into their components. Cmd+Z undoes a whole edit, Cmd+S writes the level
+back to the file it came from. A level that stops compiling says why across
+the top of the panel and keeps the running world.
 
 **Live editing**: the level file is watched while running. Materials,
 environment and LOD tuning apply instantly; changes to the nodes,

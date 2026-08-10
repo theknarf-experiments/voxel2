@@ -5,8 +5,31 @@
 //! `TypeInfo` what is in it and `voxel_engine::schema` how to show it, and
 //! every row carries the reflect path it came from — the same path
 //! `world.mutate_resources` uses over BRP. Editing is therefore one
-//! observer rather than one per field, and a type this crate has never
-//! heard of is editable the moment it is annotated.
+//! observer per value TYPE rather than one per field, and a type this
+//! crate has never heard of is editable the moment it is annotated.
+//!
+//! What a value can be told to become: a number drags (at the speed its
+//! field declares, or one percent of itself), a bool toggles, a reference
+//! offers what the document actually contains, and an enum offers its own
+//! variants — switching one builds the new variant's fields from the
+//! registry. A colour opens into the numbers it is made of. Text and the
+//! structure of a document — adding, removing, reordering — are not
+//! editable yet, and the rows say so by being inert rather than by
+//! pretending.
+//!
+//! Two views. [`View::Rows`] is the generic one, and works on anything.
+//! [`View::Graph`] is a picture of `voxel_engine::graph` specifically —
+//! boxes, ports, wires, a frame per scope — because a graph view needs
+//! ports and wires and those belong to that language. Selecting a box
+//! shows its fields in the same column any other selection uses.
+//!
+//! Three things guard the document. Edits queue and apply through one
+//! exclusive system, which is where [`edit::History`] takes its snapshot,
+//! so undo is a whole document rather than an inverse per widget. The
+//! panel refuses to respawn while a widget is being dragged, or the drag
+//! would despawn its own widget. And a document that does not compile is
+//! shown with the compiler's complaint across the top, because the panel
+//! is now able to make one.
 
 use bevy::feathers::{dark_theme::create_dark_theme, theme::UiTheme, FeathersPlugins};
 use bevy::platform::collections::HashSet;
