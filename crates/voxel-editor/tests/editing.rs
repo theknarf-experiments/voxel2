@@ -238,3 +238,40 @@ fn picking_a_reference_writes_it() {
         .and_then(|w| w.sources().first().cloned());
     assert_eq!(wired.as_deref(), Some(name.as_str()), "a wire is rewired");
 }
+
+/// Save is asked for, never done here: this crate edits any reflected
+/// resource and has no idea where one came from.
+#[test]
+fn the_panel_asks_to_save_and_only_when_open() {
+    use bevy::input::ButtonInput;
+    let mut app = app();
+    app.add_message::<voxel_editor::SaveRequested>()
+        .init_resource::<ButtonInput<KeyCode>>()
+        .add_systems(Update, voxel_editor::save);
+
+    let asked = |app: &mut App| -> usize {
+        let world = app.world_mut();
+        let messages =
+            world.resource::<bevy::ecs::message::Messages<voxel_editor::SaveRequested>>();
+        messages.iter_current_update_messages().count()
+    };
+
+    // Shut: the flag is ignored, or a level editor would write the file
+    // from a keystroke in a game window.
+    app.world_mut().resource_mut::<EditorState>().open = false;
+    app.world_mut().resource_mut::<EditorState>().save = true;
+    app.update();
+    assert_eq!(asked(&mut app), 0, "a shut panel saves nothing");
+
+    app.world_mut().resource_mut::<EditorState>().open = true;
+    app.world_mut().resource_mut::<EditorState>().save = true;
+    app.update();
+    assert_eq!(asked(&mut app), 1, "open, and asked");
+    assert!(
+        !app.world().resource::<EditorState>().save,
+        "the ask is cleared, or it would save every frame"
+    );
+
+    app.update();
+    assert_eq!(asked(&mut app), 1, "and only once");
+}

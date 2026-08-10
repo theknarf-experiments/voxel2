@@ -23,9 +23,18 @@ mod walk;
 
 pub use edit::on_pick;
 pub use panel::on_tab;
+pub use panel::save;
 pub use row::{PicksOption, SelectsRoot};
 pub use style::PanelStyle;
 pub use walk::{rows, rows_at, rows_in, Num, Row, RowKind};
+
+/// The panel asked to save what it is editing.
+///
+/// Generic on purpose: this crate edits any reflected resource and has no
+/// idea what a document IS, let alone where it came from. The host says
+/// what saving means — for a level, `voxel_engine::level::SaveLevel`.
+#[derive(Message, Debug, Default, Clone, Copy)]
+pub struct SaveRequested;
 
 /// The key that opens the editor.
 ///
@@ -119,6 +128,10 @@ pub struct EditorState {
     /// A path rather than an entity: the graph is respawned whenever the
     /// document changes, and the same node is the same path afterwards.
     pub selected: Option<String>,
+    /// Set to ask for a save; cleared as soon as the ask is sent. A flag
+    /// rather than only a keystroke so tooling can drive it, which is also
+    /// the only way this is testable on a running panel.
+    pub save: bool,
     /// Panel width in logical pixels, dragged by the grip on its inner
     /// edge. Here rather than on the node because the panel is respawned
     /// whenever the document changes.
@@ -134,6 +147,7 @@ impl Default for EditorState {
             expanded: HashSet::from_iter([String::new()]),
             camera: canvas::GraphCamera::default(),
             selected: None,
+            save: false,
             width: 620.0,
         }
     }
@@ -216,7 +230,8 @@ impl Plugin for EditorPlugin {
             app.insert_resource(UiTheme(create_dark_theme()));
         }
 
-        app.insert_resource(EditorRoots(self.roots.clone()))
+        app.add_message::<SaveRequested>()
+            .insert_resource(EditorRoots(self.roots.clone()))
             .init_resource::<EditorState>()
             .init_resource::<edit::Pending>()
             .init_resource::<PanelStyle>()
@@ -235,6 +250,7 @@ impl Plugin for EditorPlugin {
                 Update,
                 (
                     panel::toggle,
+                    panel::save,
                     // Ordered: an edit queued this frame is applied before
                     // the panel is rebuilt from it, so a row never shows
                     // the value it had a frame after you changed it. Gated

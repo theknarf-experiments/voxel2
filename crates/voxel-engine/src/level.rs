@@ -1015,6 +1015,7 @@ impl Plugin for LevelPlugin {
         let level = self.def.clone();
 
         app.add_message::<LevelReloaded>()
+            .add_message::<SaveLevel>()
             .insert_resource(WorldSeed(self.seed))
             .insert_resource(HostPlanner(self.planner.clone()));
         if let Some(path) = &self.source {
@@ -1024,7 +1025,7 @@ impl Plugin for LevelPlugin {
                 mtime,
                 poll: Timer::from_seconds(0.5, TimerMode::Repeating),
             })
-            .add_systems(Update, watch_level_file);
+            .add_systems(Update, (watch_level_file, save_level));
         }
 
         if let Some(host) = &self.planner {
@@ -1141,6 +1142,35 @@ pub(crate) fn build_world_query(
 /// changes to the generator/ops/LOD topology rebuild the streamed
 /// world in place — including swapping in a completely different world.
 #[allow(clippy::too_many_arguments)]
+/// Write the live level back to the file it was loaded from.
+///
+/// The watcher is told the new mtime rather than left to notice it: our
+/// own write is not an edit, and reloading it would re-diff and re-apply a
+/// level that is already live.
+fn save_level(
+    mut asked: MessageReader<SaveLevel>,
+    level: Res<LevelDef>,
+    registry: Res<AppTypeRegistry>,
+    source: Option<ResMut<LevelSource>>,
+) {
+    if asked.read().count() == 0 {
+        return;
+    }
+    let Some(mut source) = source else {
+        warn_once!("level save: this level was not loaded from a file");
+        return;
+    };
+    match save_to(&level, &source.path, &registry.0) {
+        Ok(()) => {
+            source.mtime = std::fs::metadata(&source.path)
+                .and_then(|m| m.modified())
+                .ok();
+            info!("level saved: {}", source.path.display());
+        }
+        Err(e) => warn!("level save: {e}"),
+    }
+}
+
 /// Poll the watched file and publish what it says into [`LevelDef`].
 ///
 /// Writing the resource is the whole job: applying the change is
@@ -1298,6 +1328,30 @@ fn apply_level_change(
     // message and applies its own camera, lights and clear color.
     let previous = std::mem::replace(&mut applied.0, new);
     reloaded.write(LevelReloaded { previous });
+}
+
+/// Ask for the live level to be written back to the file it came from.
+///
+/// The engine owns the file, so it owns saving; WHAT asks is somebody
+/// else's business — a menu item, a keystroke in a panel, a tool over the
+/// wire. A level with no source file ignores it and says so once.
+#[derive(Message, Debug, Default, Clone, Copy)]
+pub struct SaveLevel;
+
+/// Write a level to `path`, as a level file.
+///
+/// Separate from the system so it can be tested without an `App`: the
+/// system is the five lines that decide WHEN, and this is the part that
+/// can fail.
+pub fn save_to(
+    level: &LevelDef,
+    path: &std::path::Path,
+    registry: &bevy::reflect::TypeRegistryArc,
+) -> Result<(), String> {
+    let json = level.to_json(registry).map_err(|e| e.to_string())?;
+    // A trailing newline, because a level is a text file under version
+    // control and every other tool that writes one leaves it.
+    std::fs::write(path, format!("{json}\n")).map_err(|e| e.to_string())
 }
 
 /// Emitted after a hot reload so the host can re-apply whatever it owns
@@ -1665,6 +1719,28 @@ mod tests {
             !packed.iter().any(|op| op.is_height_op()),
             "mega should have no height ops"
         );
+    }
+
+    /// A saved level is a level: it parses back, and it is the one that
+    /// was in memory rather than the one on disk when it loaded.
+    #[test]
+    fn saving_writes_a_level_that_loads() {
+        let reg = crate::graph::registry::engine_kinds();
+        let mut planet = LevelDef::from_json_known(&shipped("planet.json"), &reg).unwrap();
+        planet.lod.max_level -= 1;
+
+        let path = std::env::temp_dir().join("voxel2-save-test.json");
+        save_to(&planet, &path, &reg).expect("writes");
+        let back =
+            LevelDef::from_json_known(&std::fs::read_to_string(&path).unwrap(), &reg).unwrap();
+        std::fs::remove_file(&path).ok();
+
+        assert_eq!(
+            back.lod.max_level, planet.lod.max_level,
+            "the EDIT is there"
+        );
+        assert_eq!(back.nodes, planet.nodes);
+        assert_eq!(back.materials, planet.materials);
     }
 
     #[test]

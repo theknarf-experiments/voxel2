@@ -435,6 +435,17 @@ fn main() {
             .as_graph()
             .except(&["nodes"]),
     );
+    // The panel knows a keystroke; the engine knows the file. Which one
+    // means the other is the host's to say, and it is this line.
+    app.add_systems(
+        Update,
+        |mut asked: MessageReader<voxel_editor::SaveRequested>,
+         mut save: MessageWriter<voxel_engine::level::SaveLevel>| {
+            for _ in asked.read() {
+                save.write(voxel_engine::level::SaveLevel);
+            }
+        },
+    );
     app.add_systems(Startup, setup_scene)
         .add_systems(Update, (autopilot, sync_world_suns));
 
