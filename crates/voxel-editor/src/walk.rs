@@ -49,6 +49,12 @@ pub enum RowKind {
         value: f64,
         num: Num,
         range: Option<schema::Range>,
+        /// Units per pixel of drag, for a number no [`schema::Range`]
+        /// bounds. Declared by the field where it knows better, and
+        /// otherwise proportional to the value: a scale of `5e-5` and an
+        /// amplitude of `800` cannot share a step, and one that suited
+        /// either would make the other untouchable.
+        speed: f32,
     },
     Bool(bool),
     Text(String),
@@ -111,6 +117,7 @@ struct Hints {
     /// survives the step through an array of colour pairs.
     color: bool,
     range: Option<schema::Range>,
+    speed: Option<schema::Speed>,
     one_of: Option<schema::OneOf>,
     /// Inherited all the way down: every number inside a section that
     /// restreams the world restreams it too.
@@ -316,6 +323,9 @@ fn emit(
                 value: value_f,
                 num,
                 range: hints.range,
+                speed: hints
+                    .speed
+                    .map_or_else(|| drag_speed(value_f, num), |schema::Speed(units)| units),
             },
         });
         return;
@@ -614,6 +624,7 @@ fn field_hints(field: &NamedField, inherited: Hints) -> Hints {
     Hints {
         color: field.has_attribute::<schema::AsColor>(),
         range: field.get_attribute::<schema::Range>().copied(),
+        speed: field.get_attribute::<schema::Speed>().copied(),
         one_of: field.get_attribute::<schema::OneOf>().copied(),
         // Not replaced: a section marked as restreaming contains only
         // fields that restream, however deep.
@@ -667,6 +678,20 @@ fn type_name(value: &dyn PartialReflect) -> &'static str {
     value
         .get_represented_type_info()
         .map_or("<dynamic>", |i| i.type_path())
+}
+
+/// How fast an undeclared number moves under the pointer.
+///
+/// One percent of itself per pixel, so a hundred pixels roughly doubles
+/// whatever it is: a level holds `5e-5` beside `800`, and any fixed step
+/// that suited one would leave the other unusable. Integers move at least
+/// one per hundred pixels, and a value of zero has to start somewhere.
+fn drag_speed(value: f64, num: Num) -> f32 {
+    let proportional = (value.abs() * 0.01) as f32;
+    match num {
+        Num::F32 | Num::F64 => proportional.max(1e-6),
+        _ => proportional.max(0.01),
+    }
 }
 
 /// A number as the level would write it.

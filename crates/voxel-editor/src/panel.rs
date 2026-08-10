@@ -205,6 +205,24 @@ pub struct Shown {
     entity: Entity,
 }
 
+/// A widget is being dragged, so the panel must hold still.
+///
+/// Every edit changes the document, and the panel is respawned when the
+/// document changes — which would DESPAWN the very widget under the
+/// pointer, ending the drag on its first frame. So a drag freezes the
+/// rebuild and the panel catches up when the pointer is released. This is
+/// why the ranged sliders could not be dragged either.
+#[derive(Resource, Default)]
+pub struct Dragging(pub bool);
+
+pub fn on_drag_start(_: On<Pointer<DragStart>>, mut dragging: ResMut<Dragging>) {
+    dragging.0 = true;
+}
+
+pub fn on_drag_end(_: On<Pointer<DragEnd>>, mut dragging: ResMut<Dragging>) {
+    dragging.0 = false;
+}
+
 /// Is there anything for the panel systems to do?
 ///
 /// A closed dev tool has to cost NOTHING. These systems are exclusive, so
@@ -305,6 +323,11 @@ pub fn on_disclosure(
 /// needs the whole `World` and the type registry at once — the price of
 /// the panel not knowing what it is showing.
 pub fn rebuild(world: &mut World) {
+    // Not while a widget is being dragged: respawning the panel would
+    // despawn the thing the pointer is holding.
+    if world.resource::<Dragging>().0 {
+        return;
+    }
     let open = world.resource::<EditorState>().open;
     if !open {
         if let Some(shown) = world.remove_resource::<Shown>() {

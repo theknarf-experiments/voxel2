@@ -21,10 +21,10 @@ mod row;
 mod style;
 mod walk;
 
-pub use edit::on_pick;
+pub use edit::{on_drag, on_drag_done, on_pick};
 pub use panel::on_tab;
 pub use panel::save;
-pub use row::{PicksOption, SelectsRoot};
+pub use row::{DragsNum, FieldPath, PicksOption, SelectsRoot, WritesNum};
 pub use style::PanelStyle;
 pub use walk::{rows, rows_at, rows_in, Num, Row, RowKind};
 
@@ -234,6 +234,7 @@ impl Plugin for EditorPlugin {
             .insert_resource(EditorRoots(self.roots.clone()))
             .init_resource::<EditorState>()
             .init_resource::<edit::Pending>()
+            .init_resource::<panel::Dragging>()
             .init_resource::<PanelStyle>()
             .init_resource::<graph::GraphStyle>()
             .register_type::<EditorState>()
@@ -243,9 +244,13 @@ impl Plugin for EditorPlugin {
             .add_observer(panel::on_tab)
             .add_observer(panel::on_select)
             .add_observer(panel::on_grip_drag)
+            .add_observer(panel::on_drag_start)
+            .add_observer(panel::on_drag_end)
             .add_observer(edit::on_f32)
             .add_observer(edit::on_bool)
             .add_observer(edit::on_pick)
+            .add_observer(edit::on_drag)
+            .add_observer(edit::on_drag_done)
             .add_systems(
                 Update,
                 (

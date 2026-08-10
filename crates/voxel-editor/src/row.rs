@@ -15,6 +15,7 @@ use bevy::feathers::controls::{
     FeathersDisclosureToggle, FeathersMenu, FeathersMenuButton, FeathersMenuItem,
     FeathersMenuPopup, FeathersSlider,
 };
+use bevy::feathers::cursor::EntityCursor;
 use bevy::feathers::font_styles::InheritableFont;
 use bevy::feathers::theme::{InheritableThemeTextColor, ThemedText};
 use bevy::feathers::tokens;
@@ -55,6 +56,18 @@ pub struct WritesNum(pub Num);
 /// (`voxel_engine::schema::Rebuilds`), never a guess made here.
 #[derive(Component, Clone, Copy, Debug, Default)]
 pub struct CommitOnRelease;
+
+/// A number the pointer can drag.
+///
+/// `from` is the value the row was BUILT with, and the drag reports its
+/// total distance, so the new value is one multiplication rather than an
+/// accumulation that drifts — and the panel is frozen while a drag is in
+/// flight, so `from` cannot go stale under it.
+#[derive(Component, Clone, Copy, Debug, Default)]
+pub struct DragsNum {
+    pub from: f32,
+    pub speed: f32,
+}
 
 /// A menu item that writes one of a reference's options.
 ///
@@ -316,7 +329,12 @@ fn value_widget(row: &Row, style: &PanelStyle) -> Box<dyn SceneList> {
             menu(current, options, &row.path, None, true, style)
         }
 
-        RowKind::Number { value, num, range } => match range {
+        RowKind::Number {
+            value,
+            num,
+            range,
+            speed,
+        } => match range {
             Some(r) => {
                 let (v, lo, hi) = (*value as f32, r.0, r.1);
                 let writes = *num;
@@ -346,19 +364,43 @@ fn value_widget(row: &Row, style: &PanelStyle) -> Box<dyn SceneList> {
                     ))
                 }
             }
-            // Shown, not yet edited in the panel.
+            // No bounds to slide between, so it DRAGS: press and move
+            // sideways. The number is still shown as the level writes it.
             //
-            // `FeathersNumberInput` displayed `14` as `4` and `2.5` as
-            // `5` — it keeps its text in a child it manages, and only the
-            // last character survived. Rendered beside our own text the
-            // two disagreed in the same row. A tool opened to check a
-            // number must not be the thing that gets it wrong, so the
-            // control is gone until there is one that can be trusted.
-            // These fields are still reachable by file edit and by
-            // `world.mutate_resources`.
+            // Not `FeathersNumberInput`, which displayed `14` as `4` and
+            // `2.5` as `5` — it keeps its text in a child it manages, and
+            // only the last character survived. A tool opened to check a
+            // number must not be the thing that gets it wrong.
             None => {
                 let shown = format_num(*value, *num);
-                Box::new(vec![cell(style.value, self::text(shown, style.font))])
+                let (writes, from, speed) = (*num, *value as f32, *speed);
+                if hold {
+                    Box::new(bsn_list!(
+                        Node {
+                            width: {px(style.value)},
+                            flex_shrink: 0.0,
+                            justify_content: bevy::ui::JustifyContent::FlexEnd,
+                            align_items: AlignItems::Center,
+                            overflow: Overflow::clip(),
+                        }
+                        EntityCursor::System(bevy::window::SystemCursorIcon::EwResize)
+                        DragsNum { from: {from}, speed: {speed} } WritesNum({writes}) FieldPath({p}) CommitOnRelease
+                        Children [ {vec![text(shown, style.font)]} ]
+                    ))
+                } else {
+                    Box::new(bsn_list!(
+                        Node {
+                            width: {px(style.value)},
+                            flex_shrink: 0.0,
+                            justify_content: bevy::ui::JustifyContent::FlexEnd,
+                            align_items: AlignItems::Center,
+                            overflow: Overflow::clip(),
+                        }
+                        EntityCursor::System(bevy::window::SystemCursorIcon::EwResize)
+                        DragsNum { from: {from}, speed: {speed} } WritesNum({writes}) FieldPath({p})
+                        Children [ {vec![text(shown, style.font)]} ]
+                    ))
+                }
             }
         },
 

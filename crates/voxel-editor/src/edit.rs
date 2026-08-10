@@ -13,7 +13,7 @@ use bevy::reflect::{TypeInfo, TypeRegistry};
 use bevy::ui_widgets::ValueChange;
 
 use crate::path;
-use crate::row::{CommitOnRelease, FieldPath, PicksOption, WritesNum};
+use crate::row::{CommitOnRelease, DragsNum, FieldPath, PicksOption, WritesNum};
 use crate::walk::Num;
 use crate::{EditorRoots, EditorState};
 
@@ -36,6 +36,75 @@ pub enum Value {
 /// Edits waiting for the exclusive system that can apply them.
 #[derive(Resource, Default)]
 pub struct Pending(pub Vec<Edit>);
+
+/// A number was dragged sideways.
+///
+/// The value is `from + distance * speed`, where the distance is the
+/// drag's OWN total: a dropped frame or a re-entrant observer cannot make
+/// it drift away from the pointer, the way accumulating deltas would.
+pub fn on_drag(
+    drag: On<Pointer<Drag>>,
+    rows: Query<(
+        &FieldPath,
+        &DragsNum,
+        Option<&WritesNum>,
+        Has<CommitOnRelease>,
+    )>,
+    state: Res<EditorState>,
+    mut pending: ResMut<Pending>,
+) {
+    let Ok((FieldPath(path), drags, num, on_release)) = rows.get(drag.event_target()) else {
+        return;
+    };
+    // A field that restreams the world waits for the pointer to be let
+    // go; dragging it would rebuild the streamed world once a frame.
+    if on_release {
+        return;
+    }
+    pending
+        .0
+        .push(dragged(&state, path, drags, num, drag.distance.x));
+}
+
+/// The end of a drag, for the fields that wait for it.
+pub fn on_drag_done(
+    drag: On<Pointer<DragEnd>>,
+    rows: Query<(
+        &FieldPath,
+        &DragsNum,
+        Option<&WritesNum>,
+        Has<CommitOnRelease>,
+    )>,
+    state: Res<EditorState>,
+    mut pending: ResMut<Pending>,
+) {
+    let Ok((FieldPath(path), drags, num, on_release)) = rows.get(drag.event_target()) else {
+        return;
+    };
+    if !on_release {
+        return;
+    }
+    pending
+        .0
+        .push(dragged(&state, path, drags, num, drag.distance.x));
+}
+
+fn dragged(
+    state: &EditorState,
+    path: &str,
+    drags: &DragsNum,
+    num: Option<&WritesNum>,
+    distance: f32,
+) -> Edit {
+    Edit {
+        root: state.root,
+        path: path.to_string(),
+        value: Value::Num(
+            (drags.from + distance * drags.speed) as f64,
+            num.map_or(Num::F32, |n| n.0),
+        ),
+    }
+}
 
 /// A reference was picked from its menu.
 ///

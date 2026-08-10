@@ -342,3 +342,88 @@ fn picking_a_variant_changes_the_shape_of_the_field() {
         "the recipe changed"
     );
 }
+
+/// A number with no declared bounds is dragged, and lands where the
+/// pointer says: `from + distance * speed`, at the field's own type.
+#[test]
+fn dragging_a_number_writes_where_the_pointer_went() {
+    use voxel_editor::{DragsNum, FieldPath, WritesNum};
+    let mut app = app();
+    app.add_observer(voxel_editor::on_drag);
+
+    let at = app
+        .world()
+        .resource::<LevelDef>()
+        .nodes
+        .iter()
+        .position(|n| n.node.0.kind() == "height_fbm")
+        .expect("planet has fbm height");
+    let path = format!(".nodes[{at}].node.amp");
+    let amp = read(&app, &path);
+
+    let widget = app
+        .world_mut()
+        .spawn((
+            FieldPath(path.clone()),
+            DragsNum {
+                from: amp,
+                speed: 2.0,
+            },
+            WritesNum(Num::F32),
+        ))
+        .id();
+    drag(&mut app, widget, 10.0);
+    let after = read(&app, &path);
+    assert!(
+        (after - (amp + 20.0)).abs() < 1e-3,
+        "{amp} + 10px * 2 = {}, got {after}",
+        amp + 20.0
+    );
+
+    // The SAME drag continued further is absolute, not cumulative: the
+    // distance is the drag's own total.
+    drag(&mut app, widget, 15.0);
+    let after = read(&app, &path);
+    assert!((after - (amp + 30.0)).abs() < 1e-3, "got {after}");
+}
+
+/// An `f32` the level holds, by path.
+fn read(app: &App, path: &str) -> f32 {
+    *app.world()
+        .resource::<LevelDef>()
+        .as_reflect()
+        .reflect_path(path)
+        .unwrap()
+        .try_downcast_ref::<f32>()
+        .unwrap()
+}
+
+/// Drag `widget` `x` pixels sideways.
+///
+/// The event is built by hand rather than pumped through picking: what is
+/// under test is the arithmetic from a drag to a value, and a real pointer
+/// would need a window, a camera and a hit.
+fn drag(app: &mut App, widget: Entity, x: f32) {
+    use bevy::picking::events::{Drag, Pointer};
+    use bevy::picking::pointer::{Location, PointerId};
+    let window = app.world_mut().spawn(bevy::window::Window::default()).id();
+    let location = Location {
+        target: bevy::window::WindowRef::Entity(window)
+            .normalize(None)
+            .unwrap()
+            .into(),
+        position: Vec2::ZERO,
+    };
+    app.world_mut()
+        .trigger(Pointer::<Drag>::new_without_propagate(
+            PointerId::Mouse,
+            location,
+            Drag {
+                button: bevy::picking::pointer::PointerButton::Primary,
+                distance: Vec2::new(x, 0.0),
+                delta: Vec2::new(x, 0.0),
+            },
+            widget,
+        ));
+    app.update();
+}
