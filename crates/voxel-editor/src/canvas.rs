@@ -17,12 +17,16 @@ use bevy::prelude::*;
 use bevy::text::{FontSize, FontWeight, LineBreak, TextLayout};
 use bevy::ui::{px, Display, FlexDirection, Node, PositionType, UiRect, UiTransform, Val2};
 
-use crate::graph::{Edge, Frame, GraphStyle, Layout, Placed};
+use crate::graph::{Frame, GraphStyle, Layout, Placed, Seg};
 use crate::style::PanelStyle;
 
 /// The pannable, zoomable layer every box sits on.
 #[derive(Component, Clone, Default)]
 pub struct GraphCanvas;
+
+/// Which node a box inspects when clicked.
+#[derive(Component, Clone, Debug, Default)]
+pub struct SelectsNode(pub String);
 
 /// The clipping window the canvas moves inside.
 #[derive(Component, Clone, Default)]
@@ -81,6 +85,7 @@ pub fn scene(
     graph: &GraphStyle,
     style: &PanelStyle,
     camera: GraphCamera,
+    selected: Option<&str>,
 ) -> impl Scene {
     // Text is sized with the layout, so a zoomed box holds a zoomed label
     // rather than a clipped one.
@@ -95,8 +100,17 @@ pub fn scene(
         .iter()
         .map(|f| frame(f, graph, style))
         .collect();
-    let edges: Vec<_> = layout.edges.iter().map(|e| edge(e, style)).collect();
-    let nodes: Vec<_> = layout.nodes.iter().map(|n| node(n, graph, style)).collect();
+    let edges: Vec<_> = layout
+        .edges
+        .iter()
+        .flat_map(|e| e.segments.iter().copied())
+        .map(wire)
+        .collect();
+    let nodes: Vec<_> = layout
+        .nodes
+        .iter()
+        .map(|n| node(n, graph, style, selected == Some(n.path.as_str())))
+        .collect();
     let font = FontSize::Px(style.font);
     let pan = camera.pan;
 
@@ -130,7 +144,7 @@ pub fn scene(
 }
 
 /// One node: a title bar, then one row per port.
-fn node(placed: &Placed, graph: &GraphStyle, style: &PanelStyle) -> impl Scene {
+fn node(placed: &Placed, graph: &GraphStyle, style: &PanelStyle, selected: bool) -> impl Scene {
     let title = match &placed.name {
         Some(name) => format!("{name}  {}", placed.kind),
         None => placed.kind.to_string(),
@@ -144,8 +158,15 @@ fn node(placed: &Placed, graph: &GraphStyle, style: &PanelStyle) -> impl Scene {
     let (at, size) = (placed.at, placed.size);
     let header = px(graph.header);
     let font = FontSize::Px(style.font * 0.9);
+    let path = placed.path.clone();
+    let border = if selected {
+        Color::srgb(0.30, 0.55, 0.92)
+    } else {
+        Color::srgba(0.0, 0.0, 0.0, 0.6)
+    };
 
     bsn! {
+        SelectsNode({path})
         Node {
             position_type: PositionType::Absolute,
             left: px(at.x), top: px(at.y),
@@ -154,7 +175,7 @@ fn node(placed: &Placed, graph: &GraphStyle, style: &PanelStyle) -> impl Scene {
             flex_direction: FlexDirection::Column,
             border: UiRect::all(px(1)),
         }
-        BorderColor::all(Color::srgba(0.0, 0.0, 0.0, 0.6))
+        BorderColor::all(border)
         ThemeBackgroundColor(tokens::SUBPANE_BODY_BG)
         Children [
             (
@@ -207,30 +228,22 @@ fn port(name: &str, input: bool, graph: &GraphStyle, style: &PanelStyle) -> impl
     }
 }
 
-/// A wire, as a thin bar rotated onto the line between its two ends.
+/// One run of a wire: an ordinary axis-aligned box.
 ///
-/// Bevy's UI has no line primitive and no curves. A straight bar is what
-/// `space-wizard-horror` draws through egui's painter too, so nothing is
-/// lost but the flourish — and one node per wire is ninety-seven entities
-/// on the biggest level this game ships.
-fn edge(edge: &Edge, _style: &PanelStyle) -> impl Scene {
-    let span = edge.to - edge.from;
-    let length = span.length().max(1.0);
-    let mid = (edge.from + edge.to) * 0.5;
-    // Rot2 turns clockwise and UI y grows downward, so the screen-space
-    // angle needs no flip.
-    let angle = Rot2::radians(span.y.atan2(span.x));
-    let thickness = 1.5;
+/// Not a rotated bar. Bevy has no line primitive, and a rotated node is
+/// clipped against an axis-aligned rect that does not follow the rotation,
+/// which broke every near-vertical wire into moving dashes — see
+/// [`crate::graph::Edge`].
+fn wire(seg: Seg) -> impl Scene {
     bsn! {
         Node {
             position_type: PositionType::Absolute,
-            left: px(mid.x - length * 0.5),
-            top: px(mid.y - thickness * 0.5),
-            width: px(length),
-            height: px(thickness),
+            left: px(seg.at.x),
+            top: px(seg.at.y),
+            width: px(seg.size.x),
+            height: px(seg.size.y),
         }
-        UiTransform { rotation: {angle} }
-        BackgroundColor({Color::srgba(0.45, 0.62, 0.85, 0.75)})
+        BackgroundColor(Color::srgba(0.45, 0.62, 0.85, 0.75))
     }
 }
 

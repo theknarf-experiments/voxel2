@@ -167,6 +167,35 @@ pub fn rows_in(
     cx.out
 }
 
+/// The rows of ONE value, reached at `path`.
+///
+/// The paths the rows carry stay absolute, so a widget built from them
+/// edits the document and not a copy — and `root` is still the whole
+/// document, because a reference row's options are enumerated from it.
+///
+/// `section` names the top-level field the value lives under, so the
+/// attributes it carries — a section that restreams the world, above all —
+/// reach the rows the same way they would on the way down.
+pub fn rows_at(
+    root: &dyn PartialReflect,
+    value: &dyn PartialReflect,
+    path: &str,
+    section: &str,
+    expanded: &HashSet<String>,
+) -> Vec<Row> {
+    let mut cx = Cx {
+        root,
+        expanded,
+        sections: &Sections::All,
+        out: Vec::new(),
+    };
+    let hints = named_field(root, section)
+        .map(|(_, info)| field_hints(info, Hints::default()))
+        .unwrap_or_default();
+    children(&mut cx, value, path, 0, hints);
+    cx.out
+}
+
 /// A struct field by name, with the type info that carries its attributes.
 fn named_field<'a>(
     value: &'a dyn PartialReflect,

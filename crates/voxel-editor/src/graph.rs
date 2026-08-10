@@ -125,13 +125,49 @@ pub struct Frame {
     pub size: Vec2,
 }
 
-/// One wire, resolved to the two boxes it joins.
+/// One wire, as axis-aligned segments from one port to the other.
+///
+/// Right angles rather than a diagonal, for two reasons. A diagonal has to
+/// be drawn as a ROTATED node, and Bevy clips a rotated node against an
+/// axis-aligned box in the wrong space — a near-vertical wire came out as
+/// a dashed line that crawled along itself as the graph panned, while
+/// near-horizontal ones were fine. And a right-angled route is what a node
+/// editor looks like: sixty crossing diagonals are a haystack.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Edge {
-    pub from: Vec2,
-    pub to: Vec2,
     /// The port on the consuming end, for a label or a hover.
     pub port: String,
+    pub segments: Vec<Seg>,
+}
+
+/// One axis-aligned run of a wire.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Seg {
+    pub at: Vec2,
+    pub size: Vec2,
+}
+
+impl Edge {
+    /// Route from an output port to an input one: out, across, in.
+    ///
+    /// The vertical run sits midway between the two boxes, so wires
+    /// leaving one column share a lane instead of each cutting its own
+    /// diagonal across everything between.
+    fn route(from: Vec2, to: Vec2, port: String, style: &GraphStyle) -> Self {
+        let thick = (1.5 * style.node_width / GraphStyle::default().node_width).max(1.0);
+        let half = thick * 0.5;
+        let mid = (from.x + to.x) * 0.5;
+        let bar = |a: Vec2, b: Vec2| Seg {
+            at: Vec2::new(a.x.min(b.x), a.y.min(b.y)) - Vec2::splat(half),
+            size: Vec2::new((b.x - a.x).abs(), (b.y - a.y).abs()) + Vec2::splat(thick),
+        };
+        let mut segments = vec![bar(from, Vec2::new(mid, from.y))];
+        if from.y != to.y {
+            segments.push(bar(Vec2::new(mid, from.y), Vec2::new(mid, to.y)));
+        }
+        segments.push(bar(Vec2::new(mid, to.y), to));
+        Self { port, segments }
+    }
 }
 
 /// A whole level, placed.
@@ -181,11 +217,12 @@ pub fn layout(nodes: &[NodeDef], style: &GraphStyle) -> Layout {
                     continue;
                 };
                 let produced = out.nodes[from].outs.first().copied().unwrap_or("");
-                edges.push(Edge {
-                    from: out.nodes[from].out_anchor(produced, style),
-                    to: out.nodes[to].in_anchor(port, style),
-                    port: port.clone(),
-                });
+                edges.push(Edge::route(
+                    out.nodes[from].out_anchor(produced, style),
+                    out.nodes[to].in_anchor(port, style),
+                    port.clone(),
+                    style,
+                ));
             }
         }
     }

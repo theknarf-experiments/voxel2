@@ -70,17 +70,33 @@ fn a_wire_lands_on_the_port_it_names() {
         .unwrap();
     let height = out.edges.iter().find(|e| e.port == "height").unwrap();
     let warp = out.edges.iter().find(|e| e.port == "warp").unwrap();
-    // Both land on `a`'s left edge, at different rows.
-    assert_eq!(height.to.x, a.at.x);
-    assert_eq!(warp.to.x, a.at.x);
-    assert_ne!(height.to.y, warp.to.y, "a port is a row, not a box");
-    // And leave from the producer's right edge.
     let sea = out
         .nodes
         .iter()
         .find(|p| p.name.as_deref() == Some("sea"))
         .unwrap();
-    assert_eq!(height.from.x, sea.at.x + sea.size.x);
+
+    // Every run is axis-aligned — a diagonal would have to be a rotated
+    // node, which Bevy draws in pieces.
+    for edge in &out.edges {
+        for seg in &edge.segments {
+            assert!(
+                seg.size.x.min(seg.size.y) <= 2.0,
+                "{:?} is not a line: {seg:?}",
+                edge.port
+            );
+        }
+    }
+    // The first run leaves the producer's right edge; the last arrives at
+    // the consumer's left one, on the port's own row.
+    let ends = |e: &super::Edge| {
+        let (first, last) = (e.segments.first().unwrap(), e.segments.last().unwrap());
+        (first.at, last.at + last.size)
+    };
+    let (from, to) = ends(height);
+    assert!((from.x - (sea.at.x + sea.size.x)).abs() <= 2.0, "{from:?}");
+    assert!((to.x - a.at.x).abs() <= 2.0, "{to:?}");
+    assert_ne!(to.y, ends(warp).1.y, "a port is a row, not a box");
 }
 
 /// A scope is a frame around its children, and the frame contains them.

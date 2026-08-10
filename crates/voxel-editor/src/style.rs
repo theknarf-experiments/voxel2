@@ -57,6 +57,8 @@ pub struct PanelStyle {
     pub wheel_line: f32,
     /// Padding inside the scrolling body.
     pub pad: f32,
+    /// The properties column beside the graph.
+    pub inspector: f32,
 }
 
 impl Default for PanelStyle {
@@ -74,6 +76,7 @@ impl Default for PanelStyle {
             width: 320.0..1400.0,
             wheel_line: 24.0,
             pad: 6.0,
+            inspector: 300.0,
         }
     }
 }

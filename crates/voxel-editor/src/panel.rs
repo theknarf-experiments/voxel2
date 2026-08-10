@@ -124,7 +124,13 @@ pub fn on_wheel(
     if delta == Vec2::ZERO {
         return;
     }
-    if graph_view(&roots, state.root) {
+    // Over the properties column, the wheel scrolls it; over the graph it
+    // pans. The column is a fixed width at the panel's inner edge, so this
+    // is one comparison, like the panel's own.
+    let over_props = window
+        .cursor_position()
+        .is_some_and(|c| c.x >= window.width() - style.inspector);
+    if graph_view(&roots, state.root) && !over_props {
         // The gesture is in screen pixels and so is the pan: the zoom is
         // already in the geometry underneath it.
         state.camera.pan += delta;
@@ -190,6 +196,8 @@ pub struct Shown {
     /// Zoom is in the GEOMETRY, so changing it rebuilds. Pan is not — it
     /// is one transform, written by [`apply_camera`] without a respawn.
     zoom: f32,
+    /// Which node the properties column is showing.
+    selected: Option<String>,
     /// The change tick of the document resource the rows were read from.
     tick: u32,
     /// The panel entity, so finding it again is not a fresh `QueryState`
@@ -212,6 +220,22 @@ pub fn active(state: Res<EditorState>, shown: Option<Res<Shown>>) -> bool {
 pub fn toggle(keys: Res<ButtonInput<KeyCode>>, mut state: ResMut<EditorState>) {
     if keys.just_pressed(TOGGLE_KEY) {
         state.open = !state.open;
+    }
+}
+
+/// Inspect the node that was clicked, or clear the selection when the
+/// click lands on the canvas behind them.
+pub fn on_select(
+    click: On<Pointer<Click>>,
+    boxes: Query<&canvas::SelectsNode>,
+    viewports: Query<(), With<canvas::GraphViewport>>,
+    mut state: ResMut<EditorState>,
+) {
+    let target = click.event_target();
+    if let Ok(canvas::SelectsNode(path)) = boxes.get(target) {
+        state.selected = Some(path.clone());
+    } else if viewports.contains(target) {
+        state.selected = None;
     }
 }
 
@@ -265,7 +289,13 @@ pub fn rebuild(world: &mut World) {
         return;
     }
 
-    let Some(Document { label, tick, body }) = read_document(world) else {
+    let Some(Document {
+        label,
+        tick,
+        body,
+        props,
+    }) = read_document(world)
+    else {
         return;
     };
 
@@ -276,6 +306,7 @@ pub fn rebuild(world: &mut World) {
         root: state.root,
         expanded,
         zoom: state.camera.zoom,
+        selected: state.selected.clone(),
         tick,
         entity: Entity::PLACEHOLDER,
     };
@@ -302,9 +333,19 @@ pub fn rebuild(world: &mut World) {
         Body::Rows(rows) => Box::new(rows_body(rows, &style)),
         Body::Graph(layout) => {
             let camera = world.resource::<EditorState>().camera;
+            let selected = world.resource::<EditorState>().selected.clone();
             let graph_style = world.resource::<graph::GraphStyle>().scaled(camera.zoom);
+            let canvas = bsn_list! {(
+                {canvas::scene(layout, &graph_style, &style, camera, selected.as_deref())}
+            )};
+            let inspector = inspector(&props, &style);
             Box::new(bsn_list! {(
-                {canvas::scene(layout, &graph_style, &style, camera)}
+                Node {
+                    flex_grow: 1.0,
+                    min_height: px(0),
+                    flex_direction: FlexDirection::Row,
+                }
+                Children [ {canvas}, {inspector} ]
             )})
         }
     };
@@ -388,6 +429,9 @@ struct Document {
     label: String,
     tick: u32,
     body: Body,
+    /// The selected node's own rows, for the graph view's properties
+    /// column. Empty when nothing is selected.
+    props: Option<(String, Vec<walk::Row>)>,
 }
 
 /// The two things a tab can be.
@@ -409,6 +453,63 @@ impl Body {
             }
         }
     }
+}
+
+/// What the graph view is inspecting, if anything.
+fn state_selected(world: &World) -> Option<String> {
+    world.resource::<EditorState>().selected.clone()
+}
+
+/// The properties column beside the graph.
+///
+/// The same rows the list view builds, at the same paths: a value edited
+/// here is edited in the document, not in a copy of the selection.
+fn inspector(props: &Option<(String, Vec<walk::Row>)>, style: &PanelStyle) -> impl SceneList {
+    let width = px(style.inspector);
+    // Its own columns: the list view's are sized for a panel three times
+    // this wide, and a value column that does not fit is a value you
+    // cannot read.
+    let style = &PanelStyle {
+        label: style.inspector * 0.45,
+        value: style.inspector * 0.35,
+        ..style.clone()
+    };
+    let (title, rows) = match props {
+        Some((label, rows)) => (label.clone(), rows.as_slice()),
+        None => ("click a node".to_string(), [].as_slice()),
+    };
+    let header = self::rows_header(title, style);
+    let body = rows_body(rows, style);
+    bsn_list! {(
+        Node {
+            width: {width},
+            flex_shrink: 0.0,
+            flex_direction: FlexDirection::Column,
+            border: UiRect::left(px(1)),
+        }
+        BorderColor::all(Color::srgba(0.0, 0.0, 0.0, 0.5))
+        ThemeBackgroundColor(tokens::PANE_HEADER_BG)
+        Children [ {header}, {body} ]
+    )}
+}
+
+/// The properties column's own title bar.
+fn rows_header(title: String, style: &PanelStyle) -> impl SceneList {
+    let font = bevy::text::FontSize::Px(style.font);
+    let pad = px(style.pad);
+    bsn_list! {(
+        Node {
+            padding: UiRect::all(pad),
+            flex_shrink: 0.0,
+            overflow: Overflow::clip(),
+        }
+        Children [(
+            Text({title})
+            TextFont { font_size: {font} }
+            bevy::text::TextLayout { linebreak: bevy::text::LineBreak::NoWrap }
+            ThemedText
+        )]
+    )}
 }
 
 /// The scrolling list of rows.
@@ -505,9 +606,31 @@ fn read_document(world: &mut World) -> Option<Document> {
             )
         }
     };
+    // The selection is a path into the SAME document, so the rows it
+    // produces address the level and edit it like any other row.
+    let props = state_selected(world).and_then(|path| {
+        let node = value.reflect_path(path.as_str()).ok()?;
+        // What the level calls it, if it named it at all.
+        let label = value
+            .reflect_path(format!("{path}.name.0").as_str())
+            .ok()
+            .and_then(|n| n.try_downcast_ref::<String>().cloned())
+            .unwrap_or_else(|| path.clone());
+        Some((
+            label,
+            walk::rows_at(
+                value.as_partial_reflect(),
+                node.as_partial_reflect(),
+                &path,
+                "nodes",
+                &expanded,
+            ),
+        ))
+    });
     Some(Document {
         label: root.label,
         tick,
         body,
+        props,
     })
 }

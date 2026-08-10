@@ -24,7 +24,7 @@ mod walk;
 pub use panel::on_tab;
 pub use row::SelectsRoot;
 pub use style::PanelStyle;
-pub use walk::{rows, rows_in, Num, Row, RowKind};
+pub use walk::{rows, rows_at, rows_in, Num, Row, RowKind};
 
 /// The key that opens the editor.
 ///
@@ -61,6 +61,9 @@ pub struct Root {
 pub enum View {
     #[default]
     Rows,
+    /// The node list as a picture, with the selected node's own fields
+    /// beside it. [`Sections`] does not apply: the nodes ARE what a graph
+    /// draws.
     Graph,
 }
 
@@ -111,6 +114,10 @@ pub struct EditorState {
     pub expanded: HashSet<String>,
     /// Where the graph view is looked at from.
     pub camera: canvas::GraphCamera,
+    /// Reflect path of the node the graph view is inspecting, if any.
+    /// A path rather than an entity: the graph is respawned whenever the
+    /// document changes, and the same node is the same path afterwards.
+    pub selected: Option<String>,
     /// Panel width in logical pixels, dragged by the grip on its inner
     /// edge. Here rather than on the node because the panel is respawned
     /// whenever the document changes.
@@ -125,6 +132,7 @@ impl Default for EditorState {
             // The root itself is always open, or the panel is one row.
             expanded: HashSet::from_iter([String::new()]),
             camera: canvas::GraphCamera::default(),
+            selected: None,
             width: 620.0,
         }
     }
@@ -217,6 +225,7 @@ impl Plugin for EditorPlugin {
             .register_type::<graph::GraphStyle>()
             .add_observer(panel::on_disclosure)
             .add_observer(panel::on_tab)
+            .add_observer(panel::on_select)
             .add_observer(panel::on_grip_drag)
             .add_observer(edit::on_f32)
             .add_observer(edit::on_bool)
