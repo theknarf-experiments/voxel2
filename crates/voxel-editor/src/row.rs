@@ -11,8 +11,8 @@
 
 use bevy::feathers::constants::{fonts, size};
 use bevy::feathers::controls::{
-    ColorSwatchValue, FeathersCheckbox, FeathersColorSwatch, FeathersDisclosureToggle,
-    FeathersMenuButton, FeathersSlider,
+    ButtonVariant, ColorSwatchValue, FeathersButton, FeathersCheckbox, FeathersColorSwatch,
+    FeathersDisclosureToggle, FeathersMenuButton, FeathersSlider,
 };
 use bevy::feathers::font_styles::InheritableFont;
 use bevy::feathers::theme::{InheritableThemeTextColor, ThemedText};
@@ -349,5 +349,29 @@ fn value_widget(row: &Row, style: &PanelStyle) -> Box<dyn SceneList> {
             let text = format!("no widget for {type_path}");
             Box::new(vec![cell(style.value, self::text(text, style.font))])
         }
+    }
+}
+
+/// Which tab a button selects. On the button, not the row: the tab strip
+/// is not part of the document.
+#[derive(Component, Clone, Debug, Default)]
+pub struct SelectsRoot(pub usize);
+
+/// One tab. The active one is `Primary`; the rest are `Plain`, so the
+/// strip reads as a strip rather than as a row of buttons.
+pub fn tab(index: usize, label: &str, active: bool, style: &PanelStyle) -> impl Scene {
+    let caption = Box::new(vec![text(label.to_string(), style.font)]) as Box<dyn SceneList>;
+    let variant = if active {
+        ButtonVariant::Primary
+    } else {
+        ButtonVariant::Plain
+    };
+    bsn! {
+        @FeathersButton {
+            @caption: {caption},
+            @variant: {variant},
+        }
+        SelectsRoot({index})
+        Node { flex_grow: 1.0, min_width: px(0) }
     }
 }

@@ -19,8 +19,10 @@ mod row;
 mod style;
 mod walk;
 
+pub use panel::on_tab;
+pub use row::SelectsRoot;
 pub use style::PanelStyle;
-pub use walk::{rows, Num, Row, RowKind};
+pub use walk::{rows, rows_in, Num, Row, RowKind};
 
 /// The key that opens the editor.
 ///
@@ -42,6 +44,33 @@ pub struct Root {
     pub label: String,
     /// Fully-qualified type path of the resource.
     pub type_path: &'static str,
+    /// Which of the document's top-level sections this tab shows.
+    pub sections: Sections,
+}
+
+/// Which top-level fields a tab shows.
+///
+/// A tab is a VIEW of a document, not a document: a level's node list is
+/// most of what there is to edit and nothing like the rest of it, so the
+/// two want separate tabs while remaining one resource, one change tick
+/// and one set of reflect paths.
+#[derive(Clone, PartialEq, Debug, Default)]
+pub enum Sections {
+    #[default]
+    All,
+    Only(Vec<String>),
+    Except(Vec<String>),
+}
+
+impl Sections {
+    /// Does this tab show the document's `field` section?
+    pub fn shows(&self, field: &str) -> bool {
+        match self {
+            Sections::All => true,
+            Sections::Only(names) => names.iter().any(|n| n == field),
+            Sections::Except(names) => !names.iter().any(|n| n == field),
+        }
+    }
 }
 
 /// The documents this app lets the editor edit, in tab order.
@@ -98,7 +127,35 @@ impl EditorPlugin {
         self.roots.push(Root {
             label: label.into(),
             type_path: T::type_path(),
+            sections: Sections::All,
         });
+        self
+    }
+
+    /// Show only these sections of the root just added.
+    pub fn only(self, sections: &[&str]) -> Self {
+        self.sections(Sections::Only(
+            sections.iter().map(|s| s.to_string()).collect(),
+        ))
+    }
+
+    /// Show everything of the root just added EXCEPT these sections.
+    ///
+    /// Paired with [`EditorPlugin::only`] on another tab, this is how a
+    /// document is split without either half having to list the other's
+    /// contents — add a section to the level and it appears in the tab
+    /// that did not name it.
+    pub fn except(self, sections: &[&str]) -> Self {
+        self.sections(Sections::Except(
+            sections.iter().map(|s| s.to_string()).collect(),
+        ))
+    }
+
+    fn sections(mut self, sections: Sections) -> Self {
+        match self.roots.last_mut() {
+            Some(root) => root.sections = sections,
+            None => warn!("editor: sections declared before any root — ignored"),
+        }
         self
     }
 }
@@ -128,6 +185,7 @@ impl Plugin for EditorPlugin {
             .register_type::<EditorState>()
             .register_type::<PanelStyle>()
             .add_observer(panel::on_disclosure)
+            .add_observer(panel::on_tab)
             .add_observer(panel::on_grip_drag)
             .add_observer(edit::on_f32)
             .add_observer(edit::on_bool)

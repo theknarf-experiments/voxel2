@@ -41,6 +41,7 @@ fn app() -> App {
         .insert_resource(planet())
         .init_resource::<Rebuilt>()
         .insert_resource(EditorRoots(vec![Root {
+            sections: voxel_editor::Sections::All,
             label: "Level".into(),
             type_path: <LevelDef as TypePath>::type_path(),
         }]))
@@ -149,4 +150,29 @@ fn a_bad_path_changes_nothing() {
 
     let after = format!("{:?}", app.world().resource::<LevelDef>().materials[0]);
     assert_eq!(before, after);
+}
+
+/// Clicking a tab switches which view the panel shows.
+///
+/// The observer half is small but it is the ONE thing standing between a
+/// strip that looks right in a screenshot and a strip that does nothing:
+/// the button carries the index, the observer writes it, and the panel
+/// respawns from it.
+#[test]
+fn activating_a_tab_selects_its_root() {
+    let mut app = app();
+    app.world_mut().resource_mut::<EditorRoots>().0.push(Root {
+        label: "Nodes".into(),
+        type_path: <LevelDef as TypePath>::type_path(),
+        sections: voxel_editor::Sections::Only(vec!["nodes".into()]),
+    });
+    app.add_observer(voxel_editor::on_tab);
+
+    let tab = app.world_mut().spawn(voxel_editor::SelectsRoot(1)).id();
+    assert_eq!(app.world().resource::<EditorState>().root, 0);
+
+    app.world_mut()
+        .trigger(bevy::ui_widgets::Activate { entity: tab });
+    app.update();
+    assert_eq!(app.world().resource::<EditorState>().root, 1);
 }

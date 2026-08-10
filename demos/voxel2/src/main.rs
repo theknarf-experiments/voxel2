@@ -425,7 +425,17 @@ fn main() {
     // The level editor edits the level, which is `LevelDef` — the editor
     // crate is told which reflected resources are documents and knows
     // nothing else about either this demo or the engine.
-    app.add_plugins(voxel_editor::EditorPlugin::default().root::<LevelDef>("Level"));
+    // Two views of ONE document: the node list is most of what there is
+    // to edit and nothing like the rest of it. Split by naming only
+    // `nodes`, so a section added to the level lands in "Level" without
+    // anyone here being told about it.
+    app.add_plugins(
+        voxel_editor::EditorPlugin::default()
+            .root::<LevelDef>("Nodes")
+            .only(&["nodes"])
+            .root::<LevelDef>("Level")
+            .except(&["nodes"]),
+    );
     app.add_systems(Startup, setup_scene)
         .add_systems(Update, (autopilot, sync_world_suns));
 

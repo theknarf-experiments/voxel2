@@ -12,6 +12,8 @@ use bevy::reflect::enums::{VariantInfo, VariantType};
 use bevy::reflect::{NamedField, PartialReflect, ReflectRef, TypeInfo};
 use voxel_engine::schema;
 
+use crate::Sections;
+
 /// One line of the panel.
 pub struct Row {
     /// Reflect path from the document root. `.field` and `[index]` are
@@ -123,20 +125,61 @@ struct Hints {
 struct Cx<'a> {
     root: &'a dyn PartialReflect,
     expanded: &'a HashSet<String>,
+    /// Which top-level sections this tab shows. Applied at the root only:
+    /// below it, a field named `nodes` is a field, not a section.
+    sections: &'a Sections,
     out: Vec<Row>,
 }
 
-/// Build the visible rows of `root`.
+/// Build the visible rows of the whole document.
 pub fn rows(root: &dyn PartialReflect, expanded: &HashSet<String>) -> Vec<Row> {
+    rows_in(root, expanded, &Sections::All)
+}
+
+/// Build the visible rows of one tab's view of `root`.
+pub fn rows_in(
+    root: &dyn PartialReflect,
+    expanded: &HashSet<String>,
+    sections: &Sections,
+) -> Vec<Row> {
     let mut cx = Cx {
         root,
         expanded,
+        sections,
         out: Vec::new(),
     };
+    // A tab that names exactly ONE section shows that section's contents.
+    // A tab called "Nodes" whose whole body is a collapsed row called
+    // `nodes` has spent a tab to say a word. The paths stay absolute, so
+    // what a row edits does not depend on which tab it was reached from.
+    if let Sections::Only(names) = sections {
+        if let [only] = names.as_slice() {
+            if let Some((field, info)) = named_field(root, only) {
+                let hints = field_hints(info, Hints::default());
+                children(&mut cx, field, &format!(".{only}"), 0, hints);
+                return cx.out;
+            }
+        }
+    }
     // The root's own container row is the panel header, so descend
     // straight into its children.
     children(&mut cx, root, "", 0, Hints::default());
     cx.out
+}
+
+/// A struct field by name, with the type info that carries its attributes.
+fn named_field<'a>(
+    value: &'a dyn PartialReflect,
+    name: &str,
+) -> Option<(&'a dyn PartialReflect, &'static NamedField)> {
+    let TypeInfo::Struct(info) = value.get_represented_type_info()? else {
+        return None;
+    };
+    let index = info.index_of(name)?;
+    let ReflectRef::Struct(s) = value.reflect_ref() else {
+        return None;
+    };
+    Some((s.field_at(index)?, info.field_at(index)?))
 }
 
 /// Emit one row for `value`, and its children if it is open.
@@ -331,6 +374,10 @@ fn children(cx: &mut Cx, value: &dyn PartialReflect, path: &str, depth: usize, h
                     continue;
                 };
                 if named.has_attribute::<schema::Hidden>() {
+                    continue;
+                }
+                // The tab's own filter, at the document's top level.
+                if path.is_empty() && !cx.sections.shows(named.name()) {
                     continue;
                 }
                 emit(

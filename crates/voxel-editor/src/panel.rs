@@ -145,6 +145,21 @@ pub fn toggle(keys: Res<ButtonInput<KeyCode>>, mut state: ResMut<EditorState>) {
     }
 }
 
+/// Switch to the tab that was clicked.
+///
+/// The panel respawns from [`EditorState`], so nothing else has to happen:
+/// the strip is rendered from `root` and cannot disagree with what is
+/// shown below it.
+pub fn on_tab(
+    activate: On<bevy::ui_widgets::Activate>,
+    tabs: Query<&row::SelectsRoot>,
+    mut state: ResMut<EditorState>,
+) {
+    if let Ok(row::SelectsRoot(index)) = tabs.get(activate.event_target()) {
+        state.root = *index;
+    }
+}
+
 /// Open or close whatever a clicked disclosure names.
 ///
 /// The widget is not told to update itself: the panel respawns from the
@@ -202,7 +217,15 @@ pub fn rebuild(world: &mut World) {
         }
         world.entity_mut(shown.entity).despawn();
     }
-    let header = format!("{label}  —  {} rows  (F10)", rows.len());
+    let n = rows.len();
+    let header = format!(
+        "{label}  —  {n} row{}  (F10)",
+        if n == 1 { "" } else { "s" }
+    );
+    // Only where there is a choice: a single-document app should not grow
+    // a strip with one thing in it.
+    let roots = world.resource::<EditorRoots>().0.clone();
+    let current = world.resource::<EditorState>().root;
     let width = px(world.resource::<EditorState>().width);
     let style = world.resource::<PanelStyle>().clone();
     let (grip, pad, row_gap) = (px(style.grip), px(style.pad), px(style.row_gap));
@@ -210,6 +233,20 @@ pub fn rebuild(world: &mut World) {
     // `impl SceneList for Vec<S: Scene>` is what lets a panel whose shape
     // is only known at runtime be expressed in a static macro.
     let row_scenes: Vec<_> = rows.iter().map(|r| row::scene(r, &style)).collect();
+    let tab_scenes: Vec<_> = if roots.len() > 1 {
+        roots
+            .iter()
+            .enumerate()
+            .map(|(i, r)| row::tab(i, &r.label, i == current, &style))
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let tabs = if tab_scenes.is_empty() {
+        Display::None
+    } else {
+        Display::Flex
+    };
     let panel = world
         .spawn_scene(bsn! {
             // Docked to the right edge, full height. The debug HUD lives
@@ -239,6 +276,19 @@ pub fn rebuild(world: &mut World) {
                     Node { flex_grow: 1.0, min_width: px(0), flex_direction: FlexDirection::Column }
                     Children [
                         (pane_header() Children [ (Text({header}) ThemedText) ]),
+                        (
+                            Node {
+                                display: {tabs},
+                                flex_direction: FlexDirection::Row,
+                                column_gap: {row_gap},
+                                padding: UiRect::all(pad),
+                                flex_shrink: 0.0,
+                            }
+                            // Part of the header, not of the document: an
+                            // unthemed strip shows whatever is behind it.
+                            ThemeBackgroundColor(tokens::PANE_HEADER_BG)
+                            Children [ {tab_scenes} ]
+                        ),
                         (
                             pane_body()
                             EditorBody
@@ -327,6 +377,6 @@ fn read_document(world: &mut World) -> Option<(String, u32, Vec<walk::Row>)> {
     let entity = world.resource_entities().get(component_id)?;
     let value = reflect.reflect(world.entity(entity))?;
 
-    let rows = walk::rows(value.as_partial_reflect(), &expanded);
+    let rows = walk::rows_in(value.as_partial_reflect(), &expanded, &root.sections);
     Some((root.label, tick, rows))
 }

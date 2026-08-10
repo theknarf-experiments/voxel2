@@ -349,3 +349,69 @@ fn every_reference_a_level_makes_resolves() {
         assert!(seen > 0, "{name} makes no references at all");
     }
 }
+
+/// A tab is a VIEW of a document, not a document: both halves of the split
+/// read the same resource, the same change tick and the same paths.
+#[test]
+fn a_tab_shows_the_sections_it_asked_for() {
+    use voxel_editor::{rows_in, Sections};
+    let level = planet();
+    let shut = bevy::platform::collections::HashSet::default();
+
+    let nodes = Sections::Only(vec!["nodes".into()]);
+    let rest = Sections::Except(vec!["nodes".into()]);
+    let labels = |s: &Sections| -> Vec<String> {
+        rows_in(&level, &shut, s)
+            .iter()
+            .map(|r| r.label.clone())
+            .collect()
+    };
+
+    // A tab naming one section shows that section's CONTENTS, so this is
+    // the node list itself rather than a row called `nodes`.
+    assert!(labels(&nodes).len() > 20, "{:?}", labels(&nodes));
+    assert!(rows_in(&level, &shut, &nodes)
+        .iter()
+        .all(|r| r.path.starts_with(".nodes[")));
+    let rest_labels: Vec<String> = labels(&rest);
+    assert!(!rest_labels.iter().any(|l| l == "nodes"), "{rest_labels:?}");
+    assert!(
+        rest_labels.iter().any(|l| l == "materials"),
+        "{rest_labels:?}"
+    );
+
+    // Between them they cover the document: `except` is what makes a
+    // section added to the level land in a tab without anyone naming it.
+    let all: Vec<String> = rows(&level, &shut)
+        .iter()
+        .map(|r| r.label.clone())
+        .collect();
+    for section in &all {
+        let shown = section == "nodes" || rest_labels.contains(section);
+        assert!(shown, "'{section}' is in no tab");
+    }
+}
+
+/// The filter is the TAB's, not a rule about the name: a field called
+/// `nodes` inside a section is still a field.
+#[test]
+fn a_section_filter_applies_only_at_the_top() {
+    use voxel_editor::{rows_in, Sections};
+    let level = planet();
+    // A `region` scope holds a `nodes` field of its own.
+    let at = level
+        .nodes
+        .iter()
+        .position(|n| !n.node.0.children().is_empty());
+    let Some(at) = at else { return };
+    let open = open(&[
+        ".nodes",
+        &format!(".nodes[{at}]"),
+        &format!(".nodes[{at}].node"),
+    ]);
+    let rows = rows_in(&level, &open, &Sections::Except(vec!["nodes".into()]));
+    assert!(
+        rows.iter().any(|r| r.path.ends_with(".node.nodes")),
+        "a scope's own `nodes` must survive a tab that hides the section"
+    );
+}
