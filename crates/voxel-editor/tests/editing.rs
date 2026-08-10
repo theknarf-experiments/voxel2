@@ -44,6 +44,7 @@ fn app() -> App {
             open: true,
             root: 0,
             expanded: HashSet::default(),
+            ..default()
         })
         .init_resource::<Pending>()
         .add_systems(Update, (apply, note_rebuild).chain());

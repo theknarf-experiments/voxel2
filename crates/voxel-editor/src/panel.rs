@@ -8,21 +8,108 @@
 //! whose shape changes under it (a list gains an item, an enum changes
 //! variant) is not without more machinery than the rebuild costs.
 
-use bevy::feathers::constants::{fonts, size};
+use bevy::feathers::constants::fonts;
 use bevy::feathers::containers::{pane, pane_body, pane_header};
 use bevy::feathers::font_styles::InheritableFont;
-use bevy::feathers::theme::ThemedText;
+use bevy::feathers::cursor::EntityCursor;
+use bevy::feathers::theme::{ThemeBackgroundColor, ThemedText};
+use bevy::feathers::tokens;
 use bevy::prelude::*;
 use bevy::text::FontWeight;
-use bevy::ui::{px, percent, Display, FlexDirection, Node, Overflow, OverflowAxis, PositionType};
+use bevy::window::SystemCursorIcon;
+use bevy::ui::{
+    px, percent, Display, FlexDirection, Node, Overflow, OverflowAxis, PositionType,
+    ScrollPosition, UiRect,
+};
 
 use crate::row;
 use crate::walk;
+use crate::style::PanelStyle;
 use crate::{EditorRoots, EditorState, TOGGLE_KEY};
 
 /// The panel's root entity. One at a time.
 #[derive(Component)]
 pub struct EditorPanel;
+
+/// The scrolling list of rows.
+#[derive(Component, Clone, Default)]
+pub struct EditorBody;
+
+/// The strip along the panel's inner edge that resizes it.
+#[derive(Component, Clone, Default)]
+pub struct ResizeGrip;
+
+/// Drag the panel's inner edge.
+///
+/// The width lives in [`EditorState`] rather than on the node, because the
+/// panel is respawned whenever the document changes and a width kept only
+/// on the node would snap back to the default mid-drag.
+pub fn on_grip_drag(
+    drag: On<Pointer<Drag>>,
+    grips: Query<(), With<ResizeGrip>>,
+    style: Res<PanelStyle>,
+    mut state: ResMut<EditorState>,
+) {
+    if !grips.contains(drag.event_target()) {
+        return;
+    }
+    // Pinned right: dragging the grip LEFT makes the panel wider.
+    state.width = (state.width - drag.delta.x).clamp(style.width.start, style.width.end);
+}
+
+/// Apply the width to the live panel.
+///
+/// Directly, not by respawning: a rebuild per drag frame would throw away
+/// and rebuild every row forty times a second to move an edge.
+pub fn apply_width(
+    state: Res<EditorState>,
+    shown: Option<Res<Shown>>,
+    mut nodes: Query<&mut Node>,
+) {
+    if !state.is_changed() {
+        return;
+    }
+    let Some(shown) = shown else { return };
+    if let Ok(mut node) = nodes.get_mut(shown.entity) {
+        node.width = px(state.width);
+    }
+}
+
+/// Scroll the list under the pointer.
+///
+/// Bevy clamps `ScrollPosition` during layout, so this can add freely and
+/// never has to know how tall the content is.
+pub fn on_wheel(
+    mut wheel: MessageReader<bevy::input::mouse::MouseWheel>,
+    windows: Query<&Window>,
+    state: Res<EditorState>,
+    style: Res<PanelStyle>,
+    mut bodies: Query<&mut ScrollPosition, With<EditorBody>>,
+) {
+    let Ok(window) = windows.single() else { return };
+    // Only when the pointer is over the panel — the panel is pinned to the
+    // right edge, so that is one comparison rather than a hit test.
+    let over = window
+        .cursor_position()
+        .is_some_and(|c| c.x >= window.width() - state.width);
+    if !over {
+        wheel.clear();
+        return;
+    }
+    let mut delta = 0.0;
+    for ev in wheel.read() {
+        delta += match ev.unit {
+            bevy::input::mouse::MouseScrollUnit::Line => ev.y * style.wheel_line,
+            bevy::input::mouse::MouseScrollUnit::Pixel => ev.y,
+        };
+    }
+    if delta == 0.0 {
+        return;
+    }
+    for mut scroll in &mut bodies {
+        scroll.0.y -= delta;
+    }
+}
 
 /// What the rows on screen were built from.
 ///
@@ -116,50 +203,72 @@ pub fn rebuild(world: &mut World) {
         world.entity_mut(shown.entity).despawn();
     }
     let header = format!("{label}  —  {} rows  (F10)", rows.len());
+    let width = px(world.resource::<EditorState>().width);
+    let style = world.resource::<PanelStyle>().clone();
+    let (grip, pad, row_gap) = (px(style.grip), px(style.pad), px(style.row_gap));
+    let body_font = bevy::text::FontSize::Px(style.font);
     // `impl SceneList for Vec<S: Scene>` is what lets a panel whose shape
     // is only known at runtime be expressed in a static macro.
-    let row_scenes: Vec<_> = rows.iter().map(row::scene).collect();
-
+    let row_scenes: Vec<_> = rows.iter().map(|r| row::scene(r, &style)).collect();
     let panel = world
         .spawn_scene(bsn! {
-            pane()
             // Docked to the right edge, full height. The debug HUD lives
             // in the top-left corner and the two used to overlap.
+            //
+            // A ROW, so the resize grip can sit on the panel's inner edge:
+            // the panel is pinned right, so its left edge is the only one
+            // that can move.
             Node {
                 position_type: PositionType::Absolute,
                 right: px(0),
                 top: px(0),
                 bottom: px(0),
-                width: percent(40),
-                min_width: px(560),
+                width: {width},
                 display: Display::Flex,
-                flex_direction: FlexDirection::Column,
+                flex_direction: FlexDirection::Row,
             }
             Children [
-                (pane_header() Children [ (Text({header}) ThemedText) ]),
                 (
-                    pane_body()
-                    // Feathers propagates `TextFont` only from an ancestor
-                    // carrying this; without it every row rendered at
-                    // Bevy's default 20px and a level's worth of them was
-                    // three screens tall.
-                    InheritableFont {
-                        font: fonts::MONO,
-                        font_size: size::SMALL_FONT,
-                        weight: FontWeight::NORMAL,
-                    }
-                    Node {
-                        // The body takes the rest of the height and
-                        // scrolls, or a level with an open section is a
-                        // list that runs off the bottom of the screen.
-                        flex_grow: 1.0,
-                        min_height: px(0),
-                        flex_direction: FlexDirection::Column,
-                        // Clip across, scroll down: a long doc line must
-                        // not paint over the world beside the panel.
-                        overflow: Overflow { x: OverflowAxis::Clip, y: OverflowAxis::Scroll },
-                    }
-                    Children [ {row_scenes} ]
+                    ResizeGrip
+                    Node { width: {grip}, height: percent(100), flex_shrink: 0.0 }
+                    ThemeBackgroundColor(tokens::PANE_HEADER_BORDER)
+                    EntityCursor::System(SystemCursorIcon::EwResize)
+                ),
+                (
+                    pane()
+                    Node { flex_grow: 1.0, min_width: px(0), flex_direction: FlexDirection::Column }
+                    Children [
+                        (pane_header() Children [ (Text({header}) ThemedText) ]),
+                        (
+                            pane_body()
+                            EditorBody
+                            ScrollPosition
+                            // Feathers propagates `TextFont` only from an
+                            // ancestor carrying this; without it every row
+                            // rendered at Bevy's default 20px and a level's
+                            // worth of them was three screens tall.
+                            InheritableFont {
+                                font: fonts::MONO,
+                                font_size: {body_font},
+                                weight: FontWeight::NORMAL,
+                            }
+                            Node {
+                                // The body takes the rest of the height and
+                                // scrolls, or a level with an open section
+                                // runs off the bottom of the screen.
+                                flex_grow: 1.0,
+                                min_height: px(0),
+                                flex_direction: FlexDirection::Column,
+                                row_gap: {row_gap},
+                                padding: UiRect::all(pad),
+                                // Clip across, scroll down: a long doc line
+                                // must not paint over the world beside the
+                                // panel.
+                                overflow: Overflow { x: OverflowAxis::Clip, y: OverflowAxis::Scroll },
+                            }
+                            Children [ {row_scenes} ]
+                        ),
+                    ]
                 ),
             ]
         })

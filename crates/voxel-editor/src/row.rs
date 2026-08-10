@@ -1,19 +1,28 @@
 //! One [`Row`] as one Feathers scene.
 //!
+//! A row is two lines, not three columns: the value line, and under it the
+//! field's own documentation, dimmed and smaller. As a third column the
+//! docs squeezed the values into a strip and still showed only a clause;
+//! under the value they have the panel's whole width, and the panel is
+//! resizable now, so widening it reveals more of the sentence.
+//!
 //! Every row carries [`FieldPath`], which is what makes editing one
 //! observer rather than one per field.
 
-use bevy::feathers::constants::size;
 use bevy::feathers::controls::{
     ColorSwatchValue, FeathersCheckbox, FeathersColorSwatch, FeathersDisclosureToggle,
     FeathersMenuButton, FeathersSlider,
 };
-use bevy::feathers::theme::ThemedText;
+use bevy::feathers::constants::{fonts, size};
+use bevy::feathers::font_styles::InheritableFont;
+use bevy::feathers::theme::{InheritableThemeTextColor, ThemedText};
+use bevy::feathers::tokens;
 use bevy::prelude::*;
-use bevy::text::{FontSize, LineBreak, TextLayout};
+use bevy::text::{FontSize, FontWeight, LineBreak, TextLayout};
 use bevy::ui::{px, AlignItems, Checked, Display, FlexDirection, Node, Overflow, UiRect};
 use bevy::ui_widgets::{SliderPrecision, SliderStep};
 
+use crate::style::PanelStyle;
 use crate::walk::{format_num, Num, Row, RowKind};
 
 /// The reflect path this row edits, from its document's root.
@@ -46,57 +55,155 @@ pub struct WritesNum(pub Num);
 #[derive(Component, Clone, Copy, Debug, Default)]
 pub struct CommitOnRelease;
 
-
-/// Indent per nesting level. The rows are a flat list, so this is the only
-/// thing that says what contains what.
-const INDENT: f32 = 14.0;
-
-/// Docs are the field's whole rationale, several sentences of it. A row
-/// has space for the first clause, and only if it does not wrap: a level
-/// is a long list of short rows, and three-line rows turn it into a page
-/// of prose with the values hidden in it.
-const TIP_CHARS: usize = 48;
-
-pub fn scene(row: &Row) -> impl Scene {
+pub fn scene(row: &Row, style: &PanelStyle) -> impl Scene {
     let path = row.path.clone();
-    let indent = px(INDENT * row.depth as f32 + 4.0);
+    let indent = px(style.indent * row.depth as f32);
     let label = row.label.clone();
-    let tip = tip(row.docs);
+    let (gap, label_w) = (px(style.gap), px(style.label));
 
     bsn! {
         FieldPath({path})
         Node {
             display: Display::Flex,
-            flex_direction: FlexDirection::Row,
-            align_items: AlignItems::Center,
-            column_gap: px(8),
-            padding: UiRect::left(indent),
-            min_height: size::ROW_HEIGHT,
+            flex_direction: FlexDirection::Column,
             // Rows must not shrink. A column of forty in a fixed-height
-            // pane shrinks every one of them below its text and they
-            // overlap into an unreadable stack — flexbox doing exactly
-            // what it is told, which looks like a rendering bug.
+            // pane shrinks every one below its text and they overlap into
+            // an unreadable stack — flexbox doing exactly what it is told,
+            // which looks like a rendering bug.
             flex_shrink: 0.0,
         }
         Children [
-            (Node { width: px(150), flex_shrink: 0.0 } {text(label)}),
-            {value_widget(row)},
             (
-                Node { flex_grow: 1.0, flex_basis: px(0), overflow: Overflow::clip() }
-                {text(tip)}
-                TextLayout { linebreak: LineBreak::NoWrap }
+                Node {
+                    display: Display::Flex,
+                    flex_direction: FlexDirection::Row,
+                    align_items: AlignItems::Center,
+                    column_gap: {gap},
+                    // Feathers' own controls are `ROW_HEIGHT`; a shorter
+                    // line clips a slider.
+                    height: {size::ROW_HEIGHT},
+                    flex_shrink: 0.0,
+                }
+                Children [
+                    // The NAME column holds the nesting: the indent and the
+                    // disclosure are inside it, and it is a fixed width. So
+                    // the value column starts at the same x on every row
+                    // however deep it sits — an inspector reads down its
+                    // values, and a value column that stepped right with
+                    // depth cannot be read down at all.
+                    (
+                        Node {
+                            width: {label_w},
+                            height: {size::ROW_HEIGHT},
+                            flex_shrink: 0.0,
+                            display: Display::Flex,
+                            flex_direction: FlexDirection::Row,
+                            align_items: AlignItems::Center,
+                            column_gap: {gap},
+                            padding: UiRect::left(indent),
+                            overflow: Overflow::clip(),
+                        }
+                        Children [
+                            {gutter(row, style)},
+                            {vec![text(label, style.font)]},
+                        ]
+                    ),
+                    {value_widget(row, style)},
+                ]
             ),
+            {doc_line(row.docs, style.indent * row.depth as f32, style)},
         ]
     }
 }
 
-/// The first clause of the rationale written above the field.
+/// The disclosure column: a chevron for a container, empty for a leaf.
 ///
-/// Straight off `NamedField::docs()` — the editor never restates a label
-/// or an explanation that the type already carries.
-fn tip(docs: Option<&'static str>) -> String {
+/// Always present and always the same width, so the label and value
+/// columns start at the same x on every row.
+fn gutter(row: &Row, style: &PanelStyle) -> Box<dyn SceneList> {
+    let expanded = match row.kind {
+        RowKind::Group { expanded, .. } | RowKind::Variant { expanded, .. } => expanded,
+        _ => {
+            let w = px(style.gutter);
+            return Box::new(bsn_list!(Node { width: {w}, flex_shrink: 0.0 }));
+        }
+    };
+    let toggles = row.path.clone();
+    let w = px(style.gutter);
+    if expanded {
+        Box::new(bsn_list!(
+            Node {
+                width: {w},
+                height: {size::ROW_HEIGHT},
+                flex_shrink: 0.0,
+                display: Display::Flex,
+                align_items: AlignItems::Center,
+            }
+            Children [(@FeathersDisclosureToggle Checked TogglesPath({toggles}))]
+        ))
+    } else {
+        Box::new(bsn_list!(
+            Node {
+                width: {w},
+                height: {size::ROW_HEIGHT},
+                flex_shrink: 0.0,
+                display: Display::Flex,
+                align_items: AlignItems::Center,
+            }
+            Children [(@FeathersDisclosureToggle TogglesPath({toggles}))]
+        ))
+    }
+}
+
+/// A fixed-width cell of the value line, with its text centred.
+///
+/// Explicit height and centring on every cell rather than auto-sizing:
+/// a disclosure toggle is 12px and a line of 13px text is about 15, so
+/// leaving them to `align_items` alone let the value column sit half a row
+/// below its own label.
+fn cell(width: f32, inner: impl Scene) -> impl Scene {
+    bsn! {
+        Node {
+            width: px(width),
+            height: {size::ROW_HEIGHT},
+            flex_shrink: 0.0,
+            display: Display::Flex,
+            align_items: AlignItems::Center,
+            overflow: Overflow::clip(),
+        }
+        Children [ {vec![inner]} ]
+    }
+}
+
+/// Panel text, at the size [`PanelStyle`] asks for.
+///
+/// Set on the span rather than inherited from the body's
+/// `InheritableFont`. The cascade IS there — it is what dims and shrinks
+/// the documentation line, whose `InheritableFont` sits directly above its
+/// own span — but it did not reach through the row / line / cell nodes
+/// between the body and these spans, and text that silently stayed at
+/// Bevy's 20px default is worse than a size stated where it applies. Still
+/// one number, still in `PanelStyle`.
+fn text(s: String, size: f32) -> impl Scene {
+    bsn! {
+        Text({s})
+        TextFont { font_size: {FontSize::Px(size)} }
+        // Never wrapped: a cell is one line of a grid, and a long label
+        // that wrapped pushed its own row out of alignment with every
+        // other one. The cell clips; the panel resizes.
+        TextLayout { linebreak: LineBreak::NoWrap }
+        ThemedText
+    }
+}
+
+/// The rationale written above the field, under the value it explains.
+///
+/// Not truncated and wrapped: the whole sentence, on as many lines as it
+/// needs, indented to start under the label rather than under the
+/// disclosure gutter.
+fn doc_line(docs: Option<&'static str>, indent: f32, style: &PanelStyle) -> Box<dyn SceneList> {
     let Some(docs) = docs else {
-        return String::new();
+        return Box::new(bsn_list!());
     };
     let flat = docs
         .split('\n')
@@ -105,45 +212,44 @@ fn tip(docs: Option<&'static str>) -> String {
         .join(" ")
         .trim()
         .to_string();
-    if flat.chars().count() <= TIP_CHARS {
-        return flat;
+    if flat.is_empty() {
+        return Box::new(bsn_list!());
     }
-    let cut: String = flat.chars().take(TIP_CHARS).collect();
-    match cut.rsplit_once(' ') {
-        Some((head, _)) => format!("{head}…"),
-        None => format!("{cut}…"),
-    }
-}
-
-/// Panel text at the panel's size.
-///
-/// Stated here rather than inherited: Feathers propagates `TextFont` from
-/// an ancestor `InheritableFont`, and a row is spawned as its own scene
-/// under a container this crate does not own the font of.
-fn text(s: String) -> impl Scene {
-    bsn! {
-        Text({s})
-        TextFont { font_size: {FontSize::Px(13.0)} }
-        ThemedText
-    }
+    let font = FontSize::Px(style.doc_font);
+    let doc_indent = px(indent + style.gutter + style.gap);
+    Box::new(bsn_list!(
+        // No height and no clipping: the sentence wraps to as many lines
+        // as it needs, and the row grows to hold them. The value line
+        // above it stays a fixed-height grid either way.
+        Node { flex_shrink: 0.0, padding: UiRect::left(doc_indent) }
+        // Smaller and dimmer than the value it explains, said once here
+        // and inherited by the span — not set on the text itself.
+        InheritableFont {
+            font: fonts::MONO,
+            font_size: {font},
+            weight: FontWeight::NORMAL,
+        }
+        InheritableThemeTextColor(tokens::TEXT_DIM)
+        Children [( Text({flat}) ThemedText )]
+    ))
 }
 
 /// `bsn!` builds a fixed shape; the value side of a row is a different
 /// widget per kind, so it comes back boxed. `Vec<Box<dyn SceneList>>` is
 /// what makes a reflection-driven panel expressible in a static macro.
-fn value_widget(row: &Row) -> Box<dyn SceneList> {
+fn value_widget(row: &Row, style: &PanelStyle) -> Box<dyn SceneList> {
     // `FieldPath` goes on the WIDGET as well as the row: a `ValueChange`
     // fires on the checkbox or slider, which is a child, and an observer
     // that looked only at the row would never find the path.
     let p = row.path.clone();
     let hold = row.rebuilds;
     match &row.kind {
-        RowKind::Group { expanded, summary } => {
-            disclosure(&row.path, *expanded, summary.clone())
+        RowKind::Group { summary, .. } => {
+            Box::new(vec![cell(style.value, text(summary.clone(), style.font))])
         }
-        RowKind::Variant {
-            expanded, current, ..
-        } => disclosure(&row.path, *expanded, current.clone()),
+        RowKind::Variant { current, .. } => {
+            Box::new(vec![cell(style.value, text(current.clone(), style.font))])
+        }
 
         RowKind::Number { value, num, range } => match range {
             Some(r) => {
@@ -162,25 +268,19 @@ fn value_widget(row: &Row) -> Box<dyn SceneList> {
                 if hold {
                     Box::new(bsn_list!(
                         @FeathersSlider { @value: {v}, @min: {lo}, @max: {hi} }
-                        Node { width: px(150) }
+                        Node { width: px(style.value), flex_shrink: 0.0 }
                         SliderStep({step}) SliderPrecision({digits})
                         WritesNum({writes}) FieldPath({p}) CommitOnRelease
                     ))
                 } else {
                     Box::new(bsn_list!(
                         @FeathersSlider { @value: {v}, @min: {lo}, @max: {hi} }
-                        Node { width: px(150) }
+                        Node { width: px(style.value), flex_shrink: 0.0 }
                         SliderStep({step}) SliderPrecision({digits})
                         WritesNum({writes}) FieldPath({p})
                     ))
                 }
             }
-            // Always `CommitOnRelease`. A number input emits a
-            // non-final `ValueChange` for every text change — including
-            // the one that gives it its initial value, and including each
-            // keystroke of a number being typed. Taking those would write
-            // `1` on the way to `14` and rebuild the panel out from under
-            // the cursor. Enter and focus-loss are the final ones.
             // Shown, not yet edited in the panel.
             //
             // `FeathersNumberInput` displayed `14` as `4` and `2.5` as
@@ -188,20 +288,19 @@ fn value_widget(row: &Row) -> Box<dyn SceneList> {
             // last character survived. Rendered beside our own text the
             // two disagreed in the same row. A tool opened to check a
             // number must not be the thing that gets it wrong, so the
-            // control is gone and the value stands on its own until there
-            // is one that can be trusted. These fields are still reachable
-            // by file edit and by `world.mutate_resources`.
+            // control is gone until there is one that can be trusted.
+            // These fields are still reachable by file edit and by
+            // `world.mutate_resources`.
             None => {
                 let shown = format_num(*value, *num);
-                Box::new(bsn_list!(
-                    Node { width: px(150) }
-                    {self::text(shown)}
-                ))
+                Box::new(vec![cell(style.value, self::text(shown, style.font))])
             }
         },
 
         RowKind::Bool(v) => match (*v, hold) {
-            (true, true) => Box::new(bsn_list!(@FeathersCheckbox Checked FieldPath({p}) CommitOnRelease)),
+            (true, true) => {
+                Box::new(bsn_list!(@FeathersCheckbox Checked FieldPath({p}) CommitOnRelease))
+            }
             (true, false) => Box::new(bsn_list!(@FeathersCheckbox Checked FieldPath({p}))),
             (false, true) => Box::new(bsn_list!(@FeathersCheckbox FieldPath({p}) CommitOnRelease)),
             (false, false) => Box::new(bsn_list!(@FeathersCheckbox FieldPath({p}))),
@@ -209,14 +308,14 @@ fn value_widget(row: &Row) -> Box<dyn SceneList> {
 
         RowKind::Text(s) => {
             let s = s.clone();
-            Box::new(bsn_list!(Node { width: px(150) } {self::text(s)}))
+            Box::new(vec![cell(style.value, self::text(s, style.font))])
         }
 
         RowKind::Color(rgb) => {
             let value = Color::linear_rgb(rgb[0], rgb[1], rgb[2]);
             Box::new(bsn_list!(
                 @FeathersColorSwatch
-                Node { width: px(150) }
+                Node { width: px(style.value), flex_shrink: 0.0 }
                 ColorSwatchValue({value})
             ))
         }
@@ -234,9 +333,9 @@ fn value_widget(row: &Row) -> Box<dyn SceneList> {
             };
             Box::new(bsn_list!(
                 @FeathersMenuButton {
-                    @caption: {Box::new(vec![self::text(text)]) as Box<dyn SceneList>},
+                    @caption: {Box::new(vec![self::text(text, style.font)]) as Box<dyn SceneList>},
                 }
-                Node { width: px(150) }
+                Node { width: px(style.value), flex_shrink: 0.0 }
             ))
         }
 
@@ -245,22 +344,8 @@ fn value_widget(row: &Row) -> Box<dyn SceneList> {
             // widget for a type is a bug report; a row that silently
             // vanishes reads as a field that does not exist.
             let text = format!("no widget for {type_path}");
-            Box::new(bsn_list!(Node { width: px(150) } {self::text(text)}))
+            Box::new(vec![cell(style.value, self::text(text, style.font))])
         }
     }
 }
 
-fn disclosure(path: &str, expanded: bool, summary: String) -> Box<dyn SceneList> {
-    let toggles = path.to_string();
-    if expanded {
-        Box::new(bsn_list!(
-            (@FeathersDisclosureToggle Checked TogglesPath({toggles})),
-            (Node { width: px(130) } {text(summary)}),
-        ))
-    } else {
-        Box::new(bsn_list!(
-            (@FeathersDisclosureToggle TogglesPath({toggles})),
-            (Node { width: px(130) } {text(summary)}),
-        ))
-    }
-}

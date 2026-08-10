@@ -15,9 +15,11 @@ use bevy::prelude::*;
 pub mod edit;
 mod panel;
 mod path;
+mod style;
 mod row;
 mod walk;
 
+pub use style::PanelStyle;
 pub use walk::{rows, Num, Row, RowKind};
 
 /// The key that opens the editor.
@@ -62,6 +64,10 @@ pub struct EditorState {
     pub open: bool,
     pub root: usize,
     pub expanded: HashSet<String>,
+    /// Panel width in logical pixels, dragged by the grip on its inner
+    /// edge. Here rather than on the node because the panel is respawned
+    /// whenever the document changes.
+    pub width: f32,
 }
 
 impl Default for EditorState {
@@ -71,6 +77,7 @@ impl Default for EditorState {
             root: 0,
             // The root itself is always open, or the panel is one row.
             expanded: HashSet::from_iter([String::new()]),
+            width: 620.0,
         }
     }
 }
@@ -117,8 +124,11 @@ impl Plugin for EditorPlugin {
         app.insert_resource(EditorRoots(self.roots.clone()))
             .init_resource::<EditorState>()
             .init_resource::<edit::Pending>()
+            .init_resource::<PanelStyle>()
             .register_type::<EditorState>()
+            .register_type::<PanelStyle>()
             .add_observer(panel::on_disclosure)
+            .add_observer(panel::on_grip_drag)
             .add_observer(edit::on_f32)
             .add_observer(edit::on_bool)
             .add_systems(
@@ -130,7 +140,15 @@ impl Plugin for EditorPlugin {
                     // the value it had a frame after you changed it. Gated
                     // so a shut panel costs no frames at all — see
                     // `panel::active`.
-                    (edit::apply, panel::rebuild)
+                    (
+                        edit::apply,
+                        panel::rebuild,
+                        // After the rebuild, so a panel respawned this
+                        // frame gets the dragged width and not the one it
+                        // was authored with.
+                        panel::apply_width,
+                        panel::on_wheel,
+                    )
                         .chain()
                         .run_if(panel::active),
                 )
