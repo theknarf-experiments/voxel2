@@ -160,6 +160,11 @@ pub struct EditorState {
     pub undo: bool,
     /// Set to put back what [`EditorState::undo`] took away.
     pub redo: bool,
+    /// The document has been edited HERE since the last save was asked
+    /// for. Optimistic — the host does the saving and says if it failed —
+    /// but it is the difference between knowing your work is on disk and
+    /// guessing.
+    pub edited: bool,
     /// Panel width in logical pixels, dragged by the grip on its inner
     /// edge. Here rather than on the node because the panel is respawned
     /// whenever the document changes.
@@ -178,6 +183,7 @@ impl Default for EditorState {
             save: false,
             undo: false,
             redo: false,
+            edited: false,
             width: 620.0,
         }
     }

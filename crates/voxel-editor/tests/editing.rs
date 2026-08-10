@@ -754,3 +754,32 @@ fn text_commits_on_enter_and_only_then() {
         "and the rename took its wires with it"
     );
 }
+
+/// The panel knows whether there is work not yet on disk.
+#[test]
+fn an_edit_marks_the_document_unsaved_and_a_save_clears_it() {
+    use bevy::input::ButtonInput;
+    let mut app = app();
+    app.add_message::<voxel_editor::SaveRequested>()
+        .init_resource::<ButtonInput<KeyCode>>()
+        .add_systems(Update, voxel_editor::save);
+
+    assert!(!app.world().resource::<EditorState>().edited);
+    edit(&mut app, ".materials[0].id", 12.0, Num::U32);
+    assert!(
+        app.world().resource::<EditorState>().edited,
+        "an edit is unsaved work"
+    );
+
+    app.world_mut().resource_mut::<EditorState>().open = true;
+    app.world_mut().resource_mut::<EditorState>().save = true;
+    app.update();
+    assert!(
+        !app.world().resource::<EditorState>().edited,
+        "and asking to save clears it"
+    );
+
+    // An edit that changes nothing is not work.
+    edit(&mut app, ".materials[0].id", 12.0, Num::U32);
+    assert!(!app.world().resource::<EditorState>().edited);
+}

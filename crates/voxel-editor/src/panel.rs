@@ -197,6 +197,10 @@ pub struct Shown {
     expanded: Vec<String>,
     /// Which node the properties column is showing.
     selected: Option<String>,
+    /// Whether the notice bar is saying there is unsaved work. Saving
+    /// changes no document, so without this the bar would linger until
+    /// something else happened to rebuild the panel.
+    edited: bool,
     /// The change tick of the document resource the rows were read from.
     tick: u32,
     /// The panel entity, so finding it again is not a fresh `QueryState`
@@ -268,6 +272,7 @@ pub fn save(
         return;
     }
     state.save = false;
+    state.edited = false;
     asked.write(crate::SaveRequested);
 }
 
@@ -364,6 +369,7 @@ pub fn rebuild(world: &mut World) {
         root: state.root,
         expanded,
         selected: state.selected.clone(),
+        edited: state.edited,
         tick,
         entity: Entity::PLACEHOLDER,
     };
@@ -413,7 +419,11 @@ pub fn rebuild(world: &mut World) {
             )})
         }
     };
-    let complaint_scene = complaint_bar(complaint.as_ref().map(|(_, said)| said.as_str()), &style);
+    let complaint_scene = notice_bar(
+        complaint.as_ref().map(|(_, said)| said.as_str()),
+        world.resource::<EditorState>().edited,
+        &style,
+    );
     let tab_scenes: Vec<_> = if roots.len() > 1 {
         roots
             .iter()
@@ -548,12 +558,22 @@ fn inspector(props: &Option<(String, Vec<walk::Row>)>, style: &PanelStyle) -> im
     )})
 }
 
-/// What the compiler says is wrong, along the top of the panel.
+/// The one line along the top: what the compiler says is wrong, or that
+/// there is work not yet on disk.
 ///
-/// Absent when there is nothing to say, so the panel does not carry a
-/// permanent empty strip for the sake of the rare moment it is needed.
-fn complaint_bar(complaint: Option<&str>, style: &PanelStyle) -> impl SceneList {
-    let said = complaint?.to_string();
+/// Absent when there is neither, so the panel carries no permanent strip
+/// for the sake of the moments one is needed. A complaint wins: a level
+/// that does not compile is worth more of your attention than one that is
+/// merely unsaved.
+fn notice_bar(complaint: Option<&str>, edited: bool, style: &PanelStyle) -> impl SceneList {
+    let (said, colour) = match (complaint, edited) {
+        (Some(said), _) => (said.to_string(), Color::srgb(0.42, 0.13, 0.13)),
+        (None, true) => (
+            "edited — ⌘S to save, ⌘Z to undo".to_string(),
+            Color::srgb(0.20, 0.20, 0.22),
+        ),
+        (None, false) => return None,
+    };
     let font = bevy::text::FontSize::Px(style.font);
     let pad = px(style.pad);
     Some(bsn_list! {(
@@ -561,7 +581,7 @@ fn complaint_bar(complaint: Option<&str>, style: &PanelStyle) -> impl SceneList 
             padding: UiRect::all(pad),
             flex_shrink: 0.0,
         }
-        BackgroundColor(Color::srgb(0.42, 0.13, 0.13))
+        BackgroundColor(colour)
         Children [(
             Text({said})
             TextFont { font_size: {font} }

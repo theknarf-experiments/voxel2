@@ -335,6 +335,9 @@ pub fn undo(world: &mut World) {
     } else {
         history.done.push((root, now));
     }
+    // Stepping through history is editing: the document no longer matches
+    // what was last written.
+    world.resource_mut::<EditorState>().edited = true;
 }
 
 /// The document a root names, ready to be written.
@@ -359,6 +362,7 @@ pub fn apply(world: &mut World) {
         return;
     }
     let edits = std::mem::take(&mut world.resource_mut::<Pending>().0);
+    let mut landed = false;
     // One step per BATCH, not per edit: a drag queues one a frame and
     // undoing it a pixel at a time would be its own kind of unusable.
     let mut remember = true;
@@ -405,6 +409,7 @@ pub fn apply(world: &mut World) {
                 if renamed > 0 {
                     info!("editor: renamed, and {renamed} wires followed");
                 }
+                landed = true;
                 continue;
             }
         }
@@ -440,6 +445,7 @@ pub fn apply(world: &mut World) {
         if slot.reflect_partial_eq(&*wanted) == Some(true) {
             continue;
         }
+        landed = true;
         if let Err(e) = slot.try_apply(&*wanted) {
             // `try_apply`, never `apply`: a type mismatch in a dev tool
             // must not take the session down with it.
@@ -448,6 +454,9 @@ pub fn apply(world: &mut World) {
     }
     for step in history {
         world.resource_mut::<History>().remember(step);
+    }
+    if landed {
+        world.resource_mut::<EditorState>().edited = true;
     }
 }
 
