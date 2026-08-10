@@ -1235,27 +1235,32 @@ fn apply_level_change(
     // Generation-affecting changes rebuild the streamed world.
     let sun_changed = sun_dir(&new) != sun_dir(level);
     let generator_changed = new.nodes != level.nodes || sun_changed;
-    // Rebuilt whether or not the program changed: the planning graph and
-    // the facade below need one either way.
-    let (program, generator) = build_generator(&new, seed.0);
-    if generator_changed {
-        render.program = program;
-    }
-    // A planning-only edit still replaces the planner — that is where the
-    // populations are registered — but leaves the streamed chunks alone.
-    // They were carved by ops this edit cannot have changed, so tearing
-    // them down would regenerate every one of them into itself.
-    if let Some(stale) = staleness(&new, level) {
-        if stale == Invalidates::World {
-            world.config.max_level = new.lod.max_level;
-            world.config.top_radius = new.lod.top_radius;
-            world.config.top_y = new.lod.top_y;
-            world.generator = generator.clone();
-            rebuild.0 = true;
+    let stale = staleness(&new, level);
+    // Only where something needs one. This runs on EVERY write to the
+    // resource, and a colour dragged in the editor writes one a frame:
+    // compiling the graph and rebuilding the CPU twin to hand both to
+    // nobody is the whole cost of tuning a material.
+    if generator_changed || stale.is_some() {
+        let (program, generator) = build_generator(&new, seed.0);
+        if generator_changed {
+            render.program = program;
         }
-        world.query = build_world_query(&new, seed.0, &generator, planner.0.as_ref());
-        world.level = new.clone();
-        info!("level reload: {stale:?} is stale — rebuilding it");
+        // A planning-only edit still replaces the planner — that is where
+        // the populations are registered — but leaves the streamed chunks
+        // alone. They were carved by ops this edit cannot have changed, so
+        // tearing them down would regenerate every one of them into itself.
+        if let Some(stale) = stale {
+            if stale == Invalidates::World {
+                world.config.max_level = new.lod.max_level;
+                world.config.top_radius = new.lod.top_radius;
+                world.config.top_y = new.lod.top_y;
+                world.generator = generator.clone();
+                rebuild.0 = true;
+            }
+            world.query = build_world_query(&new, seed.0, &generator, planner.0.as_ref());
+            world.level = new.clone();
+            info!("level reload: {stale:?} is stale — rebuilding it");
+        }
     }
 
     // The host owns the scene: it reads the new definition off this
