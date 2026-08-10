@@ -22,28 +22,39 @@ cargo run -p voxel2 -- levels/planet.json         # forests, biomes, rivers, rui
 cargo run -p voxel2 -- levels/megastructure.json  # endless interior: pocket districts linked by tubes
 ```
 
-There are no hardcoded worlds. A level file describes everything, most
-importantly the **generator program**: an ordered list of composable ops
-(FBM height bands, floor lattices, pillar/wall grids, shafts, catwalk
-beams, 3D noise carves, domain warp) that one GPU interpreter evaluates as
-the world's SDF — a lush planet and a concrete megacity are the same
-engine fed different data. Planned structure is data too, declared as a
-**planning stack**: a small generic layer vocabulary — `biomes` (blended
-regions), `scatter`/`scatter3` (sites), `connect`/`connect3` (pathfound
-or orthogonal links), `flow` (descent hydrology), `worm` (burrows), and
-`emit` (CSG patches, ribbons, clearance, markers) — that levels
-compose by instance name: ruins, roads, rivers, caves, dungeons, and the
-megastructure's habitation districts are all stack configurations, not
-engine features. Shading follows the same rule: a **material table**
-(parameterized `surface`, `zoned`, and `canopy` recipes) indexed by the
-material ids the ops emit, an **environment** block for lighting and
-haze, and **scatter classes** — populations of props described only by
-where they go (density, altitude band, slope, patch noise, biome and
-field gates, clearance, weighted variants). The engine streams one
-entity per placement carrying a `ScatterInstance`; the host dresses
-those entities with its own models, materials and gameplay components,
-so no models live in the reusable crates. Even the structures the stack
-builds are data: a **structure** is weighted variants of parts, each
+There are no hardcoded worlds. A level file describes everything as **one
+list of nodes**. Each node names its `kind`, its `name`, and the nodes it
+consumes (`"in": {"height": "base", "warp": "coast"}`), so the dataflow is
+written down rather than implied by position in a list. A node's kind is a
+registered Rust type, its fields are its schema, and there is no enum
+anywhere: a host adds a kind by registering a type, and the type registry
+IS the vocabulary — for the file format, the compiler and the editor at
+once.
+
+Nodes come in two **domains**, which is a backend decision and not a
+second language. Point nodes (FBM height bands, floor lattices,
+pillar/wall grids, shafts, catwalk beams, 3D noise carves, domain warp)
+compile to the generator program one GPU interpreter evaluates as the
+world's SDF — a lush planet and a concrete megacity are the same engine
+fed different data. Region nodes have a lifetime and become LayerProcGen
+layers: `biomes` (blended regions), `scatter`/`scatter3` (sites),
+`connect`/`connect3` (pathfound or orthogonal links), `flow` (descent
+hydrology), `worm` (burrows), `emit` (CSG patches, ribbons, clearance,
+markers) and `population` (props). Ruins, roads, rivers, caves, dungeons,
+and the megastructure's habitation districts are all node graphs, not
+engine features. A `region` node is a scope: it carries a gate and the
+nodes it applies to, so nine districts are nine nested scopes rather than
+the same four numbers repeated on sixty rows.
+
+Shading follows the same rule: a **material table** (parameterized
+`surface`, `zoned`, and `canopy` recipes) indexed by the material ids the
+ops emit, an **environment** block for lighting and haze, and
+**populations** — props described only by where they go (density,
+altitude band, slope, patch noise, region and field gates, clearance,
+weighted variants). The engine streams one entity per placement carrying
+a `ScatterInstance`; the host dresses those entities with its own models,
+materials and gameplay components, so no models live in the reusable
+crates. Even the structures an `emit` builds are data: a **structure** is weighted variants of parts, each
 placing a shape (box/cylinder/sphere, added or cut, optionally hollowed
 into a shell) at every position of an arrangement — `ring`, `scatter`,
 `chain`, or a single point — seated on the terrain or an interior floor,
@@ -62,11 +73,11 @@ bounded, which `[f32; 3]` is a colour, which `u32` is a reference to a
 material id rather than a number, and which fields restream the world when
 edited. Every row carries the reflect path it came from, so editing is one
 observer rather than one per field — the same path `world.mutate_resources`
-takes over BRP. A new generator op or planning layer is editable the moment
-it is annotated.
+takes over BRP. A new node kind is editable the moment it is
+registered.
 
 **Live editing**: the level file is watched while running. Materials,
-environment and LOD tuning apply instantly; changes to the generator,
+environment and LOD tuning apply instantly; changes to the nodes,
 providers, or LOD topology rebuild the streamed world in place — copying
 a different level over the watched file swaps the whole world without a
 restart. The file holds only what the engine owns: the camera, lights,
@@ -110,8 +121,8 @@ is admitted against the slab budget and caps what the others can stream.
 ## How it works
 
 - **Voxels are transient GPU artifacts.** One density compute pass
-  interprets the level's generator program (a storage buffer of 64-byte
-  ops over a small register file) into a 38³-sample
+  interprets the program the level's point nodes compile to (a storage
+  buffer of 64-byte ops over a small register file) into a 38³-sample
   arena slot per chunk; an exact-count pass feeds a staging-ring readback
   that drives bucketed slab allocation; surface-nets compute passes then
   mesh straight into shared vertex/index slabs. Nothing but 8-byte counts
@@ -148,7 +159,7 @@ is admitted against the slab budget and caps what the others can stream.
 - **Worlds are plural.** A level is loaded as a world through one path
   (`WorldLoader::load`), including the first one, and everything about it
   — generator program, LOD config, material table, painted surface map,
-  planning stack, portal clip planes — is indexed by its id in `Worlds`
+  planning graph, portal clip planes — is indexed by its id in `Worlds`
   and `RenderWorlds`. Several coexist: they share one chunk service, one
   GPU arena and one program buffer, because the world rides in
   `ChunkKey`. They also share COORDINATES, which is why nothing per-world
@@ -172,7 +183,7 @@ is admitted against the slab budget and caps what the others can stream.
 |---|---|
 | `voxel-core` | Chunk keys, packed voxel format, CSG op IR, morton, seeding (no Bevy) |
 | `voxel-layers` | LayerProcGen framework: padded deps, recursive on-demand generation |
-| `voxel-worldgen` | CPU twin of the generator interpreter + the stack vocabulary (scatter/connect/flow/worm/biomes/emit), recipes, hydrology, pathfinding |
+| `voxel-worldgen` | CPU twin of the generator interpreter, plus the primitives the game's layers are built from: scatter points, descent walks, A* paths, ribbons |
 | `voxel-render` | Density/meshing compute, slab allocator, LOD draw, grass, materials |
 | `voxel-engine` | The LOD field and its layers, chunk generation service, level definitions (JSON), remote tooling |
 | `voxel-debug` | Flycam + HUD (fps, chunk/arena/slab occupancy, LOD histogram) |

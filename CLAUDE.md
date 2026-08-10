@@ -64,23 +64,33 @@ architecture. Design plan: `~/.claude/plans/binary-twirling-brooks.md`.
   baked-shadow march (mesh shader ↔ voxel_worldgen::sun_shadow).
 - **Worlds are data, not code**: never add a world-kind enum,
   world-specific shader, feature flag, or shading branch; extend the op
-  set (voxel-core::worldop + both interpreters + GenOpDef — vegetation is
-  scatter data), the material recipe kinds (voxel-render WorldMaterial ↔
-  MaterialDef::pack ↔ the WGSL MaterialTable — field-position layout
-  twins), or the host's planning vocabulary, and express the world in the
-  level JSON. `voxel_engine` tests pin the shipped JSONs to the reference
-  programs.
+  set (voxel-core::worldop + both interpreters + a node struct — vegetation
+  is population data), the material recipe kinds (voxel-render
+  WorldMaterial ↔ MaterialDef::pack ↔ the WGSL MaterialTable —
+  field-position layout twins), or the host's node vocabulary, and express
+  the world in the level JSON. `voxel_engine` tests pin the shipped JSONs
+  to the reference programs.
 - **The crates hold no named nouns and no concrete layers.** A reusable
   crate may contain primitives (ribbon, scatter point, descent walk,
   A* path) but never an instance of a domain noun — water, river, grass,
   tree, ruin are level data the host interprets. Likewise `voxel-layers`
   is the LayerProcGen *framework* only; concrete layers are the game's,
   written against `voxel_engine::planning::WorldPlanner` (this demo's
-  live in `demos/voxel2/src/planning/`, driven by the level's opaque
-  `planning` block — NEVER add a hand-written structure recipe fn; a new
-  structure is level JSON). The engine keeps only what seams depend on:
-  the ops horizon, the density apron, and per-chunk (never per-op)
-  gating.
+  live in `demos/voxel2/src/planning/nodes.rs` as node kinds — NEVER add
+  a hand-written structure recipe fn; a new structure is level JSON).
+  A node whose ports touch the HOST's vocabulary is the host's, even when
+  the engine owns everything else about it: `population` is a demo newtype
+  over the engine's `ScatterDef`, because an engine node wired to a host
+  value makes a level's engine half unreadable on its own. The engine
+  keeps only what seams depend on: the ops horizon, the density apron, and
+  per-chunk (never per-op) gating.
+- **One node list, one referencing rule.** A level is `nodes[]`; a node is
+  `{kind, name, in, ...params}`, and `in` names EVERY input — there is no
+  ordering rule that supplies one implicitly. Source order is program
+  order and the compiler verifies it rather than sorting (a topological
+  sort is not unique). Never reintroduce a hand-written index: field slots
+  and gate references come from node names, resolved by
+  `voxel_engine::graph::compile`.
 - Count pass and emit passes in `voxel_mesh_chunks.wgsl` must agree
   *exactly* on skip rules — allocation uses counted values.
 - `map_async` on the counts staging ring only the frame *after* the copy
