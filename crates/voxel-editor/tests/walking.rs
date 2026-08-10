@@ -444,3 +444,34 @@ fn a_colour_opens_into_its_components() {
         assert_eq!(value as f32, *want, "component {i}");
     }
 }
+
+/// What a level contains that the panel has no widget for.
+///
+/// Not a prohibition — a row that admits it has no widget is the honest
+/// outcome, and better than one that silently vanishes — but the SET of
+/// them is worth pinning: it is the list of things a level can hold and
+/// nobody can edit, and it should shrink rather than grow by accident.
+#[test]
+fn the_types_with_no_widget_are_the_ones_we_know_about() {
+    let mut unsupported: Vec<String> = Vec::new();
+    for name in ["planet", "megastructure", "purgatory"] {
+        let path = format!("{}/../../levels/{name}.json", env!("CARGO_MANIFEST_DIR"));
+        let level = LevelDef::from_json_known(
+            &std::fs::read_to_string(&path).unwrap(),
+            &registry::engine_kinds(),
+        )
+        .unwrap();
+        for row in rows(&level, &everything(&level)) {
+            if let RowKind::Unsupported(ty) = row.kind {
+                unsupported.push(ty.to_string());
+            }
+        }
+    }
+    unsupported.sort();
+    unsupported.dedup();
+    assert_eq!(
+        unsupported,
+        Vec::<String>::new(),
+        "a type the panel cannot show — add a widget, or add it here on purpose"
+    );
+}
