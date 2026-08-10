@@ -303,8 +303,8 @@ fn ops(
 /// Anything the HOST defines, passed through untouched.
 ///
 /// The engine's tooling has no business knowing what a portal is, so it
-/// carries an opaque value and the host decides what it means — the same
-/// bargain as the level's `planning` block. Queued rather than applied,
+/// carries an opaque value and the host decides what it means. Queued
+/// rather than applied,
 /// because the host reads it from its own systems.
 #[derive(Resource, Default)]
 pub struct HostCommands(pub Vec<Value>);

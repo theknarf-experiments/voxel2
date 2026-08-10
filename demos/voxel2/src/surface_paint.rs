@@ -239,7 +239,7 @@ fn repaint_world(
     // so the empty distance is not charged to `reads_missed`.
     let _peek = world.query.peek();
     // Its OWN planner, downcast — the engine has no ribbons to hand out.
-    let Some(planner) = world.query.planner_as::<crate::planning::StackPlanner>() else {
+    let Some(planner) = world.query.planner_as::<crate::planning::RegionPlanner>() else {
         return;
     };
 
@@ -394,7 +394,7 @@ struct CoverJob {
 impl CoverJob {
     fn of(
         world: &voxel_engine::World,
-        planner: &crate::planning::StackPlanner,
+        planner: &crate::planning::RegionPlanner,
         origin: Vec2,
     ) -> Self {
         let populations = planner

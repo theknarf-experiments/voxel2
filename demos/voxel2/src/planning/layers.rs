@@ -1,4 +1,4 @@
-//! The generic planning-stack vocabulary (unification M2): a small set of
+//! The layers behind this game's region nodes: a small set of
 //! parameterized layer kinds — scatter, connect, flow, worm, emit — that
 //! level JSON composes into ONE LayerManager per level. Features (ruins,
 //! roads, rivers, caves, dungeons, districts) are configurations of these
@@ -12,8 +12,8 @@ use voxel_worldgen::Generator;
 
 pub use voxel_core::patch::{Marker, PatchSet, RibbonSeg};
 
-/// Configuration of a `scatter` stack layer: hash-gated candidate sites
-/// per cell, filtered by terrain.
+/// Configuration of a `scatter` node: hash-gated candidate sites per
+/// cell, filtered by terrain.
 #[derive(Clone, Debug)]
 pub struct ScatterCfg {
     pub cell_m: i32,
@@ -195,13 +195,13 @@ impl ScatterSites {
 /// population thins out across a border instead of stopping on a line.
 #[derive(Clone, Debug)]
 pub struct BiomeGate {
-    /// The material the gated region paints. Resolved from the stack's
-    /// name table at build time; the weight itself comes from the
+    /// The material the gated region paints. Resolved through the wired
+    /// `biomes` node at build time; the weight itself comes from the
     /// generator, which owns the bands.
     pub material: u32,
 }
 
-/// Configuration of a `scatter3` stack layer: volumetric sites for
+/// Configuration of a `scatter3` node: volumetric sites for
 /// interior worlds (habitation pockets in a megastructure). No terrain
 /// filters — interiors have no heightfield.
 #[derive(Clone, Debug)]
@@ -295,7 +295,7 @@ impl Scatter3Sites {
     }
 }
 
-/// Configuration of a `connect3` stack layer: orthogonal (axis-aligned)
+/// Configuration of a `connect3` node: orthogonal (axis-aligned)
 /// links between volumetric sites — walkway tubes in a megastructure.
 #[derive(Clone, Debug)]
 pub struct Connect3Cfg {
@@ -389,7 +389,7 @@ impl Connect3Paths {
     }
 }
 
-/// Configuration of a `connect` stack layer: pathfound links between
+/// Configuration of a `connect` node: pathfound links between
 /// sites of a scatter instance (roads, patrol routes, power lines...).
 #[derive(Clone, Debug)]
 pub struct ConnectCfg {
@@ -506,7 +506,7 @@ impl ConnectPaths {
     }
 }
 
-/// Configuration of a `flow` stack layer: descent courses from sites
+/// Configuration of a `flow` node: descent courses from sites
 /// (rivers, lava, mudslides).
 #[derive(Clone, Debug)]
 pub struct FlowCfg {
@@ -593,7 +593,7 @@ impl FlowCourses {
     }
 }
 
-/// Configuration of a `worm` stack layer: noise-steered burrows from
+/// Configuration of a `worm` node: noise-steered burrows from
 /// sites (caves, lava tubes).
 #[derive(Clone, Debug)]
 pub struct WormCfg {

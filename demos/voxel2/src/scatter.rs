@@ -41,7 +41,7 @@ pub struct ScatterPopulation {
     /// Emit instances whose carved ground and clearance gate placement.
     emit_sources: Vec<String>,
     /// The material of the region this population is gated on, resolved
-    /// from the stack's name table once. `None` grows anywhere.
+    /// through its wired `biomes` node once. `None` grows anywhere.
     biome: Option<u32>,
 }
 
@@ -261,20 +261,11 @@ pub fn register(
 /// Bring the world in line with what the layers published: spawn and
 /// despawn entities per chunk, and hand point populations to the renderer
 /// in bulk.
+///
+/// Not budgeted with `timed!`: this spawns in bulk whenever a population
+/// arrives, so overrunning a frame is what it DOES on a hot reload, and a
+/// warning that fires on the normal case says nothing.
 fn reconcile(
-    commands: Commands,
-    points: Res<voxel_render::ScatterPoints>,
-    populations: ResMut<Populations>,
-    worlds: Res<voxel_engine::Worlds>,
-) {
-    voxel_core::timed!(
-        "scatter::reconcile",
-        4.0,
-        reconcile_inner(commands, points, populations, worlds)
-    );
-}
-
-fn reconcile_inner(
     mut commands: Commands,
     points: Res<voxel_render::ScatterPoints>,
     mut populations: ResMut<Populations>,

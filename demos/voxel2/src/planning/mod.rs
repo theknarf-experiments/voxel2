@@ -5,7 +5,7 @@
 //! the game's, so they live here. [`layers`] holds the layer
 //! implementations, [`structure`] the grammar one of them builds with,
 //! and [`schema`] the JSON vocabulary that composes them. The engine sees
-//! only [`StackPlanning`] through [`HostPlanning`].
+//! only [`RegionPlanning`] through [`HostPlanning`].
 
 pub mod layers;
 pub mod nodes;
@@ -25,26 +25,27 @@ use voxel_layers::{LayerGraph, LayerRuntime, TopDep, TopHandle};
 
 use schema::{validate_level, EmitDef};
 
-/// This demo's planning: interpret the level's `planning` block.
-pub struct StackPlanning(pub bevy::reflect::TypeRegistryArc);
+/// This demo's planning: build layers from the level's region nodes.
+pub struct RegionPlanning(pub bevy::reflect::TypeRegistryArc);
 
 /// Vertical band xz-facade queries cover: enough for any current world
 /// (the deepest LOD tree spans ~±2.5 km), small enough that volumetric
 /// emit layers don't enumerate thousands of 132 m y-rows per query.
 const FACADE_Y_M: f32 = 2_560.0;
 
-/// The level stack as a [`WorldPlanner`]: one `LayerManager` holding every
-/// layer the level declared, plus the bookkeeping needed to answer a query
-/// without generating layers that cannot contribute to it.
+/// The level's region nodes as a [`WorldPlanner`]: one `LayerManager`
+/// holding every layer they describe, plus the bookkeeping needed to
+/// answer a query without generating layers that cannot contribute to it.
 ///
-/// This is *a* host's planner, not the engine's: it interprets the
-/// `stack`/`structures` blocks of a level file. A game with hand-written
-/// layers implements [`WorldPlanner`] itself and never touches this.
+/// This is *a* host's planner, not the engine's: it turns the
+/// region-domain half of a level's node list into layers. A game with
+/// hand-written layers implements [`WorldPlanner`] itself and never
+/// touches this.
 #[derive(Clone, Default)]
-pub struct StackPlanner {
-    /// The level's planning stack: one graph for every layer, plus the
-    /// thread keeping its top dependencies satisfied.
-    stack: Option<Arc<LayerRuntime>>,
+pub struct RegionPlanner {
+    /// One graph for every layer the level's region nodes describe, plus
+    /// the thread keeping its top dependencies satisfied.
+    graph: Option<Arc<LayerRuntime>>,
     /// Handles for the top dependencies that follow the camera.
     tops: Vec<TopHandle>,
     /// What this game's layers share, so its systems can read what they
@@ -109,12 +110,12 @@ impl Emitter {
     }
 }
 
-impl WorldPlanner for StackPlanner {
+impl WorldPlanner for RegionPlanner {
     /// Gated emitters drop out wholesale for coarse chunks — the gate is
     /// per chunk, never per op.
     fn ops_in(&self, min: Vec3, max: Vec3, chunk_edge_m: f32) -> Vec<CsgOp> {
         let mut out = Vec::new();
-        if let Some(rt) = &self.stack {
+        if let Some(rt) = &self.graph {
             let mgr = rt.graph();
             for e in &self.emitters {
                 if e.gate.is_none_or(|g| chunk_edge_m <= g) {
@@ -340,7 +341,7 @@ impl WorldPlanner for StackPlanner {
     /// because it is a race between the first published camera position
     /// and the first chunk.
     fn wait_idle(&self) {
-        let Some(rt) = &self.stack else { return };
+        let Some(rt) = &self.graph else { return };
         while !self.focused.load(std::sync::atomic::Ordering::Acquire) {
             std::thread::sleep(std::time::Duration::from_millis(1));
         }
@@ -348,19 +349,19 @@ impl WorldPlanner for StackPlanner {
     }
 
     fn is_idle(&self) -> bool {
-        self.stack.as_ref().is_none_or(|rt| {
+        self.graph.as_ref().is_none_or(|rt| {
             self.focused.load(std::sync::atomic::Ordering::Acquire) && rt.is_idle()
         })
     }
 
     fn reads_missed(&self) -> usize {
-        self.stack
+        self.graph
             .as_ref()
             .map_or(0, |rt| rt.graph().reads_missed())
     }
 
     fn stats(&self) -> PlanningStats {
-        self.stack
+        self.graph
             .as_ref()
             .map_or_else(PlanningStats::default, |rt| PlanningStats {
                 resident_chunks: rt.graph().resident_chunks(),
@@ -398,7 +399,7 @@ fn hsl_rgb(h: f32, s: f32, l: f32) -> [f32; 3] {
 /// What this HOST asks its own planner. None of it is engine vocabulary:
 /// a ribbon, a marker, a clearance bed and a weight field are this
 /// game's nouns, reached through `WorldQuery::planner_as`.
-impl StackPlanner {
+impl RegionPlanner {
     pub fn clearance_in(
         &self,
         min: bevy::math::Vec2,
@@ -409,7 +410,7 @@ impl StackPlanner {
             Vec3::new(max.x, FACADE_Y_M, max.y),
         );
         let mut out = Vec::new();
-        if let Some(rt) = &self.stack {
+        if let Some(rt) = &self.graph {
             let mgr = rt.graph();
             for e in self.emitters.iter().filter(|e| e.clearance) {
                 out.extend(layers::patches_in(mgr, &e.name, min3, max3).clearance);
@@ -424,7 +425,7 @@ impl StackPlanner {
             Vec3::new(max.x, FACADE_Y_M, max.y),
         );
         let mut out = Vec::new();
-        if let Some(rt) = &self.stack {
+        if let Some(rt) = &self.graph {
             let mgr = rt.graph();
             for e in self.emitters.iter().filter(|e| e.ribbons) {
                 out.extend(layers::patches_in(mgr, &e.name, min3, max3).ribbons);
@@ -474,7 +475,7 @@ impl StackPlanner {
             Vec3::new(max.x, FACADE_Y_M, max.y),
         );
         let mut out = Vec::new();
-        if let Some(rt) = &self.stack {
+        if let Some(rt) = &self.graph {
             let mgr = rt.graph();
             for e in self.emitters.iter().filter(|e| e.markers) {
                 out.extend(
@@ -511,14 +512,14 @@ fn largest_leaf_level(cap: f32) -> u8 {
     level
 }
 
-impl StackPlanner {
+impl RegionPlanner {
     /// Build the planner the level's region nodes describe, or `None` if
     /// it declares none.
     ///
     /// The nodes come from the same list as the generator's — one document,
     /// one order, one way of naming things. What each layer needs from the
     /// others arrives through a port the graph compiler already checked, so
-    /// nothing here scans the stack looking for a name.
+    /// nothing here scans the list looking for a name.
     pub fn new(
         level: &LevelDef,
         seed: u64,
@@ -668,7 +669,7 @@ impl StackPlanner {
         let runtime = Arc::new(LayerRuntime::start(Arc::new(graph), deps));
         let tops = (0..runtime.tops()).map(|i| runtime.top(i)).collect();
         Some(Self {
-            stack: Some(runtime),
+            graph: Some(runtime),
             ctx: Some(ctx),
             tops,
             emitters,
@@ -679,7 +680,7 @@ impl StackPlanner {
     }
 }
 
-impl HostPlanning for StackPlanning {
+impl HostPlanning for RegionPlanning {
     fn validate(&self, level: &LevelDef) -> Result<(), String> {
         validate_level(level)
     }
@@ -690,7 +691,7 @@ impl HostPlanning for StackPlanning {
         seed: u64,
         generator: &Arc<voxel_worldgen::Generator>,
     ) -> Option<Arc<dyn WorldPlanner>> {
-        StackPlanner::new(level, seed, generator, &self.0)
+        RegionPlanner::new(level, seed, generator, &self.0)
             .map(|p| Arc::new(p) as Arc<dyn WorldPlanner>)
     }
 }
@@ -708,20 +709,14 @@ mod tests {
     use voxel_core::csg::CsgOp;
 
     use super::schema::validate_level;
-    use super::{StackPlanner, StackPlanning};
+    use super::{RegionPlanner, RegionPlanning};
 
     /// Engine kinds plus this game's, which is what a level names.
-    fn kinds() -> bevy::reflect::TypeRegistryArc {
-        let reg = crate::planning::nodes::kinds();
-        super::nodes::register(&mut reg.write());
-        reg
-    }
-
     fn shipped(name: &str) -> LevelDef {
         let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../levels/");
         LevelDef::from_json(
             &std::fs::read_to_string(format!("{path}{name}")).unwrap(),
-            &kinds(),
+            &super::nodes::kinds(),
         )
         .unwrap()
     }
@@ -739,7 +734,7 @@ mod tests {
     pub(super) fn world_at(def: &LevelDef, seed: u64, focus: Vec3) -> WorldQuery {
         let generator = Arc::new(def.generator(seed));
         let world = WorldQuery::new(generator.clone());
-        let world = match StackPlanning(kinds()).build(def, seed, &generator) {
+        let world = match RegionPlanning(super::nodes::kinds()).build(def, seed, &generator) {
             Some(planner) => world.with_planner(planner),
             None => world,
         };
@@ -786,11 +781,11 @@ mod tests {
     fn mega_stack_serves_pockets_and_tubes_through_world_query() {
         let mega = shipped("megastructure.json");
         let world = world_for(&mega);
-        let planner = world.planner_as::<StackPlanner>().expect("stack planner");
+        let planner = world.planner_as::<RegionPlanner>().expect("region planner");
         let min = Vec3::new(-1500.0, -260.0, -1500.0);
         let max = Vec3::new(1500.0, 260.0, 1500.0);
         let ops = world.ops_in(min, max, 12.8);
-        assert!(!ops.is_empty(), "mega stack served no ops");
+        assert!(!ops.is_empty(), "the megastructure served no ops");
         // Room shells and tube shells: adds and cuts both present.
         assert!(ops.iter().any(|op| op.kind & 1 == 0), "no shell adds");
         assert!(ops.iter().any(|op| op.kind & 1 == 1), "no bore/room cuts");
@@ -811,7 +806,7 @@ mod tests {
         );
     }
 
-    /// The graph compiler refuses what `validate_stack` used to.
+    /// The graph compiler refuses what a hand-written validator used to.
     ///
     /// These are the same authoring mistakes, checked one layer down: a
     /// source naming nothing, naming the wrong KIND of thing, or naming
@@ -821,7 +816,7 @@ mod tests {
     fn the_compiler_refuses_a_badly_wired_stack() {
         let compile = |json: &str| -> String {
             let nodes: Vec<voxel_engine::graph::NodeDef> =
-                voxel_engine::graph::with_registry(&kinds(), || serde_json::from_str(json))
+                voxel_engine::graph::with_registry(&super::nodes::kinds(), || serde_json::from_str(json))
                     .expect("parses");
             voxel_engine::graph::compile(&nodes)
                 .expect_err("should not compile")
@@ -1041,11 +1036,11 @@ mod tests {
         let planet = shipped("planet.json");
         // A land region large enough to hold every feature kind.
         let world = world_at(&planet, 0, Vec3::new(-27000.0, 0.0, -38000.0));
-        let planner = world.planner_as::<StackPlanner>().expect("stack planner");
+        let planner = world.planner_as::<RegionPlanner>().expect("region planner");
         let min = Vec3::new(-31096.0, -200.0, -42096.0);
         let max = Vec3::new(-22904.0, 500.0, -33904.0);
         let fine = world.ops_in(min, max, 12.8);
-        assert!(!fine.is_empty(), "stack served no ops");
+        assert!(!fine.is_empty(), "the planner served no ops");
         let has_sphere_cuts = |ops: &[CsgOp]| {
             ops.iter()
                 .any(|op| op.kind == voxel_core::csg::CSG_KIND_SPHERE_CUT)
@@ -1109,14 +1104,14 @@ mod output_is_unchanged {
     use bevy::math::{Vec2, Vec3};
     use voxel_engine::level::LevelDef;
 
-    /// Exactly what the stack serves in a fixed window of each level.
+    /// Exactly what the planner serves in a fixed window of each level.
     ///
     /// The generator has a bit-identity net and planning has none, so this
-    /// is it: the numbers were taken before the stack moved into the node
+    /// is it: the numbers were taken before planning moved into the node
     /// list, and they have to survive it. A change here is either a bug or
     /// a decision somebody should be making on purpose.
     #[test]
-    fn the_stack_serves_exactly_what_it_did() {
+    fn planning_serves_exactly_what_it_did() {
         for (name, focus, half, want) in [
             (
                 "planet.json",
@@ -1142,7 +1137,7 @@ mod output_is_unchanged {
             let min = focus - Vec3::splat(half);
             let max = focus + Vec3::splat(half);
             let (min2, max2) = (Vec2::new(min.x, min.z), Vec2::new(max.x, max.z));
-            let planner = world.planner_as::<super::StackPlanner>().unwrap();
+            let planner = world.planner_as::<super::RegionPlanner>().unwrap();
             let got = (
                 world.ops_in(min, max, 12.8).len(),
                 planner.clearance_in(min2, max2).len(),

@@ -174,7 +174,7 @@ fn sync_impostor_style(
         .filter_map(|world| {
             let def = world
                 .query
-                .planner_as::<crate::planning::StackPlanner>()?
+                .planner_as::<crate::planning::RegionPlanner>()?
                 .populations
                 .iter()
                 .find(|def| def.class == IMPOSTOR_CLASS)?;

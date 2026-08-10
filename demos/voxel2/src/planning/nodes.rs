@@ -3,9 +3,9 @@
 //! The engine owns [`Node`] and nothing else about what a kind is. These
 //! are the game's, in the game's crate, and the engine never learns that a
 //! road or a river exists — it sees a region-domain node with ports and
-//! hands the whole set to [`super::StackPlanning`] to turn into layers.
+//! hands the whole set to [`super::RegionPlanning`] to turn into layers.
 //!
-//! What each replaces: a variant of a `StackLayerDef` enum, wired by
+//! What each replaces: a variant of one big enum, wired by
 //! `"source": "sites:ruins"` strings that nothing checked. A source naming
 //! a layer that does not exist used to parse, build, and quietly produce
 //! nothing.
@@ -27,7 +27,7 @@ use super::schema::{
 use super::schema::{EmitDef, RelaxDef, StructureDef, VariantDef};
 use voxel_engine::level::ScatterDef;
 
-/// A named structure the stack can build at a site.
+/// A named structure an `emit` can build at a site.
 ///
 /// A node like everything else, so `site_structure` REFERS to one by name
 /// through a port the compiler checks, rather than by a string looked up in
@@ -188,16 +188,14 @@ impl Node for Worm {
     }
 }
 
-/// A coarse blended-region field; other layers and spawners gate on
-/// its named biomes.
-/// Names for the regions the GENERATOR paints, so the rest of the
-/// stack can gate on them.
+/// Names for the regions the GENERATOR paints, so the rest of the level
+/// can gate on them.
 ///
-/// It defines nothing itself: a region is a `material_band` op and
-/// the ground colour is the definition. This is the dictionary from
-/// a name to the material that region paints, which is what stops
-/// "where trees grow" and "what colour the ground is" from being two
-/// descriptions that can disagree.
+/// It defines nothing itself: a region is a `material_band` op and the
+/// ground colour is the definition. This is the dictionary from a name to
+/// the material that region paints, which is what stops "where trees grow"
+/// and "what colour the ground is" from being two descriptions that can
+/// disagree.
 #[derive(Reflect, Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
 #[reflect(Node, RegionLayer, Serialize, Deserialize, Default)]
 pub struct Biomes {
@@ -497,7 +495,7 @@ pub trait RegionLayer {
 impl RegionLayer for Biomes {
     // Names only: there is no layer to register. A region is a
     // `material_band` op in the generator, and this node is the dictionary
-    // the stack's gates resolve through.
+    // the level's gates resolve through.
     fn register(&self, _ctx: &RegionCtx, _mgr: &mut LayerGraph) {}
 }
 
@@ -698,7 +696,7 @@ impl RegionLayer for Connect3 {
 impl RegionLayer for Emit {
     fn register(&self, ctx: &RegionCtx, mgr: &mut LayerGraph) {
         // `max_chunk_edge_m` and `keep_m` are residency sizes, read by
-        // `StackPlanner::new` when it builds this node's top dependency —
+        // `RegionPlanner::new` when it builds this node's top dependency —
         // the layer itself never sees them.
         let Self {
             cell_m,

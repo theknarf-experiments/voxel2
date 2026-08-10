@@ -31,9 +31,9 @@ pub const TOGGLE_KEY: KeyCode = KeyCode::F10;
 /// One editable document.
 ///
 /// Reached through `ReflectResource`, so a root is any reflected resource
-/// — the engine's [`LevelDef`] and a host's own parsed planning block are
-/// the same kind of thing to this crate, which is what keeps its
-/// vocabulary free of either one's nouns.
+/// — the engine's [`LevelDef`] and a host's own settings are the same kind
+/// of thing to this crate, which is what keeps its vocabulary free of
+/// either one's nouns.
 ///
 /// [`LevelDef`]: voxel_engine::LevelDef
 #[derive(Clone)]

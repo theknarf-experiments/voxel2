@@ -45,10 +45,11 @@ pub struct Hidden;
 /// This field REFERS to something else in the document: its value must be
 /// one of those the given pattern enumerates (see [`resolve_options`]).
 ///
-/// The point of the whole contract. A stack layer's `source` naming a
-/// layer that does not exist is a silent nothing today — the level parses,
-/// the world builds, and the thing you asked for is absent. Enumerated
-/// from `"stack[].name"` it cannot be mistyped.
+/// The point of the whole contract. A placement naming a prefab that does
+/// not exist is a silent nothing — the level parses, the world builds, and
+/// the thing you asked for is absent. Enumerated from `"prefabs{}"` it
+/// cannot be mistyped. (References between NODES are the same idea and
+/// need no pattern; see [`NodeRef`].)
 ///
 /// Names and ids are the same relationship, so this covers both: a
 /// material field is `"materials[].id"`, and that it is spelled as a
@@ -100,25 +101,24 @@ pub struct Rebuilds;
 /// and anything after it is read from each element:
 ///
 /// - `"materials[].id"` — every material id the level defines.
-/// - `"structures{}"` — every structure's name.
-/// - `"stack[].name"` — the `name` of every stack layer.
+/// - `"prefabs{}"` — every prefab's name.
 ///
 /// This is deliberately a pattern rather than a callback: a host adds a
 /// reference space by annotating a field, not by implementing a trait and
 /// remembering to register it.
+pub fn resolve_options(root: &dyn PartialReflect, pattern: &str) -> Vec<String> {
+    let steps: Vec<&str> = pattern.split('.').collect();
+    let mut out = Vec::new();
+    walk(root, &steps, pattern, &mut out);
+    out
+}
+
 /// Every name a [`NodeRef`] could hold: the level's own nodes, at any
 /// depth. The compiler's list, so the menu and the checker agree.
 pub fn node_names(root: &dyn PartialReflect) -> Vec<String> {
     root.try_downcast_ref::<crate::level::LevelDef>()
         .map(|level| crate::graph::names(&level.nodes))
         .unwrap_or_default()
-}
-
-pub fn resolve_options(root: &dyn PartialReflect, pattern: &str) -> Vec<String> {
-    let steps: Vec<&str> = pattern.split('.').collect();
-    let mut out = Vec::new();
-    walk(root, &steps, pattern, &mut out);
-    out
 }
 
 fn walk(value: &dyn PartialReflect, steps: &[&str], pattern: &str, out: &mut Vec<String>) {
@@ -171,10 +171,10 @@ fn walk(value: &dyn PartialReflect, steps: &[&str], pattern: &str, out: &mut Vec
 
 /// One field step, through a struct OR an enum variant.
 ///
-/// Enums matter as much as structs here: the stack layer vocabulary is an
-/// enum whose every variant carries a `name`, so a pattern that only knew
-/// how to read structs would resolve to nothing on exactly the type the
-/// contract exists for.
+/// Enums matter as much as structs here: a material recipe is an enum
+/// whose every variant carries an `id`, so a pattern that only knew how to
+/// read structs would resolve to nothing on exactly the type the contract
+/// exists for.
 fn descend<'a>(
     value: &'a dyn PartialReflect,
     name: &str,
@@ -217,37 +217,34 @@ mod tests {
     use super::*;
     use bevy::platform::collections::HashMap;
 
+    /// Shaped like the two reference spaces a level actually has: a list
+    /// of material recipes, which is an ENUM carrying `id` in every
+    /// variant, and a map of prefabs keyed by name.
     #[derive(Reflect)]
     struct Doc {
-        materials: Vec<Mat>,
-        structures: HashMap<String, Mat>,
-        stack: Vec<Layer>,
+        materials: Vec<Recipe>,
+        prefabs: HashMap<String, Part>,
     }
 
     #[derive(Reflect)]
-    struct Mat {
-        base: f32,
+    struct Part {
+        size: f32,
     }
 
     #[derive(Reflect)]
-    enum Layer {
-        Scatter { name: String },
-        Emit { name: String, source: String },
+    enum Recipe {
+        Surface { id: u32 },
+        Zoned { id: u32, mid: f32 },
     }
 
     fn doc() -> Doc {
         Doc {
-            materials: vec![Mat { base: 0.0 }, Mat { base: 1.0 }, Mat { base: 2.0 }],
-            structures: HashMap::from_iter([("ruin".to_string(), Mat { base: 0.0 })]),
-            stack: vec![
-                Layer::Scatter {
-                    name: "sites".into(),
-                },
-                Layer::Emit {
-                    name: "walls".into(),
-                    source: "sites".into(),
-                },
+            materials: vec![
+                Recipe::Surface { id: 1 },
+                Recipe::Zoned { id: 3, mid: 0.5 },
+                Recipe::Surface { id: 8 },
             ],
+            prefabs: HashMap::from_iter([("ruin".to_string(), Part { size: 2.0 })]),
         }
     }
 
@@ -258,20 +255,20 @@ mod tests {
 
     #[test]
     fn map_keys() {
-        assert_eq!(resolve_options(&doc(), "structures{}"), ["ruin"]);
+        assert_eq!(resolve_options(&doc(), "prefabs{}"), ["ruin"]);
     }
 
-    /// The case the contract exists for: every variant of the layer enum
-    /// carries `name`, and a struct-only walk would find none of them.
+    /// The case the contract exists for: every variant of the recipe enum
+    /// carries `id`, and a struct-only walk would find none of them.
     #[test]
     fn field_of_every_enum_variant() {
-        assert_eq!(resolve_options(&doc(), "stack[].name"), ["sites", "walls"]);
+        assert_eq!(resolve_options(&doc(), "materials[].id"), ["1", "3", "8"]);
     }
 
     #[test]
     fn empty_list_is_no_options_not_an_error() {
         let mut d = doc();
-        d.stack.clear();
-        assert!(resolve_options(&d, "stack[].name").is_empty());
+        d.materials.clear();
+        assert!(resolve_options(&d, "materials[].id").is_empty());
     }
 }

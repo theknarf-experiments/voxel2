@@ -199,8 +199,9 @@ fn main() {
         },
         // Read and write the LIVE level by field path. The engine applies
         // whatever writes the resource, so a set here takes the same route
-        // a file edit does — a material is a table upload, a generator or
-        // scatter change rebuilds. Tuning a colour used to be a relaunch.
+        // a file edit does — a material is a table upload, a node change
+        // rebuilds what that node reaches. Tuning a colour used to be a
+        // relaunch.
         // A resource read takes no path, so the walk happens here. See
         // `walk` for why that is not the same as indexing the JSON.
         ["get", path] => call("world.get_resources", json!({"resource": LEVEL}))
@@ -256,14 +257,14 @@ mod tests {
             // An enum: reflect names the variant's fields directly.
             "materials": [{"Surface": {"base": [0.5, 0.25, 0.125]}}],
             // An Option: reflect wants `.0`, the serializer inlined it.
-            "scatter": [{"cover": {"full_at": 0.02}}],
+            "placements": [{"prefab": "monolith"}],
         });
         let at = |p: &str| walk(&level, p).unwrap().clone();
 
         assert_eq!(at("lod.split_k"), json!(2.5));
         assert_eq!(at(".lod.split_k"), json!(2.5), "a leading dot is optional");
         assert_eq!(at("materials[0].base[1]"), json!(0.25), "through a variant");
-        assert_eq!(at("scatter[0].cover.0.full_at"), json!(0.02), "through Some");
+        assert_eq!(at("placements[0].prefab.0"), json!("monolith"), "through Some");
         // Naming the variant explicitly still has to work: it is what the
         // JSON actually contains, and what someone reading a dump will try.
         assert_eq!(at("materials[0].Surface.base[0]"), json!(0.5));

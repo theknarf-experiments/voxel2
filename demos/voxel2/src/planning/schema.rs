@@ -1,9 +1,12 @@
-//! The JSON planning vocabulary this demo authors its world in.
+//! The value types this game's [`nodes`] take their parameters in, and
+//! the checks a compiled graph still cannot make.
 //!
-//! Nothing here is engine schema. The engine carries the level's
-//! `planning` block verbatim and never looks inside it; these types are
+//! Nothing here is engine schema: the engine knows a node kind is a
+//! registered type and nothing about what a road or a ruin is. These are
 //! how *this* host chooses to describe its layers, and a game with
 //! hand-written layers would delete the whole module.
+//!
+//! [`nodes`]: super::nodes
 
 use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -168,7 +171,7 @@ pub fn d_link_step() -> f32 {
 }
 
 impl StructureDef {
-    /// Pack into the runtime form the planning stack builds from.
+    /// Pack into the runtime form the layers build from.
     pub fn pack(&self) -> structure::Structure {
         use structure as rt;
         rt::Structure {

@@ -99,9 +99,9 @@ pub trait WorldPlanner: Send + Sync + 'static {
 
     /// Answer an opaque question from out-of-process tooling.
     ///
-    /// Carried verbatim, like the level's `planning` block: tooling asks
-    /// `{"kind": "..."}` and the host decides what that means and what
-    /// to reply. JSON because the asker is a socket, not a system.
+    /// Carried verbatim: tooling asks `{"kind": "..."}` and the host
+    /// decides what that means and what to reply. JSON because the asker
+    /// is a socket, not a system.
     fn inspect(&self, _query: &serde_json::Value) -> serde_json::Value {
         serde_json::Value::Null
     }

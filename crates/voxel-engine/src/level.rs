@@ -312,6 +312,7 @@ impl CsgOpDef {
 pub struct PlacementDef {
     /// Name into the level's `prefabs` table...
     #[serde(default)]
+    #[reflect(@schema::OneOf("prefabs{}"))]
     pub prefab: Option<String>,
     /// ...or inline local-space ops.
     #[serde(default)]

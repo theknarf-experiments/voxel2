@@ -392,7 +392,7 @@ fn main() {
                 remote_port: None,
                 // This demo authors its layers as JSON; a game with
                 // hand-written layers passes its own factory here.
-                planner: Some(std::sync::Arc::new(planning::StackPlanning(kinds.clone()))),
+                planner: Some(std::sync::Arc::new(planning::RegionPlanning(kinds.clone()))),
                 // The mesh budget is the HOST's, because what a chunk
                 // costs is a property of the levels it ships: this
                 // demo's terrain is about a page each and its interior

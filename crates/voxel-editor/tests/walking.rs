@@ -314,3 +314,33 @@ fn a_newtype_does_not_cost_a_row() {
     );
     assert_eq!(wires.label, "wires", "and keeps the field's own name");
 }
+
+/// Every reference in a shipped level resolves to something the level
+/// actually has.
+///
+/// The guard that was missing: a `OneOf` pattern is a string, and one
+/// naming a section that has been renamed or removed degrades to an empty
+/// menu and a warning nobody reads. `"stack[].name"` outlived the section
+/// it named by three commits.
+#[test]
+fn every_reference_a_level_makes_resolves() {
+    for name in ["planet", "megastructure", "purgatory"] {
+        let path = format!("{}/../../levels/{name}.json", env!("CARGO_MANIFEST_DIR"));
+        let level =
+            LevelDef::from_json_known(&std::fs::read_to_string(&path).unwrap(), &registry::engine_kinds())
+                .unwrap();
+        let mut seen = 0;
+        for row in rows(&level, &everything(&level)) {
+            let RowKind::Choice { current, options, .. } = &row.kind else {
+                continue;
+            };
+            seen += 1;
+            assert!(
+                options.contains(current),
+                "{name}: '{}' is {current:?}, which is not among {options:?}",
+                row.path
+            );
+        }
+        assert!(seen > 0, "{name} makes no references at all");
+    }
+}
