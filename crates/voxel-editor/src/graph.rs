@@ -41,27 +41,6 @@ pub struct GraphStyle {
     pub frame_header: f32,
 }
 
-impl GraphStyle {
-    /// The same metrics at `zoom`.
-    ///
-    /// Zoom scales the LAYOUT rather than the drawing. A `UiTransform`
-    /// scale is cheaper — it moves no boxes — but Bevy clips a node to its
-    /// unscaled rect, so a zoomed-in label is drawn wide and then cut down
-    /// to the middle slice of itself, and the glyphs are a stretched
-    /// raster besides. Laid out at size, text is clipped where it looks
-    /// clipped and rendered at the size it is read at.
-    pub fn scaled(&self, zoom: f32) -> Self {
-        Self {
-            node_width: self.node_width * zoom,
-            header: self.header * zoom,
-            port: self.port * zoom,
-            gap: self.gap * zoom,
-            frame_pad: self.frame_pad * zoom,
-            frame_header: self.frame_header * zoom,
-        }
-    }
-}
-
 impl Default for GraphStyle {
     fn default() -> Self {
         Self {
@@ -74,6 +53,14 @@ impl Default for GraphStyle {
         }
     }
 }
+
+/// The box that stands for the DOCUMENT itself, addressed by the empty
+/// path — the reflect path of the root.
+///
+/// Everything in the picture is a node, including the level: selecting it
+/// shows the sections that are not nodes, in the same column as any other
+/// node's fields.
+pub const LEVEL: &str = "";
 
 /// One node, placed.
 #[derive(Clone, Debug, PartialEq)]
@@ -153,8 +140,8 @@ impl Edge {
     /// The vertical run sits midway between the two boxes, so wires
     /// leaving one column share a lane instead of each cutting its own
     /// diagonal across everything between.
-    fn route(from: Vec2, to: Vec2, port: String, style: &GraphStyle) -> Self {
-        let thick = (1.5 * style.node_width / GraphStyle::default().node_width).max(1.0);
+    fn route(from: Vec2, to: Vec2, port: String) -> Self {
+        let thick = 1.5;
         let half = thick * 0.5;
         let mid = (from.x + to.x) * 0.5;
         let bar = |a: Vec2, b: Vec2| Seg {
@@ -192,6 +179,26 @@ pub fn layout(nodes: &[NodeDef], style: &GraphStyle) -> Layout {
     let mut depths: bevy::platform::collections::HashMap<String, usize> = Default::default();
     place(nodes, "", style, &mut depths, &mut out);
 
+    // The level's own box, above the graph it heads. Everything else moves
+    // down to make room, which is cheaper than teaching `place` about a
+    // node that is not in the list.
+    let head = Vec2::new(0.0, style.header + style.port + style.gap.y);
+    for node in &mut out.nodes {
+        node.at += head;
+    }
+    for frame in &mut out.frames {
+        frame.at += head;
+    }
+    out.nodes.push(Placed {
+        path: LEVEL.to_string(),
+        name: None,
+        kind: "level",
+        ins: Vec::new(),
+        outs: Vec::new(),
+        at: Vec2::ZERO,
+        size: Vec2::new(style.node_width, style.header + style.port),
+    });
+
     // Wires last: every box has to be placed before an anchor can be
     // asked for, and a wire may cross a scope boundary.
     let by_name: bevy::platform::collections::HashMap<String, usize> = out
@@ -221,7 +228,6 @@ pub fn layout(nodes: &[NodeDef], style: &GraphStyle) -> Layout {
                     out.nodes[from].out_anchor(produced, style),
                     out.nodes[to].in_anchor(port, style),
                     port.clone(),
-                    style,
                 ));
             }
         }

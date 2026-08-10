@@ -80,6 +80,11 @@ impl GraphCamera {
 }
 
 /// The whole graph, as one scene under a clipping viewport.
+///
+/// The geometry is built once, at 1:1, and the camera scales what is
+/// DRAWN. Bevy's UI does not go through a camera projection — `bevy_ui`
+/// reads a camera's scale factor and viewport size and nothing else — so
+/// the transform on this canvas IS the camera.
 pub fn scene(
     layout: &Layout,
     graph: &GraphStyle,
@@ -87,12 +92,6 @@ pub fn scene(
     camera: GraphCamera,
     selected: Option<&str>,
 ) -> impl Scene {
-    // Text is sized with the layout, so a zoomed box holds a zoomed label
-    // rather than a clipped one.
-    let style = &PanelStyle {
-        font: style.font * camera.zoom,
-        ..style.clone()
-    };
     // Frames first, then edges, then boxes: a wire passes behind the node
     // it lands on, and a frame behind everything it gates.
     let frames: Vec<_> = layout
@@ -113,6 +112,7 @@ pub fn scene(
         .collect();
     let font = FontSize::Px(style.font);
     let pan = camera.pan;
+    let scale = Vec2::splat(camera.zoom);
 
     bsn! {
         GraphViewport
@@ -131,8 +131,10 @@ pub fn scene(
                 width: px(0),
                 height: px(0),
             }
-            // Pan only: the zoom is already in the geometry.
-            UiTransform { translation: Val2::px(pan.x, pan.y) }
+            UiTransform {
+                translation: Val2::px(pan.x, pan.y),
+                scale: {scale},
+            }
             InheritableFont {
                 font: fonts::MONO,
                 font_size: {font},
@@ -184,7 +186,6 @@ fn node(placed: &Placed, graph: &GraphStyle, style: &PanelStyle, selected: bool)
                     flex_shrink: 0.0,
                     padding: UiRect::horizontal(px(4)),
                     align_items: bevy::ui::AlignItems::Center,
-                    overflow: bevy::ui::Overflow::clip(),
                 }
                 ThemeBackgroundColor(tokens::SUBPANE_HEADER_BG)
                 Children [(
@@ -216,7 +217,6 @@ fn port(name: &str, input: bool, graph: &GraphStyle, style: &PanelStyle) -> impl
             padding: UiRect::horizontal(px(4)),
             align_items: bevy::ui::AlignItems::Center,
             justify_content: {justify},
-            overflow: bevy::ui::Overflow::clip(),
         }
         Children [(
             Text({label})
@@ -271,7 +271,6 @@ fn frame(frame: &Frame, graph: &GraphStyle, style: &PanelStyle) -> impl Scene {
                 height: {header},
                 padding: UiRect::horizontal(px(5)),
                 align_items: bevy::ui::AlignItems::Center,
-                overflow: bevy::ui::Overflow::clip(),
             }
             Children [(
                 Text({title})

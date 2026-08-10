@@ -9,7 +9,7 @@
 //! variant) is not without more machinery than the rebuild costs.
 
 use bevy::feathers::constants::fonts;
-use bevy::feathers::containers::{pane, pane_body, pane_header};
+use bevy::feathers::containers::{pane, pane_body};
 use bevy::feathers::cursor::EntityCursor;
 use bevy::feathers::font_styles::InheritableFont;
 use bevy::feathers::theme::{ThemeBackgroundColor, ThemedText};
@@ -67,8 +67,10 @@ pub fn apply_camera(
     if !state.is_changed() {
         return;
     }
+    let scale = Vec2::splat(state.camera.zoom);
     for mut transform in &mut canvases {
         transform.translation = Val2::px(state.camera.pan.x, state.camera.pan.y);
+        transform.scale = scale;
     }
 }
 
@@ -193,9 +195,6 @@ fn graph_view(roots: &EditorRoots, root: usize) -> bool {
 pub struct Shown {
     root: usize,
     expanded: Vec<String>,
-    /// Zoom is in the GEOMETRY, so changing it rebuilds. Pan is not — it
-    /// is one transform, written by [`apply_camera`] without a respawn.
-    zoom: f32,
     /// Which node the properties column is showing.
     selected: Option<String>,
     /// The change tick of the document resource the rows were read from.
@@ -231,10 +230,15 @@ pub fn on_select(
     viewports: Query<(), With<canvas::GraphViewport>>,
     mut state: ResMut<EditorState>,
 ) {
-    let target = click.event_target();
-    if let Ok(canvas::SelectsNode(path)) = boxes.get(target) {
+    // A pointer event BUBBLES, so this observer runs once per ancestor: a
+    // click on a node's title bar reaches the title, then the box, then
+    // the canvas, then the viewport. Selecting on the way up is right —
+    // that is how a click on any part of a box selects it — but clearing
+    // has to ask where the click STARTED, or the viewport at the end of
+    // the chain undoes what the box just did. It did exactly that.
+    if let Ok(canvas::SelectsNode(path)) = boxes.get(click.event_target()) {
         state.selected = Some(path.clone());
-    } else if viewports.contains(target) {
+    } else if viewports.contains(click.original_event_target()) {
         state.selected = None;
     }
 }
@@ -289,13 +293,7 @@ pub fn rebuild(world: &mut World) {
         return;
     }
 
-    let Some(Document {
-        label,
-        tick,
-        body,
-        props,
-    }) = read_document(world)
-    else {
+    let Some(Document { tick, body, props }) = read_document(world) else {
         return;
     };
 
@@ -305,7 +303,6 @@ pub fn rebuild(world: &mut World) {
     let mut wanted = Shown {
         root: state.root,
         expanded,
-        zoom: state.camera.zoom,
         selected: state.selected.clone(),
         tick,
         entity: Entity::PLACEHOLDER,
@@ -319,14 +316,13 @@ pub fn rebuild(world: &mut World) {
         }
         world.entity_mut(shown.entity).despawn();
     }
-    let header = format!("{label}  —  {}  (F10)", body.summary());
     // Only where there is a choice: a single-document app should not grow
     // a strip with one thing in it.
     let roots = world.resource::<EditorRoots>().0.clone();
     let current = world.resource::<EditorState>().root;
     let width = px(world.resource::<EditorState>().width);
     let style = world.resource::<PanelStyle>().clone();
-    let (grip, pad, row_gap) = (px(style.grip), px(style.pad), px(style.row_gap));
+    let (grip, row_gap) = (px(style.grip), px(style.row_gap));
     // `impl SceneList for Vec<S: Scene>` is what lets a panel whose shape
     // is only known at runtime be expressed in a static macro.
     let body_scene: Box<dyn SceneList> = match &body {
@@ -334,7 +330,7 @@ pub fn rebuild(world: &mut World) {
         Body::Graph(layout) => {
             let camera = world.resource::<EditorState>().camera;
             let selected = world.resource::<EditorState>().selected.clone();
-            let graph_style = world.resource::<graph::GraphStyle>().scaled(camera.zoom);
+            let graph_style = world.resource::<graph::GraphStyle>().clone();
             let canvas = bsn_list! {(
                 {canvas::scene(layout, &graph_style, &style, camera, selected.as_deref())}
             )};
@@ -391,13 +387,12 @@ pub fn rebuild(world: &mut World) {
                     pane()
                     Node { flex_grow: 1.0, min_width: px(0), flex_direction: FlexDirection::Column }
                     Children [
-                        (pane_header() Children [ (Text({header}) ThemedText) ]),
                         (
                             Node {
                                 display: {tabs},
                                 flex_direction: FlexDirection::Row,
                                 column_gap: {row_gap},
-                                padding: UiRect::all(pad),
+                                padding: UiRect::all(px(2)),
                                 flex_shrink: 0.0,
                             }
                             // Part of the header, not of the document: an
@@ -426,7 +421,6 @@ pub fn rebuild(world: &mut World) {
 
 /// What one tab's document turned into.
 struct Document {
-    label: String,
     tick: u32,
     body: Body,
     /// The selected node's own rows, for the graph view's properties
@@ -440,31 +434,20 @@ enum Body {
     Graph(graph::Layout),
 }
 
-impl Body {
-    /// What the header says there is, in the units the view is measured in.
-    fn summary(&self) -> String {
-        match self {
-            Body::Rows(rows) => match rows.len() {
-                1 => "1 row".to_string(),
-                n => format!("{n} rows"),
-            },
-            Body::Graph(layout) => {
-                format!("{} nodes, {} wires", layout.nodes.len(), layout.edges.len())
-            }
-        }
-    }
-}
-
 /// What the graph view is inspecting, if anything.
 fn state_selected(world: &World) -> Option<String> {
     world.resource::<EditorState>().selected.clone()
 }
 
-/// The properties column beside the graph.
+/// The properties column beside the graph, or NOTHING when no node is
+/// selected — a column explaining that it is empty is still a column.
 ///
 /// The same rows the list view builds, at the same paths: a value edited
 /// here is edited in the document, not in a copy of the selection.
 fn inspector(props: &Option<(String, Vec<walk::Row>)>, style: &PanelStyle) -> impl SceneList {
+    let Some((title, rows)) = props else {
+        return None;
+    };
     let width = px(style.inspector);
     // Its own columns: the list view's are sized for a panel three times
     // this wide, and a value column that does not fit is a value you
@@ -474,13 +457,9 @@ fn inspector(props: &Option<(String, Vec<walk::Row>)>, style: &PanelStyle) -> im
         value: style.inspector * 0.35,
         ..style.clone()
     };
-    let (title, rows) = match props {
-        Some((label, rows)) => (label.clone(), rows.as_slice()),
-        None => ("click a node".to_string(), [].as_slice()),
-    };
-    let header = self::rows_header(title, style);
+    let header = self::rows_header(title.clone(), style);
     let body = rows_body(rows, style);
-    bsn_list! {(
+    Some(bsn_list! {(
         Node {
             width: {width},
             flex_shrink: 0.0,
@@ -490,7 +469,7 @@ fn inspector(props: &Option<(String, Vec<walk::Row>)>, style: &PanelStyle) -> im
         BorderColor::all(Color::srgba(0.0, 0.0, 0.0, 0.5))
         ThemeBackgroundColor(tokens::PANE_HEADER_BG)
         Children [ {header}, {body} ]
-    )}
+    )})
 }
 
 /// The properties column's own title bar.
@@ -595,8 +574,7 @@ fn read_document(world: &mut World) -> Option<Document> {
         // panel asks what it is showing. A root that is not a level draws
         // an empty graph rather than pretending otherwise.
         View::Graph => {
-            let zoom = world.resource::<EditorState>().camera.zoom;
-            let style = world.resource::<graph::GraphStyle>().scaled(zoom);
+            let style = world.resource::<graph::GraphStyle>().clone();
             Body::Graph(
                 value
                     .as_partial_reflect()
@@ -609,6 +587,12 @@ fn read_document(world: &mut World) -> Option<Document> {
     // The selection is a path into the SAME document, so the rows it
     // produces address the level and edit it like any other row.
     let props = state_selected(world).and_then(|path| {
+        // The level's own box is the document root, and what it holds is
+        // what this tab declared it shows.
+        if path == graph::LEVEL {
+            let rows = walk::rows_in(value.as_partial_reflect(), &expanded, &root.sections);
+            return Some(("level".to_string(), rows));
+        }
         let node = value.reflect_path(path.as_str()).ok()?;
         // What the level calls it, if it named it at all.
         let label = value
@@ -627,10 +611,5 @@ fn read_document(world: &mut World) -> Option<Document> {
             ),
         ))
     });
-    Some(Document {
-        label: root.label,
-        tick,
-        body,
-        props,
-    })
+    Some(Document { tick, body, props })
 }

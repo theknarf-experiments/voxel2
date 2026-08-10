@@ -372,6 +372,6 @@ pub fn tab(index: usize, label: &str, active: bool, style: &PanelStyle) -> impl 
             @variant: {variant},
         }
         SelectsRoot({index})
-        Node { flex_grow: 1.0, min_width: px(0) }
+        Node { flex_grow: 1.0, min_width: px(0), height: px(style.tab) }
     }
 }

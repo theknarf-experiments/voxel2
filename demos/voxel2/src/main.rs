@@ -425,15 +425,14 @@ fn main() {
     // The level editor edits the level, which is `LevelDef` — the editor
     // crate is told which reflected resources are documents and knows
     // nothing else about either this demo or the engine.
-    // Two views of ONE document. The graph IS the node list — a picture of
-    // it, with the selected node's own fields beside it — so the rest of
-    // the level is what is left, named by exception: a section added to
-    // the level lands in "Level" without anyone here being told about it.
+    // ONE view: the graph. Everything in a level is a node in it, the
+    // level included — selecting its box shows the sections that are not
+    // nodes, named by exception so one added to the level appears there
+    // without anyone here being told about it.
     app.add_plugins(
         voxel_editor::EditorPlugin::default()
             .root::<LevelDef>("Graph")
             .as_graph()
-            .root::<LevelDef>("Level")
             .except(&["nodes"]),
     );
     app.add_systems(Startup, setup_scene)

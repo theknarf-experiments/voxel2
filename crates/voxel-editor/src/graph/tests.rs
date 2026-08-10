@@ -99,6 +99,35 @@ fn a_wire_lands_on_the_port_it_names() {
     assert_ne!(to.y, ends(warp).1.y, "a port is a row, not a box");
 }
 
+/// The document is a node too: one box, no ports, above the graph it
+/// heads, and addressed by the root path so selecting it inspects the
+/// level itself.
+#[test]
+fn the_level_is_a_node_in_its_own_graph() {
+    let nodes = parse(r#"[{"kind":"height_zero","name":"sea"}]"#);
+    let style = GraphStyle::default();
+    let out = layout(&nodes, &style);
+
+    let level = out
+        .nodes
+        .iter()
+        .find(|p| p.path == LEVEL)
+        .expect("the level has a box");
+    assert_eq!(level.kind, "level");
+    assert!(level.ins.is_empty() && level.outs.is_empty());
+    let sea = out
+        .nodes
+        .iter()
+        .find(|p| p.name.as_deref() == Some("sea"))
+        .unwrap();
+    assert!(
+        level.at.y + level.size.y <= sea.at.y,
+        "the level heads the graph: {:?} vs {:?}",
+        level.at,
+        sea.at
+    );
+}
+
 /// A scope is a frame around its children, and the frame contains them.
 #[test]
 fn a_scope_frames_what_it_gates() {

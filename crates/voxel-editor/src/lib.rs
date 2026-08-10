@@ -62,8 +62,8 @@ pub enum View {
     #[default]
     Rows,
     /// The node list as a picture, with the selected node's own fields
-    /// beside it. [`Sections`] does not apply: the nodes ARE what a graph
-    /// draws.
+    /// beside it. [`Sections`] says what the LEVEL's own box holds — the
+    /// parts of the document that are not nodes.
     Graph,
 }
 

@@ -59,6 +59,9 @@ pub struct PanelStyle {
     pub pad: f32,
     /// The properties column beside the graph.
     pub inspector: f32,
+    /// The tab strip. Shorter than a Feathers `ROW_HEIGHT` button, which
+    /// is sized for a control you aim at rather than a label you read.
+    pub tab: f32,
 }
 
 impl Default for PanelStyle {
@@ -77,6 +80,7 @@ impl Default for PanelStyle {
             wheel_line: 24.0,
             pad: 6.0,
             inspector: 300.0,
+            tab: 17.0,
         }
     }
 }
