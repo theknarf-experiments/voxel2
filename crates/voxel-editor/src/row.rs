@@ -12,7 +12,8 @@
 use bevy::feathers::constants::{fonts, size};
 use bevy::feathers::controls::{
     ButtonVariant, ColorSwatchValue, FeathersButton, FeathersCheckbox, FeathersColorSwatch,
-    FeathersDisclosureToggle, FeathersMenuButton, FeathersSlider,
+    FeathersDisclosureToggle, FeathersMenu, FeathersMenuButton, FeathersMenuItem,
+    FeathersMenuPopup, FeathersSlider,
 };
 use bevy::feathers::font_styles::InheritableFont;
 use bevy::feathers::theme::{InheritableThemeTextColor, ThemedText};
@@ -54,6 +55,22 @@ pub struct WritesNum(pub Num);
 /// (`voxel_engine::schema::Rebuilds`), never a guess made here.
 #[derive(Component, Clone, Copy, Debug, Default)]
 pub struct CommitOnRelease;
+
+/// A menu item that writes one of a reference's options.
+///
+/// The option is carried on the ITEM rather than looked up by index when
+/// it is picked: the panel is respawned whenever the document changes, so
+/// an index into a list that has since been rebuilt is the one thing a
+/// menu must not hold.
+#[derive(Component, Clone, Debug, Default)]
+pub struct PicksOption {
+    pub path: String,
+    pub value: String,
+    /// The field's numeric type, when the reference is spelled as a number
+    /// — a material id is a `u32` and a prefab name is a `String`, and the
+    /// menu that offers them is the same menu.
+    pub num: Option<Num>,
+}
 
 pub fn scene(row: &Row, style: &PanelStyle) -> impl Scene {
     let path = row.path.clone();
@@ -324,21 +341,41 @@ fn value_widget(row: &Row, style: &PanelStyle) -> Box<dyn SceneList> {
         }
 
         RowKind::Choice {
-            current, options, ..
+            current,
+            options,
+            num,
         } => {
             // An empty option list is a level that defines none of that
             // thing, or a pattern that points nowhere. Both are worth
             // seeing in the row rather than as an inert menu.
-            let text = if options.is_empty() {
-                format!("{current}  (nothing to refer to)")
-            } else {
-                format!("{current}  ({} available)", options.len())
-            };
+            if options.is_empty() {
+                let text = format!("{current}  (nothing to refer to)");
+                return Box::new(vec![cell(style.value, self::text(text, style.font))]);
+            }
+            let items: Vec<_> = options
+                .iter()
+                .map(|option| {
+                    let (path, value, num) = (row.path.clone(), option.clone(), *num);
+                    let caption = Box::new(vec![self::text(option.clone(), style.font)])
+                        as Box<dyn SceneList>;
+                    bsn! {
+                        @FeathersMenuItem { @caption: {caption} }
+                        PicksOption { path: {path}, value: {value}, num: {num} }
+                    }
+                })
+                .collect();
+            let caption =
+                Box::new(vec![self::text(current.clone(), style.font)]) as Box<dyn SceneList>;
             Box::new(bsn_list!(
-                @FeathersMenuButton {
-                    @caption: {Box::new(vec![self::text(text, style.font)]) as Box<dyn SceneList>},
-                }
-                Node { width: px(style.value), flex_shrink: 0.0 }
+                @FeathersMenu
+                Node { width: {px(style.value)}, flex_shrink: 0.0 }
+                Children [
+                    (
+                        @FeathersMenuButton { @caption: {caption} }
+                        Node { flex_grow: 1.0, min_width: px(0), height: px(style.tab) }
+                    ),
+                    (@FeathersMenuPopup Children [ {items} ]),
+                ]
             ))
         }
 

@@ -178,3 +178,63 @@ fn activating_a_tab_selects_its_root() {
     app.update();
     assert_eq!(app.world().resource::<EditorState>().root, 1);
 }
+
+/// Picking a reference from its menu writes it, at the field's own type.
+///
+/// A material id is a number and a prefab name is a string; the menu that
+/// offers them is the same menu, so the item carries which it is.
+#[test]
+fn picking_a_reference_writes_it() {
+    use voxel_editor::PicksOption;
+    let mut app = app();
+    app.add_observer(voxel_editor::on_pick);
+
+    // A numeric reference: the id an op paints with.
+    let id = app.world().resource::<LevelDef>().materials[1].id();
+    let item = app
+        .world_mut()
+        .spawn(PicksOption {
+            path: ".materials[0].id".into(),
+            value: id.to_string(),
+            num: Some(Num::U32),
+        })
+        .id();
+    app.world_mut()
+        .trigger(bevy::ui_widgets::Activate { entity: item });
+    app.update();
+    assert_eq!(
+        app.world().resource::<LevelDef>().materials[0].id(),
+        id,
+        "a numeric reference lands as a number"
+    );
+
+    // A textual one: the node a port is wired to.
+    let (at, port) = app
+        .world()
+        .resource::<LevelDef>()
+        .nodes
+        .iter()
+        .enumerate()
+        .find_map(|(i, n)| Some((i, n.wires.iter().next()?.0.clone())))
+        .expect("planet wires its nodes");
+    let name = app.world().resource::<LevelDef>().nodes[0]
+        .name
+        .clone()
+        .expect("the first node is named");
+    let item = app
+        .world_mut()
+        .spawn(PicksOption {
+            path: format!(".nodes[{at}].wires.0{{{port}}}.0"),
+            value: name.clone(),
+            num: None,
+        })
+        .id();
+    app.world_mut()
+        .trigger(bevy::ui_widgets::Activate { entity: item });
+    app.update();
+    let wired = app.world().resource::<LevelDef>().nodes[at]
+        .wires
+        .get(&port)
+        .and_then(|w| w.sources().first().cloned());
+    assert_eq!(wired.as_deref(), Some(name.as_str()), "a wire is rewired");
+}

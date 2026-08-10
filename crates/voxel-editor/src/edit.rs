@@ -12,7 +12,7 @@ use bevy::prelude::*;
 use bevy::ui_widgets::ValueChange;
 
 use crate::path;
-use crate::row::{CommitOnRelease, FieldPath, WritesNum};
+use crate::row::{CommitOnRelease, FieldPath, PicksOption, WritesNum};
 use crate::walk::Num;
 use crate::{EditorRoots, EditorState};
 
@@ -26,11 +26,48 @@ pub struct Edit {
 pub enum Value {
     Num(f64, Num),
     Bool(bool),
+    Text(String),
 }
 
 /// Edits waiting for the exclusive system that can apply them.
 #[derive(Resource, Default)]
 pub struct Pending(pub Vec<Edit>);
+
+/// A reference was picked from its menu.
+///
+/// The row said what the field may hold — the level's own material ids,
+/// its prefabs, its node names — so this only has to write the one that
+/// was chosen. Whether it lands as a number or as text is the FIELD's
+/// business, carried on the item: an id is spelled as a number and a name
+/// as a string, and the menu that offers them is the same menu.
+pub fn on_pick(
+    activate: On<bevy::ui_widgets::Activate>,
+    picks: Query<&PicksOption>,
+    state: Res<EditorState>,
+    mut pending: ResMut<Pending>,
+) {
+    let Ok(pick) = picks.get(activate.event_target()) else {
+        return;
+    };
+    let value = match pick.num {
+        Some(num) => match pick.value.parse::<f64>() {
+            Ok(v) => Value::Num(v, num),
+            // The options come from the document, so a numeric reference
+            // whose option is not a number is a bug in the pattern that
+            // enumerated it, not in the level.
+            Err(_) => {
+                warn!("editor: '{}' is not a number", pick.value);
+                return;
+            }
+        },
+        None => Value::Text(pick.value.clone()),
+    };
+    pending.0.push(Edit {
+        root: state.root,
+        path: pick.path.clone(),
+        value,
+    });
+}
 
 /// A slider moved.
 ///
@@ -151,6 +188,7 @@ pub fn apply(world: &mut World) {
 /// only place that conversion is allowed to happen.
 fn typed(value: &Value) -> Box<dyn PartialReflect> {
     match *value {
+        Value::Text(ref s) => Box::new(s.clone()),
         Value::Bool(b) => Box::new(b),
         Value::Num(v, num) => match num {
             Num::F32 => Box::new(v as f32),

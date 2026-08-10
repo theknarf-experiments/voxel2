@@ -21,8 +21,9 @@ mod row;
 mod style;
 mod walk;
 
+pub use edit::on_pick;
 pub use panel::on_tab;
-pub use row::SelectsRoot;
+pub use row::{PicksOption, SelectsRoot};
 pub use style::PanelStyle;
 pub use walk::{rows, rows_at, rows_in, Num, Row, RowKind};
 
@@ -229,6 +230,7 @@ impl Plugin for EditorPlugin {
             .add_observer(panel::on_grip_drag)
             .add_observer(edit::on_f32)
             .add_observer(edit::on_bool)
+            .add_observer(edit::on_pick)
             .add_systems(
                 Update,
                 (
