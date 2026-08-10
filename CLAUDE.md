@@ -19,8 +19,19 @@ architecture. Design plan: `~/.claude/plans/binary-twirling-brooks.md`.
   cannot catch the create-then-release races. `dress_scatter` panicked on
   exactly one, straight flight missed it for 100 s, weaving found it in
   under 40. Run this too before claiming a change works.
+- Both are for changes that reach GENERATION: the engine, the renderer,
+  planning, a level. An editor-only change does not need them — with one
+  exception that has actually happened: the panel's exclusive systems ran
+  every frame and split the schedule, and `fly` exhausted the slabs with
+  the panel SHUT. So run them when the editor's SCHEDULING changes (a new
+  system, a changed run condition), not when its drawing does.
+- **Build first, then launch the binary directly.** `cargo build
+  --workspace && ./target/debug/voxel2 levels/planet.json` is up and
+  SETTLED in ~6 s; `cargo run` bundles a rebuild into that wait and makes
+  it 80+. Poll for it rather than sleeping blind: loop on `voxctl status`
+  until `stream.settled` is true.
 - `cargo run -p voxel2 -- levels/<name>.json` — visual verification is
-  mandatory for render changes: run ~35 s (LOD refinement needs time),
+  mandatory for render changes: settle, then let LOD refine,
   screenshot, and look. Use `caffeinate -dis` so the display can't sleep,
   and take shots with `voxctl shot` — NEVER `screencapture -R`, which
   grabs whatever is on screen, not the app.
