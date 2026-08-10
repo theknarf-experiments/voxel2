@@ -34,7 +34,7 @@ use crate::worldop::*;
 /// is what lets a level wire two ops together without knowing that a
 /// register file exists at all — the level says `"in": {"lattice": "floors"}`
 /// and the compiler lowers that back to `level`/`fy`.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum Value {
     /// `h` — the heightfield accumulator.
     Height,

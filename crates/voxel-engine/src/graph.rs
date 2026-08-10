@@ -1,0 +1,371 @@
+//! The level graph, and the compiler that lowers it.
+//!
+//! A level is one list of nodes. Each names the nodes it consumes, so the
+//! dataflow is written down rather than implied by a shared register file
+//! and a position in a list. This module checks that wiring and lowers the
+//! point-domain part of it back to the `WorldOp` program both interpreters
+//! already run.
+//!
+//! **The order a level is written IS the program order.** The compiler
+//! verifies that order is a valid topological one rather than computing a
+//! new one, for three reasons: a level reads top to bottom like the
+//! program it is, the error for a forward reference can name the two nodes
+//! involved, and a topological sort is not unique — reordering would make
+//! "the same graph" compile to a different program, which is exactly what
+//! nobody wants to debug.
+//!
+//! **Registers are the lowering, not the language.** Every value but a
+//! field lives in one register, so one thing is live at a time. Reading is
+//! not consuming — every height op reads the same warp — so what the
+//! compiler tracks is LIVENESS: which writes are still standing, and which
+//! of them a reader's own region can see. A gated write displaces only the
+//! ones it covers, which is what lets nine districts each define a lattice
+//! and one `shafts_cut` read seven shafts.
+
+use bevy::platform::collections::{HashMap, HashSet};
+use voxel_core::opgen::{self, Value};
+use voxel_core::worldop::{WorldOp, FIELD_SLOTS};
+
+use crate::level::{NodeDef, NodeKind};
+
+/// A compiled level graph.
+#[derive(Debug)]
+pub struct Program {
+    /// The point-domain program, in emission order.
+    pub ops: Vec<WorldOp>,
+    /// Which slot each named field node was allocated. Consumers name the
+    /// node; this is how a slot number is found without a level ever
+    /// writing one.
+    pub fields: HashMap<String, u32>,
+}
+
+/// Everything that can be wrong with a graph, said in terms of the nodes a
+/// level wrote rather than the registers it never mentioned.
+#[derive(Debug, PartialEq)]
+pub enum Error {
+    DuplicateName(String),
+    UnknownNode { at: String, port: String, name: String },
+    ForwardReference { at: String, port: String, name: String },
+    UnknownPort { at: String, port: String },
+    MissingPort { at: String, port: String, value: Value },
+    WrongType { at: String, port: String, want: Value, got: Value },
+    StaleRead {
+        at: String,
+        port: String,
+        wired: Vec<String>,
+        live: Vec<String>,
+    },
+    TooManyFields { at: String, limit: usize },
+    Unnamed { at: String },
+}
+
+impl std::fmt::Display for Error {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Error::DuplicateName(n) => write!(f, "two nodes are called '{n}'"),
+            Error::UnknownNode { at, port, name } => {
+                write!(f, "'{at}' wires port '{port}' to '{name}', which is not a node")
+            }
+            Error::ForwardReference { at, port, name } => write!(
+                f,
+                "'{at}' wires port '{port}' to '{name}', which is written later — \
+                 a level is its own program order, so '{name}' has to come first"
+            ),
+            Error::UnknownPort { at, port } => {
+                write!(f, "'{at}' has no port called '{port}'")
+            }
+            Error::MissingPort { at, port, value } => write!(
+                f,
+                "'{at}' consumes {value:?} through port '{port}' and nothing is wired to it"
+            ),
+            Error::WrongType { at, port, want, got } => write!(
+                f,
+                "'{at}' port '{port}' wants {want:?} but is wired to a {got:?}"
+            ),
+            Error::StaleRead {
+                at,
+                port,
+                wired,
+                live,
+            } => write!(
+                f,
+                "'{at}' reads {wired:?} through port '{port}', but by then that \
+                 value has been replaced by {live:?} — one thing is live at a time, \
+                 so whatever reads a value has to come before what overwrites it"
+            ),
+            Error::TooManyFields { at, limit } => {
+                write!(f, "'{at}' is field {} and there are only {limit}", limit + 1)
+            }
+            Error::Unnamed { at } => {
+                write!(f, "{at} is referred to by name but has none")
+            }
+        }
+    }
+}
+
+/// One node after scopes are flattened.
+struct Flat<'a> {
+    name: Option<&'a str>,
+    /// What to call it in an error when it has no name.
+    label: String,
+    node: &'a NodeDef,
+    /// The intersection of every enclosing scope, or `None` for ungated.
+    region: Option<[f32; 4]>,
+}
+
+/// Flatten scopes, intersecting their gates.
+///
+/// A box inside a box is a box, so any depth of nesting still lands in the
+/// single packed gate a `WorldOp` carries.
+fn flatten<'a>(nodes: &'a [NodeDef], region: Option<[f32; 4]>, path: &str, out: &mut Vec<Flat<'a>>) {
+    for (i, node) in nodes.iter().enumerate() {
+        let label = match &node.name {
+            Some(n) => n.to_string(),
+            None => format!("{path}[{i}] ({})", kind_name(&node.kind)),
+        };
+        if let NodeKind::Region { axes, nodes: inner } = &node.kind {
+            let region = Some(match region {
+                None => *axes,
+                Some(o) => [
+                    o[0].max(axes[0]),
+                    o[1].min(axes[1]),
+                    o[2].max(axes[2]),
+                    o[3].min(axes[3]),
+                ],
+            });
+            flatten(inner, region, &label, out);
+        } else {
+            out.push(Flat {
+                name: node.name.as_deref(),
+                label,
+                node,
+                region,
+            });
+        }
+    }
+}
+
+fn kind_name(kind: &NodeKind) -> &'static str {
+    match kind {
+        NodeKind::Region { .. } => "region",
+        NodeKind::HeightZero => "height_zero",
+        NodeKind::SdfVoid => "sdf_void",
+        NodeKind::WarpNone => "warp_none",
+        _ => "op",
+    }
+}
+
+/// The value an origin node produces; origins emit no op.
+fn origin_value(kind: &NodeKind) -> Option<Value> {
+    match kind {
+        NodeKind::HeightZero => Some(Value::Height),
+        NodeKind::SdfVoid => Some(Value::Sdf),
+        NodeKind::WarpNone => Some(Value::Warp),
+        _ => None,
+    }
+}
+
+/// The ports of a node, whichever kind it is.
+fn ports(kind: &NodeKind) -> (&'static [opgen::Port], &'static [opgen::Port]) {
+    if let Some(value) = origin_value(kind) {
+        // An origin consumes nothing and produces the register's initial
+        // state. Leaked as a static so every kind answers the same shape.
+        return (&[], match value {
+            Value::Height => &[("height", Value::Height)],
+            Value::Sdf => &[("sdf", Value::Sdf)],
+            _ => &[("warp", Value::Warp)],
+        });
+    }
+    // Every other node is an op, and the op table declares its ports.
+    kind.op(0)
+        .and_then(|op| opgen::ports(op.kind))
+        .unwrap_or((&[], &[]))
+}
+
+/// Does gate `outer` contain every point of gate `inner`?
+///
+/// `None` is everywhere: an ungated write covers any region, and nothing
+/// but another ungated write covers an ungated one.
+fn covers(outer: Option<[f32; 4]>, inner: Option<[f32; 4]>) -> bool {
+    let Some(outer) = outer else { return true };
+    let Some(inner) = inner else { return false };
+    outer[0] <= inner[0] && outer[1] >= inner[1] && outer[2] <= inner[2] && outer[3] >= inner[3]
+}
+
+/// Do two region gates cover any of the same points?
+///
+/// `None` is everywhere, so it overlaps anything.
+fn gates_overlap(a: Option<[f32; 4]>, b: Option<[f32; 4]>) -> bool {
+    let (Some(a), Some(b)) = (a, b) else { return true };
+    let axis = |lo_a: f32, hi_a: f32, lo_b: f32, hi_b: f32| lo_a < hi_b && lo_b < hi_a;
+    axis(a[0], a[1], b[0], b[1]) && axis(a[2], a[3], b[2], b[3])
+}
+
+/// Check a level's wiring and lower its point-domain nodes.
+pub fn compile(nodes: &[NodeDef]) -> Result<Program, Error> {
+    let mut flat = Vec::new();
+    flatten(nodes, None, "", &mut flat);
+
+    // Names, and the value each node produces.
+    let mut by_name: HashMap<&str, usize> = HashMap::default();
+    for (i, f) in flat.iter().enumerate() {
+        if let Some(name) = f.name {
+            if by_name.insert(name, i).is_some() {
+                return Err(Error::DuplicateName(name.to_string()));
+            }
+        }
+    }
+
+    // Field slots, allocated in declaration order — which is what makes
+    // the level stop writing slot numbers and stop keeping them agreeing
+    // with the spawners that read them.
+    let mut fields: HashMap<String, u32> = HashMap::default();
+    for f in &flat {
+        if !matches!(f.node.kind, NodeKind::Field { .. }) {
+            continue;
+        }
+        let Some(name) = f.name else {
+            return Err(Error::Unnamed { at: f.label.clone() });
+        };
+        if fields.len() >= FIELD_SLOTS {
+            return Err(Error::TooManyFields {
+                at: f.label.clone(),
+                limit: FIELD_SLOTS,
+            });
+        }
+        fields.insert(name.to_string(), fields.len() as u32);
+    }
+
+    // Wiring: every port named, every name known and already written,
+    // every type agreeing, and every read reading what is actually live.
+    //
+    // Liveness rather than "consumed once", because reading a value is not
+    // consuming it: every height op reads the same warp and every slab op
+    // the same lattice. What a single-slot register cannot do is hold two
+    // things at once — so this tracks, per value, which nodes' writes are
+    // still standing, and a gated write only displaces the ones its region
+    // covers.
+    let mut live: HashMap<Value, Vec<usize>> = HashMap::default();
+    let mut ops = Vec::with_capacity(flat.len());
+
+    for (i, f) in flat.iter().enumerate() {
+        let (ins, outs) = ports(&f.node.kind);
+
+        for (port, _) in f.node.wires.iter() {
+            if !ins.iter().any(|(p, _)| p == port) {
+                return Err(Error::UnknownPort {
+                    at: f.label.clone(),
+                    port: port.clone(),
+                });
+            }
+        }
+
+        for (port, want) in ins {
+            let Some(wire) = f.node.wires.get(port) else {
+                return Err(Error::MissingPort {
+                    at: f.label.clone(),
+                    port: port.to_string(),
+                    value: *want,
+                });
+            };
+            let sources = wire.sources();
+            let mut resolved = Vec::with_capacity(sources.len());
+            for name in sources {
+                let Some(&j) = by_name.get(name.as_str()) else {
+                    return Err(Error::UnknownNode {
+                        at: f.label.clone(),
+                        port: port.to_string(),
+                        name: name.clone(),
+                    });
+                };
+                if j >= i {
+                    return Err(Error::ForwardReference {
+                        at: f.label.clone(),
+                        port: port.to_string(),
+                        name: name.clone(),
+                    });
+                }
+                let (_, produced) = ports(&flat[j].node.kind);
+                let got = produced.first().map(|(_, v)| *v);
+                if got != Some(*want) {
+                    return Err(Error::WrongType {
+                        at: f.label.clone(),
+                        port: port.to_string(),
+                        want: *want,
+                        got: got.unwrap_or(Value::Field),
+                    });
+                }
+                resolved.push(j);
+            }
+
+            // What this node can actually see: the still-standing writes
+            // of this value whose region overlaps its own. A district's
+            // `slabs_y` sees its own district's lattice and no other, so
+            // it names one source and not nine.
+            let standing = live.get(want).map(Vec::as_slice).unwrap_or_default();
+            // A write that covers this node's whole region hides every
+            // write before it: inside district one, `void` is not visible
+            // because the district's own `coarse_solid` replaced all of it.
+            let from = standing
+                .iter()
+                .rposition(|&j| covers(flat[j].region, f.region))
+                .unwrap_or(0);
+            let mut visible: Vec<usize> = standing[from..]
+                .iter()
+                .copied()
+                .filter(|&j| gates_overlap(flat[j].region, f.region))
+                .collect();
+            visible.sort_unstable();
+            let mut asked = resolved.clone();
+            asked.sort_unstable();
+            if asked != visible {
+                let label = |v: &[usize]| v.iter().map(|&j| flat[j].label.clone()).collect();
+                return Err(Error::StaleRead {
+                    at: f.label.clone(),
+                    port: port.to_string(),
+                    wired: label(&asked),
+                    live: label(&visible),
+                });
+            }
+        }
+
+        // Writes. An ungated write replaces the value everywhere; a gated
+        // one only where it applies, which is what lets nine districts each
+        // define a lattice and one `shafts_cut` read seven shafts.
+        for (_, produced) in outs {
+            let standing = live.entry(*produced).or_default();
+            standing.retain(|&j| !covers(f.region, flat[j].region));
+            standing.push(i);
+        }
+
+        let slot = f
+            .name
+            .and_then(|n| fields.get(n))
+            .copied()
+            .unwrap_or_default();
+        if let Some(op) = f.node.kind.op(slot) {
+            ops.push(match f.region {
+                Some(band) => op.region(band),
+                None => op,
+            });
+        }
+    }
+
+    Ok(Program { ops, fields })
+}
+
+/// Names every node a level defines, for the reference lists an editor
+/// offers. Scopes included: they are nodes too.
+pub fn names(nodes: &[NodeDef]) -> Vec<String> {
+    let mut flat = Vec::new();
+    flatten(nodes, None, "", &mut flat);
+    let mut seen: HashSet<&str> = HashSet::default();
+    flat.iter()
+        .filter_map(|f| f.name)
+        .filter(|n| seen.insert(*n))
+        .map(str::to_string)
+        .collect()
+}
+
+#[cfg(test)]
+mod tests;

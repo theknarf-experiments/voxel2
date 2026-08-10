@@ -14,7 +14,7 @@ use bevy::platform::collections::HashSet;
 use bevy::prelude::*;
 use voxel_editor::edit::{apply, Edit, Pending, Value};
 use voxel_editor::{EditorRoots, EditorState, Num, Root};
-use voxel_engine::level::GenOpDef;
+use voxel_engine::level::NodeKind;
 use voxel_engine::LevelDef;
 
 /// Set by change detection, exactly as `apply_level_change` is driven.
@@ -75,26 +75,26 @@ fn an_edit_reaches_the_field_its_path_names() {
 }
 
 /// The path shape the whole editor turns on: a number inside a struct
-/// variant of an enum inside a list. Every generator op is one, and it is
-/// the shape `GetPath` alone would not have reached through the map case
+/// variant of an enum inside a list. Every generator node is one, and it
+/// is the shape `GetPath` alone would not have reached through the map case
 /// this crate's resolver exists for.
 #[test]
-fn an_edit_reaches_inside_a_generator_op() {
+fn an_edit_reaches_inside_a_generator_node() {
     let mut app = app();
-    // By variant, not by index: which op sits where is content, and a test
-    // that hardcoded it would break on any re-authoring of the level.
+    // By variant, not by index: which node sits where is content, and a
+    // test that hardcoded it would break on any re-authoring of the level.
     let at = app
         .world()
         .resource::<LevelDef>()
-        .generator
+        .nodes
         .iter()
-        .position(|e| matches!(e.op, GenOpDef::HeightFbm { .. }))
+        .position(|n| matches!(n.kind, NodeKind::HeightFbm { .. }))
         .expect("planet's terrain is fbm height bands");
 
-    edit(&mut app, &format!(".generator[{at}].op.amp"), 123.0, Num::F32);
+    edit(&mut app, &format!(".nodes[{at}].kind.amp"), 123.0, Num::F32);
 
     let level = app.world().resource::<LevelDef>();
-    let GenOpDef::HeightFbm { amp, .. } = level.generator[at].op else {
+    let NodeKind::HeightFbm { amp, .. } = level.nodes[at].kind else {
         panic!("the edit changed the variant")
     };
     assert_eq!(amp, 123.0);

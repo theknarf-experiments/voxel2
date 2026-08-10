@@ -16,9 +16,22 @@
       -0.62
     ]
   },
-  "generator": [
+  "nodes": [
     {
-      "type": "region_axes",
+      "kind": "height_zero",
+      "name": "sea"
+    },
+    {
+      "kind": "sdf_void",
+      "name": "void"
+    },
+    {
+      "kind": "warp_none",
+      "name": "unwarped"
+    },
+    {
+      "kind": "region_axes",
+      "name": "regions.1",
       "scale": [
         9e-05,
         0.00012
@@ -32,13 +45,22 @@
       "octaves": 5
     },
     {
-      "type": "height_fbm",
+      "kind": "height_fbm",
+      "name": "height.1",
+      "in": {
+        "height": "sea",
+        "warp": "unwarped"
+      },
       "scale": 3e-05,
       "amp": 620.0,
       "octaves": 3
     },
     {
-      "type": "warp_xz",
+      "kind": "warp_xz",
+      "name": "warp.1",
+      "in": {
+        "warp": "unwarped"
+      },
       "offset": [
         211.0,
         -87.0
@@ -48,7 +70,12 @@
       "octaves": 3
     },
     {
-      "type": "height_fbm",
+      "kind": "height_fbm",
+      "name": "height.2",
+      "in": {
+        "height": "height.1",
+        "warp": "warp.1"
+      },
       "offset": [
         -4100.0,
         2600.0
@@ -59,7 +86,12 @@
       "mode": "billow"
     },
     {
-      "type": "height_fbm",
+      "kind": "height_fbm",
+      "name": "height.3",
+      "in": {
+        "height": "height.2",
+        "warp": "warp.1"
+      },
       "offset": [
         980.0,
         4400.0
@@ -70,7 +102,12 @@
       "mode": "billow"
     },
     {
-      "type": "height_fbm",
+      "kind": "height_fbm",
+      "name": "height.4",
+      "in": {
+        "height": "height.3",
+        "warp": "warp.1"
+      },
       "offset": [
         -660.0,
         -230.0
@@ -81,7 +118,12 @@
       "mode": "ridged"
     },
     {
-      "type": "height_fbm",
+      "kind": "height_fbm",
+      "name": "height.5",
+      "in": {
+        "height": "height.4",
+        "warp": "warp.1"
+      },
       "offset": [
         3300.0,
         1700.0
@@ -92,7 +134,12 @@
       "mode": "billow"
     },
     {
-      "type": "height_fbm",
+      "kind": "height_fbm",
+      "name": "height.6",
+      "in": {
+        "height": "height.5",
+        "warp": "warp.1"
+      },
       "offset": [
         120.0,
         -900.0
@@ -103,19 +150,32 @@
       "mode": "ridged"
     },
     {
-      "type": "height_step",
+      "kind": "height_step",
+      "name": "height.7",
+      "in": {
+        "height": "height.6"
+      },
       "start": 120.0,
       "end": 156.0,
       "amp": 44.0
     },
     {
-      "type": "height_step",
+      "kind": "height_step",
+      "name": "height.8",
+      "in": {
+        "height": "height.7"
+      },
       "start": 320.0,
       "end": 352.0,
       "amp": 30.0
     },
     {
-      "type": "height_fbm",
+      "kind": "height_fbm",
+      "name": "height.9",
+      "in": {
+        "height": "height.8",
+        "warp": "warp.1"
+      },
       "offset": [
         61.0,
         17.0
@@ -125,7 +185,12 @@
       "octaves": 4
     },
     {
-      "type": "height_fbm",
+      "kind": "height_fbm",
+      "name": "height.10",
+      "in": {
+        "height": "height.9",
+        "warp": "warp.1"
+      },
       "offset": [
         -311.0,
         508.0
@@ -135,20 +200,30 @@
       "octaves": 2
     },
     {
-      "type": "height_offset",
+      "kind": "height_offset",
+      "name": "height.11",
+      "in": {
+        "height": "height.10"
+      },
       "value": 26.0
     },
     {
-      "type": "field",
-      "slot": 0,
+      "kind": "field",
+      "name": "field.1",
+      "in": {
+        "warp": "warp.1"
+      },
       "scale": 0.00042,
       "amp": 1.0,
       "octaves": 3,
       "bias": 0.12
     },
     {
-      "type": "field",
-      "slot": 1,
+      "kind": "field",
+      "name": "field.2",
+      "in": {
+        "warp": "warp.1"
+      },
       "offset": [
         770.0,
         -140.0
@@ -159,11 +234,20 @@
       "bias": -0.05
     },
     {
-      "type": "height_surface",
+      "kind": "height_surface",
+      "name": "sdf.1",
+      "in": {
+        "height": "height.11",
+        "sdf": "void"
+      },
       "material": 1
     },
     {
-      "type": "material_band",
+      "kind": "material_band",
+      "in": {
+        "sdf": "sdf.1",
+        "regions": "regions.1"
+      },
       "from": 1,
       "material": 3,
       "a": [

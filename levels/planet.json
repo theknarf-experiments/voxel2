@@ -16,9 +16,22 @@
       0.32
     ]
   },
-  "generator": [
+  "nodes": [
     {
-      "type": "region_axes",
+      "kind": "height_zero",
+      "name": "sea"
+    },
+    {
+      "kind": "sdf_void",
+      "name": "void"
+    },
+    {
+      "kind": "warp_none",
+      "name": "unwarped"
+    },
+    {
+      "kind": "region_axes",
+      "name": "regions.1",
       "scale": [
         8e-05,
         0.00011
@@ -32,13 +45,23 @@
       "octaves": 5
     },
     {
-      "type": "height_fbm",
+      "kind": "height_fbm",
+      "name": "height.1",
+      "in": {
+        "height": "sea",
+        "warp": "unwarped"
+      },
       "scale": 5e-05,
       "amp": 800.0,
       "octaves": 3
     },
     {
-      "type": "height_fbm",
+      "kind": "height_fbm",
+      "name": "height.2",
+      "in": {
+        "height": "height.1",
+        "warp": "unwarped"
+      },
       "offset": [
         510.0,
         -770.0
@@ -48,7 +71,12 @@
       "octaves": 5
     },
     {
-      "type": "height_fbm",
+      "kind": "height_fbm",
+      "name": "height.3",
+      "in": {
+        "height": "height.2",
+        "warp": "unwarped"
+      },
       "offset": [
         1337.0,
         55.0
@@ -58,13 +86,22 @@
       "octaves": 5
     },
     {
-      "type": "height_step",
+      "kind": "height_step",
+      "name": "height.4",
+      "in": {
+        "height": "height.3"
+      },
       "start": 180.0,
       "end": 230.0,
       "amp": 90.0
     },
     {
-      "type": "height_fbm",
+      "kind": "height_fbm",
+      "name": "height.5",
+      "in": {
+        "height": "height.4",
+        "warp": "unwarped"
+      },
       "offset": [
         37.0,
         91.0
@@ -74,12 +111,19 @@
       "octaves": 4
     },
     {
-      "type": "height_offset",
+      "kind": "height_offset",
+      "name": "height.6",
+      "in": {
+        "height": "height.5"
+      },
       "value": -8.0
     },
     {
-      "type": "field",
-      "slot": 0,
+      "kind": "field",
+      "name": "field.1",
+      "in": {
+        "warp": "unwarped"
+      },
       "offset": [
         -4200.0,
         8800.0
@@ -90,7 +134,13 @@
       "bias": 0.15
     },
     {
-      "type": "height_band_fbm",
+      "kind": "height_band_fbm",
+      "name": "height.7",
+      "in": {
+        "height": "height.6",
+        "warp": "unwarped",
+        "regions": "regions.1"
+      },
       "a": [
         0.56,
         1.0
@@ -109,7 +159,13 @@
       "mode": "billow"
     },
     {
-      "type": "height_band_fbm",
+      "kind": "height_band_fbm",
+      "name": "height.8",
+      "in": {
+        "height": "height.7",
+        "warp": "unwarped",
+        "regions": "regions.1"
+      },
       "a": [
         0.0,
         0.44
@@ -129,7 +185,13 @@
       "lift": 60.0
     },
     {
-      "type": "height_band_fbm",
+      "kind": "height_band_fbm",
+      "name": "height.9",
+      "in": {
+        "height": "height.8",
+        "warp": "unwarped",
+        "regions": "regions.1"
+      },
       "a": [
         0.0,
         1.0
@@ -148,7 +210,13 @@
       "lift": -26.0
     },
     {
-      "type": "height_band_fbm",
+      "kind": "height_band_fbm",
+      "name": "height.10",
+      "in": {
+        "height": "height.9",
+        "warp": "unwarped",
+        "regions": "regions.1"
+      },
       "a": [
         0.47,
         0.53
@@ -168,7 +236,13 @@
       "lift": 1150.0
     },
     {
-      "type": "height_band_fbm",
+      "kind": "height_band_fbm",
+      "name": "height.11",
+      "in": {
+        "height": "height.10",
+        "warp": "unwarped",
+        "regions": "regions.1"
+      },
       "a": [
         0.47,
         0.53
@@ -187,11 +261,21 @@
       "mode": "ridged"
     },
     {
-      "type": "height_surface",
+      "kind": "height_surface",
+      "name": "sdf.1",
+      "in": {
+        "height": "height.11",
+        "sdf": "void"
+      },
       "material": 1
     },
     {
-      "type": "material_band",
+      "kind": "material_band",
+      "name": "sdf.2",
+      "in": {
+        "sdf": "sdf.1",
+        "regions": "regions.1"
+      },
       "from": 1,
       "material": 7,
       "a": [
@@ -205,7 +289,12 @@
       "feather": 0.018
     },
     {
-      "type": "material_band",
+      "kind": "material_band",
+      "name": "sdf.3",
+      "in": {
+        "sdf": "sdf.2",
+        "regions": "regions.1"
+      },
       "from": 1,
       "material": 5,
       "a": [
@@ -218,7 +307,12 @@
       ]
     },
     {
-      "type": "material_band",
+      "kind": "material_band",
+      "name": "sdf.4",
+      "in": {
+        "sdf": "sdf.3",
+        "regions": "regions.1"
+      },
       "from": 1,
       "material": 2,
       "a": [
@@ -231,7 +325,11 @@
       ]
     },
     {
-      "type": "material_band",
+      "kind": "material_band",
+      "in": {
+        "sdf": "sdf.4",
+        "regions": "regions.1"
+      },
       "from": 1,
       "material": 6,
       "a": [

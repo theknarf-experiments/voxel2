@@ -669,10 +669,10 @@ pub struct LevelDef {
     #[serde(default)]
     pub environment: EnvDef,
     pub lod: LodDef,
-    /// The world's base geometry (and water/vegetation meta ops),
-    /// interpreted in order.
+    /// The world's graph: every node, in an order that is also a valid
+    /// topological order. See [`crate::graph`].
     #[reflect(@schema::Rebuilds)]
-    pub generator: Vec<GenEntryDef>,
+    pub nodes: Vec<NodeDef>,
     /// Material recipes for the ids the generator ops emit.
     ///
     /// No [`schema::Rebuilds`]: a material is a table upload, which is why
@@ -742,50 +742,41 @@ pub struct DoorDef {
     pub salt: i32,
 }
 
-/// One entry in a level's generator: an op, plus where it applies.
+/// Everything a level's graph is made of: one vocabulary, one tag.
 ///
-/// The region gate lives out here rather than on each op because it is
-/// not an op's business. `walls` knows about spacing and doorways; that
-/// a level only wants walls in one district is a fact about the LEVEL,
-/// and hanging an optional band off all fifteen variants would say
-/// otherwise fifteen times.
-///
-/// This is what makes "a different shape language per region" authorable
-/// without the engine learning what a region is for. It compares two
-/// numbers against a box; the level decides those numbers mean a desert,
-/// a habitation block, or nothing at all.
-#[derive(Reflect, Serialize, Deserialize, Clone, Debug, PartialEq)]
-pub struct GenEntryDef {
-    #[serde(flatten)]
-    pub op: GenOpDef,
-    /// `[a0, a1, b0, b1]` in the axes `region_axes` sampled — the same
-    /// band form `material_band` and `height_band_fbm` take. Absent
-    /// applies the op everywhere.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub region: Option<[f32; 4]>,
-}
-
-impl GenEntryDef {
-    /// Pack to the interpreter form, gate included.
-    pub fn pack(&self) -> WorldOp {
-        let op = self.op.pack();
-        match self.region {
-            Some(band) => op.region(band),
-            None => op,
-        }
-    }
-}
-
-impl From<GenOpDef> for GenEntryDef {
-    fn from(op: GenOpDef) -> Self {
-        Self { op, region: None }
-    }
-}
-
-/// One generator op — the JSON authoring form of `voxel_core::WorldOp`.
-#[derive(Reflect, Serialize, Deserialize, Clone, Debug, PartialEq)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum GenOpDef {
+/// Point-domain ops (the JSON authoring form of `voxel_core::WorldOp`),
+/// the scope that gates them, and the origins their chains start from.
+/// A node's kind is what says where it runs and what it may be wired to;
+/// see `crate::graph` for the compiler that checks that.
+#[derive(Reflect, Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum NodeKind {
+    /// A region gate and the nodes it applies to.
+    ///
+    /// Nesting intersects: a box inside a box is a box, so any depth still
+    /// compiles to the single packed gate a `WorldOp` carries. What this
+    /// replaces is the same four numbers repeated on sixty rows, with the
+    /// district structure they describe left implicit.
+    Region {
+        /// `[a0, a1, b0, b1]` in the axes `region_axes` samples.
+        axes: [f32; 4],
+        nodes: Vec<NodeDef>,
+    },
+    /// Sea level: the height register before anything adds to it.
+    ///
+    /// An origin emits no op — it IS the initial register state. It exists
+    /// so that "every input is named" has no exception at the start of a
+    /// chain, and so the editor can show where one begins.
+    HeightZero,
+    /// Empty space: the SDF register before anything merges into it.
+    ///
+    /// The default because it is the emptiest thing a node can be: a new
+    /// node in an editor should start as something that changes nothing.
+    #[default]
+    SdfVoid,
+    /// No domain warp: the offset height and field ops sample through
+    /// before any `warp_xz` bends it.
+    WarpNone,
     /// A band-limited FBM heightfield band added to the height register.
     HeightFbm {
         #[serde(default)]
@@ -838,7 +829,6 @@ pub enum GenOpDef {
     /// Accumulate an FBM band into a field register: named world data for
     /// spawner densities and gameplay queries (never the SDF itself).
     Field {
-        slot: u32,
         #[serde(default)]
         offset: [f32; 2],
         scale: f32,
@@ -1041,11 +1031,22 @@ fn gate_flags(lod: LodGateDef, auto: u32) -> u32 {
     }
 }
 
-impl GenOpDef {
+impl NodeKind {
     /// Pack into the 64-byte interpreter form.
-    pub fn pack(&self) -> WorldOp {
-        match *self {
-            GenOpDef::HeightFbm {
+    /// Lower to the interpreter form, or `None` for a node that emits no
+    /// op: an origin is the register file's initial state, and a scope is
+    /// a gate its children carry.
+    ///
+    /// `field_slot` is what the compiler allocated for this node's name —
+    /// the level no longer writes slot numbers and no longer has to keep
+    /// them agreeing with the spawners that read them.
+    pub fn op(&self, field_slot: u32) -> Option<WorldOp> {
+        let op = match *self {
+            NodeKind::Region { .. }
+            | NodeKind::HeightZero
+            | NodeKind::SdfVoid
+            | NodeKind::WarpNone => return None,
+            NodeKind::HeightFbm {
                 offset,
                 scale,
                 amp,
@@ -1054,7 +1055,7 @@ impl GenOpDef {
             } => WorldOp::new(WOP_HEIGHT_FBM)
                 .p0([offset[0], offset[1], scale, amp])
                 .p1([octaves as f32, mode as u32 as f32, 0.0, 0.0]),
-            GenOpDef::WarpXz {
+            NodeKind::WarpXz {
                 offset,
                 scale,
                 amp,
@@ -1062,7 +1063,7 @@ impl GenOpDef {
             } => WorldOp::new(WOP_WARP_XZ)
                 .p0([scale, amp, offset[0], offset[1]])
                 .p1([octaves as f32, 0.0, 0.0, 0.0]),
-            GenOpDef::Fbm3 {
+            NodeKind::Fbm3 {
                 scale,
                 y_ratio,
                 octaves,
@@ -1081,14 +1082,13 @@ impl GenOpDef {
                     if carve { 1.0 } else { 0.0 },
                 ])
                 .p2([octaves as f32, 0.0, 0.0, 0.0]),
-            GenOpDef::HeightOffset { value } => {
+            NodeKind::HeightOffset { value } => {
                 WorldOp::new(WOP_HEIGHT_OFFSET).p0([value, 0.0, 0.0, 0.0])
             }
-            GenOpDef::HeightStep { start, end, amp } => {
+            NodeKind::HeightStep { start, end, amp } => {
                 WorldOp::new(WOP_HEIGHT_STEP).p0([start, end, amp, 0.0])
             }
-            GenOpDef::Field {
-                slot,
+            NodeKind::Field {
                 offset,
                 scale,
                 amp,
@@ -1097,15 +1097,15 @@ impl GenOpDef {
                 bias,
             } => WorldOp::new(WOP_FIELD)
                 .p0([offset[0], offset[1], scale, amp])
-                .p1([octaves as f32, mode as u32 as f32, slot as f32, bias]),
-            GenOpDef::RegionAxes {
+                .p1([octaves as f32, mode as u32 as f32, field_slot as f32, bias]),
+            NodeKind::RegionAxes {
                 scale,
                 offset,
                 octaves,
             } => WorldOp::new(WOP_REGION_AXES)
                 .p0([offset[0], offset[1], scale[0], scale[1]])
                 .p1([offset[2], offset[3], octaves as f32, 0.0]),
-            GenOpDef::HeightBandFbm {
+            NodeKind::HeightBandFbm {
                 a,
                 b,
                 offset,
@@ -1124,7 +1124,7 @@ impl GenOpDef {
                     lift,
                 ])
                 .p2([a[0], a[1], b[0], b[1]]),
-            GenOpDef::MaterialBand {
+            NodeKind::MaterialBand {
                 from,
                 material,
                 a,
@@ -1133,16 +1133,16 @@ impl GenOpDef {
                 .material(material)
                 .p0([a[0], a[1], b[0], b[1]])
                 .p1([0.0, 0.0, from as f32, 0.0]),
-            GenOpDef::HeightSurface { material } => {
+            NodeKind::HeightSurface { material } => {
                 WorldOp::new(WOP_HEIGHT_SURFACE).material(material)
             }
-            GenOpDef::CoarseSolid { material } => WorldOp::new(WOP_COARSE_SOLID)
+            NodeKind::CoarseSolid { material } => WorldOp::new(WOP_COARSE_SOLID)
                 .flags(WOP_FLAG_COARSE_ONLY)
                 .material(material),
-            GenOpDef::LatticeY { spacing, lod } => WorldOp::new(WOP_LATTICE_Y)
+            NodeKind::LatticeY { spacing, lod } => WorldOp::new(WOP_LATTICE_Y)
                 .flags(gate_flags(lod, WOP_FLAG_FINE_ONLY))
                 .p0([spacing, 0.0, 0.0, 0.0]),
-            GenOpDef::SlabsY {
+            NodeKind::SlabsY {
                 half_thickness,
                 material,
                 lod,
@@ -1150,7 +1150,7 @@ impl GenOpDef {
                 .flags(gate_flags(lod, WOP_FLAG_FINE_ONLY))
                 .material(material)
                 .p0([half_thickness, 0.0, 0.0, 0.0]),
-            GenOpDef::GridHoles {
+            NodeKind::GridHoles {
                 cell,
                 chance,
                 half,
@@ -1159,7 +1159,7 @@ impl GenOpDef {
                 .flags(gate_flags(lod, WOP_FLAG_FINE_ONLY))
                 .p0([cell, chance, 0.0, 0.0])
                 .p1([half[0], half[1], half[2], 0.0]),
-            GenOpDef::PillarsXz {
+            NodeKind::PillarsXz {
                 spacing,
                 jitter,
                 girth,
@@ -1169,7 +1169,7 @@ impl GenOpDef {
                 .flags(gate_flags(lod, WOP_FLAG_FINE_ONLY))
                 .material(material)
                 .p0([spacing, jitter, girth[0], girth[1]]),
-            GenOpDef::Walls {
+            NodeKind::Walls {
                 ref axis,
                 spacing,
                 half_thickness,
@@ -1194,13 +1194,13 @@ impl GenOpDef {
                 }
                 op
             }
-            GenOpDef::ShaftsXz {
+            NodeKind::ShaftsXz {
                 spacing,
                 jitter,
                 radius,
             } => WorldOp::new(WOP_SHAFTS_XZ).p0([spacing, jitter, radius[0], radius[1]]),
-            GenOpDef::ShaftsCut => WorldOp::new(WOP_SHAFTS_CUT),
-            GenOpDef::Beams {
+            NodeKind::ShaftsCut => WorldOp::new(WOP_SHAFTS_CUT),
+            NodeKind::Beams {
                 every,
                 half_width,
                 y,
@@ -1213,9 +1213,79 @@ impl GenOpDef {
                 .material(material)
                 .p0([every as f32, half_width, y, half_height])
                 .p1([reach, 0.0, 0.0, 0.0]),
+        };
+        Some(op)
+    }
+}
+
+/// One node of a level's graph: a name, the inputs it consumes, and what
+/// it is.
+///
+/// Every input is named. There is no ordering rule that supplies one
+/// implicitly, because an edge nothing writes down is an edge no level can
+/// rewire, no editor can draw and no invalidation can follow — which is
+/// what the generator's shared registers were.
+#[derive(Reflect, Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
+pub struct NodeDef {
+    /// What other nodes call this one. Required only where something
+    /// refers to it, so the long unbranching middle of a chain need not
+    /// invent names nothing uses.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// Port name to the node feeding it. A port may take several sources
+    /// where the domain genuinely merges — the megastructure's seven
+    /// region-gated `shafts_xz` into one `shafts_cut` — and the compiler
+    /// checks those gates are disjoint.
+    #[serde(default, rename = "in", skip_serializing_if = "Wires::is_empty")]
+    pub wires: Wires,
+    #[serde(flatten)]
+    pub kind: NodeKind,
+}
+
+/// A node's inputs, by port name.
+///
+/// A `BTreeMap` so a port is written once and the file round-trips in a
+/// stable order — a level is a document under version control, and a map
+/// that reshuffled its keys on every save would make every diff a lie.
+#[derive(Reflect, Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
+#[serde(transparent)]
+pub struct Wires(pub std::collections::BTreeMap<String, Wire>);
+
+impl Wires {
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    pub fn get(&self, port: &str) -> Option<&Wire> {
+        self.0.get(port)
+    }
+
+    /// Every (port, wire) pair, for the compiler's unknown-port check.
+    pub fn iter(&self) -> impl Iterator<Item = (&String, &Wire)> {
+        self.0.iter()
+    }
+}
+
+/// What a port is wired to.
+#[derive(Reflect, Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(untagged)]
+pub enum Wire {
+    One(String),
+    /// Several producers into one port, for a value only one of them
+    /// defines at any given point.
+    Many(Vec<String>),
+}
+
+impl Wire {
+    pub fn sources(&self) -> &[String] {
+        match self {
+            Wire::One(name) => std::slice::from_ref(name),
+            Wire::Many(names) => names,
         }
     }
 }
+
+
 
 impl LevelDef {
     pub fn from_json(json: &str) -> Result<Self, serde_json::Error> {
@@ -1226,9 +1296,10 @@ impl LevelDef {
     /// world they are planning on top of; at runtime the engine hands the
     /// same value to [`crate::planning::HostPlanning::build`].
     pub fn generator(&self, seed: u64) -> voxel_worldgen::Generator {
-        let ops: Vec<WorldOp> = self.generator.iter().map(GenEntryDef::pack).collect();
-        assert_region_axes_first(&ops);
-        voxel_worldgen::Generator::new(ops, seed as u32, sun_dir(self))
+        let program = crate::graph::compile(&self.nodes)
+            .unwrap_or_else(|e| panic!("level graph: {e}"));
+        assert_region_axes_first(&program.ops);
+        voxel_worldgen::Generator::new(program.ops, seed as u32, sun_dir(self))
     }
 }
 
@@ -1574,7 +1645,7 @@ fn watch_level_file(
 /// gave "does this edit restream" two answers in two places and one of
 /// them to an editor that has to ask.
 fn needs_regen(new: &LevelDef, old: &LevelDef) -> bool {
-    new.generator != old.generator
+    new.nodes != old.nodes
         || sun_dir(new) != sun_dir(old)
         || new.planning != old.planning
         || new.placements != old.placements
@@ -1622,7 +1693,7 @@ fn apply_level_change(
 
     // Generation-affecting changes rebuild the streamed world.
     let sun_changed = sun_dir(&new) != sun_dir(level);
-    let generator_changed = new.generator != level.generator || sun_changed;
+    let generator_changed = new.nodes != level.nodes || sun_changed;
     // Rebuilt whether or not the program changed: the planning stack and
     // the facade below need one either way.
     let (program, generator) = build_generator(&new, seed.0);
@@ -1792,12 +1863,12 @@ mod tests {
             panic!("LevelDef is a struct")
         };
         let docs = info
-            .field("generator")
-            .expect("generator is reflected")
+            .field("nodes")
+            .expect("nodes is reflected")
             .docs()
             .expect("reflect_documentation must be on — see Cargo.toml");
         assert!(
-            docs.contains("base geometry"),
+            docs.contains("graph"),
             "documentation reached reflection but not this field's: {docs:?}"
         );
     }
@@ -1836,9 +1907,9 @@ mod tests {
             ("lod.split_k", |l| l.lod.split_k += 1.0, false),
             ("lod.merge_k", |l| l.lod.merge_k += 1.0, false),
             (
-                "generator",
+                "nodes",
                 |l| {
-                    l.generator.pop();
+                    l.nodes.pop();
                 },
                 true,
             ),
@@ -1969,7 +2040,7 @@ mod tests {
             .any(|d| d.output == ScatterOutput::Points));
         // The planet's geometry comes from height ops; sea level is the
         // host's business and no longer part of the program.
-        let packed: Vec<_> = planet.generator.iter().map(GenEntryDef::pack).collect();
+        let packed = crate::graph::compile(&planet.nodes).unwrap().ops;
         assert!(packed.iter().any(|op| op.is_height_op()));
         // Materials cover the ids the generator emits.
         assert!(planet.materials.iter().any(|m| m.id() == 1));
@@ -1977,7 +2048,7 @@ mod tests {
 
         let mega = LevelDef::from_json(&shipped("megastructure.json")).unwrap();
         assert!(mega.planning.is_object());
-        let packed: Vec<_> = mega.generator.iter().map(GenEntryDef::pack).collect();
+        let packed = crate::graph::compile(&mega.nodes).unwrap().ops;
         assert!(mega.scatter.is_empty());
         assert!(mega.materials.iter().any(|m| m.id() == 2));
         // Sunless interior: no height ops, so the horizon-shadow bake
@@ -1993,7 +2064,7 @@ mod tests {
         let planet = LevelDef::from_json(&shipped("planet.json")).unwrap();
         let json = serde_json::to_string(&planet).unwrap();
         let back = LevelDef::from_json(&json).unwrap();
-        assert_eq!(back.generator, planet.generator);
+        assert_eq!(back.nodes, planet.nodes);
         assert_eq!(back.materials, planet.materials);
         assert_eq!(back.environment, planet.environment);
         assert_eq!(back.planning, planet.planning);
@@ -2010,7 +2081,7 @@ mod tests {
         // The megastructure has no such oracle — see the test below,
         // which asserts what is actually true of it instead.
         let planet = LevelDef::from_json(&shipped("planet.json")).unwrap();
-        let packed: Vec<_> = planet.generator.iter().map(GenEntryDef::pack).collect();
+        let packed = crate::graph::compile(&planet.nodes).unwrap().ops;
         assert_eq!(packed, voxel_worldgen::program::planet_program());
     }
 
@@ -2024,7 +2095,7 @@ mod tests {
     #[test]
     fn every_megastructure_district_is_whole() {
         let mega = LevelDef::from_json(&shipped("megastructure.json")).unwrap();
-        let ops: Vec<_> = mega.generator.iter().map(GenEntryDef::pack).collect();
+        let ops = crate::graph::compile(&mega.nodes).unwrap().ops;
 
         assert_eq!(ops[0].kind, WOP_REGION_AXES, "the axes must be filled first");
 

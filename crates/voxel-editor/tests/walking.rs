@@ -102,14 +102,14 @@ fn nothing_is_walked_that_is_not_open() {
     assert!(rows(&level, &open(&[".lod"])).len() > shut.len());
 }
 
-/// The op vocabulary is an enum, so the palette is `EnumInfo` and needs no
-/// registration list to go stale.
+/// The node vocabulary is an enum, so the palette is `EnumInfo` and needs
+/// no registration list to go stale.
 #[test]
-fn an_op_row_offers_every_variant_of_the_op_enum() {
+fn a_node_row_offers_every_kind_in_the_vocabulary() {
     let level = planet();
-    let rows = rows(&level, &open(&[".generator", ".generator[1]"]));
-    let RowKind::Variant { options, current, .. } = &row_at(&rows, ".generator[1].op").kind else {
-        panic!("an op is an enum")
+    let rows = rows(&level, &open(&[".nodes", ".nodes[4]"]));
+    let RowKind::Variant { options, current, .. } = &row_at(&rows, ".nodes[4].kind").kind else {
+        panic!("a node kind is an enum")
     };
     assert!(options.len() > 10, "the whole op set: {options:?}");
     assert!(options.contains(&"HeightFbm".to_string()));
@@ -170,8 +170,8 @@ fn a_colour_pair_is_two_swatches() {
 #[test]
 fn rebuilds_reaches_the_numbers_inside_a_restreaming_section() {
     let level = planet();
-    let rows = rows(&level, &open(&[".generator", ".generator[1]", ".generator[1].op"]));
-    assert!(row_at(&rows, ".generator[1].op.amp").rebuilds);
+    let rows = rows(&level, &open(&[".nodes", ".nodes[4]", ".nodes[4].kind"]));
+    assert!(row_at(&rows, ".nodes[4].kind.amp").rebuilds);
     // And does not leak sideways into the cheap sections.
     let rows = rows_of_materials(&level);
     assert!(!rows.iter().any(|r| r.rebuilds), "a material is a table upload");
