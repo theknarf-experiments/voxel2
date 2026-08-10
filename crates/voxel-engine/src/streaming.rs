@@ -60,8 +60,6 @@ impl Default for LodConfig {
     }
 }
 
-
-
 /// Set to request a full streaming rebuild (e.g. after a hot-reloaded
 /// level changes generation parameters): the LOD graph is dropped, which
 /// destroys every chunk it holds, and rebuilt against the new world.
@@ -352,7 +350,12 @@ pub fn resident_count(config: &LodConfig, anchor: DVec3) -> usize {
         for dx in -config.top_radius..=config.top_radius {
             for y in config.top_y.0..=config.top_y.1 {
                 let cell = IVec3::new(cx + dx, y, cz + dz);
-                descend(config, anchor, ChunkKey::new(config.max_level, cell), &mut count);
+                descend(
+                    config,
+                    anchor,
+                    ChunkKey::new(config.max_level, cell),
+                    &mut count,
+                );
             }
         }
     }
@@ -606,7 +609,12 @@ mod residency_shape {
             for dx in -config.top_radius..=config.top_radius {
                 for y in config.top_y.0..=config.top_y.1 {
                     let cell = IVec3::new(cx + dx, y, cz + dz);
-                    descend(config, anchor, ChunkKey::new(config.max_level, cell), &mut leaves);
+                    descend(
+                        config,
+                        anchor,
+                        ChunkKey::new(config.max_level, cell),
+                        &mut leaves,
+                    );
                 }
             }
         }
@@ -685,7 +693,12 @@ mod residency_shape {
         /// actually touches `target`'s box (shares at least a corner)? Leaves
         /// deep inside the region can't produce a seam with `target`, so they
         /// must not veto its transitions.
-        fn has_touching_finer_than(&self, region: ChunkKey, target: ChunkKey, min_level: u8) -> bool {
+        fn has_touching_finer_than(
+            &self,
+            region: ChunkKey,
+            target: ChunkKey,
+            min_level: u8,
+        ) -> bool {
             if !boxes_touch(region, target) {
                 return false;
             }
@@ -726,7 +739,6 @@ mod residency_shape {
             mask
         }
     }
-
 
     fn planet() -> LodConfig {
         LodConfig {
@@ -837,7 +849,11 @@ mod residency_shape {
             return top_ring(config, anchor);
         }
         let edge = ChunkKey::new(level, IVec3::ZERO).edge_m();
-        let hole = if level == 0 { 0.0 } else { config.split_k * edge };
+        let hole = if level == 0 {
+            0.0
+        } else {
+            config.split_k * edge
+        };
         let outer = 2.0 * config.merge_k * edge;
         let lo = ((anchor - DVec3::splat(outer)) / edge).floor();
         let hi = ((anchor + DVec3::splat(outer)) / edge).ceil();
@@ -979,7 +995,6 @@ mod residency_shape {
         }
     }
 
-
     /// The 26 neighborhood directions in seam-mask scan order.
     fn scan_dirs() -> Vec<IVec3> {
         let mut dirs = Vec::new();
@@ -1103,8 +1118,7 @@ mod residency_shape {
                 DVec3::new(1234.0, 600.0, -800.0),
             ] {
                 let drawn = converged_leaves(&config, anchor);
-                let (resident, missed) =
-                    measure(&config, anchor, resident_level_clamped, &drawn);
+                let (resident, missed) = measure(&config, anchor, resident_level_clamped, &drawn);
                 println!(
                     "{name} @{:?}: drawn {} — clamped field {resident} ({:.2}x, {missed} missed)",
                     anchor.as_ivec3(),
@@ -1112,12 +1126,14 @@ mod residency_shape {
                     resident as f64 / drawn.len() as f64,
                 );
                 assert_eq!(missed, 0, "{name}: shown chunks outside residency");
-                assert!((resident as f64) < 1.3 * drawn.len() as f64, "{name}: {resident}");
+                assert!(
+                    (resident as f64) < 1.3 * drawn.len() as f64,
+                    "{name}: {resident}"
+                );
             }
         }
     }
 }
-
 
 #[cfg(test)]
 mod field_invariants {
@@ -1387,7 +1403,12 @@ mod residency_budget {
             for dx in -config.top_radius..=config.top_radius {
                 for y in config.top_y.0..=config.top_y.1 {
                     let cell = IVec3::new(cx + dx, y, cz + dz);
-                    walk(&config, anchor, ChunkKey::new(config.max_level, cell), &mut expected);
+                    walk(
+                        &config,
+                        anchor,
+                        ChunkKey::new(config.max_level, cell),
+                        &mut expected,
+                    );
                 }
             }
         }
@@ -1417,9 +1438,15 @@ mod residency_budget {
         let anchor = DVec3::new(0.0, 100.0, 0.0);
         let mut last = usize::MAX;
         for max_level in (4..=8u8).rev() {
-            let config = LodConfig { max_level, ..Default::default() };
+            let config = LodConfig {
+                max_level,
+                ..Default::default()
+            };
             let count = resident_count(&config, anchor);
-            assert!(count < last, "L{max_level} = {count} did not shrink below {last}");
+            assert!(
+                count < last,
+                "L{max_level} = {count} did not shrink below {last}"
+            );
             last = count;
         }
     }

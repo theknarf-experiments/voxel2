@@ -9,11 +9,11 @@
 //! Every row carries [`FieldPath`], which is what makes editing one
 //! observer rather than one per field.
 
+use bevy::feathers::constants::{fonts, size};
 use bevy::feathers::controls::{
     ColorSwatchValue, FeathersCheckbox, FeathersColorSwatch, FeathersDisclosureToggle,
     FeathersMenuButton, FeathersSlider,
 };
-use bevy::feathers::constants::{fonts, size};
 use bevy::feathers::font_styles::InheritableFont;
 use bevy::feathers::theme::{InheritableThemeTextColor, ThemedText};
 use bevy::feathers::tokens;
@@ -125,7 +125,10 @@ fn gutter(row: &Row, style: &PanelStyle) -> Box<dyn SceneList> {
         RowKind::Group { expanded, .. } | RowKind::Variant { expanded, .. } => expanded,
         _ => {
             let w = px(style.gutter);
-            return Box::new(bsn_list!(Node { width: {w}, flex_shrink: 0.0 }));
+            return Box::new(bsn_list!(Node {
+                width: { w },
+                flex_shrink: 0.0
+            }));
         }
     };
     let toggles = row.path.clone();
@@ -348,4 +351,3 @@ fn value_widget(row: &Row, style: &PanelStyle) -> Box<dyn SceneList> {
         }
     }
 }
-

@@ -11,9 +11,9 @@
 //! `voxel-render/src/shaders/voxel_world_density.wgsl` — vegetation and
 //! gameplay place things on the surface the GPU generates.
 
-pub mod program;
-pub mod path;
 pub mod flow;
+pub mod path;
+pub mod program;
 
 use glam::Vec2;
 
@@ -277,10 +277,16 @@ impl Generator {
         program::lattice_y_spacing(&self.ops)
     }
 
-
     /// Patch density in [0, 1]: slow spatial noise so scattered props
     /// come in coherent patches with clearings.
-    pub fn patch_density(&self, xz: Vec2, scale: f32, offset: Vec2, contrast: f32, bias: f32) -> f32 {
+    pub fn patch_density(
+        &self,
+        xz: Vec2,
+        scale: f32,
+        offset: Vec2,
+        contrast: f32,
+        bias: f32,
+    ) -> f32 {
         let n = fbm(self.seed, xz + offset, scale, 3, 1.0) + 0.5;
         (n * contrast + bias).clamp(0.0, 1.0)
     }

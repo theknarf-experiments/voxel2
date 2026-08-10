@@ -376,17 +376,17 @@ impl MatPack {
 
     fn at(&self, name: &str) -> &'static MatParam {
         self.kind.param(name).unwrap_or_else(|| {
-            panic!("material kind `{}` has no parameter `{name}`", self.kind.name)
+            panic!(
+                "material kind `{}` has no parameter `{name}`",
+                self.kind.name
+            )
         })
     }
 
     /// Set a scalar parameter.
     pub fn set(&mut self, name: &str, v: f32) -> &mut Self {
         let param = self.at(name);
-        assert!(
-            param.comp != Comp::Rgb,
-            "`{name}` is a colour — use `rgb`"
-        );
+        assert!(param.comp != Comp::Rgb, "`{name}` is a colour — use `rgb`");
         self.slots[param.slot][param.comp.lanes()[0]] = v;
         self
     }
@@ -394,10 +394,7 @@ impl MatPack {
     /// Set a colour parameter.
     pub fn rgb(&mut self, name: &str, v: [f32; 3]) -> &mut Self {
         let param = self.at(name);
-        assert!(
-            param.comp == Comp::Rgb,
-            "`{name}` is a scalar — use `set`"
-        );
+        assert!(param.comp == Comp::Rgb, "`{name}` is a scalar — use `set`");
         self.slots[param.slot][..3].copy_from_slice(&v);
         self
     }
@@ -464,7 +461,9 @@ mod tests {
         assert_eq!(slots[1][3], 9.0, "rock_start is c1.w");
         // And the shader is told the same thing.
         let wgsl = wgsl_material_accessors();
-        assert!(wgsl.contains("fn canopy_canopy_a(m: WorldMaterial) -> vec3<f32> { return m.c0.rgb; }"));
+        assert!(
+            wgsl.contains("fn canopy_canopy_a(m: WorldMaterial) -> vec3<f32> { return m.c0.rgb; }")
+        );
         assert!(wgsl.contains("fn canopy_rock_start(m: WorldMaterial) -> f32 { return m.c1.w; }"));
     }
 

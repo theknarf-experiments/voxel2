@@ -3,12 +3,12 @@
 //!
 //! This crate deliberately has no Bevy dependency.
 
-pub mod interval;
-pub mod opgen;
 pub mod csg;
+pub mod interval;
 pub mod key;
 pub mod layout;
 pub mod morton;
+pub mod opgen;
 pub mod patch;
 pub mod pos;
 pub mod seed;

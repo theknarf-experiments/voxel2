@@ -35,13 +35,16 @@ fn call(method: &str, params: Value) -> Result<Value, String> {
         "params": params,
     })
     .to_string();
-    let mut stream = TcpStream::connect(("127.0.0.1", port))
-        .map_err(|e| format!("connect 127.0.0.1:{port}: {e} (is the game running with VOXEL_REMOTE=1?)"))?;
+    let mut stream = TcpStream::connect(("127.0.0.1", port)).map_err(|e| {
+        format!("connect 127.0.0.1:{port}: {e} (is the game running with VOXEL_REMOTE=1?)")
+    })?;
     let http = format!(
         "POST / HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{request}",
         request.len()
     );
-    stream.write_all(http.as_bytes()).map_err(|e| e.to_string())?;
+    stream
+        .write_all(http.as_bytes())
+        .map_err(|e| e.to_string())?;
     let mut response = Vec::new();
     stream
         .read_to_end(&mut response)
@@ -160,8 +163,7 @@ fn main() {
         }
         ["markers", x, z, rest @ ..] => {
             let radius = rest.first().map(|r| parse_f64(r)).unwrap_or(2048.0);
-            let mut params =
-                json!({"kind": "markers", "center": [parse_f64(x), parse_f64(z)], "radius": radius});
+            let mut params = json!({"kind": "markers", "center": [parse_f64(x), parse_f64(z)], "radius": radius});
             if let Some(of) = rest.get(1) {
                 params["of"] = json!(of);
             }
@@ -264,7 +266,11 @@ mod tests {
         assert_eq!(at("lod.split_k"), json!(2.5));
         assert_eq!(at(".lod.split_k"), json!(2.5), "a leading dot is optional");
         assert_eq!(at("materials[0].base[1]"), json!(0.25), "through a variant");
-        assert_eq!(at("placements[0].prefab.0"), json!("monolith"), "through Some");
+        assert_eq!(
+            at("placements[0].prefab.0"),
+            json!("monolith"),
+            "through Some"
+        );
         // Naming the variant explicitly still has to work: it is what the
         // JSON actually contains, and what someone reading a dump will try.
         assert_eq!(at("materials[0].Surface.base[0]"), json!(0.5));

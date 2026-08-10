@@ -392,8 +392,7 @@ impl WorldLod {
                     || can_hold_surface(&at.generator, key)
             });
             tops.push(
-                TopDep::new(&instance(level), level_span(&config, level))
-                    .with_filter(filter),
+                TopDep::new(&instance(level), level_span(&config, level)).with_filter(filter),
             );
         }
         // `before` freezes the focus this pass works from. `between` runs
@@ -420,8 +419,7 @@ impl WorldLod {
                 }
             })
         };
-        let runtime =
-            LayerRuntime::start_with(Arc::new(graph), tops, Some(before), Some(between));
+        let runtime = LayerRuntime::start_with(Arc::new(graph), tops, Some(before), Some(between));
         Self {
             runtime,
             shared,
@@ -431,7 +429,10 @@ impl WorldLod {
 
     /// Re-centre the field, if the camera has moved far enough to matter.
     fn follow(&mut self, camera: DVec3) {
-        if self.published.is_some_and(|a| camera.distance(a) < ANCHOR_STEP) {
+        if self
+            .published
+            .is_some_and(|a| camera.distance(a) < ANCHOR_STEP)
+        {
             return;
         }
         // One pass runs against one focus. Moving it mid-pass would let

@@ -4,7 +4,11 @@ use crate::level::LevelDef;
 
 fn shipped(name: &str) -> LevelDef {
     let path = format!("{}/../../levels/{name}.json", env!("CARGO_MANIFEST_DIR"));
-    LevelDef::from_json_known(&std::fs::read_to_string(path).unwrap(), &registry::engine_kinds()).unwrap()
+    LevelDef::from_json_known(
+        &std::fs::read_to_string(path).unwrap(),
+        &registry::engine_kinds(),
+    )
+    .unwrap()
 }
 
 /// The program each level compiled to before it was a graph.
@@ -135,7 +139,10 @@ fn branching_a_single_slot_value_says_what_replaced_it() {
         node(r#"{"kind":"height_offset","name":"b","in":{"height":"sea"},"value":2.0}"#),
     ];
     let e = err(&nodes);
-    assert!(e.contains("'b'") && e.contains("\"a\"") && e.contains("\"sea\""), "{e}");
+    assert!(
+        e.contains("'b'") && e.contains("\"a\"") && e.contains("\"sea\""),
+        "{e}"
+    );
     assert!(e.contains("one thing is live at a time"), "{e}");
 }
 
@@ -162,7 +169,8 @@ fn a_port_that_does_not_exist_is_refused() {
 /// one packed gate a `WorldOp` carries.
 #[test]
 fn nested_scopes_intersect_into_one_gate() {
-    let nodes: Vec<NodeDef> = parse(r#"[
+    let nodes: Vec<NodeDef> = parse(
+        r#"[
           {"kind":"sdf_void","name":"void"},
           {"kind":"region","axes":[0.0,0.8,0.0,1.0],"nodes":[
             {"kind":"region","axes":[0.2,1.0,0.0,0.5],"nodes":[
@@ -170,7 +178,8 @@ fn nested_scopes_intersect_into_one_gate() {
             ]}
           ]}
         ]"#,
-    ).unwrap();
+    )
+    .unwrap();
     let ops = compile(&nodes).unwrap().ops;
     assert_eq!(ops.len(), 1, "origins and scopes emit nothing");
     let band = voxel_core::worldop::unpack_region(ops[0].region);
@@ -281,7 +290,11 @@ fn an_edit_is_charged_to_the_node_it_changed() {
         ))
     };
     let base = level(200, 800.0);
-    assert_eq!(changed(&base, &base), None, "an unchanged list is not stale");
+    assert_eq!(
+        changed(&base, &base),
+        None,
+        "an unchanged list is not stale"
+    );
     assert_eq!(
         changed(&level(201, 800.0), &base),
         Some(node::Invalidates::Plan),
@@ -313,7 +326,10 @@ fn adding_a_node_only_charges_for_that_node() {
         ]"#,
     );
     let mut with_new = base.clone();
-    with_new.insert(0, with_props(r#"[{"kind":"props","name":"trees"}]"#).remove(0));
+    with_new.insert(
+        0,
+        with_props(r#"[{"kind":"props","name":"trees"}]"#).remove(0),
+    );
     assert_eq!(changed(&with_new, &base), Some(node::Invalidates::Plan));
     assert_eq!(changed(&base, &with_new), Some(node::Invalidates::Plan));
 }

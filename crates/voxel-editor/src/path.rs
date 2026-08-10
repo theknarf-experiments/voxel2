@@ -42,7 +42,12 @@ pub fn parse(path: &str) -> Result<Vec<Step<'_>>, String> {
                 let end = rest.find('}').ok_or_else(|| format!("'{path}': no }}"))?;
                 (Step::Key(&rest[1..end]), &rest[end + 1..])
             }
-            c => return Err(format!("'{path}': expected . [ or {{, found '{}'", c as char)),
+            c => {
+                return Err(format!(
+                    "'{path}': expected . [ or {{, found '{}'",
+                    c as char
+                ))
+            }
         };
         steps.push(step);
         rest = tail;
@@ -62,14 +67,16 @@ pub fn resolve_mut<'a>(
     let steps = parse(path)?;
     let mut here = root;
     for (i, step) in steps.iter().enumerate() {
-        let so_far = || steps[..i].iter().fold(String::new(), |mut s, st| {
-            match st {
-                Step::Field(f) => s.push_str(&format!(".{f}")),
-                Step::Index(n) => s.push_str(&format!("[{n}]")),
-                Step::Key(k) => s.push_str(&format!("{{{k}}}")),
-            }
-            s
-        });
+        let so_far = || {
+            steps[..i].iter().fold(String::new(), |mut s, st| {
+                match st {
+                    Step::Field(f) => s.push_str(&format!(".{f}")),
+                    Step::Index(n) => s.push_str(&format!("[{n}]")),
+                    Step::Key(k) => s.push_str(&format!("{{{k}}}")),
+                }
+                s
+            })
+        };
         here = match (step, here.reflect_mut()) {
             (Step::Field(name), ReflectMut::Struct(s)) => s.field_mut(name),
             (Step::Field(name), ReflectMut::Enum(e)) => e.field_mut(name),

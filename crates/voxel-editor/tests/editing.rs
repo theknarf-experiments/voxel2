@@ -27,7 +27,11 @@ fn note_rebuild(level: Res<LevelDef>, mut flag: ResMut<Rebuilt>) {
 
 fn planet() -> LevelDef {
     let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../levels/planet.json");
-    LevelDef::from_json_known(&std::fs::read_to_string(path).unwrap(), &registry::engine_kinds()).unwrap()
+    LevelDef::from_json_known(
+        &std::fs::read_to_string(path).unwrap(),
+        &registry::engine_kinds(),
+    )
+    .unwrap()
 }
 
 fn app() -> App {
@@ -110,7 +114,10 @@ fn an_edit_reaches_inside_a_generator_node() {
 fn an_edit_marks_the_document_changed() {
     let mut app = app();
     app.update();
-    assert!(!app.world().resource::<Rebuilt>().0, "nothing edited it yet");
+    assert!(
+        !app.world().resource::<Rebuilt>().0,
+        "nothing edited it yet"
+    );
 
     edit(&mut app, ".materials[0].id", 7.0, Num::U32);
     assert!(

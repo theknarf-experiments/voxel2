@@ -38,7 +38,12 @@ fn splice(text: &str, begin: &str, end: &str, content: &str, indent: &str) -> St
             }
         })
         .collect();
-    format!("{}{}{}", &text[..b_line_end], indented, &text[e_line_start..])
+    format!(
+        "{}{}{}",
+        &text[..b_line_end],
+        indented,
+        &text[e_line_start..]
+    )
 }
 
 /// Splice only where the marker exists. A shader opts into a region by
@@ -80,13 +85,25 @@ fn main() {
     ];
     for (path, helpers, arms, column, arm_indent) in targets {
         let text = std::fs::read_to_string(path).unwrap_or_else(|e| panic!("{path}: {e}"));
-        let text = splice(&text, HELPERS_BEGIN, HELPERS_END, &wgsl_helpers(helpers), "");
+        let text = splice(
+            &text,
+            HELPERS_BEGIN,
+            HELPERS_END,
+            &wgsl_helpers(helpers),
+            "",
+        );
         let text = splice(&text, ARMS_BEGIN, ARMS_END, &wgsl_arms(arms), arm_indent);
         let text = match column {
             // The column pass runs the height chain, but inside the
             // volumetric evaluator — so it keeps the full dialect's
             // vs-aware FBM, not the replay shells'.
-            Some(_) => splice(&text, COLUMN_BEGIN, COLUMN_END, &wgsl_column_arms(), arm_indent),
+            Some(_) => splice(
+                &text,
+                COLUMN_BEGIN,
+                COLUMN_END,
+                &wgsl_column_arms(),
+                arm_indent,
+            ),
             None => text,
         };
         let text = splice_if_present(

@@ -141,11 +141,7 @@ impl LayerChunk for PlayChunk {
     fn create(&mut self, ctx: &ChunkCtx<'_, Play>) {
         let ledger = ctx.context::<Ledger>();
         ledger.created.fetch_add(1, Ordering::Relaxed);
-        ledger
-            .events
-            .lock()
-            .unwrap()
-            .push(("play", ctx.coord()));
+        ledger.events.lock().unwrap().push(("play", ctx.coord()));
         let pad = IVec3::new(ctx.layer().pad, 0, ctx.layer().pad);
         let mut sum = 0u64;
         ctx.get_named::<Base>(ctx.layer().base, ctx.chunk_bounds().inflate(pad))
@@ -411,11 +407,7 @@ fn runtime_follows_a_published_focus() {
     // and the resident count does not grow. Same offset within a chunk —
     // a half-open window spans one more chunk when it straddles a
     // boundary than when it aligns to one.
-    handle.set_focus(IVec3::new(
-        CELL * 500 + CELL / 2,
-        0,
-        -CELL * 500 + CELL / 2,
-    ));
+    handle.set_focus(IVec3::new(CELL * 500 + CELL / 2, 0, -CELL * 500 + CELL / 2));
     runtime.wait_idle();
     assert_eq!(graph.resident_in("play"), resident);
 }
@@ -570,7 +562,9 @@ fn a_predicate_follows_the_focus_within_one_cell() {
     let wanted = Arc::new(AtomicUsize::new(0));
     let mut top = TopDep::new("play", IVec3::new(CELL * 7, 0, CELL * 7)).with_filter({
         let wanted = wanted.clone();
-        Arc::new(move |coord: IVec3| coord == IVec3::new(wanted.load(Ordering::Relaxed) as i32, 0, 0))
+        Arc::new(move |coord: IVec3| {
+            coord == IVec3::new(wanted.load(Ordering::Relaxed) as i32, 0, 0)
+        })
     });
     top.set_focus(&graph, IVec3::new(1, 0, 1));
     graph.process_top(&mut top);
@@ -580,7 +574,10 @@ fn a_predicate_follows_the_focus_within_one_cell() {
     // the shape still has to follow.
     wanted.store(1, Ordering::Relaxed);
     top.set_focus(&graph, IVec3::new(CELL + 1, 0, 1));
-    assert!(top.changed(), "a filtered dependency must re-evaluate on a move");
+    assert!(
+        top.changed(),
+        "a filtered dependency must re-evaluate on a move"
+    );
     graph.process_top(&mut top);
     assert_eq!(graph.resident_in("play"), 1);
 }

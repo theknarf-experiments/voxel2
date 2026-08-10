@@ -15,8 +15,8 @@ use bevy::prelude::*;
 pub mod edit;
 mod panel;
 mod path;
-mod style;
 mod row;
+mod style;
 mod walk;
 
 pub use style::PanelStyle;

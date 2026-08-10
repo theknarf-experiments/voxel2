@@ -72,7 +72,10 @@ pub fn chunk_bounds(extent: DVec3, coord: IVec3) -> IAabb {
         } else {
             // Chunk coords stay small enough that this cannot overflow in
             // practice (extent ≥ 1 m, world spans ± 2^31 m).
-            ((c as f64 * e).floor() as i32, ((c + 1) as f64 * e).ceil() as i32)
+            (
+                (c as f64 * e).floor() as i32,
+                ((c + 1) as f64 * e).ceil() as i32,
+            )
         }
     };
     let (min_x, max_x) = axis(extent.x, coord.x);
@@ -140,7 +143,10 @@ mod tests {
                 // Round trip: the cell's own box resolves to the cell,
                 // and to no other.
                 let (lo, hi) = chunk_range(extent, b);
-                assert!(lo.cmple(c).all() && hi.cmpge(c).all(), "level {level} coord {coord}");
+                assert!(
+                    lo.cmple(c).all() && hi.cmpge(c).all(),
+                    "level {level} coord {coord}"
+                );
                 assert!(hi.x - lo.x <= 2, "outward rounding pulled in extra cells");
             }
         }

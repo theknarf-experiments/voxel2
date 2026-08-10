@@ -21,10 +21,10 @@ use std::sync::{Arc, Mutex, RwLock};
 use glam::{DVec3, IVec3};
 use voxel_core::seed::{chunk_seed, Rng};
 
-use crate::layer::{layer_key, IAabb, LayerKey};
 use crate::layer::{chunk_bounds as bounds_of, chunk_range as range_of};
-use crate::traits::{Dep, Layer, LayerChunk};
+use crate::layer::{layer_key, IAabb, LayerKey};
 use crate::store::{ChunkSlot, ErasedChunk, Provider, Usage};
+use crate::traits::{Dep, Layer, LayerChunk};
 
 type CreateFn = Box<dyn Fn(&LayerGraph, &Arc<ChunkSlot>) + Send + Sync>;
 /// Which chunk coordinates a top dependency wants, for one focus.
@@ -35,8 +35,6 @@ struct LayerEntry {
     name: String,
     type_id: TypeId,
     extent: DVec3,
-
-
 
     /// Dependencies per level, with `FINAL_LEVEL` already resolved.
     deps: Vec<Dep>,
@@ -335,7 +333,8 @@ impl LayerGraph {
             .collect();
         if !missing.is_empty() {
             missing.sort_by_key(|slot| {
-                let d = (slot.coord - center_coord).clamp(IVec3::splat(-30_000), IVec3::splat(30_000));
+                let d =
+                    (slot.coord - center_coord).clamp(IVec3::splat(-30_000), IVec3::splat(30_000));
                 d.x * d.x + d.y * d.y + d.z * d.z
             });
             self.create_all(key, &missing);
@@ -518,7 +517,11 @@ impl LayerGraph {
         // underneath it.
         if let Some(slot) = removed {
             if let Ok(slot) = Arc::try_unwrap(slot) {
-                entry.pool.lock().unwrap().push(slot.data.into_inner().unwrap());
+                entry
+                    .pool
+                    .lock()
+                    .unwrap()
+                    .push(slot.data.into_inner().unwrap());
             }
         }
     }
@@ -891,7 +894,6 @@ impl<L: Layer> ChunkCtx<'_, L> {
         );
         self.graph.view_at::<D>(dep_key, bounds)
     }
-
 }
 
 /// The region a chunk may read from a dependency: its own bounds inflated
@@ -929,9 +931,27 @@ fn needed_padding(own: IAabb, requested: IAabb, declared: IVec3) -> IVec3 {
             .max(have)
     };
     IVec3::new(
-        axis(own.min.x, own.max.x, requested.min.x, requested.max.x, declared.x),
-        axis(own.min.y, own.max.y, requested.min.y, requested.max.y, declared.y),
-        axis(own.min.z, own.max.z, requested.min.z, requested.max.z, declared.z),
+        axis(
+            own.min.x,
+            own.max.x,
+            requested.min.x,
+            requested.max.x,
+            declared.x,
+        ),
+        axis(
+            own.min.y,
+            own.max.y,
+            requested.min.y,
+            requested.max.y,
+            declared.y,
+        ),
+        axis(
+            own.min.z,
+            own.max.z,
+            requested.min.z,
+            requested.max.z,
+            declared.z,
+        ),
     )
 }
 
@@ -985,7 +1005,6 @@ impl<L: Layer> View<L> {
             f(*coord, chunk);
         }
     }
-
 
     pub fn len(&self) -> usize {
         self.chunks.len()

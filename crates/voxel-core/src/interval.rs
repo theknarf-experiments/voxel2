@@ -246,7 +246,11 @@ mod tests {
         assert_bounds(&mut rng, |a, b| a.max(b), Interval::max);
         assert_bounds(&mut rng, |a, _| a.abs(), |a, _| a.abs());
         assert_bounds(&mut rng, |a, _| -a, |a, _| -a);
-        assert_bounds(&mut rng, |a, _| a.clamp(-3.0, 7.0), |a, _| a.clamp(-3.0, 7.0));
+        assert_bounds(
+            &mut rng,
+            |a, _| a.clamp(-3.0, 7.0),
+            |a, _| a.clamp(-3.0, 7.0),
+        );
     }
 
     /// Scaling by a negative constant swaps the ends; getting this wrong

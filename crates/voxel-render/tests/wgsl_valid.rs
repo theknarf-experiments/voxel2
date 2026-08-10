@@ -21,8 +21,7 @@ const STANDALONE: &[&str] = &[
 fn standalone_shaders_are_valid_wgsl() {
     for path in STANDALONE {
         let full = format!("{}/{}", env!("CARGO_MANIFEST_DIR"), path);
-        let src = std::fs::read_to_string(&full)
-            .unwrap_or_else(|e| panic!("{path}: {e}"));
+        let src = std::fs::read_to_string(&full).unwrap_or_else(|e| panic!("{path}: {e}"));
         assert!(
             !src.contains("#import"),
             "{path} gained an #import — it can no longer be validated standalone, \

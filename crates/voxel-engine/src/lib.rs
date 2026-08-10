@@ -2,14 +2,14 @@
 //! budgets, edit application, and persistence.
 
 pub mod chunkgen;
-pub mod layers;
-pub mod lod_layers;
 pub mod graph;
+pub mod layers;
 pub mod level;
+pub mod lod_layers;
 pub mod planning;
+pub mod scatter;
 pub mod schema;
 pub mod streaming;
-pub mod scatter;
 
 use bevy::prelude::*;
 
@@ -26,15 +26,16 @@ pub struct VoxelStreamSource;
 
 /// The streaming anchor's transform. Systems take this instead of
 /// querying for a camera.
-pub type StreamSourceQuery<'w, 's> = Query<'w, 's, &'static GlobalTransform, With<VoxelStreamSource>>;
+pub type StreamSourceQuery<'w, 's> =
+    Query<'w, 's, &'static GlobalTransform, With<VoxelStreamSource>>;
 
-pub use level::{LevelDef, LevelPlugin};
 pub use chunkgen::ChunkGen;
 pub use layers::{MainThreadBudget, MainThreadQueue, VoxelLayersPlugin};
-pub use planning::{Marker, PatchSet, PlanningStats, RibbonSeg, WorldPlanner, WorldQuery};
-pub use streaming::{LodConfig, VoxelStreamingPlugin};
+pub use level::{LevelDef, LevelPlugin};
 pub use lod_layers::WorldFocus;
+pub use planning::{Marker, PatchSet, PlanningStats, RibbonSeg, WorldPlanner, WorldQuery};
 pub use scatter::{Placement, PlacementInputs, ScatterInstance};
+pub use streaming::{LodConfig, VoxelStreamingPlugin};
 pub use voxel_core::{ChunkKey, WorldId};
 
 /// Where each world is looked at from is PUBLISHED before it is
@@ -343,12 +344,9 @@ impl Plugin for VoxelEnginePlugin {
             voxel_render::VoxelChunksPlugin { slab: self.slab },
             VoxelStreamingPlugin,
         ))
-            .insert_resource(self.slab)
-            .init_resource::<Worlds>()
-            .configure_sets(
-                Update,
-                WorldFocusSet::Follow.after(WorldFocusSet::Publish),
-            )
-            .add_systems(PreUpdate, sync_ops_providers);
+        .insert_resource(self.slab)
+        .init_resource::<Worlds>()
+        .configure_sets(Update, WorldFocusSet::Follow.after(WorldFocusSet::Publish))
+        .add_systems(PreUpdate, sync_ops_providers);
     }
 }

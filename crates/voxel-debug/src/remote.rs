@@ -9,26 +9,26 @@ use bevy::prelude::*;
 use bevy::remote::{error_codes, http::RemoteHttpPlugin, BrpError, BrpResult, RemotePlugin};
 use serde_json::{json, Value};
 
-
 pub struct VoxelRemotePlugin {
     pub port: u16,
 }
 
 impl Plugin for VoxelRemotePlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<HostCommands>().add_plugins(
-            RemotePlugin::default()
-                .with_method_main("voxel/status", status)
-                .with_method_main("voxel/teleport", teleport)
-                .with_method_main("voxel/inspect", inspect)
-                .with_method_main("voxel/ops", ops)
-                .with_method_main("voxel/scan", scan)
-                .with_method_main("voxel/viz", viz)
-                .with_method_main("voxel/world", world_switch)
-                .with_method_main("voxel/host", host_command)
-                .with_method_main("voxel/screenshot", screenshot),
-        )
-        .add_plugins(RemoteHttpPlugin::default().with_port(self.port));
+        app.init_resource::<HostCommands>()
+            .add_plugins(
+                RemotePlugin::default()
+                    .with_method_main("voxel/status", status)
+                    .with_method_main("voxel/teleport", teleport)
+                    .with_method_main("voxel/inspect", inspect)
+                    .with_method_main("voxel/ops", ops)
+                    .with_method_main("voxel/scan", scan)
+                    .with_method_main("voxel/viz", viz)
+                    .with_method_main("voxel/world", world_switch)
+                    .with_method_main("voxel/host", host_command)
+                    .with_method_main("voxel/screenshot", screenshot),
+            )
+            .add_plugins(RemoteHttpPlugin::default().with_port(self.port));
     }
 }
 
@@ -100,8 +100,7 @@ fn radius(params: &Value, default: f64) -> f32 {
         .clamp(1.0, REMOTE_RADIUS_M) as f32
 }
 
-type PlayerCamera<'w, 's, T> =
-    Query<'w, 's, T, (With<crate::FreeCamera>, With<Camera3d>)>;
+type PlayerCamera<'w, 's, T> = Query<'w, 's, T, (With<crate::FreeCamera>, With<Camera3d>)>;
 
 fn status(
     In(_): In<Option<Value>>,
@@ -224,7 +223,6 @@ fn teleport(In(params): In<Option<Value>>, mut cams: PlayerCamera<&mut Transform
     Ok(json!({"ok": true}))
 }
 
-
 /// The world the player is standing in.
 ///
 /// Every introspection command answers about THAT world: `voxctl ribbons`
@@ -235,9 +233,7 @@ fn here<'a>(
     worlds: &'a voxel_engine::Worlds,
     camera: &voxel_render::CameraWorld,
 ) -> Result<&'a voxel_engine::WorldQuery, BrpError> {
-    worlds
-        .query(camera.0)
-        .ok_or_else(|| err("no world loaded"))
+    worlds.query(camera.0).ok_or_else(|| err("no world loaded"))
 }
 
 /// Anything the HOST's planner cares to answer, carried verbatim.
@@ -340,7 +336,11 @@ fn viz(In(params): In<Option<Value>>, mut viz: ResMut<crate::viz::DebugViz>) -> 
     }
     match params.get("layers") {
         Some(Value::Bool(v)) => {
-            viz.layer_radius_m = if *v { crate::viz::LAYER_VIZ_NEAR_M } else { 0.0 }
+            viz.layer_radius_m = if *v {
+                crate::viz::LAYER_VIZ_NEAR_M
+            } else {
+                0.0
+            }
         }
         Some(v) => {
             if let Some(r) = v.as_f64() {
@@ -374,8 +374,7 @@ fn scan_terrain(
     let mut spots: Vec<(Vec3, f32, f32)> = Vec::new();
     for gz in 0..=n {
         for gx in 0..=n {
-            let p = center - Vec2::splat(radius)
-                + Vec2::new(gx as f32, gz as f32) * step;
+            let p = center - Vec2::splat(radius) + Vec2::new(gx as f32, gz as f32) * step;
             let h = height(p);
             if h <= 1.0 {
                 continue; // sea floor is never scenic

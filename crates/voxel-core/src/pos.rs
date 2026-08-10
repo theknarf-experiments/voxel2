@@ -75,7 +75,10 @@ mod tests {
         let edge = (crate::BASE_VOXEL_M * crate::CHUNK_CELLS as f64) as f32;
         let p = GlobalPos::new(IVec3::ZERO, Vec3::new(33.0, -1.0, 64.5));
         let expect = |v: f32| (v / edge).floor() as i32;
-        assert_eq!(p.chunk, IVec3::new(expect(33.0), expect(-1.0), expect(64.5)));
+        assert_eq!(
+            p.chunk,
+            IVec3::new(expect(33.0), expect(-1.0), expect(64.5))
+        );
         assert!(p.local.x >= 0.0 && p.local.x < edge);
         assert!(p.local.y >= 0.0 && p.local.y < edge);
         assert!((p.to_dvec3() - DVec3::new(33.0, -1.0, 64.5)).length() < 1e-4);

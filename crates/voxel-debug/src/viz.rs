@@ -13,7 +13,6 @@
 use bevy::gizmos::config::{GizmoConfigGroup, GizmoConfigStore};
 use bevy::prelude::*;
 
-
 /// The planning overlay's own gizmo group, so it can draw IN FRONT of the
 /// world while chunk boundaries stay depth-tested.
 ///

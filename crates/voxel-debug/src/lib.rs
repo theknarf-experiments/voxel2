@@ -52,7 +52,8 @@ fn engine_hud(
                 s.slab_peak_pages,
                 s.slab_longest_free_run,
             ));
-            hud.0.push(format!("slab peak shape: [{}]", runs.join(", ")));
+            hud.0
+                .push(format!("slab peak shape: [{}]", runs.join(", ")));
         }
     }
     hud.0.push(format!(
@@ -138,13 +139,16 @@ impl Plugin for VoxelDebugPlugin {
                 },
             },
         ))
-            .add_systems(Startup, spawn_hud)
-            .init_resource::<ScreenshotRequest>()
-            .add_systems(Update, (engine_hud, update_hud, auto_screenshot, dump_camera).chain())
-            .init_resource::<MainWorldSpan>()
-            .init_resource::<MainWorldMs>()
-            .add_systems(First, main_world_begin)
-            .add_systems(Last, (main_world_end, log_slow_frames).chain());
+        .add_systems(Startup, spawn_hud)
+        .init_resource::<ScreenshotRequest>()
+        .add_systems(
+            Update,
+            (engine_hud, update_hud, auto_screenshot, dump_camera).chain(),
+        )
+        .init_resource::<MainWorldSpan>()
+        .init_resource::<MainWorldMs>()
+        .add_systems(First, main_world_begin)
+        .add_systems(Last, (main_world_end, log_slow_frames).chain());
     }
 }
 

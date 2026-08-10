@@ -1,7 +1,10 @@
 #!/bin/sh
-# Commit gate: the workspace must type-check and be clippy-clean
-# (warnings are errors). Install with `mise run setup`.
+# Commit gate: the workspace must be formatted, type-check, and be
+# clippy-clean (warnings are errors). Install with `mise run setup`.
 set -e
+
+echo "pre-commit: cargo fmt --all --check"
+cargo fmt --all --check
 
 echo "pre-commit: cargo check --workspace --all-targets"
 cargo check --workspace --all-targets

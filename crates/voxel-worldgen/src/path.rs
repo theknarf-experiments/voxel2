@@ -57,7 +57,8 @@ pub fn find_path(
     params: &PathParams,
 ) -> Option<Vec<Vec2>> {
     let step = params.step_m;
-    let node = |p: Vec2| -> (i32, i32) { ((p.x / step).round() as i32, (p.y / step).round() as i32) };
+    let node =
+        |p: Vec2| -> (i32, i32) { ((p.x / step).round() as i32, (p.y / step).round() as i32) };
     let pos = |n: (i32, i32)| -> Vec2 { Vec2::new(n.0 as f32 * step, n.1 as f32 * step) };
     let (start, goal) = (node(a), node(b));
     let in_box = |n: (i32, i32)| {
@@ -134,7 +135,8 @@ pub fn find_path(
                     None => true,
                     Some((old, _)) => {
                         g < *old - 1e-6
-                            || (g < *old + 1e-6 && (current.0, current.1) < (best[&next].1 .0, best[&next].1 .1))
+                            || (g < *old + 1e-6
+                                && (current.0, current.1) < (best[&next].1 .0, best[&next].1 .1))
                     }
                 };
                 if better {
@@ -172,8 +174,15 @@ mod tests {
         let flat = |_: Vec2| 10.0;
         let a = Vec2::new(0.0, 0.0);
         let b = Vec2::new(200.0, 80.0);
-        let path = find_path(&flat, a, b, Vec2::splat(-100.0), Vec2::splat(400.0), &PathParams::default())
-            .expect("path on flat ground");
+        let path = find_path(
+            &flat,
+            a,
+            b,
+            Vec2::splat(-100.0),
+            Vec2::splat(400.0),
+            &PathParams::default(),
+        )
+        .expect("path on flat ground");
         assert_eq!(path[0], a);
         assert_eq!(*path.last().unwrap(), b);
         let len: f32 = path.windows(2).map(|w| w[0].distance(w[1])).sum();

@@ -10,21 +10,21 @@
 
 use bevy::feathers::constants::fonts;
 use bevy::feathers::containers::{pane, pane_body, pane_header};
-use bevy::feathers::font_styles::InheritableFont;
 use bevy::feathers::cursor::EntityCursor;
+use bevy::feathers::font_styles::InheritableFont;
 use bevy::feathers::theme::{ThemeBackgroundColor, ThemedText};
 use bevy::feathers::tokens;
 use bevy::prelude::*;
 use bevy::text::FontWeight;
-use bevy::window::SystemCursorIcon;
 use bevy::ui::{
-    px, percent, Display, FlexDirection, Node, Overflow, OverflowAxis, PositionType,
+    percent, px, Display, FlexDirection, Node, Overflow, OverflowAxis, PositionType,
     ScrollPosition, UiRect,
 };
+use bevy::window::SystemCursorIcon;
 
 use crate::row;
-use crate::walk;
 use crate::style::PanelStyle;
+use crate::walk;
 use crate::{EditorRoots, EditorState, TOGGLE_KEY};
 
 /// The panel's root entity. One at a time.
@@ -284,7 +284,6 @@ pub fn rebuild(world: &mut World) {
         // silently on an empty panel.
         Err(e) => warn_once!("editor panel did not spawn: {e}"),
     }
-
 }
 
 /// Read the selected document and walk it into rows.

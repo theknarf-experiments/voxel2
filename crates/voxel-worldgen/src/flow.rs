@@ -148,7 +148,11 @@ mod tests {
             );
         }
         let end = *path.last().unwrap();
-        assert!(slope(end) <= 0.5, "flow never reached the stop level: h={}", slope(end));
+        assert!(
+            slope(end) <= 0.5,
+            "flow never reached the stop level: h={}",
+            slope(end)
+        );
     }
 
     #[test]
@@ -157,7 +161,11 @@ mod tests {
         // the walk must pond, spill over, and continue to the stop level.
         let terrain = |p: Vec2| {
             let base = (900.0 - p.x).max(0.0) * 0.08;
-            let ridge = if (390.0..410.0).contains(&p.x) { 4.0 } else { 0.0 };
+            let ridge = if (390.0..410.0).contains(&p.x) {
+                4.0
+            } else {
+                0.0
+            };
             base + ridge
         };
         let path = flow_path(&terrain, Vec2::new(0.0, 0.0), &FlowParams::default());
@@ -175,7 +183,14 @@ mod tests {
         let bowl = |p: Vec2| 50.0 + p.length() * 0.05;
         let path = flow_path(&bowl, Vec2::new(300.0, 0.0), &FlowParams::default());
         let end = *path.last().unwrap();
-        assert!(end.length() < 40.0, "flow did not settle in the pit: {end:?}");
-        assert!(path.len() < 100, "walk wandered instead of ending: {}", path.len());
+        assert!(
+            end.length() < 40.0,
+            "flow did not settle in the pit: {end:?}"
+        );
+        assert!(
+            path.len() < 100,
+            "walk wandered instead of ending: {}",
+            path.len()
+        );
     }
 }

@@ -105,7 +105,6 @@ pub trait WorldPlanner: Send + Sync + 'static {
     fn inspect(&self, _query: &serde_json::Value) -> serde_json::Value {
         serde_json::Value::Null
     }
-
 }
 
 /// One line a planner wants drawn: world-space ends and an RGB colour.
@@ -246,7 +245,9 @@ impl WorldQuery {
     }
 
     pub fn stats(&self) -> PlanningStats {
-        self.planner.as_ref().map_or_else(PlanningStats::default, |p| p.stats())
+        self.planner
+            .as_ref()
+            .map_or_else(PlanningStats::default, |p| p.stats())
     }
 
     /// See [`WorldPlanner::reads_missed`].

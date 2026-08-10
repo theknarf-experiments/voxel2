@@ -5,7 +5,6 @@
 //! planning, and the rendered world always agree. MUST stay bit-compatible
 //! with the WGSL.
 
-
 use glam::{IVec2, IVec3, Vec2, Vec3};
 
 /// Round half-up, shared with the WGSL twin (`round_half_up` there):
@@ -18,7 +17,6 @@ fn round_half_up(x: f32) -> f32 {
 }
 use voxel_core::interval::Interval;
 use voxel_core::worldop::*;
-
 
 fn hash3_seeded(seed: u32, p: IVec3) -> f32 {
     let mut h: u32 = (p.x as u32)
@@ -69,11 +67,10 @@ fn fbm3_seeded(
         let fade = crate::band_fade(1.0 / (freq_xz * mul), voxel_size);
         sum += amp
             * fade
-            * (value_noise3(seed, Vec3::new(
-                p.x * freq_xz * mul,
-                p.y * freq_y * mul,
-                p.z * freq_xz * mul,
-            )) - 0.5);
+            * (value_noise3(
+                seed,
+                Vec3::new(p.x * freq_xz * mul, p.y * freq_y * mul, p.z * freq_xz * mul),
+            ) - 0.5);
         amp *= 0.5;
         mul *= 2.0;
     }
@@ -252,9 +249,8 @@ pub fn eval_range(ops: &[WorldOp], seed: u32, min: Vec3, max: Vec3, vs: f32) -> 
     // this function exists for stops working everywhere at once.
     let mut ta = Interval::point(0.5);
     let mut tb = Interval::point(0.5);
-    let frange = |lo: Vec2, hi: Vec2, s: f32, o: i32, m: u32| {
-        crate::fbm_range(seed, lo, hi, s, o, vs, m)
-    };
+    let frange =
+        |lo: Vec2, hi: Vec2, s: f32, o: i32, m: u32| crate::fbm_range(seed, lo, hi, s, o, vs, m);
     for op in ops {
         match region_gate_range(op.region, ta, tb) {
             // Definitely outside: the op does not exist over this box.
@@ -379,10 +375,22 @@ pub fn surface_material_weight(
         match op.kind {
             WOP_REGION_AXES => {
                 let oct = op.p1[2] as i32;
-                ta = crate::fbm_mode(seed, xz + Vec2::new(op.p0[0], op.p0[1]), op.p0[2], oct, vs, 0)
-                    + 0.5;
-                tb = crate::fbm_mode(seed, xz + Vec2::new(op.p1[0], op.p1[1]), op.p0[3], oct, vs, 0)
-                    + 0.5;
+                ta = crate::fbm_mode(
+                    seed,
+                    xz + Vec2::new(op.p0[0], op.p0[1]),
+                    op.p0[2],
+                    oct,
+                    vs,
+                    0,
+                ) + 0.5;
+                tb = crate::fbm_mode(
+                    seed,
+                    xz + Vec2::new(op.p1[0], op.p1[1]),
+                    op.p0[3],
+                    oct,
+                    vs,
+                    0,
+                ) + 0.5;
             }
             WOP_HEIGHT_SURFACE | WOP_COARSE_SOLID => base = op.material,
             WOP_MATERIAL_BAND => {
@@ -445,17 +453,62 @@ pub fn planet_program() -> Vec<WorldOp> {
             .p0([-4200.0, 8800.0, 0.004, 1.6])
             .p1([3.0, 0.0, 0.0, 0.15]),
         // Dunes in the desert: long ridged waves, low amplitude.
-        region_terrain([0.56, 1.0], [0.0, 0.47], [820.0, -410.0], 0.011, 21.0, 3, 2, 0.0),
+        region_terrain(
+            [0.56, 1.0],
+            [0.0, 0.47],
+            [820.0, -410.0],
+            0.011,
+            21.0,
+            3,
+            2,
+            0.0,
+        ),
         // Jagged crests in the alpine: ridged noise, tall and sharp.
-        region_terrain([0.0, 0.44], [0.0, 1.0], [-2600.0, 1750.0], 0.0035, 165.0, 5, 1, 60.0),
+        region_terrain(
+            [0.0, 0.44],
+            [0.0, 1.0],
+            [-2600.0, 1750.0],
+            0.0035,
+            165.0,
+            5,
+            1,
+            60.0,
+        ),
         // Wetland is the flattest ground on the planet: a gentle negative
         // band, which is what makes water pool there.
-        region_terrain([0.0, 1.0], [0.56, 1.0], [4400.0, 900.0], 0.0025, 34.0, 3, 0, -26.0),
+        region_terrain(
+            [0.0, 1.0],
+            [0.56, 1.0],
+            [4400.0, 900.0],
+            0.0025,
+            34.0,
+            3,
+            0,
+            -26.0,
+        ),
         // A mountain range. The band is NARROW on one axis, so the
         // region is an iso-strip of the noise field and snakes across
         // the world the way a range does; a wide box would give a blob.
-        region_terrain([0.470, 0.530], [0.0, 1.0], [15200.0, -6400.0], 0.00022, 2350.0, 4, 1, 1150.0),
-        region_terrain([0.470, 0.530], [0.0, 1.0], [-3300.0, 7100.0], 0.0016, 430.0, 5, 1, 0.0),
+        region_terrain(
+            [0.470, 0.530],
+            [0.0, 1.0],
+            [15200.0, -6400.0],
+            0.00022,
+            2350.0,
+            4,
+            1,
+            1150.0,
+        ),
+        region_terrain(
+            [0.470, 0.530],
+            [0.0, 1.0],
+            [-3300.0, 7100.0],
+            0.0016,
+            430.0,
+            5,
+            1,
+            0.0,
+        ),
         WorldOp::new(WOP_HEIGHT_SURFACE).material(1),
         // Regions: two noise axes, and a box in their product per region.
         // Order is priority — each only repaints ground still left as
@@ -610,9 +663,9 @@ pub fn mega_program() -> Vec<WorldOp> {
 
 #[cfg(test)]
 mod tests {
-    use crate::fbm_mode;
     use super::*;
     use crate::fbm;
+    use crate::fbm_mode;
 
     #[test]
     fn planet_program_matches_legacy_terrain_height() {
@@ -637,7 +690,8 @@ mod tests {
                     + fbm(seed, p + Vec2::new(510.0, -770.0), 0.0008, 5, vs) * 420.0
                     + fbm(seed, p + Vec2::new(1337.0, 55.0), 0.01, 5, vs) * 36.0;
                 let stepped = base + 90.0 * smoothstep(180.0, 230.0, base);
-                let legacy = stepped + fbm(seed, p + Vec2::new(37.0, 91.0), 0.06, 4, vs) * 5.0 - 8.0;
+                let legacy =
+                    stepped + fbm(seed, p + Vec2::new(37.0, 91.0), 0.06, 4, vs) * 5.0 - 8.0;
                 assert_eq!(eval_height(&base_ops, seed, p, vs), legacy);
 
                 // With the region ops, height moves only where a region
@@ -674,7 +728,10 @@ mod tests {
         found.sort_unstable();
         assert_eq!(found, vec![1, 2, 5, 6, 7], "region coverage changed");
         // And the regions that declare terrain actually shape it.
-        assert!(shaped > 100, "region terrain barely fires: {shaped} samples");
+        assert!(
+            shaped > 100,
+            "region terrain barely fires: {shaped} samples"
+        );
     }
 
     #[test]
@@ -897,12 +954,20 @@ mod range_tests {
 
         let (mut inside, mut outside) = (0, 0);
         for i in 0..600 {
-            let p = Vec3::new(i as f32 * 137.0 - 40_000.0, 6_000.0, i as f32 * 91.0 - 30_000.0);
+            let p = Vec3::new(
+                i as f32 * 137.0 - 40_000.0,
+                6_000.0,
+                i as f32 * 91.0 - 30_000.0,
+            );
             let solid = eval(&ops, 0, p, 1.0).0 < 0.0;
             // High above the terrain, so the ONLY thing that can be solid
             // here is the gated op — which makes this a direct read of
             // the gate rather than of the landscape.
-            if solid { inside += 1 } else { outside += 1 }
+            if solid {
+                inside += 1
+            } else {
+                outside += 1
+            }
 
             let lo = p - Vec3::splat(8.0);
             let hi = p + Vec3::splat(8.0);
@@ -911,12 +976,19 @@ mod range_tests {
                 assert!(bound.contains(d), "sdf {d} at {p:?} escapes {bound:?}");
             }
         }
-        assert!(inside > 50 && outside > 50, "gate is one-sided: {inside} in, {outside} out");
+        assert!(
+            inside > 50 && outside > 50,
+            "gate is one-sided: {inside} in, {outside} out"
+        );
     }
 
     #[test]
     fn a_region_packs_and_unpacks_within_a_byte() {
-        for band in [[0.0, 1.0, 0.0, 1.0], [0.25, 0.5, 0.6, 0.75], [0.0, 0.46, 0.0, 1.0]] {
+        for band in [
+            [0.0, 1.0, 0.0, 1.0],
+            [0.25, 0.5, 0.6, 0.75],
+            [0.0, 0.46, 0.0, 1.0],
+        ] {
             let back = voxel_core::worldop::unpack_region(voxel_core::worldop::pack_region(band));
             for (a, b) in band.iter().zip(back.iter()) {
                 assert!((a - b).abs() <= 1.0 / 255.0, "{band:?} -> {back:?}");
@@ -940,9 +1012,14 @@ mod range_tests {
     #[test]
     fn sky_is_air_and_the_deep_is_solid() {
         let ops = planet_program();
-        let sky =
-            eval_range(&ops, 0, Vec3::new(0.0, 8_000.0, 0.0), Vec3::new(800.0, 8_800.0, 800.0), 1.0)
-                .unwrap();
+        let sky = eval_range(
+            &ops,
+            0,
+            Vec3::new(0.0, 8_000.0, 0.0),
+            Vec3::new(800.0, 8_800.0, 800.0),
+            1.0,
+        )
+        .unwrap();
         assert!(sky.is_positive(), "sky should be all air: {sky:?}");
         let deep = eval_range(
             &ops,
@@ -955,4 +1032,3 @@ mod range_tests {
         assert!(deep.is_negative(), "the deep should be all solid: {deep:?}");
     }
 }
-

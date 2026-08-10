@@ -326,12 +326,17 @@ fn a_newtype_does_not_cost_a_row() {
 fn every_reference_a_level_makes_resolves() {
     for name in ["planet", "megastructure", "purgatory"] {
         let path = format!("{}/../../levels/{name}.json", env!("CARGO_MANIFEST_DIR"));
-        let level =
-            LevelDef::from_json_known(&std::fs::read_to_string(&path).unwrap(), &registry::engine_kinds())
-                .unwrap();
+        let level = LevelDef::from_json_known(
+            &std::fs::read_to_string(&path).unwrap(),
+            &registry::engine_kinds(),
+        )
+        .unwrap();
         let mut seen = 0;
         for row in rows(&level, &everything(&level)) {
-            let RowKind::Choice { current, options, .. } = &row.kind else {
+            let RowKind::Choice {
+                current, options, ..
+            } = &row.kind
+            else {
                 continue;
             };
             seen += 1;

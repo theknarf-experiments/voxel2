@@ -251,11 +251,13 @@ impl SlabAllocator {
                 match self.singles.pop() {
                     Some(p) if self.is_free(p) => break Some(p),
                     Some(_) => continue,
-                    None => break self.find_run_low(1, self.low_cursor).or_else(|| {
-                        // The cursor only moves forward, so a wrap is
-                        // how freed low pages are found again.
-                        self.find_run_low(1, 0)
-                    }),
+                    None => {
+                        break self.find_run_low(1, self.low_cursor).or_else(|| {
+                            // The cursor only moves forward, so a wrap is
+                            // how freed low pages are found again.
+                            self.find_run_low(1, 0)
+                        });
+                    }
                 }
             }
         } else {
@@ -396,7 +398,9 @@ mod tests {
         assert_eq!(slab.alloc(c.page_verts + 1, 600).unwrap().pages, 2);
         // Index count alone can lengthen the run.
         assert_eq!(
-            slab.alloc(100, c.page_verts * c.index_factor + 1).unwrap().pages,
+            slab.alloc(100, c.page_verts * c.index_factor + 1)
+                .unwrap()
+                .pages,
             2
         );
         // Too big entirely.
@@ -430,7 +434,10 @@ mod tests {
         assert_eq!(c.total_vertices(), 64 * 512);
         assert_eq!(c.total_indices(), 64 * 512 * 4);
         assert_eq!(slab.alloc(513, 1).unwrap().pages, 2);
-        assert!(slab.alloc(9 * 512, 1).is_none(), "beyond this host's maximum");
+        assert!(
+            slab.alloc(9 * 512, 1).is_none(),
+            "beyond this host's maximum"
+        );
         for _ in 0..62 {
             assert!(slab.alloc(1, 1).is_some());
         }
@@ -468,7 +475,10 @@ mod tests {
             }
         }
         for _ in 0..1_892 {
-            assert!(slab.alloc(10, 60).is_some(), "single-page world alongside it");
+            assert!(
+                slab.alloc(10, 60).is_some(),
+                "single-page world alongside it"
+            );
         }
         assert_eq!(slab.pressure().failed, 0);
         assert_eq!(slab.run_histogram()[0], 1_135 + 1_892);
@@ -492,7 +502,8 @@ mod tests {
             }
         }
         assert!(
-            slab.alloc(c.max_pages_per_chunk * c.page_verts, 1).is_some(),
+            slab.alloc(c.max_pages_per_chunk * c.page_verts, 1)
+                .is_some(),
             "a maximum-size chunk must still find a run"
         );
         assert_eq!(slab.pressure().fragmented, 0);
@@ -585,6 +596,10 @@ mod tests {
             }
         }
         let held: u32 = live.iter().map(|a| a.pages).sum();
-        assert_eq!(slab.used_pages(), held, "accounting must match the live set");
+        assert_eq!(
+            slab.used_pages(),
+            held,
+            "accounting must match the live set"
+        );
     }
 }

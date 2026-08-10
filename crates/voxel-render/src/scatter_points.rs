@@ -87,7 +87,13 @@ impl ScatterPoints {
     }
 
     pub fn len(&self) -> usize {
-        self.inner.lock().unwrap().classes.values().map(Vec::len).sum()
+        self.inner
+            .lock()
+            .unwrap()
+            .classes
+            .values()
+            .map(Vec::len)
+            .sum()
     }
 
     pub fn is_empty(&self) -> bool {

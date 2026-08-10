@@ -816,8 +816,10 @@ mod tests {
     fn the_compiler_refuses_a_badly_wired_stack() {
         let compile = |json: &str| -> String {
             let nodes: Vec<voxel_engine::graph::NodeDef> =
-                voxel_engine::graph::with_registry(&super::nodes::kinds(), || serde_json::from_str(json))
-                    .expect("parses");
+                voxel_engine::graph::with_registry(&super::nodes::kinds(), || {
+                    serde_json::from_str(json)
+                })
+                .expect("parses");
             voxel_engine::graph::compile(&nodes)
                 .expect_err("should not compile")
                 .to_string()
@@ -933,7 +935,12 @@ mod tests {
         let population = edited
             .nodes
             .iter_mut()
-            .find_map(|n| n.node.0.as_any_mut().downcast_mut::<super::nodes::Population>())
+            .find_map(|n| {
+                n.node
+                    .0
+                    .as_any_mut()
+                    .downcast_mut::<super::nodes::Population>()
+            })
             .expect("planet ships populations");
         population.0.per_tile += 1;
         assert_eq!(

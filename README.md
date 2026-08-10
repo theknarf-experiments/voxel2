@@ -190,8 +190,8 @@ is admitted against the slab budget and caps what the others can stream.
 | `voxel-editor` | Level editor: reflection → Feathers rows, `bsn!` scenes, edits by reflect path |
 
 `tools/voxctl` drives a running instance over the Bevy Remote Protocol;
-`mise run setup` installs the pre-commit gate (workspace check + clippy
-`-D warnings`).
+`mise run setup` installs the pre-commit gate (`cargo fmt --check`,
+workspace check, clippy `-D warnings`).
 
 `cargo test --workspace` runs the property tests (determinism under racing
 threads, format round-trips, slab allocation, planning invariants).

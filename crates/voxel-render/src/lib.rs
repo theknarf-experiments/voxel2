@@ -3,25 +3,23 @@
 //! material shading.
 
 pub mod chunks;
-pub mod scatter_points;
 pub mod material;
 /// Shared plumbing so a HOST can build a pipeline that shades like the
 /// terrain does (Bevy's view bind group, matching keys and shader defs).
 pub mod pbr_view;
+pub mod scatter_points;
 pub mod slab;
 
 pub use chunks::{
-    material_table, material_slot_index,
-    ChunkGpuResources, GpuWorldProgram,
-    ChunkCommand, ChunkCommandQueue, ChunkReadyChannel, ChunkWaiters, EnvParams,
-    SharedRenderStats,
-    SurfaceMap, VoxelChunksPlugin, WorldMaterial, WorldProgram, MATERIAL_SLOTS,
-    MAX_WORLDS, RenderWorld, RenderWorlds, CameraWorld, ViewWorld, MAX_CLIP_PLANES,
-    MAT_KIND_CANOPY, MAT_KIND_SURFACE, MAT_KIND_ZONED,
+    material_slot_index, material_table, CameraWorld, ChunkCommand, ChunkCommandQueue,
+    ChunkGpuResources, ChunkReadyChannel, ChunkWaiters, EnvParams, GpuWorldProgram, RenderWorld,
+    RenderWorlds, SharedRenderStats, SurfaceMap, ViewWorld, VoxelChunksPlugin, WorldMaterial,
+    WorldProgram, MATERIAL_SLOTS, MAT_KIND_CANOPY, MAT_KIND_SURFACE, MAT_KIND_ZONED,
+    MAX_CLIP_PLANES, MAX_WORLDS,
 };
-pub use slab::SlabAllocator;
-pub use scatter_points::{ScatterPoint, ScatterPoints};
 pub use material::VoxelSurfaceMaterial;
+pub use scatter_points::{ScatterPoint, ScatterPoints};
+pub use slab::SlabAllocator;
 
 /// Render layer for a world's scene content. Layer N is world N.
 ///

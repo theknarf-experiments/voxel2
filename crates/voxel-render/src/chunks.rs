@@ -48,18 +48,16 @@ use bevy::{
         },
         render_resource::{
             binding_types::{storage_buffer_read_only_sized, storage_buffer_sized, uniform_buffer},
-            BindGroup, BindGroupEntries, BindGroupLayoutDescriptor, BindGroupLayoutEntries, Buffer,
-            AsBindGroup, BufferDescriptor, BufferInitDescriptor, BufferUsages,
-            CachedComputePipelineId,
-            Canonical, ColorTargetState, ColorWrites, CompareFunction, ComputePassDescriptor,
-            ComputePipelineDescriptor, DepthStencilState, DynamicUniformBuffer, FragmentState,
-            Face, IndexFormat, MapMode, PipelineCache, PrimitiveState, RenderPipeline,
-            RenderPipelineDescriptor,
-            ShaderStages, ShaderType, Specializer, SpecializerKey, StorageBuffer, TextureFormat,
-            UniformBuffer, Variants, VertexAttribute, VertexFormat, VertexState, VertexStepMode,
+            AsBindGroup, BindGroup, BindGroupEntries, BindGroupLayoutDescriptor,
+            BindGroupLayoutEntries, Buffer, BufferDescriptor, BufferInitDescriptor, BufferUsages,
+            CachedComputePipelineId, Canonical, ColorTargetState, ColorWrites, CompareFunction,
+            ComputePassDescriptor, ComputePipelineDescriptor, DepthStencilState,
+            DynamicUniformBuffer, Face, FragmentState, IndexFormat, MapMode, PipelineCache,
+            PrimitiveState, RenderPipeline, RenderPipelineDescriptor, ShaderStages, ShaderType,
+            Specializer, SpecializerKey, StorageBuffer, TextureFormat, UniformBuffer, Variants,
+            VertexAttribute, VertexFormat, VertexState, VertexStepMode,
         },
         renderer::{RenderContext, RenderDevice, RenderGraph, RenderQueue},
-
         Extract, Render, RenderApp, RenderStartup, RenderSystems,
     },
 };
@@ -681,7 +679,9 @@ pub const MATERIAL_SLOTS: usize = 32;
 
 /// A world's material table, indexed by material id and padded to
 /// [`MATERIAL_SLOTS`] so the id → slot arithmetic is uniform.
-pub fn material_table(recipes: impl IntoIterator<Item = (u32, WorldMaterial)>) -> Vec<WorldMaterial> {
+pub fn material_table(
+    recipes: impl IntoIterator<Item = (u32, WorldMaterial)>,
+) -> Vec<WorldMaterial> {
     let mut table = vec![WorldMaterial::default(); MATERIAL_SLOTS];
     for (id, recipe) in recipes {
         let id = id as usize;
@@ -1003,8 +1003,16 @@ struct ExtractedCameraPos(DVec3);
 type WorldView = Option<(DVec3, Option<Frustum>)>;
 
 /// Cameras, with the world each one looks at.
-type WorldViewQuery<'w, 's> =
-    Query<'w, 's, (&'static GlobalTransform, &'static Frustum, Option<&'static ViewWorld>), With<Camera3d>>;
+type WorldViewQuery<'w, 's> = Query<
+    'w,
+    's,
+    (
+        &'static GlobalTransform,
+        &'static Frustum,
+        Option<&'static ViewWorld>,
+    ),
+    With<Camera3d>,
+>;
 
 #[derive(Resource, Default)]
 struct WorldViews(Vec<WorldView>);
@@ -1025,7 +1033,11 @@ enum ChunkState {
     /// result. That is the whole wedge: waiting here for a slab slot held
     /// the arena slot, the arena starved, no chunk could generate, so
     /// nothing was ever freed to release a slab slot.
-    ReadyToMesh { slot: u32, alloc: SlabAlloc, index_count: u32 },
+    ReadyToMesh {
+        slot: u32,
+        alloc: SlabAlloc,
+        index_count: u32,
+    },
     /// Counted, but the slab had no room. Holds NOTHING — retried when
     /// space frees, at the cost of re-running density.
     Deferred { verts: u32, indices: u32 },
@@ -1063,13 +1075,25 @@ struct RenderChunk {
 
 enum Pending {
     Queued,
-    CountsInFlight { slot: u32 },
-    ReadyToMesh { slot: u32, alloc: SlabAlloc, index_count: u32 },
+    CountsInFlight {
+        slot: u32,
+    },
+    ReadyToMesh {
+        slot: u32,
+        alloc: SlabAlloc,
+        index_count: u32,
+    },
     /// Counted, but the slab had no room. Holds nothing; the OLD mesh
     /// keeps drawing, so this costs a stale seam rather than a hole.
-    Deferred { verts: u32, indices: u32 },
+    Deferred {
+        verts: u32,
+        indices: u32,
+    },
     /// Regen meshed but held: the old mesh keeps drawing until Commit.
-    Held { alloc: SlabAlloc, index_count: u32 },
+    Held {
+        alloc: SlabAlloc,
+        index_count: u32,
+    },
     /// Regen classified empty but held: emptiness applies at Commit.
     HeldEmpty,
 }
@@ -1402,8 +1426,8 @@ fn init_chunk_resources(
         &BindGroupLayoutEntries::sequential(
             ShaderStages::VERTEX_FRAGMENT,
             (
-                uniform_buffer::<ChunkDrawUniform>(true),    // per-chunk offset
-                uniform_buffer::<EnvParams>(false),          // render flags
+                uniform_buffer::<ChunkDrawUniform>(true), // per-chunk offset
+                uniform_buffer::<EnvParams>(false),       // render flags
                 storage_buffer_read_only_sized(false, None), // surface material map
             ),
         ),
@@ -1514,7 +1538,9 @@ fn extract_terrain_materials(
 /// is only knowable here, after Bevy has prepared the materials.
 fn resolve_material_slots(
     extracted: Res<ExtractedTerrainMaterials>,
-    prepared: Res<bevy::render::erased_render_asset::ErasedRenderAssets<bevy::pbr::PreparedMaterial>>,
+    prepared: Res<
+        bevy::render::erased_render_asset::ErasedRenderAssets<bevy::pbr::PreparedMaterial>,
+    >,
     mut env: ResMut<EnvParams>,
     mut warned: Local<bool>,
 ) {
@@ -1748,7 +1774,8 @@ fn plan_frame_inner(
     pipeline_cache: Res<PipelineCache>,
     render_device: Res<RenderDevice>,
     render_queue: Res<RenderQueue>,
-) {    // Stage counters: which stage is narrowest is not something the
+) {
+    // Stage counters: which stage is narrowest is not something the
     // budgets can tell you, since a budget only says what a frame is
     // ALLOWED to do.
     let mut readies = 0u64;
@@ -1849,8 +1876,10 @@ fn plan_frame_inner(
                             // regenerate with the new mask.
                             match chunk.pending.take() {
                                 Some(Pending::Held { alloc, .. }) => gpu.slab.free(alloc),
-                                Some(p @ (Pending::CountsInFlight { .. }
-                                | Pending::ReadyToMesh { .. })) => {
+                                Some(
+                                    p @ (Pending::CountsInFlight { .. }
+                                    | Pending::ReadyToMesh { .. }),
+                                ) => {
                                     // The in-flight regen carries the OLD
                                     // mask; without a requeue its report
                                     // never matches the new request and
@@ -2349,7 +2378,8 @@ fn plan_frame_inner(
     gpu.gen_uniforms.write_buffer(&render_device, &render_queue);
     gpu.draw_uniforms
         .write_buffer(&render_device, &render_queue);
-    gpu.program_buffer.set(GpuWorldProgram::from_worlds(&worlds));
+    gpu.program_buffer
+        .set(GpuWorldProgram::from_worlds(&worlds));
     gpu.program_buffer
         .write_buffer(&render_device, &render_queue);
     gpu.env_uniform.set(*env);
@@ -2643,18 +2673,20 @@ fn prepare_view_bind_group(
         bind_groups.chunk = None;
         return;
     };
-    bind_groups.chunk = Some(render_device.create_bind_group(
-        "voxel_chunks_chunk_bg",
-        &pipeline_cache.get_bind_group_layout(&pipeline.chunk_layout),
-        &BindGroupEntries::sequential((
-            chunk_binding,
-            env_binding,
-            gpu.surface_map
-                .as_ref()
-                .map_or(&gpu.surface_map_dummy, |(b, _)| b)
-                .as_entire_buffer_binding(),
-        )),
-    ));
+    bind_groups.chunk = Some(
+        render_device.create_bind_group(
+            "voxel_chunks_chunk_bg",
+            &pipeline_cache.get_bind_group_layout(&pipeline.chunk_layout),
+            &BindGroupEntries::sequential((
+                chunk_binding,
+                env_binding,
+                gpu.surface_map
+                    .as_ref()
+                    .map_or(&gpu.surface_map_dummy, |(b, _)| b)
+                    .as_entire_buffer_binding(),
+            )),
+        ),
+    );
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2793,14 +2825,26 @@ where
 /// Per-level histogram bucket names. Static strings because the stats map
 /// is keyed by `&'static str`; the index is the LOD level.
 const EMPTY_BY_LEVEL: [&str; 16] = [
-    "empty_L0", "empty_L1", "empty_L2", "empty_L3", "empty_L4", "empty_L5",
-    "empty_L6", "empty_L7", "empty_L8", "empty_L9", "empty_L10", "empty_L11",
-    "empty_L12", "empty_L13", "empty_L14", "empty_L15",
+    "empty_L0",
+    "empty_L1",
+    "empty_L2",
+    "empty_L3",
+    "empty_L4",
+    "empty_L5",
+    "empty_L6",
+    "empty_L7",
+    "empty_L8",
+    "empty_L9",
+    "empty_L10",
+    "empty_L11",
+    "empty_L12",
+    "empty_L13",
+    "empty_L14",
+    "empty_L15",
 ];
 const MESHED_BY_LEVEL: [&str; 16] = [
-    "mesh_L0", "mesh_L1", "mesh_L2", "mesh_L3", "mesh_L4", "mesh_L5",
-    "mesh_L6", "mesh_L7", "mesh_L8", "mesh_L9", "mesh_L10", "mesh_L11",
-    "mesh_L12", "mesh_L13", "mesh_L14", "mesh_L15",
+    "mesh_L0", "mesh_L1", "mesh_L2", "mesh_L3", "mesh_L4", "mesh_L5", "mesh_L6", "mesh_L7",
+    "mesh_L8", "mesh_L9", "mesh_L10", "mesh_L11", "mesh_L12", "mesh_L13", "mesh_L14", "mesh_L15",
 ];
 
 /// Slab exhaustion must degrade, never wedge.
@@ -2854,13 +2898,22 @@ mod slab_pressure_tests {
         }
         assert_eq!(slab.free_pages(), 0, "the fixture must exhaust the slab");
         for _ in 0..100 {
-            assert!(matches!(place(&mut slab, SMALL.0, SMALL.1), Placement::Defer));
+            assert!(matches!(
+                place(&mut slab, SMALL.0, SMALL.1),
+                Placement::Defer
+            ));
         }
         assert_eq!(slab.free_pages(), 0, "deferring must take nothing");
         // And freeing one makes exactly one placement possible again.
         slab.free(held.pop().unwrap());
-        assert!(matches!(place(&mut slab, SMALL.0, SMALL.1), Placement::Mesh(_)));
-        assert!(matches!(place(&mut slab, SMALL.0, SMALL.1), Placement::Defer));
+        assert!(matches!(
+            place(&mut slab, SMALL.0, SMALL.1),
+            Placement::Mesh(_)
+        ));
+        assert!(matches!(
+            place(&mut slab, SMALL.0, SMALL.1),
+            Placement::Defer
+        ));
     }
 
     #[test]
@@ -2994,7 +3047,10 @@ mod surface_map_tests {
     /// threshold table and paints the world with aliased float bits.
     #[test]
     fn the_header_layout_matches_the_shader() {
-        assert_eq!(shader_const("SURFACE_MAP_THRESHOLDS"), SURFACE_MAP_THRESHOLDS);
+        assert_eq!(
+            shader_const("SURFACE_MAP_THRESHOLDS"),
+            SURFACE_MAP_THRESHOLDS
+        );
         assert_eq!(shader_const("SURFACE_MAP_HEADER"), SURFACE_MAP_HEADER);
     }
 
