@@ -5285,6 +5285,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "voxel-editor"
+version = "0.1.0"
+dependencies = [
+ "bevy",
+ "voxel-engine",
+]
+
+[[package]]
 name = "voxel-engine"
 version = "0.1.0"
 dependencies = [
@@ -5339,6 +5347,7 @@ dependencies = [
  "serde_json",
  "voxel-core",
  "voxel-debug",
+ "voxel-editor",
  "voxel-engine",
  "voxel-layers",
  "voxel-render",

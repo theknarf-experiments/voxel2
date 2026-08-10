@@ -6,6 +6,7 @@ pub mod layers;
 pub mod lod_layers;
 pub mod level;
 pub mod planning;
+pub mod schema;
 pub mod streaming;
 pub mod scatter;
 

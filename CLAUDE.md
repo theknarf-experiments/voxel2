@@ -34,7 +34,14 @@ architecture. Design plan: `~/.claude/plans/binary-twirling-brooks.md`.
   per other shipped level) opens a window onto it, loaded on demand and
   left loaded when the opening closes, and `world N` switches which world
   the camera is in; F8/F9 (or `raw voxel/viz`) toggle chunk/layer debug
-  overlays — do not reuse those two.
+  overlays and F10 the level editor — do not reuse those three.
+- **`voxctl shot` renders an offscreen 3D target with NO UI on it.** To see
+  the editor or the HUD you need `shot PATH --window`, which is black
+  unless the window is in the FOREGROUND — check the file size (a real
+  frame is megabytes, a black one ~57 KB) rather than trusting the shot.
+  Drive the editor from tooling with
+  `raw world.mutate_resources '{"resource":"voxel_editor::EditorState",
+  "path":".open","value":true}'` (and `.expanded` for which rows are open).
 - Zero `Validation Error` lines in the log is part of "verified".
 - Kill running app processes before spawning another and after each
   capture.

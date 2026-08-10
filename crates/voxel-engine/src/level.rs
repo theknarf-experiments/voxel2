@@ -15,15 +15,26 @@ use voxel_core::csg::CsgOp;
 use voxel_core::worldop::*;
 
 use crate::planning::{HostPlanning, OpsSource, WorldQuery};
+use crate::schema;
 use crate::streaming::StreamingRebuild;
 use crate::{LodConfig, VoxelEnginePlugin};
 
 #[derive(Reflect, Serialize, Deserialize, Clone, Debug)]
 pub struct LodDef {
+    /// How many times the voxel size doubles above the finest level.
+    #[reflect(@schema::Rebuilds, @schema::Range(1.0, 12.0))]
     pub max_level: u8,
+    /// Chunks of the top level kept around the camera.
+    #[reflect(@schema::Rebuilds, @schema::Range(1.0, 32.0))]
     pub top_radius: i32,
+    /// Vertical extent of the top level, in chunks.
+    #[reflect(@schema::Rebuilds)]
     pub top_y: (i32, i32),
+    /// Refinement thresholds — tuning, not topology, so they apply
+    /// without restreaming.
+    #[reflect(@schema::Range(0.5, 8.0))]
     pub split_k: f64,
+    #[reflect(@schema::Range(0.5, 8.0))]
     pub merge_k: f64,
 }
 
@@ -50,7 +61,11 @@ pub struct EnvDef {
     /// horizon shadows along it, so it must match the app's sun. Colors,
     /// strengths, ambient and haze are the app's — voxel surfaces shade
     /// through Bevy's PBR, so they come from its lights and `DistanceFog`.
+    ///
+    /// Restreams: the shadows are baked into the vertices, so moving the
+    /// sun re-meshes rather than re-lights.
     #[serde(default = "d_sun_direction")]
+    #[reflect(@schema::Rebuilds)]
     pub sun_direction: [f32; 3],
 }
 
@@ -100,11 +115,13 @@ pub struct ScatterDef {
     pub per_tile: u32,
     /// Chance each surviving candidate is kept.
     #[serde(default = "default_one")]
+    #[reflect(@schema::Range(0.0, 1.0))]
     pub chance: f32,
     /// Altitude band the class lives in.
     pub altitude: [f32; 2],
     /// Minimum surface up-ness (1 = flat).
     #[serde(default)]
+    #[reflect(@schema::Range(0.0, 1.0))]
     pub min_up: f32,
     /// Voxel size the surface is sampled at: props seat on the LOD the
     /// terrain actually shows across the streaming radius.
@@ -160,6 +177,7 @@ pub struct ScatterDef {
 #[derive(Reflect, Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct CoverDef {
     /// Material id the covered ground takes.
+    #[reflect(@schema::OneOf("materials[].id"))]
     pub material: u32,
     /// Distance the paint takes over at — where the host stopped drawing
     /// the instances. Both numbers are the level's, so the handover is
@@ -228,6 +246,7 @@ pub struct CsgOpDef {
     #[serde(default)]
     pub yaw_deg: f32,
     #[serde(default = "d_op_material")]
+    #[reflect(@schema::OneOf("materials[].id"))]
     pub material: u32,
     #[serde(default)]
     pub blend: f32,
@@ -354,14 +373,17 @@ pub enum MaterialDef {
     /// Uniform base with grain, optional bands/grime/streaks/moss/emissive.
     Surface {
         id: u32,
+        #[reflect(@schema::AsColor)]
         base: [f32; 3],
         #[serde(default = "default_grain")]
+        #[reflect(@schema::Range(0.0, 1.0))]
         grain: f32,
         #[serde(default)]
         band: Option<BandDef>,
         #[serde(default)]
         grime: Option<GrimeDef>,
         #[serde(default)]
+        #[reflect(@schema::Range(0.0, 1.0))]
         streaks: f32,
         #[serde(default)]
         moss: Option<MossDef>,
@@ -375,11 +397,15 @@ pub enum MaterialDef {
     /// above with an implicit snowcap. After iq's Rainforest shading.
     Canopy {
         id: u32,
+        #[reflect(@schema::AsColor)]
         low: [f32; 3],
         /// (dark, sun-lit) canopy greens mixed by crown noise.
+        #[reflect(@schema::AsColor)]
         canopy: [[f32; 3]; 2],
+        #[reflect(@schema::AsColor)]
         rock: [f32; 3],
         /// Dry/brown patch color on gentle ground.
+        #[reflect(@schema::AsColor)]
         patch: [f32; 3],
         zones: CanopyZonesDef,
         /// Crown noise (scale 1/m, normal relief).
@@ -391,6 +417,7 @@ pub enum MaterialDef {
         #[serde(default = "default_steep")]
         steep: [f32; 2],
         #[serde(default = "default_patch_amount")]
+        #[reflect(@schema::Range(0.0, 1.0))]
         patch_amount: f32,
         #[serde(default = "default_zoned_fade")]
         detail_fade: f32,
@@ -399,11 +426,15 @@ pub enum MaterialDef {
     /// borders and a slope override to the high color).
     Zoned {
         id: u32,
+        #[reflect(@schema::AsColor)]
         low: [f32; 3],
         /// Two hues mixed by large-scale noise.
+        #[reflect(@schema::AsColor)]
         mid: [[f32; 3]; 2],
         /// Two hues banded by altitude.
+        #[reflect(@schema::AsColor)]
         high: [[f32; 3]; 2],
+        #[reflect(@schema::AsColor)]
         peak: [f32; 3],
         /// (start altitude, blend width) for mid/high/peak transitions.
         zones: ZonesDef,
@@ -427,18 +458,23 @@ pub struct BandDef {
 
 #[derive(Reflect, Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct GrimeDef {
+    #[reflect(@schema::AsColor)]
     pub tint: [f32; 3],
+    #[reflect(@schema::Range(0.0, 1.0))]
     pub amount: f32,
 }
 
 #[derive(Reflect, Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct MossDef {
+    #[reflect(@schema::AsColor)]
     pub color: [f32; 3],
+    #[reflect(@schema::Range(0.0, 1.0))]
     pub amount: f32,
 }
 
 #[derive(Reflect, Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct EmissiveDef {
+    #[reflect(@schema::AsColor)]
     pub color: [f32; 3],
     #[serde(default = "default_one")]
     pub intensity: f32,
@@ -446,6 +482,7 @@ pub struct EmissiveDef {
     pub spacing: f32,
     pub level_spacing: f32,
     /// Chance a strip is lit.
+    #[reflect(@schema::Range(0.0, 1.0))]
     pub chance: f32,
     /// Up-glow intensity on floors below.
     #[serde(default)]
@@ -631,19 +668,26 @@ pub struct LevelDef {
     pub lod: LodDef,
     /// The world's base geometry (and water/vegetation meta ops),
     /// interpreted in order.
+    #[reflect(@schema::Rebuilds)]
     pub generator: Vec<GenEntryDef>,
     /// Material recipes for the ids the generator ops emit.
+    ///
+    /// No [`schema::Rebuilds`]: a material is a table upload, which is why
+    /// tuning a colour is instant.
     #[serde(default)]
     pub materials: Vec<MaterialDef>,
     /// Named prefabs: reusable local-space CSG op groups for placements.
     #[serde(default)]
+    #[reflect(@schema::Rebuilds)]
     pub prefabs: std::collections::HashMap<String, Vec<CsgOpDef>>,
     /// Hand-authored prefab instances in the world.
     #[serde(default)]
+    #[reflect(@schema::Rebuilds)]
     pub placements: Vec<PlacementDef>,
     /// Prop populations: WHERE things go. The host decides what they
     /// look like (see [`crate::scatter::ScatterInstance`]).
     #[serde(default)]
+    #[reflect(@schema::Rebuilds)]
     pub scatter: Vec<ScatterDef>,
     /// The host's planning data, carried verbatim. Planning layers are
     /// the game's code, so the engine never looks inside this: it hands
@@ -654,6 +698,12 @@ pub struct LevelDef {
     /// level by field path can reach every number the ENGINE interprets
     /// and none of what it merely carries, which is the same boundary
     /// stated twice rather than a limitation.
+    ///
+    /// It carries no [`schema::Rebuilds`] because it carries no attributes
+    /// at all — an editor reaches this block by editing the host's own
+    /// parsed form as a second document root and writing the result back
+    /// here, so what rebuilds is the host's to annotate. Any change to it
+    /// does restream: see `needs_regen`.
     #[serde(default)]
     #[reflect(ignore)]
     pub planning: serde_json::Value,
@@ -774,6 +824,7 @@ pub enum GenOpDef {
         #[serde(default)]
         carve: bool,
         #[serde(default = "mat_grass")]
+        #[reflect(@schema::OneOf("materials[].id"))]
         material: u32,
     },
     /// Constant meters added to the height register.
@@ -847,6 +898,7 @@ pub enum GenOpDef {
         /// this id is affected, so roads and water are never touched.
         from: u32,
         /// Material to repaint TO.
+        #[reflect(@schema::OneOf("materials[].id"))]
         material: u32,
         /// Half-open band on the first axis, in 0..1.
         a: [f32; 2],
@@ -857,11 +909,13 @@ pub enum GenOpDef {
     /// Turn the accumulated height into ground.
     HeightSurface {
         #[serde(default = "mat_grass")]
+        #[reflect(@schema::OneOf("materials[].id"))]
         material: u32,
     },
     /// Solid mass at coarse LODs (the structure reads as filled from afar).
     CoarseSolid {
         #[serde(default = "mat_concrete")]
+        #[reflect(@schema::OneOf("materials[].id"))]
         material: u32,
     },
     /// Establish the structural Y lattice used by slabs/holes/walls/beams.
@@ -880,6 +934,7 @@ pub enum GenOpDef {
     SlabsY {
         half_thickness: f32,
         #[serde(default = "mat_concrete")]
+        #[reflect(@schema::OneOf("materials[].id"))]
         material: u32,
         #[serde(default)]
         lod: LodGateDef,
@@ -899,6 +954,7 @@ pub enum GenOpDef {
         /// Base and hash-scaled extra half-width.
         girth: [f32; 2],
         #[serde(default = "mat_concrete")]
+        #[reflect(@schema::OneOf("materials[].id"))]
         material: u32,
         #[serde(default)]
         lod: LodGateDef,
@@ -916,6 +972,7 @@ pub enum GenOpDef {
         #[serde(default)]
         door: Option<DoorDef>,
         #[serde(default = "mat_concrete")]
+        #[reflect(@schema::OneOf("materials[].id"))]
         material: u32,
         #[serde(default)]
         lod: LodGateDef,
@@ -941,6 +998,7 @@ pub enum GenOpDef {
         half_height: f32,
         reach: f32,
         #[serde(default = "mat_concrete")]
+        #[reflect(@schema::OneOf("materials[].id"))]
         material: u32,
         #[serde(default)]
         lod: LodGateDef,
@@ -1505,12 +1563,17 @@ fn watch_level_file(
 /// here, and the cost of missing one is silent: the level says one thing,
 /// the running planner another, and the edit appears to do nothing at all.
 /// `scatter` was missing exactly that way. Named as a function so the list
-/// can be tested against the schema rather than read carefully.
+/// can be tested against the schema rather than read carefully — which is
+/// also how [`schema::Rebuilds`] is kept honest.
 ///
-/// The generator is checked by the caller, which already has to build the
-/// program to compare it.
+/// The generator and the sun the shadows bake along belong here as much as
+/// the planning stack does. They used to be tested at the call site, which
+/// gave "does this edit restream" two answers in two places and one of
+/// them to an editor that has to ask.
 fn needs_regen(new: &LevelDef, old: &LevelDef) -> bool {
-    new.planning != old.planning
+    new.generator != old.generator
+        || sun_dir(new) != sun_dir(old)
+        || new.planning != old.planning
         || new.placements != old.placements
         || new.prefabs != old.prefabs
         || new.scatter != old.scatter
@@ -1563,7 +1626,7 @@ fn apply_level_change(
     if generator_changed {
         render.program = program;
     }
-    if needs_regen(&new, level) || generator_changed {
+    if needs_regen(&new, level) {
         world.config.max_level = new.lod.max_level;
         world.config.top_radius = new.lod.top_radius;
         world.config.top_y = new.lod.top_y;
@@ -1593,6 +1656,7 @@ pub struct LevelReloaded {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bevy::reflect::TypeInfo;
 
     fn shipped(name: &str) -> String {
         let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../levels/");
@@ -1685,6 +1749,145 @@ mod tests {
         let mut split = planet.clone();
         split.lod.split_k += 1.0;
         assert!(!needs_regen(&split, &planet), "lod.split_k");
+    }
+
+    /// Does a field carry `attr`, addressed the way a level is addressed?
+    ///
+    /// Dotted, through nested structs, because the attribute belongs on
+    /// the leaf that decides: `lod.max_level` restreams and `lod.split_k`
+    /// does not, and one attribute on `lod` could only be wrong about one
+    /// of them.
+    #[cfg(test)]
+    fn field_has<A: bevy::reflect::Reflect>(root: &'static TypeInfo, path: &str) -> bool {
+        let mut here = root;
+        let mut steps = path.split('.').peekable();
+        while let Some(step) = steps.next() {
+            let TypeInfo::Struct(info) = here else {
+                panic!("'{path}': '{step}' is not reached through a struct");
+            };
+            let field = info
+                .field(step)
+                .unwrap_or_else(|| panic!("'{path}': no reflected field '{step}'"));
+            if steps.peek().is_none() {
+                return field.has_attribute::<A>();
+            }
+            here = field.type_info().expect("a nested struct is Typed");
+        }
+        unreachable!("a path has at least one step")
+    }
+
+    /// The rationale written above each field has to survive to runtime.
+    ///
+    /// `reflect_documentation` is not a bevy default feature, so dropping
+    /// it from the workspace `bevy` line compiles fine and silently
+    /// unlabels every row of an editor. This is that line's only alarm.
+    #[test]
+    fn a_fields_documentation_reaches_the_running_program() {
+        use bevy::reflect::Typed;
+
+        let TypeInfo::Struct(info) = LevelDef::type_info() else {
+            panic!("LevelDef is a struct")
+        };
+        let docs = info
+            .field("generator")
+            .expect("generator is reflected")
+            .docs()
+            .expect("reflect_documentation must be on — see Cargo.toml");
+        assert!(
+            docs.contains("base geometry"),
+            "documentation reached reflection but not this field's: {docs:?}"
+        );
+    }
+
+    /// [`schema::Rebuilds`] must say exactly what `needs_regen` does.
+    ///
+    /// Both directions of drift are silent and both are bad: a missing
+    /// attribute makes an editor restream the world once per frame of a
+    /// slider drag, and a spurious one makes an edit apply only on release
+    /// for no reason. So this compares no lists — it EDITS each field and
+    /// asks the real function.
+    ///
+    /// The coverage assertion is the load-bearing half: a section added to
+    /// `LevelDef` fails here until somebody decides whether it rebuilds,
+    /// which is the question `scatter` went unasked.
+    #[test]
+    fn the_rebuilds_attribute_says_what_needs_regen_does() {
+        use bevy::reflect::Typed;
+
+        let planet = LevelDef::from_json(&shipped("planet.json")).unwrap();
+        let root = LevelDef::type_info();
+
+        /// A field, an edit big enough for `PartialEq` to see, and whether
+        /// making it restreams the world.
+        type Case = (&'static str, fn(&mut LevelDef), bool);
+
+        let cases: &[Case] = &[
+            (
+                "environment.sun_direction",
+                |l| l.environment.sun_direction[0] += 1.0,
+                true,
+            ),
+            ("lod.max_level", |l| l.lod.max_level -= 1, true),
+            ("lod.top_radius", |l| l.lod.top_radius += 1, true),
+            ("lod.top_y", |l| l.lod.top_y.1 += 1, true),
+            ("lod.split_k", |l| l.lod.split_k += 1.0, false),
+            ("lod.merge_k", |l| l.lod.merge_k += 1.0, false),
+            (
+                "generator",
+                |l| {
+                    l.generator.pop();
+                },
+                true,
+            ),
+            (
+                "materials",
+                |l| {
+                    l.materials.pop();
+                },
+                false,
+            ),
+            ("prefabs", |l| l.prefabs.clear(), true),
+            ("placements", |l| l.placements.clear(), true),
+            ("scatter", |l| l.scatter.clear(), true),
+        ];
+
+        for (path, edit, restreams) in cases {
+            let mut edited = planet.clone();
+            edit(&mut edited);
+            assert_ne!(
+                format!("{edited:?}"),
+                format!("{planet:?}"),
+                "the edit for '{path}' changed nothing — every assertion \
+                 below it would pass for the wrong reason"
+            );
+            assert_eq!(
+                needs_regen(&edited, &planet),
+                *restreams,
+                "needs_regen disagrees with this test about '{path}'"
+            );
+            assert_eq!(
+                field_has::<schema::Rebuilds>(root, path),
+                *restreams,
+                "schema::Rebuilds disagrees with needs_regen about '{path}' \
+                 — an editor would apply it at the wrong time"
+            );
+        }
+
+        // Coverage: every section of a level is decided about above.
+        let TypeInfo::Struct(info) = root else {
+            panic!("LevelDef is a struct")
+        };
+        let sections: Vec<&str> = info.iter().map(|f| f.name()).collect();
+        for section in sections {
+            assert!(
+                cases.iter().any(|(path, ..)| path
+                    .split('.')
+                    .next()
+                    .is_some_and(|top| top == section)),
+                "LevelDef gained '{section}' and nothing here says whether \
+                 editing it restreams the world"
+            );
+        }
     }
 
     /// A tool has to be able to reach a level's values by field path —

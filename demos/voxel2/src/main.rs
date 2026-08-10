@@ -416,6 +416,10 @@ fn main() {
             .collect(),
     ))
     .add_plugins(PortalPlugin);
+    // The level editor edits the level, which is `LevelDef` — the editor
+    // crate is told which reflected resources are documents and knows
+    // nothing else about either this demo or the engine.
+    app.add_plugins(voxel_editor::EditorPlugin::default().root::<LevelDef>("Level"));
     app
         .add_systems(Startup, setup_scene)
         .add_systems(Update, (autopilot, sync_world_suns));

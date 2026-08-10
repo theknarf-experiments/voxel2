@@ -53,6 +53,18 @@ chain with corridors and a surface entrance), and the megastructure's
 habitation pockets are all written that way, with no engine code behind
 them. See `levels/*.json` and `voxel_engine::level::LevelDef`.
 
+**In-game editor** (**F10**): a panel built entirely out of the level's own
+reflection — no widget code per field and no schema restated. `TypeInfo`
+says what is in a level, the field's own doc comment supplies the label's
+explanation (`reflect_documentation`), and a small attribute vocabulary
+(`voxel_engine::schema`) says what the types cannot: which numbers are
+bounded, which `[f32; 3]` is a colour, which `u32` is a reference to a
+material id rather than a number, and which fields restream the world when
+edited. Every row carries the reflect path it came from, so editing is one
+observer rather than one per field — the same path `world.mutate_resources`
+takes over BRP. A new generator op or planning layer is editable the moment
+it is annotated.
+
 **Live editing**: the level file is watched while running. Materials,
 environment and LOD tuning apply instantly; changes to the generator,
 providers, or LOD topology rebuild the streamed world in place — copying
@@ -164,6 +176,7 @@ is admitted against the slab budget and caps what the others can stream.
 | `voxel-render` | Density/meshing compute, slab allocator, LOD draw, grass, materials |
 | `voxel-engine` | The LOD field and its layers, chunk generation service, level definitions (JSON), remote tooling |
 | `voxel-debug` | Flycam + HUD (fps, chunk/arena/slab occupancy, LOD histogram) |
+| `voxel-editor` | Level editor: reflection → Feathers rows, `bsn!` scenes, edits by reflect path |
 
 `tools/voxctl` drives a running instance over the Bevy Remote Protocol;
 `mise run setup` installs the pre-commit gate (workspace check + clippy

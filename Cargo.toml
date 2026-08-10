@@ -10,7 +10,17 @@ license = "MIT OR Apache-2.0"
 [workspace.dependencies]
 # External
 # TODO: slim to explicit feature list once the needed set stabilizes.
-bevy = { version = "0.19", features = ["free_camera", "bevy_remote", "bevy_dev_tools"] }
+# `reflect_documentation` is what makes the doc comments on `LevelDef` and
+# the host's planning schema reachable at runtime — the editor reads field
+# labels and tooltips off `NamedField::docs()` rather than restating them.
+# It is NOT a bevy default feature.
+bevy = { version = "0.19", features = [
+    "free_camera",
+    "bevy_remote",
+    "bevy_dev_tools",
+    "bevy_feathers",
+    "reflect_documentation",
+] }
 glam = { version = "0.32", features = ["serde"] }  # keep in sync with bevy's glam version
 bytemuck = { version = "1", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
@@ -28,6 +38,7 @@ voxel-worldgen = { path = "crates/voxel-worldgen" }
 voxel-render = { path = "crates/voxel-render" }
 voxel-engine = { path = "crates/voxel-engine" }
 voxel-debug = { path = "crates/voxel-debug" }
+voxel-editor = { path = "crates/voxel-editor" }
 
 # Fast iterative builds: light opt for our code, full opt for dependencies.
 [profile.dev]
