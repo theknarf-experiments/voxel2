@@ -65,7 +65,10 @@ architecture. Design plan: `~/.claude/plans/binary-twirling-brooks.md`.
   above ~120 means the window was backgrounded and no shaders ran — a
   measurement of nothing. Below it, a reading can still be contention
   from a concurrent build (too low) or a pre-settle transient (too high).
-  Sample 3-4 times over 60+ s and compare like with like.
+  Sample 3-4 times over 60+ s and compare like with like. Read
+  `frame_ms.mean` (a 120-frame average), NOT `fps`, which is one sample and
+  swung 39→91 between consecutive reads of an idle scene; the means either
+  side of that were 11.7 and 11.8 ms.
 
 ## Invariants that bite
 
