@@ -10,17 +10,21 @@
 //! a layer that does not exist used to parse, build, and quietly produce
 //! nothing.
 
+use bevy::platform::collections::HashMap;
 use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
 use voxel_core::opgen::{Port, Value};
 use voxel_engine::graph::node::{Domain, Node, Ports, ReflectNode};
+use voxel_engine::graph::{Wire, Wires};
+use voxel_layers::LayerGraph;
 
-use super::schema::{EmitDef, RelaxDef, VariantDef};
+use super::layers::*;
 use super::schema::{
     d_altitude, d_burial, d_cell, d_cell3, d_cell3_y, d_corridor, d_flow_cell, d_flow_steps,
     d_margin, d_margin3, d_path_step, d_reach, d_reach3, d_slope_penalty, d_spill, d_up_interval,
     d_worm_radius, d_worm_steps,
 };
+use super::schema::{EmitDef, RelaxDef, StructureDef, VariantDef};
 
 /// A named structure the stack can build at a site.
 ///
@@ -28,12 +32,17 @@ use super::schema::{
 /// through a port the compiler checks, rather than by a string looked up in
 /// a side table that could be missing.
 #[derive(Reflect, Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
-#[reflect(Node, Serialize, Deserialize, Default)]
+#[reflect(Node, RegionLayer, Serialize, Deserialize, Default)]
 pub struct Structure {
     /// Sampled once per site; arrangements scale their radius by it, so a
     /// structure's parts agree with each other.
     pub size: [f32; 2],
     pub variants: Vec<VariantDef>,
+}
+
+impl RegionLayer for Structure {
+    /// A definition, not a layer: what builds it is the emit wired to it.
+    fn register(&self, _ctx: &RegionCtx, _mgr: &mut LayerGraph) {}
 }
 
 impl Node for Structure {
@@ -50,7 +59,7 @@ impl Node for Structure {
 
 /// Hash-gated candidate sites per cell, filtered by terrain.
 #[derive(Reflect, Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
-#[reflect(Node, Serialize, Deserialize, Default)]
+#[reflect(Node, RegionLayer, Serialize, Deserialize, Default)]
 pub struct Scatter {
     #[serde(default = "d_cell")]
     pub cell_m: i32,
@@ -89,7 +98,7 @@ impl Node for Scatter {
 
 /// Pathfound links between sites of a scatter instance.
 #[derive(Reflect, Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
-#[reflect(Node, Serialize, Deserialize, Default)]
+#[reflect(Node, RegionLayer, Serialize, Deserialize, Default)]
 pub struct Connect {
     #[serde(default = "d_cell")]
     pub cell_m: i32,
@@ -115,13 +124,16 @@ impl Node for Connect {
         Domain::Region
     }
     fn ports(&self) -> Ports {
-        (&[("source", Value::Host("sites"))], &[("paths", Value::Host("paths"))])
+        (
+            &[("source", Value::Host("sites"))],
+            &[("paths", Value::Host("paths"))],
+        )
     }
 }
 
 /// Descent courses (pond-and-spill hydrology) from sites.
 #[derive(Reflect, Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
-#[reflect(Node, Serialize, Deserialize, Default)]
+#[reflect(Node, RegionLayer, Serialize, Deserialize, Default)]
 pub struct Flow {
     #[serde(default = "d_flow_cell")]
     pub cell_m: i32,
@@ -139,13 +151,16 @@ impl Node for Flow {
         Domain::Region
     }
     fn ports(&self) -> Ports {
-        (&[("source", Value::Host("sites"))], &[("courses", Value::Host("courses"))])
+        (
+            &[("source", Value::Host("sites"))],
+            &[("courses", Value::Host("courses"))],
+        )
     }
 }
 
 /// Noise-steered burrows from sites.
 #[derive(Reflect, Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
-#[reflect(Node, Serialize, Deserialize, Default)]
+#[reflect(Node, RegionLayer, Serialize, Deserialize, Default)]
 pub struct Worm {
     #[serde(default = "d_cell")]
     pub cell_m: i32,
@@ -165,7 +180,10 @@ impl Node for Worm {
         Domain::Region
     }
     fn ports(&self) -> Ports {
-        (&[("source", Value::Host("sites"))], &[("burrows", Value::Host("burrows"))])
+        (
+            &[("source", Value::Host("sites"))],
+            &[("burrows", Value::Host("burrows"))],
+        )
     }
 }
 
@@ -180,7 +198,7 @@ impl Node for Worm {
 /// "where trees grow" and "what colour the ground is" from being two
 /// descriptions that can disagree.
 #[derive(Reflect, Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
-#[reflect(Node, Serialize, Deserialize, Default)]
+#[reflect(Node, RegionLayer, Serialize, Deserialize, Default)]
 pub struct Biomes {
     /// (region name, the material its band paints).
     pub table: Vec<(String, u32)>,
@@ -200,7 +218,7 @@ impl Node for Biomes {
 
 /// Volumetric sites for interior worlds (no terrain filters).
 #[derive(Reflect, Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
-#[reflect(Node, Serialize, Deserialize, Default)]
+#[reflect(Node, RegionLayer, Serialize, Deserialize, Default)]
 pub struct Scatter3 {
     #[serde(default = "d_cell3")]
     pub cell_m: i32,
@@ -236,7 +254,7 @@ impl Node for Scatter3 {
 
 /// Orthogonal links between volumetric sites (walkway tubes).
 #[derive(Reflect, Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
-#[reflect(Node, Serialize, Deserialize, Default)]
+#[reflect(Node, RegionLayer, Serialize, Deserialize, Default)]
 pub struct Connect3 {
     #[serde(default = "d_cell3")]
     pub cell_m: i32,
@@ -254,14 +272,17 @@ impl Node for Connect3 {
         Domain::Region
     }
     fn ports(&self) -> Ports {
-        (&[("source", Value::Host("sites3"))], &[("paths3", Value::Host("paths3"))])
+        (
+            &[("source", Value::Host("sites3"))],
+            &[("paths3", Value::Host("paths3"))],
+        )
     }
 }
 
 /// Turn a source layer's data into world patches (the only kind that
 /// produces geometry; also the index that keeps queries local).
 #[derive(Reflect, Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
-#[reflect(Node, Serialize, Deserialize, Default)]
+#[reflect(Node, RegionLayer, Serialize, Deserialize, Default)]
 pub struct Emit {
     #[serde(default = "d_cell")]
     pub cell_m: i32,
@@ -319,6 +340,306 @@ impl Node for Emit {
         };
         (source, &[])
     }
+}
+
+/// What a region node needs from the rest of the graph to build itself.
+///
+/// Everything it used to reach for by scanning the whole stack — the
+/// biomes table behind a `"instance:member"` string, the structure behind
+/// a name in a side map — arrives through a PORT the compiler already
+/// checked. So the lookups here cannot fail on a level that compiled, and
+/// they say so.
+pub struct RegionCtx<'a> {
+    pub name: &'a str,
+    pub wires: &'a Wires,
+    /// Every region node by name, for the tables a layer reads.
+    pub by_name: &'a HashMap<String, &'a dyn Node>,
+}
+
+impl RegionCtx<'_> {
+    /// What a port is wired to.
+    pub fn wired(&self, port: &str) -> Option<&str> {
+        match self.wires.get(port)? {
+            Wire::One(name) => Some(name),
+            Wire::Many(names) => names.first().map(String::as_str),
+        }
+    }
+
+    fn node(&self, port: &str) -> Option<&dyn Node> {
+        self.by_name.get(self.wired(port)?).copied()
+    }
+
+    /// The material id `member` has in the biomes table this node's
+    /// `biome` port is wired to.
+    pub fn biome_gate(&self, member: &str) -> Option<BiomeGate> {
+        let biomes = self.node("biome")?.as_any().downcast_ref::<Biomes>()?;
+        let (_, material) = biomes.table.iter().find(|(n, _)| n == member)?;
+        Some(BiomeGate {
+            material: *material,
+        })
+    }
+
+    /// The structure this node's `structure` port is wired to.
+    pub fn structure(&self) -> Option<StructureDef> {
+        let s = self
+            .node("structure")?
+            .as_any()
+            .downcast_ref::<Structure>()?;
+        Some(StructureDef {
+            size: s.size,
+            variants: s.variants.clone(),
+        })
+    }
+}
+
+/// How a region node becomes a layer.
+///
+/// The game's own trait, on the game's own kinds. Reached through the type
+/// registry like [`Node`] is, so the set stays open and the eight-arm
+/// match this replaces cannot come back.
+#[bevy::reflect::reflect_trait]
+pub trait RegionLayer {
+    fn register(&self, ctx: &RegionCtx, mgr: &mut LayerGraph);
+}
+
+impl RegionLayer for Biomes {
+    // Names only: there is no layer to register. A region is a
+    // `material_band` op in the generator, and this node is the dictionary
+    // the stack's gates resolve through.
+    fn register(&self, _ctx: &RegionCtx, _mgr: &mut LayerGraph) {}
+}
+
+impl RegionLayer for Scatter {
+    fn register(&self, ctx: &RegionCtx, mgr: &mut LayerGraph) {
+        let Self {
+            cell_m,
+            chance,
+            margin_m,
+            altitude,
+            up,
+            biome,
+            relax,
+        } = self.clone();
+        let name = ctx.name.to_string();
+        let base = ScatterCfg {
+            cell_m,
+            chance,
+            margin_m,
+            altitude,
+            up,
+            biome: biome.as_deref().map(|r| {
+                ctx.biome_gate(r)
+                    .expect("the biome port is wired and checked")
+            }),
+            relax_from: None,
+        };
+        let Some(relax) = relax.filter(|r| r.iterations > 0 && r.strength > 0.0) else {
+            return mgr.register_as(&name, ScatterSites { cfg: base });
+        };
+        // A chain of instances, each reading the one before. The
+        // LAST one takes the public name, so consumers are
+        // untouched — they declared a dependency on `name` and
+        // still get sites from `name`, just better spaced.
+        let raw = format!("{name}:scattered");
+        mgr.register_as(&raw, ScatterSites { cfg: base.clone() });
+        let mut source = raw;
+        for i in 1..=relax.iterations {
+            let stage = if i == relax.iterations {
+                name.clone()
+            } else {
+                format!("{name}:relax{i}")
+            };
+            mgr.register_as(
+                &stage,
+                ScatterSites {
+                    cfg: ScatterCfg {
+                        relax_from: Some(RelaxFrom {
+                            instance: source,
+                            strength: relax.strength,
+                        }),
+                        ..base.clone()
+                    },
+                },
+            );
+            source = stage;
+        }
+    }
+}
+
+impl RegionLayer for Connect {
+    fn register(&self, ctx: &RegionCtx, mgr: &mut LayerGraph) {
+        let Self {
+            cell_m,
+            reach_m,
+            corridor_m,
+            slope_penalty,
+            step_m,
+        } = self.clone();
+        let source = ctx
+            .wired("source")
+            .expect("the source port is checked")
+            .to_string();
+        let name = ctx.name.to_string();
+        mgr.register_as(
+            &name,
+            ConnectPaths {
+                cfg: ConnectCfg {
+                    source,
+                    reach_m,
+                    corridor_m,
+                    slope_penalty,
+                    step_m,
+                },
+                cell_m,
+            },
+        )
+    }
+}
+
+impl RegionLayer for Flow {
+    fn register(&self, ctx: &RegionCtx, mgr: &mut LayerGraph) {
+        let Self {
+            cell_m,
+            max_steps,
+            max_spill_rise,
+        } = self.clone();
+        let source = ctx
+            .wired("source")
+            .expect("the source port is checked")
+            .to_string();
+        let name = ctx.name.to_string();
+        mgr.register_as(
+            &name,
+            FlowCourses {
+                cfg: FlowCfg {
+                    source,
+                    max_steps,
+                    max_spill_rise,
+                },
+                cell_m,
+            },
+        )
+    }
+}
+
+impl RegionLayer for Worm {
+    fn register(&self, ctx: &RegionCtx, mgr: &mut LayerGraph) {
+        let Self {
+            cell_m,
+            steps,
+            radius,
+            burial_radii,
+        } = self.clone();
+        let source = ctx
+            .wired("source")
+            .expect("the source port is checked")
+            .to_string();
+        let name = ctx.name.to_string();
+        mgr.register_as(
+            &name,
+            WormBurrows {
+                cfg: WormCfg {
+                    source,
+                    steps,
+                    radius,
+                    burial_radii,
+                },
+                cell_m,
+            },
+        )
+    }
+}
+
+impl RegionLayer for Scatter3 {
+    fn register(&self, ctx: &RegionCtx, mgr: &mut LayerGraph) {
+        let Self {
+            cell_m,
+            cell_y_m,
+            chance,
+            margin_m,
+            snap_y_m,
+            biome,
+        } = self.clone();
+        let name = ctx.name.to_string();
+        mgr.register_as(
+            &name,
+            Scatter3Sites {
+                cfg: Scatter3Cfg {
+                    cell_m,
+                    cell_y_m,
+                    chance,
+                    margin_m,
+                    snap_y_m,
+                    biome: biome.as_deref().map(|r| {
+                        ctx.biome_gate(r)
+                            .expect("the biome port is wired and checked")
+                    }),
+                },
+            },
+        )
+    }
+}
+
+impl RegionLayer for Connect3 {
+    fn register(&self, ctx: &RegionCtx, mgr: &mut LayerGraph) {
+        let Self {
+            cell_m,
+            cell_y_m,
+            reach_m,
+        } = self.clone();
+        let source = ctx
+            .wired("source")
+            .expect("the source port is checked")
+            .to_string();
+        let name = ctx.name.to_string();
+        mgr.register_as(
+            &name,
+            Connect3Paths {
+                cfg: Connect3Cfg { source, reach_m },
+                cell_m,
+                cell_y_m,
+            },
+        )
+    }
+}
+
+impl RegionLayer for Emit {
+    fn register(&self, ctx: &RegionCtx, mgr: &mut LayerGraph) {
+        // `max_chunk_edge_m` and `keep_m` are residency sizes, read by
+        // `StackPlanner::new` when it builds this node's top dependency —
+        // the layer itself never sees them.
+        let Self {
+            cell_m,
+            cell_y_m,
+            pad_m,
+            emit,
+            ..
+        } = self.clone();
+        let source = ctx
+            .wired("source")
+            .expect("the source port is checked")
+            .to_string();
+        let name = ctx.name.to_string();
+        mgr.register_as(
+            &name,
+            EmitPatches {
+                cfg: EmitCfg {
+                    source,
+                    kind: emit.to_kind(ctx.structure().as_ref()),
+                    pad_m,
+                },
+                cell_m,
+                cell_y_m,
+            },
+        )
+    }
+}
+
+/// Every kind a level of THIS game can name: the engine's and its own.
+pub fn kinds() -> bevy::reflect::TypeRegistryArc {
+    let reg = voxel_engine::graph::registry::engine_kinds();
+    register(&mut reg.write());
+    reg
 }
 
 /// Put this game's kinds in the registry.

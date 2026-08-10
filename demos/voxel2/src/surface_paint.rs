@@ -491,8 +491,7 @@ impl CoverJob {
                     }
                     for iz in 0..COVER_STRIDE {
                         let fz = iz as f32 * inv;
-                        let (top, bot) =
-                            (c00 * (1.0 - fz) + c01 * fz, c10 * (1.0 - fz) + c11 * fz);
+                        let (top, bot) = (c00 * (1.0 - fz) + c01 * fz, c10 * (1.0 - fz) + c11 * fz);
                         for ix in 0..COVER_STRIDE {
                             let fx = ix as f32 * inv;
                             let c = top * (1.0 - fx) + bot * fx;

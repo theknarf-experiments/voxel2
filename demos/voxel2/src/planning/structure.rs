@@ -243,10 +243,7 @@ fn arrange(
                 arc: 0.0,
             });
         }
-        Arrange::Ring {
-            count,
-            radius_frac,
-        } => {
+        Arrange::Ring { count, radius_frac } => {
             let n = sample_count(rng, *count).max(1);
             let radius = size * sample(rng, *radius_frac);
             let base = rng.next_f32() * std::f32::consts::TAU;
@@ -262,10 +259,7 @@ fn arrange(
                 });
             }
         }
-        Arrange::Scatter {
-            count,
-            radius_frac,
-        } => {
+        Arrange::Scatter { count, radius_frac } => {
             let n = sample_count(rng, *count).max(1);
             for _ in 0..n {
                 let angle = rng.next_f32() * std::f32::consts::TAU;

@@ -23,11 +23,10 @@ use voxel_engine::{
 };
 use voxel_layers::{LayerGraph, LayerRuntime, TopDep, TopHandle};
 
-pub use schema::{PlanningDef, StackLayerDef};
 use schema::{validate_level, EmitDef};
 
 /// This demo's planning: interpret the level's `planning` block.
-pub struct StackPlanning;
+pub struct StackPlanning(pub bevy::reflect::TypeRegistryArc);
 
 /// Vertical band xz-facade queries cover: enough for any current world
 /// (the deepest LOD tree spans ~±2.5 km), small enough that volumetric
@@ -208,7 +207,10 @@ impl WorldPlanner for StackPlanner {
             .and_then(serde_json::Value::as_f64)
             .unwrap_or(512.0) as f32;
         let c = bevy::math::Vec2::new(f("center", 0), f("center", 1));
-        let (min, max) = (c - bevy::math::Vec2::splat(r), c + bevy::math::Vec2::splat(r));
+        let (min, max) = (
+            c - bevy::math::Vec2::splat(r),
+            c + bevy::math::Vec2::splat(r),
+        );
         match query.get("kind").and_then(serde_json::Value::as_str) {
             Some("ribbons") => {
                 let segs: Vec<_> = self
@@ -249,9 +251,9 @@ impl WorldPlanner for StackPlanner {
                 let want = query.get("of").and_then(serde_json::Value::as_str);
                 // A region search that ignores altitude finds the sea
                 // floor: most of a region's area can be under water.
-                let alt = query.get("altitude").and_then(|v| {
-                    Some([v.get(0)?.as_f64()? as f32, v.get(1)?.as_f64()? as f32])
-                });
+                let alt = query
+                    .get("altitude")
+                    .and_then(|v| Some([v.get(0)?.as_f64()? as f32, v.get(1)?.as_f64()? as f32]));
                 let gen = self.ctx.as_ref().map(|c| c.generator.clone());
                 for gz in 0..n {
                     for gx in 0..n {
@@ -315,7 +317,8 @@ impl WorldPlanner for StackPlanner {
         for top in &self.tops {
             top.set_focus(focus);
         }
-        self.focused.store(true, std::sync::atomic::Ordering::Release);
+        self.focused
+            .store(true, std::sync::atomic::Ordering::Release);
     }
 
     fn host_ctx(&self) -> Option<&(dyn std::any::Any + Send + Sync)> {
@@ -348,16 +351,20 @@ impl WorldPlanner for StackPlanner {
     }
 
     fn reads_missed(&self) -> usize {
-        self.stack.as_ref().map_or(0, |rt| rt.graph().reads_missed())
+        self.stack
+            .as_ref()
+            .map_or(0, |rt| rt.graph().reads_missed())
     }
 
     fn stats(&self) -> PlanningStats {
-        self.stack.as_ref().map_or_else(PlanningStats::default, |rt| PlanningStats {
-            resident_chunks: rt.graph().resident_chunks(),
-            reads_missed: rt.graph().reads_missed(),
-            generating: rt.is_generating(),
-            layers: rt.graph().layer_stats(),
-        })
+        self.stack
+            .as_ref()
+            .map_or_else(PlanningStats::default, |rt| PlanningStats {
+                resident_chunks: rt.graph().resident_chunks(),
+                reads_missed: rt.graph().reads_missed(),
+                generating: rt.is_generating(),
+                layers: rt.graph().layer_stats(),
+            })
     }
 }
 
@@ -389,7 +396,11 @@ fn hsl_rgb(h: f32, s: f32, l: f32) -> [f32; 3] {
 /// a ribbon, a marker, a clearance bed and a weight field are this
 /// game's nouns, reached through `WorldQuery::planner_as`.
 impl StackPlanner {
-    pub fn clearance_in(&self, min: bevy::math::Vec2, max: bevy::math::Vec2) -> Vec<[bevy::math::Vec2; 2]> {
+    pub fn clearance_in(
+        &self,
+        min: bevy::math::Vec2,
+        max: bevy::math::Vec2,
+    ) -> Vec<[bevy::math::Vec2; 2]> {
         let (min3, max3) = (
             Vec3::new(min.x, -FACADE_Y_M, min.y),
             Vec3::new(max.x, FACADE_Y_M, max.y),
@@ -498,47 +509,71 @@ fn largest_leaf_level(cap: f32) -> u8 {
 }
 
 impl StackPlanner {
-    /// Build the planner a level's `stack` block describes, or `None` if
-    /// it declares no layers.
+    /// Build the planner the level's region nodes describe, or `None` if
+    /// it declares none.
+    ///
+    /// The nodes come from the same list as the generator's — one document,
+    /// one order, one way of naming things. What each layer needs from the
+    /// others arrives through a port the graph compiler already checked, so
+    /// nothing here scans the stack looking for a name.
     pub fn new(
-        def: &PlanningDef,
         level: &LevelDef,
         seed: u64,
         generator: &Arc<voxel_worldgen::Generator>,
+        registry: &bevy::reflect::TypeRegistryArc,
     ) -> Option<Self> {
-        if def.stack.is_empty() {
+        let region: Vec<&voxel_engine::graph::NodeDef> = level
+            .nodes
+            .iter()
+            .filter(|n| n.node.0.domain() == voxel_engine::graph::Domain::Region)
+            .collect();
+        if region.is_empty() {
             return None;
         }
+        let by_name: bevy::platform::collections::HashMap<String, &dyn voxel_engine::graph::Node> =
+            region
+                .iter()
+                .filter_map(|n| Some((n.name.clone()?, &*n.node.0)))
+                .collect();
+
         // Every layer into ONE graph, in author order.
         let ctx = Arc::new(world::WorldCtx::new(generator.clone()));
         let mut graph = LayerGraph::with_context(seed, ctx.clone());
         let mut emitters = Vec::new();
-        for layer in &def.stack {
-            layer.register(&def.stack, &def.structures, &mut graph);
-            if let StackLayerDef::Emit {
+        for node in &region {
+            let Some(name) = node.name.as_deref() else {
+                continue;
+            };
+            let rctx = nodes::RegionCtx {
                 name,
-                max_chunk_edge_m,
-                keep_m,
-                emit,
-                ..
-            } = layer
+                wires: &node.wires,
+                by_name: &by_name,
+            };
+            // Dispatched through the registry, not a match: the kinds are
+            // open, and a kind that forgot `#[reflect(RegionLayer)]` is a
+            // named warning rather than a layer that silently is not there.
+            match registry
+                .read()
+                .get_type_data::<nodes::ReflectRegionLayer>(node.node.0.as_any().type_id())
+                .and_then(|d| d.get(node.node.0.as_reflect()))
             {
+                Some(layer) => layer.register(&rctx, &mut graph),
+                None => warn!("planning: '{name}' is a region node but implements no RegionLayer"),
+            }
+            if let Some(emit) = node.node.0.as_any().downcast_ref::<nodes::Emit>() {
                 emitters.push(Emitter::new(
-                    name.clone(),
-                    *max_chunk_edge_m,
-                    *keep_m,
-                    emit,
+                    name.to_string(),
+                    emit.max_chunk_edge_m,
+                    emit.keep_m,
+                    &emit.emit,
                 ));
             }
         }
-        let biome_tables: Vec<(String, Vec<(String, u32)>)> = def
-            .stack
+        let biome_tables: Vec<(String, Vec<(String, u32)>)> = region
             .iter()
-            .filter_map(|d| match d {
-                StackLayerDef::Biomes { name, table, .. } => {
-                    Some((name.clone(), table.clone()))
-                }
-                _ => None,
+            .filter_map(|n| {
+                let b = n.node.0.as_any().downcast_ref::<nodes::Biomes>()?;
+                Some((n.name.clone()?, b.table.clone()))
             })
             .collect();
 
@@ -644,17 +679,10 @@ impl HostPlanning for StackPlanning {
         seed: u64,
         generator: &Arc<voxel_worldgen::Generator>,
     ) -> Option<Arc<dyn WorldPlanner>> {
-        let def = match PlanningDef::of(level) {
-            Ok(def) => def,
-            Err(e) => {
-                error!("planning: {e}");
-                return None;
-            }
-        };
-        StackPlanner::new(&def, level, seed, generator).map(|p| Arc::new(p) as Arc<dyn WorldPlanner>)
+        StackPlanner::new(level, seed, generator, &self.0)
+            .map(|p| Arc::new(p) as Arc<dyn WorldPlanner>)
     }
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -668,21 +696,23 @@ mod tests {
 
     use voxel_core::csg::CsgOp;
 
-    use super::schema::{validate_level, validate_stack, StackLayerDef};
-    use super::{PlanningDef, StackPlanner, StackPlanning};
+    use super::schema::validate_level;
+    use super::{StackPlanner, StackPlanning};
+
+    /// Engine kinds plus this game's, which is what a level names.
+    fn kinds() -> bevy::reflect::TypeRegistryArc {
+        let reg = crate::planning::nodes::kinds();
+        super::nodes::register(&mut reg.write());
+        reg
+    }
 
     fn shipped(name: &str) -> LevelDef {
         let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../levels/");
         LevelDef::from_json(
             &std::fs::read_to_string(format!("{path}{name}")).unwrap(),
-            &voxel_engine::graph::registry::engine_kinds(),
+            &kinds(),
         )
         .unwrap()
-    }
-
-    fn validate_stack_of(level: &LevelDef) -> Result<(), String> {
-        let def = PlanningDef::of(level).unwrap();
-        validate_stack(&def.stack, &def.structures)
     }
 
     fn world_for(def: &LevelDef) -> WorldQuery {
@@ -695,10 +725,10 @@ mod tests {
 
     /// A world whose residency is focused where the test reads. Reads no
     /// longer generate, so a test declares its working set like the game.
-    fn world_at(def: &LevelDef, seed: u64, focus: Vec3) -> WorldQuery {
+    pub(super) fn world_at(def: &LevelDef, seed: u64, focus: Vec3) -> WorldQuery {
         let generator = Arc::new(def.generator(seed));
         let world = WorldQuery::new(generator.clone());
-        let world = match StackPlanning.build(def, seed, &generator) {
+        let world = match StackPlanning(kinds()).build(def, seed, &generator) {
             Some(planner) => world.with_planner(planner),
             None => world,
         };
@@ -762,11 +792,7 @@ mod tests {
         );
         // A specific marker's room shell exists near the site.
         let m = &planner.markers_in(min2, max2, Some("pocket"))[0];
-        let near = world.ops_in(
-            m.pos - Vec3::splat(40.0),
-            m.pos + Vec3::splat(40.0),
-            12.8,
-        );
+        let near = world.ops_in(m.pos - Vec3::splat(40.0), m.pos + Vec3::splat(40.0), 12.8);
         assert!(
             !near.is_empty(),
             "no ops within 40 m of pocket marker at {:?}",
@@ -774,70 +800,114 @@ mod tests {
         );
     }
 
+    /// The graph compiler refuses what `validate_stack` used to.
+    ///
+    /// These are the same authoring mistakes, checked one layer down: a
+    /// source naming nothing, naming the wrong KIND of thing, or naming
+    /// something written later are all port errors now, so the hundred
+    /// lines that used to look for them are gone rather than duplicated.
     #[test]
-    fn stack_validation_catches_authoring_errors() {
-        let parse = |json: &str| -> Vec<StackLayerDef> { serde_json::from_str(json).unwrap() };
-        // The shipped stacks validate.
-        let planet = shipped("planet.json");
-        validate_stack_of(&planet).unwrap();
-        let mega = shipped("megastructure.json");
-        validate_stack_of(&mega).unwrap();
+    fn the_compiler_refuses_a_badly_wired_stack() {
+        let compile = |json: &str| -> String {
+            let nodes: Vec<voxel_engine::graph::NodeDef> =
+                voxel_engine::graph::with_registry(&kinds(), || serde_json::from_str(json))
+                    .expect("parses");
+            voxel_engine::graph::compile(&nodes)
+                .expect_err("should not compile")
+                .to_string()
+        };
 
         let cases: &[(&str, &str)] = &[
-            // Unknown recipe name.
+            // A structure nothing defines.
             (
                 r#"[{"kind":"scatter","name":"s","chance":1.0},
-                    {"kind":"emit","name":"e","source":"s","pad_m":0.0,
-                     "emit":{"type":"site_structure","structure":"castle"}}]"#,
-                "unknown structure",
+                    {"kind":"emit","name":"e","in":{"source":"s","structure":"castle"},
+                     "pad_m":0.0,"emit":{"type":"site_structure"}}]"#,
+                "not a node",
             ),
-            // Biome ref to a missing layer.
+            // A biome layer nothing declares.
             (
-                r#"[{"kind":"scatter","name":"s","chance":1.0,"biome":"nope:forest"}]"#,
-                "not found in stack",
+                r#"[{"kind":"scatter","name":"s","chance":1.0,"biome":"forest",
+                     "in":{"biome":"nope"}}]"#,
+                "not a node",
             ),
-            // Biome name missing from the table.
+            // A source written later than its consumer.
             (
-                r#"[{"kind":"biomes","name":"b","table":[["forest",1]]},
-                    {"kind":"scatter","name":"s","chance":1.0,"biome":"b:desert"}]"#,
-                "not in layer",
-            ),
-            // Source declared later (registration order).
-            (
-                r#"[{"kind":"connect","name":"c","source":"s"},
+                r#"[{"kind":"connect","name":"c","in":{"source":"s"}},
                     {"kind":"scatter","name":"s","chance":1.0}]"#,
-                "not declared earlier",
+                "written later",
             ),
-            // Source of the wrong kind for the emit.
+            // A source of the wrong kind: worm cuts want burrows, not sites.
             (
                 r#"[{"kind":"scatter","name":"s","chance":1.0},
-                    {"kind":"emit","name":"e","source":"s","pad_m":0.0,
+                    {"kind":"emit","name":"e","in":{"source":"s"},"pad_m":0.0,
                      "emit":{"type":"worm_cuts"}}]"#,
-                "expected Worm",
+                "wired to a",
             ),
-            // Duplicate names.
+            // Two nodes with one name.
             (
                 r#"[{"kind":"scatter","name":"s","chance":1.0},
                     {"kind":"scatter","name":"s","chance":0.5}]"#,
-                "duplicate",
-            ),
-            // Empty biome table.
-            (r#"[{"kind":"biomes","name":"b","table":[]}]"#, "empty table"),
-            // Volumetric source with a collapsed emit y axis.
-            (
-                r#"[{"kind":"scatter3","name":"s","chance":1.0},
-                    {"kind":"emit","name":"e","source":"s","pad_m":0.0,
-                     "emit":{"type":"site_structure3","structure":"ruin"}}]"#,
-                "cell_y_m",
+                "two nodes are called",
             ),
         ];
-        for (json, expect) in cases {
-            let err = validate_stack(&parse(json), &PlanningDef::of(&planet).unwrap().structures).unwrap_err();
-            assert!(
-                err.contains(expect),
-                "error {err:?} missing {expect:?} for {json}"
-            );
+        for (json, want) in cases {
+            let err = compile(json);
+            assert!(err.contains(want), "expected {want:?} in {err:?}");
         }
+    }
+
+    /// And what a port cannot say, `validate_level` still does.
+    #[test]
+    fn validation_keeps_what_the_compiler_cannot_check() {
+        let planet = shipped("planet.json");
+        validate_level(&planet).unwrap();
+        validate_level(&shipped("megastructure.json")).unwrap();
+
+        // A biome MEMBER is a parameter, not a wire, so nothing upstream
+        // checks it names a region the wired table actually has.
+        // The megastructure's habitation pockets are the one gated layer
+        // the shipped levels have.
+        let mut bad = shipped("megastructure.json");
+        let mut found = false;
+        for node in &mut bad.nodes {
+            if let Some(s) = node
+                .node
+                .0
+                .as_any_mut()
+                .downcast_mut::<super::nodes::Scatter3>()
+            {
+                if s.biome.is_some() {
+                    s.biome = Some("nosuchregion".into());
+                    found = true;
+                    break;
+                }
+            }
+        }
+        assert!(found, "megastructure gates its pockets on a district");
+        let err = validate_level(&bad).unwrap_err();
+        assert!(err.contains("nosuchregion"), "{err}");
+
+        // How far a structure reaches from its site is geometry, not
+        // wiring: a port says a structure IS named, and only measuring the
+        // variants says the emit index can still find it.
+        let mut far = shipped("planet.json");
+        let mut found = false;
+        for node in &mut far.nodes {
+            if let Some(s) = node
+                .node
+                .0
+                .as_any_mut()
+                .downcast_mut::<super::nodes::Structure>()
+            {
+                s.size = [s.size[0] * 100.0, s.size[1] * 100.0];
+                found = true;
+                break;
+            }
+        }
+        assert!(found, "planet builds structures");
+        let err = validate_level(&far).unwrap_err();
+        assert!(err.contains("element padding"), "{err}");
     }
 
     #[test]
@@ -873,7 +943,10 @@ mod tests {
         let min2 = bevy::math::Vec2::new(min.x, min.z);
         let max2 = bevy::math::Vec2::new(max.x, max.z);
         assert!(!planner.clearance_in(min2, max2).is_empty(), "no clearance");
-        assert!(!planner.ribbons_in(min2, max2).is_empty(), "no ribbon segments");
+        assert!(
+            !planner.ribbons_in(min2, max2).is_empty(),
+            "no ribbon segments"
+        );
         assert!(
             !planner.markers_in(min2, max2, Some("ruin")).is_empty(),
             "no ruin markers"
@@ -892,10 +965,8 @@ mod tests {
         let mut dominant = [false; 5];
         for gz in 0..N {
             for gx in 0..N {
-                let t = bevy::math::Vec2::new(
-                    gx as f32 / (N - 1) as f32,
-                    gz as f32 / (N - 1) as f32,
-                );
+                let t =
+                    bevy::math::Vec2::new(gx as f32 / (N - 1) as f32, gz as f32 / (N - 1) as f32);
                 let p = min2 + (max2 - min2) * t;
                 let w = planner.weights_at("biomes", p);
                 assert_eq!(w.len(), 5, "planet declares five regions");
@@ -915,5 +986,55 @@ mod tests {
         // Determinism across a fresh build.
         let world2 = world_at(&planet, 0, Vec3::new(-27000.0, 0.0, -38000.0));
         assert_eq!(fine, world2.ops_in(min, max, 12.8));
+    }
+}
+
+#[cfg(test)]
+mod output_is_unchanged {
+    use bevy::math::{Vec2, Vec3};
+    use voxel_engine::level::LevelDef;
+
+    /// Exactly what the stack serves in a fixed window of each level.
+    ///
+    /// The generator has a bit-identity net and planning has none, so this
+    /// is it: the numbers were taken before the stack moved into the node
+    /// list, and they have to survive it. A change here is either a bug or
+    /// a decision somebody should be making on purpose.
+    #[test]
+    fn the_stack_serves_exactly_what_it_did() {
+        for (name, focus, half, want) in [
+            (
+                "planet.json",
+                Vec3::new(-27000.0, 0.0, -38000.0),
+                4096.0,
+                (50200, 5809, 5809, 146),
+            ),
+            ("megastructure.json", Vec3::ZERO, 2048.0, (18778, 0, 0, 772)),
+            (
+                "purgatory.json",
+                Vec3::new(-5604.0, 0.0, 5660.0),
+                4096.0,
+                (5012, 1269, 1277, 51),
+            ),
+        ] {
+            let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../levels/");
+            let level = LevelDef::from_json(
+                &std::fs::read_to_string(format!("{path}{name}")).unwrap(),
+                &crate::planning::nodes::kinds(),
+            )
+            .unwrap();
+            let world = super::tests::world_at(&level, 0, focus);
+            let min = focus - Vec3::splat(half);
+            let max = focus + Vec3::splat(half);
+            let (min2, max2) = (Vec2::new(min.x, min.z), Vec2::new(max.x, max.z));
+            let planner = world.planner_as::<super::StackPlanner>().unwrap();
+            let got = (
+                world.ops_in(min, max, 12.8).len(),
+                planner.clearance_in(min2, max2).len(),
+                planner.ribbons_in(min2, max2).len(),
+                planner.markers_in(min2, max2, None).len(),
+            );
+            assert_eq!(got, want, "{name}: (ops, clearance, ribbons, markers)");
+        }
     }
 }

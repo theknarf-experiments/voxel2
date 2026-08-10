@@ -258,6 +258,260 @@
         0.0,
         1.0
       ]
+    },
+    {
+      "kind": "structure",
+      "name": "ossuary",
+      "size": [
+        10.0,
+        22.0
+      ],
+      "variants": [
+        {
+          "weight": 1.0,
+          "parts": [
+            {
+              "arrange": {
+                "type": "ring",
+                "count": [
+                  7,
+                  13
+                ]
+              },
+              "shape": {
+                "type": "boxy",
+                "half": [
+                  "arc",
+                  [
+                    1.6,
+                    3.4
+                  ],
+                  [
+                    0.35,
+                    0.5
+                  ]
+                ]
+              },
+              "material": 3,
+              "skip": 0.34,
+              "yaw": "tangent",
+              "anchor": "base",
+              "y_offset": [
+                -0.8,
+                -0.4
+              ]
+            },
+            {
+              "arrange": {
+                "type": "scatter",
+                "count": [
+                  2,
+                  4
+                ],
+                "radius_frac": [
+                  0.0,
+                  0.55
+                ]
+              },
+              "shape": {
+                "type": "cylinder",
+                "radius": [
+                  0.5,
+                  1.1
+                ],
+                "half_height": [
+                  2.2,
+                  6.5
+                ]
+              },
+              "material": 3,
+              "anchor": "base",
+              "y_offset": [
+                -1.2,
+                -0.6
+              ]
+            },
+            {
+              "arrange": {
+                "type": "scatter",
+                "count": [
+                  3,
+                  7
+                ],
+                "radius_frac": [
+                  0.0,
+                  0.9
+                ]
+              },
+              "shape": {
+                "type": "boxy",
+                "half": [
+                  [
+                    1.0,
+                    2.6
+                  ],
+                  [
+                    0.4,
+                    0.9
+                  ],
+                  [
+                    1.0,
+                    2.6
+                  ]
+                ]
+              },
+              "material": 3,
+              "anchor": "base",
+              "y_offset": [
+                -0.9,
+                -0.5
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "kind": "biomes",
+      "name": "biomes",
+      "table": [
+        [
+          "ashfield",
+          1
+        ],
+        [
+          "boneyard",
+          3
+        ]
+      ]
+    },
+    {
+      "kind": "scatter",
+      "name": "sites:vents",
+      "cell_m": 640,
+      "chance": 0.62,
+      "altitude": [
+        180.0,
+        620.0
+      ],
+      "relax": {
+        "strength": 0.4,
+        "iterations": 2
+      }
+    },
+    {
+      "kind": "flow",
+      "name": "flow:lava",
+      "in": {
+        "source": "sites:vents"
+      }
+    },
+    {
+      "kind": "emit",
+      "name": "lava-flows",
+      "in": {
+        "source": "flow:lava"
+      },
+      "cell_m": 640,
+      "pad_m": 3264.0,
+      "max_chunk_edge_m": 140.0,
+      "keep_m": 12000.0,
+      "emit": {
+        "type": "ribbon",
+        "material": 2
+      }
+    },
+    {
+      "kind": "scatter",
+      "name": "sites:ossuaries",
+      "chance": 0.3,
+      "altitude": [
+        14.0,
+        300.0
+      ],
+      "up": [
+        0.88,
+        1.0
+      ],
+      "relax": {
+        "strength": 0.35
+      }
+    },
+    {
+      "kind": "emit",
+      "name": "ossuaries",
+      "in": {
+        "source": "sites:ossuaries",
+        "structure": "ossuary"
+      },
+      "pad_m": 0.0,
+      "emit": {
+        "type": "site_structure",
+        "marker": "ossuary"
+      }
+    },
+    {
+      "kind": "connect",
+      "name": "paths:processions",
+      "in": {
+        "source": "sites:ossuaries"
+      }
+    },
+    {
+      "kind": "emit",
+      "name": "procession-beds",
+      "in": {
+        "source": "paths:processions"
+      },
+      "pad_m": 606.0,
+      "emit": {
+        "type": "path_slabs"
+      }
+    },
+    {
+      "kind": "emit",
+      "name": "procession-surface",
+      "in": {
+        "source": "paths:processions"
+      },
+      "pad_m": 606.0,
+      "emit": {
+        "type": "path_ribbon",
+        "material": 3,
+        "width": [
+          4.0,
+          4.0
+        ]
+      }
+    },
+    {
+      "kind": "scatter",
+      "name": "sites:hollows",
+      "cell_m": 1024,
+      "chance": 0.5,
+      "altitude": [
+        40.0,
+        480.0
+      ]
+    },
+    {
+      "kind": "worm",
+      "name": "worm:hollows",
+      "in": {
+        "source": "sites:hollows"
+      }
+    },
+    {
+      "kind": "emit",
+      "name": "hollows",
+      "in": {
+        "source": "worm:hollows"
+      },
+      "pad_m": 340.0,
+      "max_chunk_edge_m": 140.0,
+      "emit": {
+        "type": "worm_cuts"
+      }
     }
   ],
   "materials": [
@@ -468,247 +722,5 @@
         "field": 1
       }
     }
-  ],
-  "planning": {
-    "stack": [
-      {
-        "kind": "biomes",
-        "name": "biomes",
-        "table": [
-          [
-            "ashfield",
-            1
-          ],
-          [
-            "boneyard",
-            3
-          ]
-        ]
-      },
-      {
-        "kind": "scatter",
-        "name": "sites:vents",
-        "cell_m": 640,
-        "chance": 0.62,
-        "altitude": [
-          180.0,
-          620.0
-        ],
-        "relax": {
-          "strength": 0.4,
-          "iterations": 2
-        }
-      },
-      {
-        "kind": "flow",
-        "name": "flow:lava",
-        "source": "sites:vents"
-      },
-      {
-        "kind": "emit",
-        "name": "lava-flows",
-        "source": "flow:lava",
-        "cell_m": 640,
-        "pad_m": 3264.0,
-        "max_chunk_edge_m": 140.0,
-        "keep_m": 12000.0,
-        "emit": {
-          "type": "ribbon",
-          "material": 2
-        }
-      },
-      {
-        "kind": "scatter",
-        "name": "sites:ossuaries",
-        "chance": 0.3,
-        "altitude": [
-          14.0,
-          300.0
-        ],
-        "up": [
-          0.88,
-          1.0
-        ],
-        "relax": {
-          "strength": 0.35
-        }
-      },
-      {
-        "kind": "emit",
-        "name": "ossuaries",
-        "source": "sites:ossuaries",
-        "pad_m": 0.0,
-        "emit": {
-          "type": "site_structure",
-          "marker": "ossuary",
-          "structure": "ossuary"
-        }
-      },
-      {
-        "kind": "connect",
-        "name": "paths:processions",
-        "source": "sites:ossuaries"
-      },
-      {
-        "kind": "emit",
-        "name": "procession-beds",
-        "source": "paths:processions",
-        "pad_m": 606.0,
-        "emit": {
-          "type": "path_slabs"
-        }
-      },
-      {
-        "kind": "emit",
-        "name": "procession-surface",
-        "source": "paths:processions",
-        "pad_m": 606.0,
-        "emit": {
-          "type": "path_ribbon",
-          "material": 3,
-          "width": [
-            4.0,
-            4.0
-          ]
-        }
-      },
-      {
-        "kind": "scatter",
-        "name": "sites:hollows",
-        "cell_m": 1024,
-        "chance": 0.5,
-        "altitude": [
-          40.0,
-          480.0
-        ]
-      },
-      {
-        "kind": "worm",
-        "name": "worm:hollows",
-        "source": "sites:hollows"
-      },
-      {
-        "kind": "emit",
-        "name": "hollows",
-        "source": "worm:hollows",
-        "pad_m": 340.0,
-        "max_chunk_edge_m": 140.0,
-        "emit": {
-          "type": "worm_cuts"
-        }
-      }
-    ],
-    "structures": {
-      "ossuary": {
-        "size": [
-          10.0,
-          22.0
-        ],
-        "variants": [
-          {
-            "weight": 1.0,
-            "parts": [
-              {
-                "arrange": {
-                  "type": "ring",
-                  "count": [
-                    7,
-                    13
-                  ]
-                },
-                "shape": {
-                  "type": "boxy",
-                  "half": [
-                    "arc",
-                    [
-                      1.6,
-                      3.4
-                    ],
-                    [
-                      0.35,
-                      0.5
-                    ]
-                  ]
-                },
-                "material": 3,
-                "skip": 0.34,
-                "yaw": "tangent",
-                "anchor": "base",
-                "y_offset": [
-                  -0.8,
-                  -0.4
-                ]
-              },
-              {
-                "arrange": {
-                  "type": "scatter",
-                  "count": [
-                    2,
-                    4
-                  ],
-                  "radius_frac": [
-                    0.0,
-                    0.55
-                  ]
-                },
-                "shape": {
-                  "type": "cylinder",
-                  "radius": [
-                    0.5,
-                    1.1
-                  ],
-                  "half_height": [
-                    2.2,
-                    6.5
-                  ]
-                },
-                "material": 3,
-                "anchor": "base",
-                "y_offset": [
-                  -1.2,
-                  -0.6
-                ]
-              },
-              {
-                "arrange": {
-                  "type": "scatter",
-                  "count": [
-                    3,
-                    7
-                  ],
-                  "radius_frac": [
-                    0.0,
-                    0.9
-                  ]
-                },
-                "shape": {
-                  "type": "boxy",
-                  "half": [
-                    [
-                      1.0,
-                      2.6
-                    ],
-                    [
-                      0.4,
-                      0.9
-                    ],
-                    [
-                      1.0,
-                      2.6
-                    ]
-                  ]
-                },
-                "material": 3,
-                "anchor": "base",
-                "y_offset": [
-                  -0.9,
-                  -0.5
-                ]
-              }
-            ]
-          }
-        ]
-      }
-    }
-  }
+  ]
 }

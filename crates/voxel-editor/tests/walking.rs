@@ -12,7 +12,7 @@ use voxel_engine::LevelDef;
 
 fn planet() -> LevelDef {
     let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../levels/planet.json");
-    LevelDef::from_json(&std::fs::read_to_string(path).unwrap(), &registry::engine_kinds()).unwrap()
+    LevelDef::from_json_known(&std::fs::read_to_string(path).unwrap(), &registry::engine_kinds()).unwrap()
 }
 
 fn open(paths: &[&str]) -> HashSet<String> {
@@ -57,7 +57,7 @@ fn no_declared_range_excludes_a_value_a_level_ships() {
             "{}/../../levels/{name}.json",
             env!("CARGO_MANIFEST_DIR")
         );
-        let level = LevelDef::from_json(&std::fs::read_to_string(&path).unwrap(), &registry::engine_kinds()).unwrap();
+        let level = LevelDef::from_json_known(&std::fs::read_to_string(&path).unwrap(), &registry::engine_kinds()).unwrap();
         for row in rows(&level, &everything(&level)) {
             let RowKind::Number {
                 value,

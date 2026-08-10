@@ -105,7 +105,6 @@ impl Layer for ScatterSites {
         // point and costs no residency.
         Vec::new()
     }
-
 }
 
 impl ScatterSites {
@@ -248,7 +247,11 @@ impl Layer for Scatter3Sites {
     const NAME: &'static str = "stack/scatter3";
 
     fn chunk_extent(&self) -> DVec3 {
-        DVec3::new(self.cfg.cell_m as f64, self.cfg.cell_y_m as f64, self.cfg.cell_m as f64)
+        DVec3::new(
+            self.cfg.cell_m as f64,
+            self.cfg.cell_y_m as f64,
+            self.cfg.cell_m as f64,
+        )
     }
 
     fn dependencies(&self) -> Vec<Dep> {
@@ -257,7 +260,6 @@ impl Layer for Scatter3Sites {
         // point and costs no residency.
         Vec::new()
     }
-
 }
 
 impl Scatter3Sites {
@@ -335,7 +337,6 @@ impl Layer for Connect3Paths {
         let pad = self.cfg.reach_m as i32;
         vec![Dep::named(&self.cfg.source, IVec3::splat(pad))]
     }
-
 }
 
 impl Connect3Paths {
@@ -374,11 +375,7 @@ impl Connect3Paths {
             // then z, then rise to hi. Degenerate legs are dropped.
             let mut waypoints = vec![lo];
             let mut cur = lo;
-            for next in [
-                Vec3::new(hi.x, lo.y, lo.z),
-                Vec3::new(hi.x, lo.y, hi.z),
-                hi,
-            ] {
+            for next in [Vec3::new(hi.x, lo.y, lo.z), Vec3::new(hi.x, lo.y, hi.z), hi] {
                 if next.distance(cur) > 0.01 {
                     waypoints.push(next);
                     cur = next;
@@ -443,12 +440,8 @@ impl Layer for ConnectPaths {
 
     fn dependencies(&self) -> Vec<Dep> {
         let pad = (self.cfg.reach_m + self.cfg.corridor_m) as i32;
-        vec![Dep::named(
-            &self.cfg.source,
-            IVec3::new(pad, 0, pad),
-        )]
+        vec![Dep::named(&self.cfg.source, IVec3::new(pad, 0, pad))]
     }
-
 }
 
 impl ConnectPaths {
@@ -456,7 +449,8 @@ impl ConnectPaths {
         let generator = &ctx.context::<crate::planning::world::WorldCtx>().generator;
         let own = ctx.chunk_bounds();
         let pad = (self.cfg.reach_m + self.cfg.corridor_m) as i32;
-        let view = ctx.get_named::<ScatterSites>(&self.cfg.source, own.inflate(IVec3::new(pad, 0, pad)));
+        let view =
+            ctx.get_named::<ScatterSites>(&self.cfg.source, own.inflate(IVec3::new(pad, 0, pad)));
         let mut sites: Vec<Vec2> = Vec::new();
         view.for_each(|_, c| sites.extend(c.sites.iter().copied()));
         let in_own = |p: Vec2| {
@@ -474,7 +468,11 @@ impl ConnectPaths {
             else {
                 continue;
             };
-            let (lo, hi) = if (a.x, a.y) <= (b.x, b.y) { (a, b) } else { (b, a) };
+            let (lo, hi) = if (a.x, a.y) <= (b.x, b.y) {
+                (a, b)
+            } else {
+                (b, a)
+            };
             if !in_own((lo + hi) * 0.5) {
                 continue;
             }
@@ -549,7 +547,6 @@ impl Layer for FlowCourses {
     fn dependencies(&self) -> Vec<Dep> {
         vec![Dep::named(&self.cfg.source, IVec3::ZERO)]
     }
-
 }
 
 impl FlowCourses {
@@ -641,7 +638,6 @@ impl Layer for WormBurrows {
     fn dependencies(&self) -> Vec<Dep> {
         vec![Dep::named(&self.cfg.source, IVec3::ZERO)]
     }
-
 }
 
 impl WormBurrows {
@@ -737,7 +733,11 @@ pub enum EmitKind {
     /// open into the rooms and shafts they meet. `lift_m` raises the
     /// route above the site lattice plane so the bore floor lands on the
     /// structural slab top instead of inside the slab.
-    Tubes { material: u32, bore: f32, lift_m: f32 },
+    Tubes {
+        material: u32,
+        bore: f32,
+        lift_m: f32,
+    },
 }
 
 /// Configuration of an `emit` stack layer: the only kind that produces
@@ -789,12 +789,8 @@ impl Layer for EmitPatches {
         // spans rows far from the owning cell); planar emits keep y
         // collapsed.
         let pad_y = if self.cell_y_m > 0 { pad } else { 0 };
-        vec![Dep::named(
-            &self.cfg.source,
-            IVec3::new(pad, pad_y, pad),
-        )]
+        vec![Dep::named(&self.cfg.source, IVec3::new(pad, pad_y, pad))]
     }
-
 }
 
 impl EmitPatches {
@@ -818,7 +814,10 @@ impl EmitPatches {
                 material,
                 clearance,
             } => {
-                for (_, c) in ctx.get_named::<ConnectPaths>(&self.cfg.source, padded).iter() {
+                for (_, c) in ctx
+                    .get_named::<ConnectPaths>(&self.cfg.source, padded)
+                    .iter()
+                {
                     for path in &c.paths {
                         for seg in path.windows(2) {
                             if !in_own((seg[0] + seg[1]) * 0.5) {
@@ -841,7 +840,10 @@ impl EmitPatches {
                 }
             }
             EmitKind::Ribbon { material, width } => {
-                for (_, c) in ctx.get_named::<FlowCourses>(&self.cfg.source, padded).iter() {
+                for (_, c) in ctx
+                    .get_named::<FlowCourses>(&self.cfg.source, padded)
+                    .iter()
+                {
                     for (waypoints, levels) in &c.courses {
                         let n = waypoints.len();
                         for (i, seg) in waypoints.windows(2).enumerate() {
@@ -867,7 +869,10 @@ impl EmitPatches {
                 }
             }
             EmitKind::PathRibbon { material, width } => {
-                for (_, c) in ctx.get_named::<ConnectPaths>(&self.cfg.source, padded).iter() {
+                for (_, c) in ctx
+                    .get_named::<ConnectPaths>(&self.cfg.source, padded)
+                    .iter()
+                {
                     for waypoints in &c.paths {
                         let n = waypoints.len();
                         for (i, seg) in waypoints.windows(2).enumerate() {
@@ -892,7 +897,10 @@ impl EmitPatches {
                 }
             }
             EmitKind::WormCuts => {
-                for (_, c) in ctx.get_named::<WormBurrows>(&self.cfg.source, padded).iter() {
+                for (_, c) in ctx
+                    .get_named::<WormBurrows>(&self.cfg.source, padded)
+                    .iter()
+                {
                     for worm in &c.worms {
                         for &(p, r) in worm {
                             if in_own(Vec2::new(p.x, p.z)) {
@@ -926,7 +934,11 @@ impl EmitPatches {
                     }
                 }
             }
-            EmitKind::Tubes { material, bore, lift_m } => {
+            EmitKind::Tubes {
+                material,
+                bore,
+                lift_m,
+            } => {
                 let in_own_y = |y: f32| y >= own.min.y as f32 && y < own.max.y as f32;
                 let lift = Vec3::Y * *lift_m;
                 let view = ctx.get_named::<Connect3Paths>(&self.cfg.source, padded);
@@ -956,7 +968,10 @@ impl EmitPatches {
                 }
             }
             EmitKind::SiteStructure { structure, marker } => {
-                for (_, c) in ctx.get_named::<ScatterSites>(&self.cfg.source, padded).iter() {
+                for (_, c) in ctx
+                    .get_named::<ScatterSites>(&self.cfg.source, padded)
+                    .iter()
+                {
                     for &site in &c.sites {
                         if !in_own(site) {
                             continue;
@@ -1009,8 +1024,20 @@ fn tube_segment_ops(a: Vec3, b: Vec3, material: u32, bore: f32, out: &mut Vec<Cs
             Vec3::new(r, r, along)
         }
     };
-    out.push(CsgOp::boxy(mid, half(len * 0.5 + shell, shell), 0.0, material, false));
-    out.push(CsgOp::boxy(mid, half(len * 0.5 + bore + 1.2, bore), 0.0, 0, true));
+    out.push(CsgOp::boxy(
+        mid,
+        half(len * 0.5 + shell, shell),
+        0.0,
+        material,
+        false,
+    ));
+    out.push(CsgOp::boxy(
+        mid,
+        half(len * 0.5 + bore + 1.2, bore),
+        0.0,
+        0,
+        true,
+    ));
 }
 
 /// Terrain-seated slab chain along one path segment (roads).
@@ -1073,12 +1100,7 @@ fn ribbon_bed_ops(a: Vec2, b: Vec2, half_w: f32, levels: [f32; 2], out: &mut Vec
 /// Patches of one emit instance overlapping the world box `[min, max]`,
 /// filtered to elements that touch it. Local: reads only the index cells
 /// within `ELEM_PAD_M` of the box.
-pub fn patches_in(
-    mgr: &LayerGraph,
-    instance: &str,
-    min: Vec3,
-    max: Vec3,
-) -> PatchSet {
+pub fn patches_in(mgr: &LayerGraph, instance: &str, min: Vec3, max: Vec3) -> PatchSet {
     let pad = ELEM_PAD_M as i32;
     // Real y bounds (volumetric emits bucket per y-row; a planar emit's
     // collapsed axis ignores them), padded like xz and clamped so a
@@ -1309,7 +1331,9 @@ mod tests {
             voxel_worldgen::program::DEFAULT_SUN_DIR,
         )
     }
-    use crate::planning::structure::{Anchor, Arrange, Extent, Part, Seat, Shape, Structure, Variant, Yaw};
+    use crate::planning::structure::{
+        Anchor, Arrange, Extent, Part, Seat, Shape, Structure, Variant, Yaw,
+    };
     use voxel_layers::{LayerRuntime, TopDep};
 
     /// A minimal structure for emit tests: one seated block per site.
@@ -1385,7 +1409,12 @@ mod tests {
         );
         let common = sites_in(mgr.graph(), "sites:common", bounds(4096));
         let rare = sites_in(mgr.graph(), "sites:rare", bounds(4096));
-        assert!(common.len() > rare.len() * 3, "chance config ignored: {} vs {}", common.len(), rare.len());
+        assert!(
+            common.len() > rare.len() * 3,
+            "chance config ignored: {} vs {}",
+            common.len(),
+            rare.len()
+        );
 
         let mut mgr2 = test_manager(3);
         mgr2.register_as(
@@ -1443,7 +1472,11 @@ mod tests {
         );
         let after = sites_in(relaxed.graph(), "sites", bounds(4096));
 
-        assert_eq!(before.len(), after.len(), "relaxing must not add or drop sites");
+        assert_eq!(
+            before.len(),
+            after.len(),
+            "relaxing must not add or drop sites"
+        );
         assert!(!after.is_empty(), "the fixture must produce sites");
 
         // Every site stays in the cell that owns it, or consumers that
@@ -1678,12 +1711,7 @@ mod tests {
         assert_eq!(patches, build_patches(build().graph(), "ruins", min, max));
     }
 
-    fn build_patches(
-        mgr: &LayerGraph,
-        instance: &str,
-        min: Vec3,
-        max: Vec3,
-    ) -> PatchSet {
+    fn build_patches(mgr: &LayerGraph, instance: &str, min: Vec3, max: Vec3) -> PatchSet {
         patches_in(mgr, instance, min, max)
     }
 
@@ -1844,7 +1872,10 @@ mod tests {
         }
         for w in &rivers.ribbons {
             assert!(w.half_w >= 2.0 && w.half_w <= 7.0);
-            assert!(w.levels[1] <= w.levels[0] + 1e-4, "ribbon surface flows uphill");
+            assert!(
+                w.levels[1] <= w.levels[0] + 1e-4,
+                "ribbon surface flows uphill"
+            );
             assert_eq!(w.material, 4);
         }
         let caves = patches_in(mgr.graph(), "caves", min, max);
@@ -1928,8 +1959,9 @@ mod tests {
                 assert!(path[0].distance(*path.last().unwrap()) < 400.0);
                 for seg in path.windows(2) {
                     let d = seg[1] - seg[0];
-                    let moving =
-                        (d.x.abs() > 0.01) as u8 + (d.y.abs() > 0.01) as u8 + (d.z.abs() > 0.01) as u8;
+                    let moving = (d.x.abs() > 0.01) as u8
+                        + (d.y.abs() > 0.01) as u8
+                        + (d.z.abs() > 0.01) as u8;
                     assert_eq!(moving, 1, "diagonal corridor segment: {d:?}");
                 }
             }
@@ -1963,7 +1995,11 @@ mod tests {
             },
         );
         let mut sites2 = Vec::new();
-        for (_, c) in mgr2.graph().view::<Scatter3Sites>("sites:pockets", b).iter() {
+        for (_, c) in mgr2
+            .graph()
+            .view::<Scatter3Sites>("sites:pockets", b)
+            .iter()
+        {
             sites2.extend(c.sites.iter().copied());
         }
         assert_eq!(sites, sites2);
@@ -2152,7 +2188,10 @@ mod tests {
             Vec3::new(-1024.0, 132.0, -1024.0),
             Vec3::new(1024.0, 264.0, 1024.0),
         );
-        assert!(row1.markers.iter().all(|m| (132.0..=264.0).contains(&m.pos.y)));
+        assert!(row1
+            .markers
+            .iter()
+            .all(|m| (132.0..=264.0).contains(&m.pos.y)));
         assert!(
             !row1.markers.is_empty(),
             "no markers in y row 1 — either bad luck (seed change?) or rows unserved"

@@ -3,7 +3,6 @@
 //! produced by the main world (vegetation streaming) and re-uploaded only
 //! when the tile set changes.
 
-
 use bevy::{
     asset::{embedded_asset, load_embedded_asset},
     camera::{
@@ -87,10 +86,7 @@ impl Plugin for GrassPlugin {
                 RenderStartup,
                 init_grass_pipeline.after(bevy::pbr::init_mesh_pipeline_view_layouts),
             )
-            .add_systems(
-                ExtractSchedule,
-                extract_grass_instances,
-            )
+            .add_systems(ExtractSchedule, extract_grass_instances)
             .add_systems(
                 Render,
                 prepare_grass_bind_group.in_set(RenderSystems::PrepareBindGroups),
@@ -266,8 +262,7 @@ fn init_grass_pipeline(
             (uniform_buffer::<GrassEnv>(false),),
         ),
     );
-    let shader: Handle<Shader> =
-        load_embedded_asset!(asset_server.as_ref(), "voxel_grass.wgsl");
+    let shader: Handle<Shader> = load_embedded_asset!(asset_server.as_ref(), "voxel_grass.wgsl");
     let base_descriptor = RenderPipelineDescriptor {
         label: Some("grass_draw".into()),
         // Groups 0/1 are replaced per key by the specializer.

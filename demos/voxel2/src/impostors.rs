@@ -13,7 +13,6 @@
 //! with a table of (class, mesh, style) — two is not yet enough evidence
 //! to say what that table wants.
 
-
 use bevy::{
     asset::{embedded_asset, load_embedded_asset},
     camera::{
@@ -368,8 +367,7 @@ fn init_impostor_pipeline(
             (uniform_buffer::<ImpostorEnv>(false),),
         ),
     );
-    let shader: Handle<Shader> =
-        load_embedded_asset!(asset_server.as_ref(), "voxel_impostor.wgsl");
+    let shader: Handle<Shader> = load_embedded_asset!(asset_server.as_ref(), "voxel_impostor.wgsl");
     let base_descriptor = RenderPipelineDescriptor {
         label: Some("impostor_draw".into()),
         // Groups 0/1 are replaced per key by the specializer.
@@ -457,9 +455,12 @@ fn extract_impostor_instances(
     let Some(per_world) = instances.take_class_if_dirty(IMPOSTOR_CLASS) else {
         return;
     };
-    buffers
-        .instances
-        .publish("impostor_instances", per_world, &render_device, &render_queue);
+    buffers.instances.publish(
+        "impostor_instances",
+        per_world,
+        &render_device,
+        &render_queue,
+    );
 }
 
 // --- drawing -----------------------------------------------------------------

@@ -84,11 +84,21 @@ impl LayerChunk for ScatterChunk {
         let mut clearance = Vec::new();
         let mut cut_ops = Vec::new();
         for source in &layer.emit_sources {
-            ctx.get_named::<crate::planning::layers::EmitPatches>(source, voxel_layers::dep_bounds(own, pad))
-                .for_each(|_, chunk| {
-                    clearance.extend(chunk.patches.clearance.iter().copied());
-                    cut_ops.extend(chunk.patches.ops.iter().filter(|op| op.kind & 1 == 1).copied());
-                });
+            ctx.get_named::<crate::planning::layers::EmitPatches>(
+                source,
+                voxel_layers::dep_bounds(own, pad),
+            )
+            .for_each(|_, chunk| {
+                clearance.extend(chunk.patches.clearance.iter().copied());
+                cut_ops.extend(
+                    chunk
+                        .patches
+                        .ops
+                        .iter()
+                        .filter(|op| op.kind & 1 == 1)
+                        .copied(),
+                );
+            });
         }
 
         let world = ctx.context::<WorldCtx>();
@@ -159,9 +169,7 @@ impl LayerChunk for ScatterDrawChunk {
     }
 
     fn destroy(&mut self, ctx: &ChunkCtx<'_, ScatterDraw>) {
-        ctx.layer()
-            .sink
-            .take(ctx.instance_key(), ctx.coord());
+        ctx.layer().sink.take(ctx.instance_key(), ctx.coord());
     }
 }
 
@@ -338,11 +346,7 @@ fn reconcile_inner(
 }
 
 /// Publish a population's live size where tooling can read it.
-fn record_count(
-    worlds: &voxel_engine::Worlds,
-    population: &PopulationHandle,
-    n: usize,
-) {
+fn record_count(worlds: &voxel_engine::Worlds, population: &PopulationHandle, n: usize) {
     if let Some(ctx) = worlds
         .query(population.world)
         .and_then(|w| w.host_ctx::<WorldCtx>())

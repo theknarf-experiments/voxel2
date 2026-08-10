@@ -69,12 +69,11 @@ use bevy::{
         },
         render_resource::{
             binding_types::{storage_buffer_read_only_sized, uniform_buffer},
-            BindGroup, BindGroupEntries, BindGroupLayoutDescriptor, BindGroupLayoutEntries,
-            Buffer, BufferInitDescriptor, BufferUsages, Canonical, ColorTargetState,
-            ColorWrites, CompareFunction, DepthStencilState,
-            FragmentState, PipelineCache, RenderPipeline, RenderPipelineDescriptor, ShaderStages,
-            ShaderType, Specializer, SpecializerKey, TextureFormat, UniformBuffer, Variants,
-            VertexState,
+            BindGroup, BindGroupEntries, BindGroupLayoutDescriptor, BindGroupLayoutEntries, Buffer,
+            BufferInitDescriptor, BufferUsages, Canonical, ColorTargetState, ColorWrites,
+            CompareFunction, DepthStencilState, FragmentState, PipelineCache, RenderPipeline,
+            RenderPipelineDescriptor, ShaderStages, ShaderType, Specializer, SpecializerKey,
+            TextureFormat, UniformBuffer, Variants, VertexState,
         },
         renderer::{RenderDevice, RenderQueue},
         Extract, Render, RenderApp, RenderStartup, RenderSystems,
@@ -257,8 +256,7 @@ fn init_water_pipeline(
             ),
         ),
     );
-    let shader: Handle<Shader> =
-        load_embedded_asset!(asset_server.as_ref(), "voxel_water.wgsl");
+    let shader: Handle<Shader> = load_embedded_asset!(asset_server.as_ref(), "voxel_water.wgsl");
     let base_descriptor = RenderPipelineDescriptor {
         label: Some("water_draw".into()),
         // Groups 0/1 are replaced per key by the specializer.
@@ -367,8 +365,7 @@ fn prepare_water_bind_group(
                 contents: bytemuck::cast_slice(contents),
                 usage: BufferUsages::STORAGE,
             });
-            world.river_buffer =
-                Some((buffer, rivers.generation, rivers.segments.len() as u32));
+            world.river_buffer = Some((buffer, rivers.generation, rivers.segments.len() as u32));
         }
         let seg_count = world.river_buffer.as_ref().map_or(0, |(_, _, n)| *n);
 
@@ -394,11 +391,7 @@ fn prepare_water_bind_group(
         world.bind_group = Some(render_device.create_bind_group(
             "water_bg",
             &pipeline_cache.get_bind_group_layout(&pipeline.layout),
-            &BindGroupEntries::sequential((
-                params_binding,
-                program_binding.clone(),
-                river_binding,
-            )),
+            &BindGroupEntries::sequential((params_binding, program_binding.clone(), river_binding)),
         ));
     }
 }

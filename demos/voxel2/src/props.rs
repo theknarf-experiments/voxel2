@@ -239,12 +239,7 @@ impl Plugin for PropsPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<PropAssets>()
             .add_systems(Update, build_prop_assets)
-            .add_systems(
-                Update,
-                (
-                    dress_scatter,
-                ),
-            );
+            .add_systems(Update, (dress_scatter,));
     }
 }
 
@@ -287,103 +282,103 @@ fn build_prop_assets(
         .map(|(world, table)| (*world, table.clone()))
         .collect();
     for (world, table) in pending {
-    assets.built.insert(world);
-    // Nothing a prop is made of is a mirror — bark, leaves, rock. The
-    // default F0 of 0.04 under this demo's sun (FULL_DAYLIGHT against an
-    // ambient a hundredth of it) put a white highlight on every skyward
-    // face, which turned a dark green conifer into pale mint while the
-    // impostor standing behind it stayed green. `voxel_impostor.wgsl`
-    // already zeroes reflectance for exactly this reason; the props were
-    // the half that never got the memo.
-    let mat = |base_color: Color, rough: f32| StandardMaterial {
-        base_color,
-        perceptual_roughness: rough,
-        reflectance: 0.0,
-        ..default()
-    };
-    for (class, def) in &table.0 {
-        let mut variants = Vec::new();
-        for variant in &def.variants {
-            let trunk_mat = materials.add(mat(variant.trunk, 0.95));
-            let foliage_mat = materials.add(mat(variant.foliage, 0.9));
-            let mut parts = Vec::new();
-            match variant.model {
-                Model::Rock => {
-                    let mut rock = MeshBuilder::default();
-                    rock.blob(Vec3::ZERO, 1.0, 0.35, 7);
-                    parts.push((
-                        meshes.add(rock.build()),
-                        materials.add(mat(variant.foliage, 0.85)),
-                    ));
-                }
-                Model::Bush => {
-                    let mut b = MeshBuilder::default();
-                    b.blob(Vec3::new(0.0, 0.34, 0.0), 0.46, 0.30, 5);
-                    b.blob(Vec3::new(0.30, 0.24, 0.16), 0.30, 0.34, 61);
-                    b.blob(Vec3::new(-0.24, 0.22, -0.20), 0.27, 0.34, 131);
-                    parts.push((meshes.add(b.build()), foliage_mat));
-                }
-                Model::Mushroom => {
-                    parts.push((meshes.add(cylinder_mesh(0.045, 0.22, 6)), trunk_mat));
-                    let mut cap = MeshBuilder::default();
-                    cap.blob(Vec3::new(0.0, 0.235, 0.0), 0.16, 0.12, 17);
-                    parts.push((meshes.add(cap.build()), foliage_mat));
-                }
-                Model::Cactus => {
-                    let mut c = MeshBuilder::default();
-                    c.limb(Vec3::ZERO, Vec3::Y, 0.16, 1.5, 7);
-                    // Arms: up the trunk, out, then up again.
-                    c.limb(Vec3::new(0.0, 0.75, 0.0), Vec3::X, 0.09, 0.42, 6);
-                    c.limb(Vec3::new(0.42, 0.75, 0.0), Vec3::Y, 0.09, 0.52, 6);
-                    c.limb(Vec3::new(0.0, 0.95, 0.0), -Vec3::X, 0.08, 0.34, 6);
-                    c.limb(Vec3::new(-0.34, 0.95, 0.0), Vec3::Y, 0.08, 0.40, 6);
-                    parts.push((meshes.add(c.build()), foliage_mat));
-                }
-                Model::Log => {
-                    let mut l = MeshBuilder::default();
-                    l.limb(Vec3::new(-0.9, 0.17, 0.0), Vec3::X, 0.17, 1.8, 7);
-                    parts.push((meshes.add(l.build()), trunk_mat));
-                }
-                Model::Reed => {
-                    let mut r = MeshBuilder::default();
-                    for i in 0..7u32 {
-                        let a = std::f32::consts::TAU * i as f32 / 7.0 + i as f32 * 0.9;
-                        let (sn, cs) = a.sin_cos();
-                        let lean = Vec3::new(cs, 0.0, sn) * 0.16;
-                        let base = Vec3::new(cs, 0.0, sn) * 0.09;
-                        let h = 0.75 + ((i * 37) % 11) as f32 * 0.06;
-                        r.limb(base, (Vec3::Y + lean).normalize(), 0.018, h, 4);
+        assets.built.insert(world);
+        // Nothing a prop is made of is a mirror — bark, leaves, rock. The
+        // default F0 of 0.04 under this demo's sun (FULL_DAYLIGHT against an
+        // ambient a hundredth of it) put a white highlight on every skyward
+        // face, which turned a dark green conifer into pale mint while the
+        // impostor standing behind it stayed green. `voxel_impostor.wgsl`
+        // already zeroes reflectance for exactly this reason; the props were
+        // the half that never got the memo.
+        let mat = |base_color: Color, rough: f32| StandardMaterial {
+            base_color,
+            perceptual_roughness: rough,
+            reflectance: 0.0,
+            ..default()
+        };
+        for (class, def) in &table.0 {
+            let mut variants = Vec::new();
+            for variant in &def.variants {
+                let trunk_mat = materials.add(mat(variant.trunk, 0.95));
+                let foliage_mat = materials.add(mat(variant.foliage, 0.9));
+                let mut parts = Vec::new();
+                match variant.model {
+                    Model::Rock => {
+                        let mut rock = MeshBuilder::default();
+                        rock.blob(Vec3::ZERO, 1.0, 0.35, 7);
+                        parts.push((
+                            meshes.add(rock.build()),
+                            materials.add(mat(variant.foliage, 0.85)),
+                        ));
                     }
-                    parts.push((meshes.add(r.build()), foliage_mat));
-                }
-                Model::Birch => {
-                    parts.push((meshes.add(cylinder_mesh(0.10, 3.0, 7)), trunk_mat));
-                    let mut top = MeshBuilder::default();
-                    top.blob(Vec3::new(0.0, 3.9, 0.0), 1.05, 0.18, 71);
-                    top.blob(Vec3::new(0.34, 3.35, -0.2), 0.72, 0.20, 173);
-                    top.blob(Vec3::new(-0.28, 4.5, 0.25), 0.62, 0.22, 211);
-                    parts.push((meshes.add(top.build()), foliage_mat));
-                }
-                model => {
-                    parts.push((meshes.add(cylinder_mesh(0.14, 1.6, 8)), trunk_mat));
-                    let mut top = MeshBuilder::default();
-                    if model == Model::Broadleaf {
-                        top.blob(Vec3::new(0.0, 3.2, 0.0), 1.6, 0.12, 11);
-                        top.blob(Vec3::new(0.9, 2.7, 0.4), 1.1, 0.14, 23);
-                        top.blob(Vec3::new(-0.8, 2.8, -0.3), 1.0, 0.14, 47);
-                    } else {
-                        top.cone(Vec3::new(0.0, 1.0, 0.0), 1.5, 2.3, 9);
-                        top.cone(Vec3::new(0.0, 2.2, 0.0), 1.2, 2.0, 9);
-                        top.cone(Vec3::new(0.0, 3.3, 0.0), 0.85, 1.7, 8);
-                        top.cone(Vec3::new(0.0, 4.3, 0.0), 0.5, 1.2, 7);
+                    Model::Bush => {
+                        let mut b = MeshBuilder::default();
+                        b.blob(Vec3::new(0.0, 0.34, 0.0), 0.46, 0.30, 5);
+                        b.blob(Vec3::new(0.30, 0.24, 0.16), 0.30, 0.34, 61);
+                        b.blob(Vec3::new(-0.24, 0.22, -0.20), 0.27, 0.34, 131);
+                        parts.push((meshes.add(b.build()), foliage_mat));
                     }
-                    parts.push((meshes.add(top.build()), foliage_mat));
+                    Model::Mushroom => {
+                        parts.push((meshes.add(cylinder_mesh(0.045, 0.22, 6)), trunk_mat));
+                        let mut cap = MeshBuilder::default();
+                        cap.blob(Vec3::new(0.0, 0.235, 0.0), 0.16, 0.12, 17);
+                        parts.push((meshes.add(cap.build()), foliage_mat));
+                    }
+                    Model::Cactus => {
+                        let mut c = MeshBuilder::default();
+                        c.limb(Vec3::ZERO, Vec3::Y, 0.16, 1.5, 7);
+                        // Arms: up the trunk, out, then up again.
+                        c.limb(Vec3::new(0.0, 0.75, 0.0), Vec3::X, 0.09, 0.42, 6);
+                        c.limb(Vec3::new(0.42, 0.75, 0.0), Vec3::Y, 0.09, 0.52, 6);
+                        c.limb(Vec3::new(0.0, 0.95, 0.0), -Vec3::X, 0.08, 0.34, 6);
+                        c.limb(Vec3::new(-0.34, 0.95, 0.0), Vec3::Y, 0.08, 0.40, 6);
+                        parts.push((meshes.add(c.build()), foliage_mat));
+                    }
+                    Model::Log => {
+                        let mut l = MeshBuilder::default();
+                        l.limb(Vec3::new(-0.9, 0.17, 0.0), Vec3::X, 0.17, 1.8, 7);
+                        parts.push((meshes.add(l.build()), trunk_mat));
+                    }
+                    Model::Reed => {
+                        let mut r = MeshBuilder::default();
+                        for i in 0..7u32 {
+                            let a = std::f32::consts::TAU * i as f32 / 7.0 + i as f32 * 0.9;
+                            let (sn, cs) = a.sin_cos();
+                            let lean = Vec3::new(cs, 0.0, sn) * 0.16;
+                            let base = Vec3::new(cs, 0.0, sn) * 0.09;
+                            let h = 0.75 + ((i * 37) % 11) as f32 * 0.06;
+                            r.limb(base, (Vec3::Y + lean).normalize(), 0.018, h, 4);
+                        }
+                        parts.push((meshes.add(r.build()), foliage_mat));
+                    }
+                    Model::Birch => {
+                        parts.push((meshes.add(cylinder_mesh(0.10, 3.0, 7)), trunk_mat));
+                        let mut top = MeshBuilder::default();
+                        top.blob(Vec3::new(0.0, 3.9, 0.0), 1.05, 0.18, 71);
+                        top.blob(Vec3::new(0.34, 3.35, -0.2), 0.72, 0.20, 173);
+                        top.blob(Vec3::new(-0.28, 4.5, 0.25), 0.62, 0.22, 211);
+                        parts.push((meshes.add(top.build()), foliage_mat));
+                    }
+                    model => {
+                        parts.push((meshes.add(cylinder_mesh(0.14, 1.6, 8)), trunk_mat));
+                        let mut top = MeshBuilder::default();
+                        if model == Model::Broadleaf {
+                            top.blob(Vec3::new(0.0, 3.2, 0.0), 1.6, 0.12, 11);
+                            top.blob(Vec3::new(0.9, 2.7, 0.4), 1.1, 0.14, 23);
+                            top.blob(Vec3::new(-0.8, 2.8, -0.3), 1.0, 0.14, 47);
+                        } else {
+                            top.cone(Vec3::new(0.0, 1.0, 0.0), 1.5, 2.3, 9);
+                            top.cone(Vec3::new(0.0, 2.2, 0.0), 1.2, 2.0, 9);
+                            top.cone(Vec3::new(0.0, 3.3, 0.0), 0.85, 1.7, 8);
+                            top.cone(Vec3::new(0.0, 4.3, 0.0), 0.5, 1.2, 7);
+                        }
+                        parts.push((meshes.add(top.build()), foliage_mat));
+                    }
                 }
+                variants.push(parts);
             }
-            variants.push(parts);
+            assets.classes.insert((world, class.clone()), variants);
         }
-        assets.classes.insert((world, class.clone()), variants);
-    }
     }
     assets.blob_mesh = meshes.add(bevy::math::primitives::Circle::new(1.0));
     assets.blob_mat = materials.add(StandardMaterial {
@@ -401,10 +396,7 @@ fn dress_scatter(
     assets: Res<PropAssets>,
     worlds: Res<voxel_engine::Worlds>,
     tables: Res<crate::WorldProps>,
-    new: Query<
-        (Entity, &ScatterInstance, &Transform, &crate::OfWorld),
-        Added<ScatterInstance>,
-    >,
+    new: Query<(Entity, &ScatterInstance, &Transform, &crate::OfWorld), Added<ScatterInstance>>,
 ) {
     // EVERY command here is fallible, because the entity may be gone by
     // the time they apply. `Added<ScatterInstance>` hands out entities
@@ -422,7 +414,10 @@ fn dress_scatter(
             continue;
         };
         let table = tables.0.get(&of_world.0).cloned().unwrap_or_default();
-        let Some(variants) = assets.classes.get(&(of_world.0, instance.class.to_string())) else {
+        let Some(variants) = assets
+            .classes
+            .get(&(of_world.0, instance.class.to_string()))
+        else {
             continue;
         };
         let Some(parts) = variants.get(instance.variant as usize) else {
@@ -472,9 +467,7 @@ fn dress_scatter(
                 scale: transform.scale * squash,
                 ..*transform
             };
-            let local = Transform::from_matrix(
-                parent.to_matrix().inverse() * world.to_matrix(),
-            );
+            let local = Transform::from_matrix(parent.to_matrix().inverse() * world.to_matrix());
             let (blob_mesh, blob_mat) = (assets.blob_mesh.clone(), assets.blob_mat.clone());
             commands
                 .entity(entity)
@@ -592,8 +585,7 @@ impl MeshBuilder {
             ]);
             self.normals
                 .extend([r0.to_array(), r1.to_array(), r0.to_array(), r1.to_array()]);
-            self.indices
-                .extend([s, s + 2, s + 1, s + 1, s + 2, s + 3]);
+            self.indices.extend([s, s + 2, s + 1, s + 1, s + 2, s + 3]);
         }
     }
 

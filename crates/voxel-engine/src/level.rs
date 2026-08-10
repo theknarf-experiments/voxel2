@@ -693,24 +693,6 @@ pub struct LevelDef {
     #[serde(default)]
     #[reflect(@schema::Rebuilds)]
     pub scatter: Vec<ScatterDef>,
-    /// The host's planning data, carried verbatim. Planning layers are
-    /// the game's code, so the engine never looks inside this: it hands
-    /// the block to the host's [`crate::planning::HostPlanning`] and
-    /// takes back a planner.
-    ///
-    /// Opaque to reflection as well as to the engine. A tool editing this
-    /// level by field path can reach every number the ENGINE interprets
-    /// and none of what it merely carries, which is the same boundary
-    /// stated twice rather than a limitation.
-    ///
-    /// It carries no [`schema::Rebuilds`] because it carries no attributes
-    /// at all — an editor reaches this block by editing the host's own
-    /// parsed form as a second document root and writing the result back
-    /// here, so what rebuilds is the host's to annotate. Any change to it
-    /// does restream: see `needs_regen`.
-    #[serde(default)]
-    #[reflect(ignore)]
-    pub planning: serde_json::Value,
 }
 
 /// When a generator op applies across the LOD range.
@@ -791,6 +773,34 @@ impl LevelDef {
         registry: &bevy::reflect::TypeRegistryArc,
     ) -> Result<Self, serde_json::Error> {
         crate::graph::with_registry(registry, || serde_json::from_str(json))
+    }
+
+    /// Read a level, dropping every node whose kind `registry` does not
+    /// know.
+    ///
+    /// A level names kinds from two vocabularies — the engine's and the
+    /// GAME's — so a crate that can see only one of them is not looking at
+    /// a malformed file, it is looking at the half addressed to it. That
+    /// is the position of a tool, and of every test in a crate below the
+    /// host. Anything that RUNS a level uses [`LevelDef::from_json`],
+    /// which rejects an unknown kind, so a typo cannot pass itself off as
+    /// a node somebody else implements.
+    pub fn from_json_known(
+        json: &str,
+        registry: &bevy::reflect::TypeRegistryArc,
+    ) -> Result<Self, serde_json::Error> {
+        let known: Vec<String> = {
+            let reg = registry.read();
+            crate::graph::registry::kinds(&reg)
+                .into_iter()
+                .map(|(kind, _)| kind.to_string())
+                .collect()
+        };
+        let mut doc: serde_json::Value = serde_json::from_str(json)?;
+        if let Some(nodes) = doc.get_mut("nodes").and_then(|n| n.as_array_mut()) {
+            nodes.retain(|n| known.iter().any(|k| n["kind"] == k.as_str()));
+        }
+        Self::from_json(&doc.to_string(), registry)
     }
 
     /// Write a level back, with each node's params serialized by its own
@@ -1159,7 +1169,6 @@ fn watch_level_file(
 fn needs_regen(new: &LevelDef, old: &LevelDef) -> bool {
     new.nodes != old.nodes
         || sun_dir(new) != sun_dir(old)
-        || new.planning != old.planning
         || new.placements != old.placements
         || new.prefabs != old.prefabs
         || new.scatter != old.scatter
@@ -1258,7 +1267,7 @@ mod tests {
     /// the canopy layout: every number here is visible in the level file.
     #[test]
     fn a_recipe_packs_into_the_components_the_shader_reads() {
-        let planet = LevelDef::from_json(&shipped("planet.json"), &crate::graph::registry::engine_kinds()).unwrap();
+        let planet = LevelDef::from_json_known(&shipped("planet.json"), &crate::graph::registry::engine_kinds()).unwrap();
         let canopy = planet
             .materials
             .iter()
@@ -1291,7 +1300,7 @@ mod tests {
     /// instead of asking why.
     #[test]
     fn an_edit_to_anything_the_world_is_built_from_rebuilds_it() {
-        let planet = LevelDef::from_json(&shipped("planet.json"), &crate::graph::registry::engine_kinds()).unwrap();
+        let planet = LevelDef::from_json_known(&shipped("planet.json"), &crate::graph::registry::engine_kinds()).unwrap();
         assert!(
             !needs_regen(&planet, &planet),
             "an unchanged level must not rebuild — a repaint would loop"
@@ -1318,9 +1327,6 @@ mod tests {
         prefabs.prefabs.clear();
         assert!(needs_regen(&prefabs, &planet), "prefabs");
 
-        let mut planning = planet.clone();
-        planning.planning = serde_json::Value::Null;
-        assert!(needs_regen(&planning, &planet), "planning");
 
         let mut lod = planet.clone();
         lod.lod.max_level -= 1;
@@ -1400,7 +1406,7 @@ mod tests {
     fn the_rebuilds_attribute_says_what_needs_regen_does() {
         use bevy::reflect::Typed;
 
-        let planet = LevelDef::from_json(&shipped("planet.json"), &crate::graph::registry::engine_kinds()).unwrap();
+        let planet = LevelDef::from_json_known(&shipped("planet.json"), &crate::graph::registry::engine_kinds()).unwrap();
         let root = LevelDef::type_info();
 
         /// A field, an edit big enough for `PartialEq` to see, and whether
@@ -1482,7 +1488,7 @@ mod tests {
     #[test]
     fn a_level_can_be_reached_by_field_path() {
         use bevy::reflect::GetPath;
-        let mut planet = LevelDef::from_json(&shipped("planet.json"), &crate::graph::registry::engine_kinds()).unwrap();
+        let mut planet = LevelDef::from_json_known(&shipped("planet.json"), &crate::graph::registry::engine_kinds()).unwrap();
 
         // The path BRP would address, on the real shipped schema. Found by
         // VARIANT, not by index: a path only reaches the fields the
@@ -1520,10 +1526,9 @@ mod tests {
 
     #[test]
     fn shipped_levels_parse() {
-        let planet = LevelDef::from_json(&shipped("planet.json"), &crate::graph::registry::engine_kinds()).unwrap();
+        let planet = LevelDef::from_json_known(&shipped("planet.json"), &crate::graph::registry::engine_kinds()).unwrap();
         // Planning is the host's: the engine carries the block
         // without ever parsing it.
-        assert!(planet.planning.is_object());
         // Scatter is placement-only: classes and variants, no models.
         // Asserted as PROPERTIES, not as a list — which classes a level
         // ships is content and changes whenever the world is dressed.
@@ -1558,8 +1563,7 @@ mod tests {
         assert!(planet.materials.iter().any(|m| m.id() == 1));
         assert!(planet.materials.iter().any(|m| m.id() == 3));
 
-        let mega = LevelDef::from_json(&shipped("megastructure.json"), &crate::graph::registry::engine_kinds()).unwrap();
-        assert!(mega.planning.is_object());
+        let mega = LevelDef::from_json_known(&shipped("megastructure.json"), &crate::graph::registry::engine_kinds()).unwrap();
         let packed = crate::graph::compile(&mega.nodes).unwrap().ops;
         assert!(mega.scatter.is_empty());
         assert!(mega.materials.iter().any(|m| m.id() == 2));
@@ -1573,14 +1577,13 @@ mod tests {
 
     #[test]
     fn levels_roundtrip() {
-        let planet = LevelDef::from_json(&shipped("planet.json"), &crate::graph::registry::engine_kinds()).unwrap();
+        let planet = LevelDef::from_json_known(&shipped("planet.json"), &crate::graph::registry::engine_kinds()).unwrap();
         let reg = crate::graph::registry::engine_kinds();
         let json = planet.to_json(&reg).unwrap();
         let back = LevelDef::from_json(&json, &reg).unwrap();
         assert_eq!(back.nodes, planet.nodes);
         assert_eq!(back.materials, planet.materials);
         assert_eq!(back.environment, planet.environment);
-        assert_eq!(back.planning, planet.planning);
         assert_eq!(back.scatter, planet.scatter);
     }
 
@@ -1593,7 +1596,7 @@ mod tests {
         //
         // The megastructure has no such oracle — see the test below,
         // which asserts what is actually true of it instead.
-        let planet = LevelDef::from_json(&shipped("planet.json"), &crate::graph::registry::engine_kinds()).unwrap();
+        let planet = LevelDef::from_json_known(&shipped("planet.json"), &crate::graph::registry::engine_kinds()).unwrap();
         let packed = crate::graph::compile(&planet.nodes).unwrap().ops;
         assert_eq!(packed, voxel_worldgen::program::planet_program());
     }
@@ -1607,7 +1610,7 @@ mod tests {
     /// architecture, a band nothing paints, a material with no recipe.
     #[test]
     fn every_megastructure_district_is_whole() {
-        let mega = LevelDef::from_json(&shipped("megastructure.json"), &crate::graph::registry::engine_kinds()).unwrap();
+        let mega = LevelDef::from_json_known(&shipped("megastructure.json"), &crate::graph::registry::engine_kinds()).unwrap();
         let ops = crate::graph::compile(&mega.nodes).unwrap().ops;
 
         assert_eq!(ops[0].kind, WOP_REGION_AXES, "the axes must be filled first");
@@ -1652,7 +1655,7 @@ mod tests {
     /// them honest when somebody retunes the axis scale or octaves.
     #[test]
     fn no_megastructure_district_is_a_sliver() {
-        let mega = LevelDef::from_json(&shipped("megastructure.json"), &crate::graph::registry::engine_kinds()).unwrap();
+        let mega = LevelDef::from_json_known(&shipped("megastructure.json"), &crate::graph::registry::engine_kinds()).unwrap();
         let gen = mega.generator(0);
         // Through `surface_material_weight`, which is the same query the
         // host gates content with — so this measures the districts as

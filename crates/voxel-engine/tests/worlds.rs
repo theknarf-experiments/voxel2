@@ -23,12 +23,11 @@ fn shipped(name: &str) -> LevelDef {
 }
 
 /// Parse with the engine's node kinds in scope. The node set is open, so
-/// a kind is only a name until a registry says what type it is.
+/// a kind is only a name until a registry says what type it is — and the
+/// kinds the GAME defines are not this crate's to know, so they drop.
 fn from_json_value(v: serde_json::Value) -> LevelDef {
-    voxel_engine::graph::with_registry(&voxel_engine::graph::registry::engine_kinds(), || {
-        serde_json::from_value(v)
-    })
-    .unwrap()
+    LevelDef::from_json_known(&v.to_string(), &voxel_engine::graph::registry::engine_kinds())
+        .unwrap()
 }
 
 /// A shipped level with one field replaced. Patching the JSON keeps these

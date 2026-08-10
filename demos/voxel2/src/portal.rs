@@ -17,11 +17,11 @@
 //! because there is nothing to pair — both openings are the same opening.
 
 use bevy::asset::embedded_asset;
-use serde_json::Value;
-use bevy::prelude::*;
 use bevy::camera::visibility::RenderLayers;
+use bevy::prelude::*;
 use bevy::render::render_resource::AsBindGroup;
 use bevy::shader::ShaderRef;
+use serde_json::Value;
 use voxel_engine::{LevelDef, LodConfig, WorldLoader};
 
 /// A second level this host can load, and its id once it has been.
@@ -50,7 +50,6 @@ use voxel_engine::{LevelDef, LodConfig, WorldLoader};
 /// host's list of level files.
 #[derive(Resource, Default)]
 pub struct ExtraLevels(pub Vec<ExtraLevel>);
-
 
 impl ExtraLevels {
     /// The key that opens onto level `slot`.
@@ -108,20 +107,20 @@ impl Plugin for PortalPlugin {
         app.add_plugins(MaterialPlugin::<PortalViewMaterial>::default())
             .add_systems(Update, size_portal_target);
         app.add_systems(
-                Update,
-                (
-                    toggle_portal,
-                    traverse_portal,
-                    follow_camera_world,
-                    sync_backdrops,
-                    drive_portal,
-                    dress_views,
-                )
-                    .chain()
-                    // `drive_portal` publishes where each world is seen
-                    // from; the engine's graphs follow it the same frame.
-                    .in_set(voxel_engine::WorldFocusSet::Publish),
-            );
+            Update,
+            (
+                toggle_portal,
+                traverse_portal,
+                follow_camera_world,
+                sync_backdrops,
+                drive_portal,
+                dress_views,
+            )
+                .chain()
+                // `drive_portal` publishes where each world is seen
+                // from; the engine's graphs follow it the same frame.
+                .in_set(voxel_engine::WorldFocusSet::Publish),
+        );
     }
 }
 
@@ -304,7 +303,6 @@ impl Portal {
             _ => None,
         }
     }
-
 }
 
 /// The view the far world is rendered FOR: the player's.
@@ -324,7 +322,11 @@ type NearViews<'w, 's> = Query<
     'w,
     's,
     (Entity, &'static GlobalTransform, &'static Camera),
-    (With<Camera3d>, Without<PortalCamera>, Without<voxel_render::HelperCamera>),
+    (
+        With<Camera3d>,
+        Without<PortalCamera>,
+        Without<voxel_render::HelperCamera>,
+    ),
 >;
 
 /// Whether to render the far world through the opening. ON — without it
@@ -435,9 +437,7 @@ fn size_portal_target(
 }
 
 fn far_view_image(width: u32, height: u32) -> Image {
-    use bevy::render::render_resource::{
-        Extent3d, TextureDimension, TextureFormat, TextureUsages,
-    };
+    use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat, TextureUsages};
     let mut image = Image::new_fill(
         Extent3d {
             width: width.max(1),
@@ -449,9 +449,8 @@ fn far_view_image(width: u32, height: u32) -> Image {
         TextureFormat::Rgba8UnormSrgb,
         bevy::asset::RenderAssetUsages::default(),
     );
-    image.texture_descriptor.usage = TextureUsages::TEXTURE_BINDING
-        | TextureUsages::COPY_DST
-        | TextureUsages::RENDER_ATTACHMENT;
+    image.texture_descriptor.usage =
+        TextureUsages::TEXTURE_BINDING | TextureUsages::COPY_DST | TextureUsages::RENDER_ATTACHMENT;
     image
 }
 
@@ -538,7 +537,9 @@ fn toggle_portal(
     // heals — the next press starts from nothing.
     if !portal.is_empty() {
         let already = levels.0[slot].world.is_some_and(|w| {
-            portal.iter().any(|(_, p)| p.worlds.0 == w || p.worlds.1 == w)
+            portal
+                .iter()
+                .any(|(_, p)| p.worlds.0 == w || p.worlds.1 == w)
         });
         for (entity, _) in &portal {
             commands.entity(entity).despawn();
@@ -553,15 +554,13 @@ fn toggle_portal(
         }
     }
 
-    let Some(far_world) =
-        ensure_loaded(
-            &mut levels.0[slot],
-            &mut loader,
-            &mut scenes,
-            &mut props,
-            &registry,
-        )
-    else {
+    let Some(far_world) = ensure_loaded(
+        &mut levels.0[slot],
+        &mut loader,
+        &mut scenes,
+        &mut props,
+        &registry,
+    ) else {
         return;
     };
 
@@ -575,15 +574,19 @@ fn toggle_portal(
     // opening a new one would join world 1 to world 1 — an opening onto
     // the world you are already in, which shows nothing and leads
     // nowhere.
-    let far_world = if near_world == far_world { 0 } else { far_world };
+    let far_world = if near_world == far_world {
+        0
+    } else {
+        far_world
+    };
     commands.spawn(Portal {
         at: placement,
         worlds: (near_world, far_world),
         half: Vec2::new(4.0, 3.0),
     });
-    let size = windows.single().map_or((1280, 720), |w| {
-        (w.physical_width(), w.physical_height())
-    });
+    let size = windows
+        .single()
+        .map_or((1280, 720), |w| (w.physical_width(), w.physical_height()));
     let target = images.add(far_view_image(size.0, size.1));
     commands.insert_resource(PortalAssets {
         quad: meshes.add(Rectangle::new(8.0, 6.0)),

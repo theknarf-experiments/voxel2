@@ -1123,187 +1123,192 @@
         0.595,
         1.0
       ]
-    }
-  ],
-  "planning": {
-    "stack": [
-      {
-        "kind": "biomes",
-        "name": "districts",
-        "table": [
-          [
-            "warrens",
-            3
-          ],
-          [
-            "conduit",
-            4
-          ],
-          [
-            "stacks",
-            5
-          ],
-          [
-            "girders",
-            6
-          ],
-          [
-            "cathedral",
-            7
-          ],
-          [
-            "silos",
-            8
-          ],
-          [
-            "foundry",
-            9
-          ],
-          [
-            "ruin",
-            10
-          ],
-          [
-            "bedrock",
-            11
-          ]
-        ]
-      },
-      {
-        "kind": "scatter3",
-        "name": "sites:pockets",
-        "chance": 0.45,
-        "snap_y_m": 44.0,
-        "biome": "districts:warrens"
-      },
-      {
-        "kind": "emit",
-        "name": "pockets",
-        "source": "sites:pockets",
-        "cell_y_m": 132,
-        "pad_m": 0.0,
-        "emit": {
-          "type": "site_structure3",
-          "marker": "pocket",
-          "structure": "pocket"
-        },
-        "max_chunk_edge_m": 128.0
-      },
-      {
-        "kind": "connect3",
-        "name": "links",
-        "source": "sites:pockets"
-      },
-      {
-        "kind": "emit",
-        "name": "tubes",
-        "source": "links",
-        "cell_y_m": 132,
-        "pad_m": 464.0,
-        "emit": {
-          "type": "tubes"
-        },
-        "max_chunk_edge_m": 128.0
-      }
-    ],
-    "structures": {
-      "pocket": {
-        "size": [
-          26.0,
-          26.0
-        ],
-        "variants": [
-          {
-            "weight": 0.88,
-            "parts": [
-              {
-                "arrange": {
-                  "type": "chain",
-                  "count": [
-                    2,
-                    4
-                  ],
-                  "step": [
-                    11.0,
-                    15.0
-                  ],
-                  "turn_deg": 90.0,
-                  "orthogonal": true,
-                  "radius_frac": [
-                    0.0,
-                    1.0
-                  ]
-                },
-                "shape": {
-                  "type": "boxy",
-                  "half": [
-                    [
-                      4.0,
-                      8.0
-                    ],
-                    [
-                      2.6,
-                      4.6
-                    ],
-                    [
-                      4.0,
-                      8.0
-                    ]
-                  ]
-                },
-                "material": 2,
-                "hollow": 0.7,
-                "seat": "site",
-                "anchor": "base",
-                "y_offset": [
-                  1.1,
-                  1.1
+    },
+    {
+      "kind": "structure",
+      "name": "pocket",
+      "size": [
+        26.0,
+        26.0
+      ],
+      "variants": [
+        {
+          "weight": 0.88,
+          "parts": [
+            {
+              "arrange": {
+                "type": "chain",
+                "count": [
+                  2,
+                  4
                 ],
-                "link": {
-                  "half_w": 1.0,
-                  "half_h": 1.4,
-                  "step_m": 2.5
-                }
-              }
-            ]
-          },
-          {
-            "weight": 0.12,
-            "parts": [
-              {
-                "arrange": {
-                  "type": "single"
-                },
-                "shape": {
-                  "type": "boxy",
-                  "half": [
-                    [
-                      2.4,
-                      2.4
-                    ],
-                    [
-                      30.8,
-                      30.8
-                    ],
-                    [
-                      2.4,
-                      2.4
-                    ]
-                  ]
-                },
-                "cut": true,
-                "material": 0,
-                "seat": "site",
-                "anchor": "center",
-                "y_offset": [
-                  30.1,
-                  30.1
+                "step": [
+                  11.0,
+                  15.0
+                ],
+                "turn_deg": 90.0,
+                "orthogonal": true,
+                "radius_frac": [
+                  0.0,
+                  1.0
                 ]
+              },
+              "shape": {
+                "type": "boxy",
+                "half": [
+                  [
+                    4.0,
+                    8.0
+                  ],
+                  [
+                    2.6,
+                    4.6
+                  ],
+                  [
+                    4.0,
+                    8.0
+                  ]
+                ]
+              },
+              "material": 2,
+              "hollow": 0.7,
+              "seat": "site",
+              "anchor": "base",
+              "y_offset": [
+                1.1,
+                1.1
+              ],
+              "link": {
+                "half_w": 1.0,
+                "half_h": 1.4,
+                "step_m": 2.5
               }
-            ]
-          }
+            }
+          ]
+        },
+        {
+          "weight": 0.12,
+          "parts": [
+            {
+              "arrange": {
+                "type": "single"
+              },
+              "shape": {
+                "type": "boxy",
+                "half": [
+                  [
+                    2.4,
+                    2.4
+                  ],
+                  [
+                    30.8,
+                    30.8
+                  ],
+                  [
+                    2.4,
+                    2.4
+                  ]
+                ]
+              },
+              "cut": true,
+              "material": 0,
+              "seat": "site",
+              "anchor": "center",
+              "y_offset": [
+                30.1,
+                30.1
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "kind": "biomes",
+      "name": "districts",
+      "table": [
+        [
+          "warrens",
+          3
+        ],
+        [
+          "conduit",
+          4
+        ],
+        [
+          "stacks",
+          5
+        ],
+        [
+          "girders",
+          6
+        ],
+        [
+          "cathedral",
+          7
+        ],
+        [
+          "silos",
+          8
+        ],
+        [
+          "foundry",
+          9
+        ],
+        [
+          "ruin",
+          10
+        ],
+        [
+          "bedrock",
+          11
         ]
+      ]
+    },
+    {
+      "kind": "scatter3",
+      "name": "sites:pockets",
+      "in": {
+        "biome": "districts"
+      },
+      "chance": 0.45,
+      "snap_y_m": 44.0,
+      "biome": "warrens"
+    },
+    {
+      "kind": "emit",
+      "name": "pockets",
+      "in": {
+        "source": "sites:pockets",
+        "structure": "pocket"
+      },
+      "cell_y_m": 132,
+      "pad_m": 0.0,
+      "emit": {
+        "type": "site_structure3",
+        "marker": "pocket"
+      },
+      "max_chunk_edge_m": 128.0
+    },
+    {
+      "kind": "connect3",
+      "name": "links",
+      "in": {
+        "source": "sites:pockets"
       }
+    },
+    {
+      "kind": "emit",
+      "name": "tubes",
+      "in": {
+        "source": "links"
+      },
+      "cell_y_m": 132,
+      "pad_m": 464.0,
+      "emit": {
+        "type": "tubes"
+      },
+      "max_chunk_edge_m": 128.0
     }
-  }
+  ]
 }

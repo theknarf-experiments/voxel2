@@ -5,8 +5,6 @@
 //! how *this* host chooses to describe its layers, and a game with
 //! hand-written layers would delete the whole module.
 
-use std::collections::HashMap;
-
 use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
 use voxel_engine::level::LevelDef;
@@ -16,31 +14,6 @@ use voxel_engine::level::{d_op_material, default_one};
 use super::layers;
 use super::structure;
 
-/// The `planning` block of a level file.
-#[derive(Reflect, Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
-pub struct PlanningDef {
-    /// The planning stack: generic layers composed into one LayerManager.
-    #[serde(default)]
-    pub stack: Vec<StackLayerDef>,
-    /// Named structures the stack's `site_structure` emits build.
-    #[serde(default)]
-    pub structures: HashMap<String, StructureDef>,
-}
-
-impl PlanningDef {
-    /// Read a level's planning block, or the empty stack if it has none.
-    pub fn of(level: &LevelDef) -> Result<Self, String> {
-        if level.planning.is_null() {
-            return Ok(Self::default());
-        }
-        serde_json::from_value(level.planning.clone())
-            .map_err(|e| format!("planning block: {e}"))
-    }
-}
-
-/// A structure: what `site_structure` emits at each site. Authored as
-/// data — weighted variants of parts, each placing one shape at every
-/// position of an arrangement. See `structure`.
 #[derive(Reflect, Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct StructureDef {
     /// Sampled once per site; arrangements scale their radius by it, so
@@ -114,8 +87,6 @@ pub enum ArrangeDef {
     },
 }
 
-/// A box half-extent: a range, or `"arc"` for the ring's tangential
-/// half-length (wall segments that meet without authored trigonometry).
 #[derive(Reflect, Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
 #[serde(untagged)]
 pub enum ExtentDef {
@@ -288,19 +259,12 @@ impl PartDef {
     }
 }
 
-/// One layer of the level's planning stack — the generic vocabulary
-/// (scatter/connect/flow/worm/emit) every planned feature is expressed
-/// in. Layers register in author order into ONE LayerManager per level;
-/// `source` references an earlier layer by instance name.
-/// Relaxation on a `scatter` layer: how hard to push sites apart, and how
-/// many times.
+/// Push sites apart from their neighbours, in a second pass.
 ///
-/// Each iteration is a SEPARATE LAYER INSTANCE reading the one before —
-/// `name:scattered` for the raw pass, `name:relax1`… for the middle ones,
-/// and `name` itself for the last, so nothing that consumes the sites
-/// changes or even notices. LayerProcGen would spell this as internal
-/// levels of one layer; instances keep each stage's reads inside a
-/// declared dependency, which is checked.
+/// A partial state is its own INSTANCE, so a graph that would otherwise be
+/// circular stays a DAG: place sites in one, relax them against their
+/// neighbours in a second that depends on it, and let each consumer name
+/// the stage it wants.
 #[derive(Reflect, Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct RelaxDef {
     /// Fraction of the wanted correction applied per iteration. Above
@@ -311,156 +275,7 @@ pub struct RelaxDef {
     pub iterations: u32,
 }
 
-pub fn d_relax_strength() -> f32 {
-    0.35
-}
-
-pub fn d_relax_iterations() -> u32 {
-    1
-}
-
-#[derive(Reflect, Serialize, Deserialize, Clone, Debug, PartialEq)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-pub enum StackLayerDef {
-    /// Hash-gated candidate sites per cell, filtered by terrain.
-    Scatter {
-        name: String,
-        #[serde(default = "d_cell")]
-        cell_m: i32,
-        chance: f32,
-        #[serde(default = "d_margin")]
-        margin_m: f32,
-        #[serde(default = "d_altitude")]
-        altitude: [f32; 2],
-        #[serde(default = "d_up_interval")]
-        up: [f32; 2],
-        /// "instance:biome" — accept sites with probability = that
-        /// biome's blended weight.
-        #[serde(default)]
-        biome: Option<String>,
-        /// Push sites apart from their neighbours after scattering.
-        #[serde(default)]
-        relax: Option<RelaxDef>,
-    },
-    /// Pathfound links between sites of a scatter instance.
-    Connect {
-        name: String,
-        source: String,
-        #[serde(default = "d_cell")]
-        cell_m: i32,
-        #[serde(default = "d_reach")]
-        reach_m: f32,
-        #[serde(default = "d_corridor")]
-        corridor_m: f32,
-        #[serde(default = "d_slope_penalty")]
-        slope_penalty: f32,
-        /// Pathfinding lattice step (meters). The cost of a route is
-        /// quadratic in this, so a long-range corridor is planned on a
-        /// coarse lattice and a local track on a fine one — which is what
-        /// makes the same layer kind serve both scales.
-        #[serde(default = "d_path_step")]
-        step_m: f32,
-    },
-    /// Descent courses (pond-and-spill hydrology) from sites.
-    Flow {
-        name: String,
-        source: String,
-        #[serde(default = "d_flow_cell")]
-        cell_m: i32,
-        #[serde(default = "d_flow_steps")]
-        max_steps: usize,
-        #[serde(default = "d_spill")]
-        max_spill_rise: f32,
-    },
-    /// Noise-steered burrows from sites.
-    Worm {
-        name: String,
-        source: String,
-        #[serde(default = "d_cell")]
-        cell_m: i32,
-        #[serde(default = "d_worm_steps")]
-        steps: u32,
-        #[serde(default = "d_worm_radius")]
-        radius: [f32; 2],
-        #[serde(default = "d_burial")]
-        burial_radii: f32,
-    },
-    /// A coarse blended-region field; other layers and spawners gate on
-    /// its named biomes.
-    /// Names for the regions the GENERATOR paints, so the rest of the
-    /// stack can gate on them.
-    ///
-    /// It defines nothing itself: a region is a `material_band` op and
-    /// the ground colour is the definition. This is the dictionary from
-    /// a name to the material that region paints, which is what stops
-    /// "where trees grow" and "what colour the ground is" from being two
-    /// descriptions that can disagree.
-    Biomes {
-        name: String,
-        /// (region name, the material its band paints).
-        table: Vec<(String, u32)>,
-    },
-    /// Volumetric sites for interior worlds (no terrain filters).
-    Scatter3 {
-        name: String,
-        #[serde(default = "d_cell3")]
-        cell_m: i32,
-        #[serde(default = "d_cell3_y")]
-        cell_y_m: i32,
-        chance: f32,
-        #[serde(default = "d_margin3")]
-        margin_m: f32,
-        /// Snap site y to the structural floor lattice (0 = none).
-        #[serde(default)]
-        snap_y_m: f32,
-        /// "instance:biome" gate (planar districts).
-        #[serde(default)]
-        biome: Option<String>,
-    },
-    /// Orthogonal links between volumetric sites (walkway tubes).
-    Connect3 {
-        name: String,
-        source: String,
-        #[serde(default = "d_cell3")]
-        cell_m: i32,
-        #[serde(default = "d_cell3_y")]
-        cell_y_m: i32,
-        #[serde(default = "d_reach3")]
-        reach_m: f32,
-    },
-    /// Turn a source layer's data into world patches (the only kind that
-    /// produces geometry; also the index that keeps queries local).
-    Emit {
-        name: String,
-        source: String,
-        #[serde(default = "d_cell")]
-        cell_m: i32,
-        /// Cell height for volumetric sources (0 = planar).
-        #[serde(default)]
-        cell_y_m: i32,
-        /// Source reach beyond its owning cells (dependency padding, m).
-        pad_m: f32,
-        /// Carve-horizon gate: serve ops only to chunks at least this
-        /// fine (edge meters). Uniform per chunk, never per op.
-        #[serde(default)]
-        max_chunk_edge_m: Option<f32>,
-        /// Keep this layer's data resident out to this radius (meters),
-        /// whether or not its ops are served there.
-        ///
-        /// The gate above is about CARVING, and carving stops being worth
-        /// anything once a chunk's voxels are bigger than the feature. The
-        /// data is a different question: a map, an overlay, or a coarse
-        /// representation reads where a road IS without wanting geometry
-        /// cut for it. Sizing residency from the carve gate conflates the
-        /// two and makes "visible on the map at 40 km" cost a carve op per
-        /// chunk out to 40 km.
-        #[serde(default)]
-        keep_m: Option<f32>,
-        emit: EmitDef,
-    },
-}
-
-/// The emission shape of an `emit` stack layer.
+/// The emission shape of an `emit` node: what it turns its source into.
 #[derive(Reflect, Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum EmitDef {
@@ -500,13 +315,11 @@ pub enum EmitDef {
     /// Build a named structure (from the level's `structures` table) at
     /// each site, with an optional marker.
     SiteStructure {
-        structure: String,
         #[serde(default)]
         marker: Option<String>,
     },
     /// The same at each `scatter3` site (interiors).
     SiteStructure3 {
-        structure: String,
         #[serde(default)]
         marker: Option<String>,
     },
@@ -598,17 +411,15 @@ pub fn d_tube_lift() -> f32 {
     3.0
 }
 impl EmitDef {
-    fn to_kind(
-        &self,
-        structures: &std::collections::HashMap<String, StructureDef>,
-    ) -> layers::EmitKind {
+    /// `structure` is whatever the emit's `structure` port is wired to.
+    /// The compiler checked that port, so a miss here is a bug rather than
+    /// an authoring mistake.
+    pub(super) fn to_kind(&self, structure: Option<&StructureDef>) -> layers::EmitKind {
         use layers::EmitKind;
-        // Structures are validated at load, so a miss here is a bug.
-        let build = |name: &str| {
+        let build = |_name: &str| {
             std::sync::Arc::new(
-                structures
-                    .get(name)
-                    .expect("structure validated before registration")
+                structure
+                    .expect("the structure port is wired and checked")
                     .pack(),
             )
         };
@@ -627,12 +438,12 @@ impl EmitDef {
             EmitDef::Ribbon { material, width } => EmitKind::Ribbon { material, width },
             EmitDef::PathRibbon { material, width } => EmitKind::PathRibbon { material, width },
             EmitDef::WormCuts => EmitKind::WormCuts,
-            EmitDef::SiteStructure { structure, marker } => EmitKind::SiteStructure {
-                structure: build(&structure),
+            EmitDef::SiteStructure { marker } => EmitKind::SiteStructure {
+                structure: build(""),
                 marker,
             },
-            EmitDef::SiteStructure3 { structure, marker } => EmitKind::SiteStructure3 {
-                structure: build(&structure),
+            EmitDef::SiteStructure3 { marker } => EmitKind::SiteStructure3 {
+                structure: build(""),
                 marker,
             },
             EmitDef::Tubes {
@@ -648,52 +459,130 @@ impl EmitDef {
     }
 }
 
-/// The kind tag of a stack layer, for source-compatibility checks.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum StackKind {
-    Biomes,
-    Scatter,
-    Scatter3,
-    Connect,
-    Connect3,
-    Flow,
-    Worm,
-    Emit,
-}
-
-/// Validate a level's planning stack before anything registers: every
-/// authoring error (bad reference, unknown recipe, kind mismatch,
-/// misordered declaration) fails HERE with a message, never as a panic
-/// at registration or mid-generation. Boot fails loudly on an invalid
-/// shipped level; hot reload warns and keeps the running world.
-/// Validate the whole level's data-driven references: the stack itself,
-/// plus spawner biome refs (which would otherwise degrade silently to
-/// full density on a typo).
+/// What the graph compiler cannot check.
+///
+/// Most of what this used to do is gone: that a `source` names a layer
+/// that exists, that it is the RIGHT kind of layer, that a structure is
+/// defined — all of it is a port now, checked when the level compiles. What
+/// is left is the spawner side, which still refers to a biome by a
+/// `"instance:member"` string rather than by a wire.
 pub fn validate_level(level: &LevelDef) -> Result<(), String> {
-    let planning = PlanningDef::of(level)?;
-    validate_stack(&planning.stack, &planning.structures)?;
+    let biomes: Vec<(&str, &Vec<(String, u32)>)> = level
+        .nodes
+        .iter()
+        .filter_map(|n| {
+            let b = n.node.0.as_any().downcast_ref::<super::nodes::Biomes>()?;
+            Some((n.name.as_deref()?, &b.table))
+        })
+        .collect();
+
     let biome_ref = |owner: &str, reference: &str| -> Result<(), String> {
         let Some((instance, biome)) = reference.rsplit_once(':') else {
             return Err(format!(
                 "spawner {owner}: biome ref {reference:?} is not \"instance:biome\""
             ));
         };
-        for def in &planning.stack {
-            if let StackLayerDef::Biomes { name, table, .. } = def {
-                if name == instance {
-                    if table.iter().any(|(n, _)| n == biome) {
-                        return Ok(());
-                    }
-                    return Err(format!(
-                        "spawner {owner}: biome {biome:?} not in layer {instance:?}"
-                    ));
-                }
-            }
+        let Some((_, table)) = biomes.iter().find(|(n, _)| *n == instance) else {
+            return Err(format!(
+                "spawner {owner}: biome layer {instance:?} is not a node in this level"
+            ));
+        };
+        if table.iter().any(|(n, _)| n == biome) {
+            return Ok(());
         }
         Err(format!(
-            "spawner {owner}: biome layer {instance:?} not found in stack"
+            "spawner {owner}: biome {biome:?} not in layer {instance:?}"
         ))
     };
+
+    // A biomes table may not be empty: every gate through it would be a
+    // reference to nothing.
+    for (name, table) in &biomes {
+        if table.is_empty() {
+            return Err(format!("biomes layer {name:?} has an empty table"));
+        }
+    }
+
+    // The PORT says which biomes layer a node reads; this says the member
+    // it names is in that layer's table. The compiler cannot check the
+    // second, because it is a parameter rather than a wire.
+    for node in &level.nodes {
+        let member = node
+            .node
+            .0
+            .as_any()
+            .downcast_ref::<super::nodes::Scatter>()
+            .and_then(|n| n.biome.clone())
+            .or_else(|| {
+                node.node
+                    .0
+                    .as_any()
+                    .downcast_ref::<super::nodes::Scatter3>()
+                    .and_then(|n| n.biome.clone())
+            });
+        let (Some(member), Some(name)) = (member, node.name.as_deref()) else {
+            continue;
+        };
+        let instance = node
+            .wires
+            .get("biome")
+            .and_then(|w| w.sources().first())
+            .ok_or_else(|| format!("layer {name:?} names a biome but wires no biome port"))?;
+        let (_, table) = biomes
+            .iter()
+            .find(|(n, _)| n == instance)
+            .ok_or_else(|| format!("layer {name:?}: {instance:?} is not a biomes layer"))?;
+        if !table.iter().any(|(n, _)| *n == member) {
+            return Err(format!(
+                "layer {name:?}: region {member:?} not in layer {instance:?}"
+            ));
+        }
+    }
+
+    // A volumetric source needs a volumetric emit: with `cell_y_m` at zero
+    // the emit's cells are planar and its sites land in one y-row.
+    for node in &level.nodes {
+        let Some(emit) = node.node.0.as_any().downcast_ref::<super::nodes::Emit>() else {
+            continue;
+        };
+        let volumetric = matches!(
+            emit.emit,
+            EmitDef::SiteStructure3 { .. } | EmitDef::Tubes { .. }
+        );
+        if volumetric && emit.cell_y_m == 0 {
+            return Err(format!(
+                "emit {:?} has a volumetric source and cell_y_m 0",
+                node.name.as_deref().unwrap_or("?")
+            ));
+        }
+    }
+
+    // A structure has to stay inside the element padding the emit index
+    // rests on. The compiler checks that a `structure` port is WIRED to
+    // one; how far the thing it names reaches is geometry, and only this
+    // can measure it.
+    for node in &level.nodes {
+        let Some(s) = node.node.0.as_any().downcast_ref::<super::nodes::Structure>() else {
+            continue;
+        };
+        let name = node.name.as_deref().unwrap_or("?");
+        if s.variants.is_empty() {
+            return Err(format!("structure {name:?} has no variants"));
+        }
+        let def = StructureDef {
+            size: s.size,
+            variants: s.variants.clone(),
+        };
+        let reach = def.pack().max_reach();
+        let limit = layers::ELEM_PAD_M;
+        if reach > limit {
+            return Err(format!(
+                "structure {name:?} reaches {reach:.0} m from its site, past the {limit:.0} m \
+                 element padding — queries farther than that would miss its geometry"
+            ));
+        }
+    }
+
     for def in &level.scatter {
         if let Some(reference) = &def.gate {
             biome_ref(&def.class, reference)?;
@@ -705,357 +594,10 @@ pub fn validate_level(level: &LevelDef) -> Result<(), String> {
     Ok(())
 }
 
-/// A referenced structure must exist and stay inside the element-padding
-/// contract the emit index rests on.
-fn check_structure(
-    structures: &std::collections::HashMap<String, StructureDef>,
-    owner: &str,
-    name: &str,
-) -> Result<(), String> {
-    let Some(def) = structures.get(name) else {
-        let known: Vec<&str> = structures.keys().map(String::as_str).collect();
-        return Err(format!(
-            "layer {owner:?}: unknown structure {name:?} (declared: {known:?})"
-        ));
-    };
-    if def.variants.is_empty() {
-        return Err(format!("structure {name:?} has no variants"));
-    }
-    let reach = def.pack().max_reach();
-    let limit = layers::ELEM_PAD_M;
-    if reach > limit {
-        return Err(format!(
-            "structure {name:?} reaches {reach:.0} m from its site, past the {limit:.0} m \
-             element padding — queries farther than that would miss its geometry"
-        ));
-    }
-    Ok(())
+pub fn d_relax_strength() -> f32 {
+    0.35
 }
 
-pub fn validate_stack(
-    stack: &[StackLayerDef],
-    structures: &std::collections::HashMap<String, StructureDef>,
-) -> Result<(), String> {
-    let mut declared: Vec<(&str, StackKind)> = Vec::new();
-    let kind_of = |declared: &[(&str, StackKind)], source: &str| -> Option<StackKind> {
-        declared
-            .iter()
-            .find_map(|(n, k)| (*n == source).then_some(*k))
-    };
-    // A `source` must name an EARLIER layer of the expected kind (the
-    // registration order the layer manager requires).
-    let check_source = |declared: &[(&str, StackKind)],
-                        owner: &str,
-                        source: &str,
-                        expect: StackKind|
-     -> Result<(), String> {
-        match kind_of(declared, source) {
-            Some(k) if k == expect => Ok(()),
-            Some(k) => Err(format!(
-                "layer {owner:?}: source {source:?} is a {k:?} layer, expected {expect:?}"
-            )),
-            None => Err(format!(
-                "layer {owner:?}: source {source:?} is not declared earlier in the stack"
-            )),
-        }
-    };
-    for def in stack {
-        let (name, kind) = match def {
-            StackLayerDef::Biomes { name, table, .. } => {
-                if table.is_empty() {
-                    return Err(format!("biome layer {name:?} has an empty table"));
-                }
-                (name.as_str(), StackKind::Biomes)
-            }
-            StackLayerDef::Scatter { name, biome, .. }
-            | StackLayerDef::Scatter3 { name, biome, .. } => {
-                if let Some(reference) = biome {
-                    StackLayerDef::biome_gate(&declared, stack, name, reference)?;
-                }
-                let kind = if matches!(def, StackLayerDef::Scatter { .. }) {
-                    StackKind::Scatter
-                } else {
-                    StackKind::Scatter3
-                };
-                (name.as_str(), kind)
-            }
-            StackLayerDef::Connect { name, source, .. } => {
-                check_source(&declared, name, source, StackKind::Scatter)?;
-                (name.as_str(), StackKind::Connect)
-            }
-            StackLayerDef::Connect3 { name, source, .. } => {
-                check_source(&declared, name, source, StackKind::Scatter3)?;
-                (name.as_str(), StackKind::Connect3)
-            }
-            StackLayerDef::Flow { name, source, .. } => {
-                check_source(&declared, name, source, StackKind::Scatter)?;
-                (name.as_str(), StackKind::Flow)
-            }
-            StackLayerDef::Worm { name, source, .. } => {
-                check_source(&declared, name, source, StackKind::Scatter)?;
-                (name.as_str(), StackKind::Worm)
-            }
-            StackLayerDef::Emit {
-                name,
-                source,
-                emit,
-                cell_y_m,
-                ..
-            } => {
-                let expect = match emit {
-                    EmitDef::PathSlabs { .. } => StackKind::Connect,
-                    EmitDef::Ribbon { .. } => StackKind::Flow,
-                    EmitDef::PathRibbon { .. } => StackKind::Connect,
-                    EmitDef::WormCuts => StackKind::Worm,
-                    EmitDef::SiteStructure { structure, .. } => {
-                        check_structure(structures, name, structure)?;
-                        StackKind::Scatter
-                    }
-                    EmitDef::SiteStructure3 { structure, .. } => {
-                        check_structure(structures, name, structure)?;
-                        StackKind::Scatter3
-                    }
-                    EmitDef::Tubes { .. } => StackKind::Connect3,
-                };
-                check_source(&declared, name, source, expect)?;
-                if matches!(expect, StackKind::Scatter3 | StackKind::Connect3) && *cell_y_m <= 0 {
-                    return Err(format!(
-                        "layer {name:?}: emit over a volumetric source needs cell_y_m > 0 \
-                         (a collapsed y axis spans unbounded rows)"
-                    ));
-                }
-                (name.as_str(), StackKind::Emit)
-            }
-        };
-        if declared.iter().any(|(n, _)| *n == name) {
-            return Err(format!("duplicate stack layer name {name:?}"));
-        }
-        declared.push((name, kind));
-    }
-    Ok(())
+pub fn d_relax_iterations() -> u32 {
+    1
 }
-
-impl StackLayerDef {
-    /// Resolve an "instance:biome" reference against earlier stack layers.
-    fn biome_gate(
-        declared: &[(&str, StackKind)],
-        stack: &[StackLayerDef],
-        owner: &str,
-        reference: &str,
-    ) -> Result<layers::BiomeGate, String> {
-        let Some((instance, biome_name)) = reference.rsplit_once(':') else {
-            return Err(format!(
-                "layer {owner:?}: biome ref {reference:?} is not \"instance:biome\""
-            ));
-        };
-        if !declared.is_empty() && !declared.iter().any(|(n, _)| *n == instance) {
-            return Err(format!(
-                "layer {owner:?}: biome layer {instance:?} is not declared earlier in the stack"
-            ));
-        }
-        for def in stack {
-            if let StackLayerDef::Biomes { name, table, .. } = def {
-                if name == instance {
-                    let Some(&(_, material)) = table.iter().find(|(n, _)| n == biome_name) else {
-                        return Err(format!(
-                            "layer {owner:?}: region {biome_name:?} not in layer {instance:?}"
-                        ));
-                    };
-                    return Ok(layers::BiomeGate { material });
-                }
-            }
-        }
-        Err(format!(
-            "layer {owner:?}: biome layer {instance:?} not found in stack"
-        ))
-    }
-
-    pub(super) fn register(
-        &self,
-        stack: &[StackLayerDef],
-        structures: &std::collections::HashMap<String, StructureDef>,
-        mgr: &mut voxel_layers::LayerGraph,
-    ) {
-        use layers::*;
-        match self.clone() {
-            // Names only — there is no layer to register. A region is a
-            // `material_band` op in the generator; this block is the
-            // dictionary the stack's gates resolve through, and it is
-            // consumed at validation time.
-            StackLayerDef::Biomes { .. } => {}
-            StackLayerDef::Scatter {
-                name,
-                cell_m,
-                chance,
-                margin_m,
-                altitude,
-                up,
-                biome,
-                relax,
-            } => {
-                let base = ScatterCfg {
-                    cell_m,
-                    chance,
-                    margin_m,
-                    altitude,
-                    up,
-                    biome: biome.map(|r| {
-                        Self::biome_gate(&[], stack, &name, &r)
-                            .expect("stack validated before registration")
-                    }),
-                    relax_from: None,
-                };
-                let Some(relax) = relax.filter(|r| r.iterations > 0 && r.strength > 0.0) else {
-                    return mgr.register_as(&name, ScatterSites { cfg: base });
-                };
-                // A chain of instances, each reading the one before. The
-                // LAST one takes the public name, so consumers are
-                // untouched — they declared a dependency on `name` and
-                // still get sites from `name`, just better spaced.
-                let raw = format!("{name}:scattered");
-                mgr.register_as(&raw, ScatterSites { cfg: base.clone() });
-                let mut source = raw;
-                for i in 1..=relax.iterations {
-                    let stage = if i == relax.iterations {
-                        name.clone()
-                    } else {
-                        format!("{name}:relax{i}")
-                    };
-                    mgr.register_as(
-                        &stage,
-                        ScatterSites {
-                            cfg: ScatterCfg {
-                                relax_from: Some(RelaxFrom {
-                                    instance: source,
-                                    strength: relax.strength,
-                                }),
-                                ..base.clone()
-                            },
-                        },
-                    );
-                    source = stage;
-                }
-            }
-            StackLayerDef::Connect {
-                name,
-                source,
-                cell_m,
-                reach_m,
-                corridor_m,
-                slope_penalty,
-                step_m,
-            } => mgr.register_as(
-                &name,
-                ConnectPaths {
-                    cfg: ConnectCfg {
-                        source,
-                        reach_m,
-                        corridor_m,
-                        slope_penalty,
-                        step_m,
-                    },
-                    cell_m,
-                },
-            ),
-            StackLayerDef::Flow {
-                name,
-                source,
-                cell_m,
-                max_steps,
-                max_spill_rise,
-            } => mgr.register_as(
-                &name,
-                FlowCourses {
-                    cfg: FlowCfg {
-                        source,
-                        max_steps,
-                        max_spill_rise,
-                    },
-                    cell_m,
-                },
-            ),
-            StackLayerDef::Worm {
-                name,
-                source,
-                cell_m,
-                steps,
-                radius,
-                burial_radii,
-            } => mgr.register_as(
-                &name,
-                WormBurrows {
-                    cfg: WormCfg {
-                        source,
-                        steps,
-                        radius,
-                        burial_radii,
-                    },
-                    cell_m,
-                },
-            ),
-            StackLayerDef::Scatter3 {
-                name,
-                cell_m,
-                cell_y_m,
-                chance,
-                margin_m,
-                snap_y_m,
-                biome,
-            } => mgr.register_as(
-                &name,
-                Scatter3Sites {
-                    cfg: Scatter3Cfg {
-                        cell_m,
-                        cell_y_m,
-                        chance,
-                        margin_m,
-                        snap_y_m,
-                        biome: biome.map(|r| {
-                            Self::biome_gate(&[], stack, &name, &r)
-                                .expect("stack validated before registration")
-                        }),
-                    },
-                },
-            ),
-            StackLayerDef::Connect3 {
-                name,
-                source,
-                cell_m,
-                cell_y_m,
-                reach_m,
-            } => mgr.register_as(
-                &name,
-                Connect3Paths {
-                    cfg: Connect3Cfg { source, reach_m },
-                    cell_m,
-                    cell_y_m,
-                },
-            ),
-            StackLayerDef::Emit {
-                name,
-                source,
-                cell_m,
-                cell_y_m,
-                pad_m,
-                // The carve-horizon gate is applied per chunk by the
-                // planner facade, never inside the layer; `keep_m` sizes
-                // the top dependency, which the planner also owns.
-                max_chunk_edge_m: _,
-                keep_m: _,
-                emit,
-            } => mgr.register_as(
-                &name,
-                EmitPatches {
-                    cfg: EmitCfg {
-                        source,
-                        kind: emit.to_kind(structures),
-                        pad_m,
-                    },
-                    cell_m,
-                    cell_y_m,
-                },
-            ),
-        }
-    }
-}
-

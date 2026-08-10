@@ -36,9 +36,7 @@ impl OfWorld {
     /// is WORLD 0's layer. That is the whole reason another level's trees
     /// and rocks appeared only in the launch level and never through the
     /// opening onto their own.
-    pub fn scene(
-        world: voxel_engine::WorldId,
-    ) -> (Self, bevy::camera::visibility::RenderLayers) {
+    pub fn scene(world: voxel_engine::WorldId) -> (Self, bevy::camera::visibility::RenderLayers) {
         (Self(world), voxel_render::world_layer(world))
     }
 }
@@ -47,7 +45,9 @@ impl OfWorld {
 /// companion to [`WorldScenes`]. A tree is dressed by the level it grows
 /// in, which is not necessarily the level you are standing in.
 #[derive(Resource, Default)]
-pub struct WorldProps(pub bevy::platform::collections::HashMap<voxel_engine::WorldId, props::PropTable>);
+pub struct WorldProps(
+    pub bevy::platform::collections::HashMap<voxel_engine::WorldId, props::PropTable>,
+);
 
 /// How each loaded world is dressed: background, sun, ambient, haze.
 ///
@@ -58,13 +58,13 @@ pub struct WorldProps(pub bevy::platform::collections::HashMap<voxel_engine::Wor
 pub struct WorldScenes(pub bevy::platform::collections::HashMap<voxel_engine::WorldId, Scene>);
 
 mod grass;
-mod instancing;
 mod impostors;
+mod instancing;
 mod planning;
 mod portal;
-mod scatter;
 mod props;
 mod ribbons;
+mod scatter;
 mod surface_paint;
 mod water;
 use portal::{ExtraLevel, PortalPlugin};
@@ -76,9 +76,9 @@ const SHIPPED_LEVELS: &[&str] = &[
     "levels/megastructure.json",
     "levels/purgatory.json",
 ];
-use props::PropsPlugin;
 use grass::GrassPlugin;
 use impostors::ImpostorPlugin;
+use props::PropsPlugin;
 use ribbons::RibbonsPlugin;
 use surface_paint::SurfacePaintPlugin;
 use water::WaterPlugin;
@@ -257,10 +257,8 @@ fn main() {
     // Built here rather than taken from the App because the level is read
     // before there is one; a host with its own kinds registers them onto
     // this before parsing.
-    let kinds = voxel_engine::graph::registry::engine_kinds();
-    // This game's own node kinds, registered before anything is parsed:
-    // a kind that is not registered is a `"kind"` no level can name.
-    planning::nodes::register(&mut kinds.write());
+    // Every kind a level can name: the engine's, plus this game's.
+    let kinds = planning::nodes::kinds();
     let level = match LevelDef::from_json(&json, &kinds) {
         Ok(level) => level,
         Err(e) => {
@@ -394,7 +392,7 @@ fn main() {
                 remote_port: None,
                 // This demo authors its layers as JSON; a game with
                 // hand-written layers passes its own factory here.
-                planner: Some(std::sync::Arc::new(planning::StackPlanning)),
+                planner: Some(std::sync::Arc::new(planning::StackPlanning(kinds.clone()))),
                 // The mesh budget is the HOST's, because what a chunk
                 // costs is a property of the levels it ships: this
                 // demo's terrain is about a page each and its interior
@@ -428,8 +426,7 @@ fn main() {
     // crate is told which reflected resources are documents and knows
     // nothing else about either this demo or the engine.
     app.add_plugins(voxel_editor::EditorPlugin::default().root::<LevelDef>("Level"));
-    app
-        .add_systems(Startup, setup_scene)
+    app.add_systems(Startup, setup_scene)
         .add_systems(Update, (autopilot, sync_world_suns));
 
     // Live tooling for the voxctl CLI: always on in a dev build, never in

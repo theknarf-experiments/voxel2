@@ -97,16 +97,19 @@ impl LayerChunk for RibbonSurfaceChunk {
         let pad = IVec3::new(layer.pad_m, RIBBON_Y_M, layer.pad_m);
         let mut segs = Vec::new();
         for source in &layer.sources {
-            ctx.get_named::<crate::planning::layers::EmitPatches>(source, voxel_layers::dep_bounds(own, pad))
-                .for_each(|_, chunk| {
-                    for s in &chunk.patches.ribbons {
-                        segs.push(RiverSegGpu {
-                            ab: [s.a.x, s.a.y, s.b.x, s.b.y],
-                            geo: [s.half_w, s.levels[0], s.levels[1], 0.0],
-                            color: layer.color(s.material),
-                        });
-                    }
-                });
+            ctx.get_named::<crate::planning::layers::EmitPatches>(
+                source,
+                voxel_layers::dep_bounds(own, pad),
+            )
+            .for_each(|_, chunk| {
+                for s in &chunk.patches.ribbons {
+                    segs.push(RiverSegGpu {
+                        ab: [s.a.x, s.a.y, s.b.x, s.b.y],
+                        geo: [s.half_w, s.levels[0], s.levels[1], 0.0],
+                        color: layer.color(s.material),
+                    });
+                }
+            });
         }
         ctx.context::<WorldCtx>()
             .ribbons
@@ -152,10 +155,7 @@ pub fn register(
             pad_m: (tile_m * 2).max(RIBBON_PAD_M),
         },
     );
-    Some(TopDep::new(
-        instance,
-        IVec3::new(2 * view_m, 0, 2 * view_m),
-    ))
+    Some(TopDep::new(instance, IVec3::new(2 * view_m, 0, 2 * view_m)))
 }
 
 /// Rebuild each world's water buffer when its resident set changed.
@@ -166,7 +166,11 @@ pub fn register(
 /// left that level's own courses undrawn.
 fn publish_ribbons(worlds: Res<voxel_engine::Worlds>, mut rivers: ResMut<RiverWater>) {
     for world in worlds.iter() {
-        let Some(sink) = world.query.host_ctx::<WorldCtx>().map(|c| c.ribbons.clone()) else {
+        let Some(sink) = world
+            .query
+            .host_ctx::<WorldCtx>()
+            .map(|c| c.ribbons.clone())
+        else {
             continue;
         };
         let generation = sink.generation();
@@ -223,7 +227,7 @@ mod tests {
     fn water_color_reads_the_material_table_with_fallback() {
         let mut level = LevelDef::from_json(
             include_str!("../../../levels/planet.json"),
-            &voxel_engine::graph::registry::engine_kinds(),
+            &crate::planning::nodes::kinds(),
         )
         .unwrap();
         // planet material 4 is the river surface color.
