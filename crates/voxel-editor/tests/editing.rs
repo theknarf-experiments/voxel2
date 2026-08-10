@@ -14,7 +14,7 @@ use bevy::platform::collections::HashSet;
 use bevy::prelude::*;
 use voxel_editor::edit::{apply, Edit, Pending, Value};
 use voxel_editor::{EditorRoots, EditorState, Num, Root};
-use voxel_engine::level::NodeKind;
+use voxel_engine::graph::{nodes, registry};
 use voxel_engine::LevelDef;
 
 /// Set by change detection, exactly as `apply_level_change` is driven.
@@ -27,7 +27,7 @@ fn note_rebuild(level: Res<LevelDef>, mut flag: ResMut<Rebuilt>) {
 
 fn planet() -> LevelDef {
     let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../levels/planet.json");
-    LevelDef::from_json(&std::fs::read_to_string(path).unwrap()).unwrap()
+    LevelDef::from_json(&std::fs::read_to_string(path).unwrap(), &registry::engine_kinds()).unwrap()
 }
 
 fn app() -> App {
@@ -88,16 +88,19 @@ fn an_edit_reaches_inside_a_generator_node() {
         .resource::<LevelDef>()
         .nodes
         .iter()
-        .position(|n| matches!(n.kind, NodeKind::HeightFbm { .. }))
+        .position(|n| n.node.kind() == "height_fbm")
         .expect("planet's terrain is fbm height bands");
 
-    edit(&mut app, &format!(".nodes[{at}].kind.amp"), 123.0, Num::F32);
+    edit(&mut app, &format!(".nodes[{at}].node.amp"), 123.0, Num::F32);
 
     let level = app.world().resource::<LevelDef>();
-    let NodeKind::HeightFbm { amp, .. } = level.nodes[at].kind else {
-        panic!("the edit changed the variant")
-    };
-    assert_eq!(amp, 123.0);
+    let node = level.nodes[at]
+        .node
+        .0
+        .as_any()
+        .downcast_ref::<nodes::HeightFbm>()
+        .expect("the edit changed the kind");
+    assert_eq!(node.amp, 123.0);
 }
 
 /// `LevelDef` changing IS the mechanism: `apply_level_change` runs on

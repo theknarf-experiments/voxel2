@@ -145,6 +145,7 @@ fn ensure_loaded(
     loader: &mut WorldLoader,
     scenes: &mut crate::WorldScenes,
     props: &mut crate::WorldProps,
+    registry: &AppTypeRegistry,
 ) -> Option<u8> {
     if let Some(id) = far.world {
         return Some(id);
@@ -152,7 +153,7 @@ fn ensure_loaded(
     let json = std::fs::read_to_string(&far.path)
         .inspect_err(|e| error!("portal: cannot read '{}': {e}", far.path))
         .ok()?;
-    let level = LevelDef::from_json(&json)
+    let level = LevelDef::from_json(&json, &registry.0)
         .inspect_err(|e| error!("portal: cannot parse '{}': {e}", far.path))
         .ok()?;
 
@@ -492,6 +493,7 @@ fn toggle_portal(
     mut loader: WorldLoader,
     mut scenes: ResMut<crate::WorldScenes>,
     mut props: ResMut<crate::WorldProps>,
+    registry: Res<AppTypeRegistry>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut images: ResMut<Assets<Image>>,
     mut portal_materials: ResMut<Assets<PortalViewMaterial>>,
@@ -552,7 +554,13 @@ fn toggle_portal(
     }
 
     let Some(far_world) =
-        ensure_loaded(&mut levels.0[slot], &mut loader, &mut scenes, &mut props)
+        ensure_loaded(
+            &mut levels.0[slot],
+            &mut loader,
+            &mut scenes,
+            &mut props,
+            &registry,
+        )
     else {
         return;
     };

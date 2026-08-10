@@ -23,10 +23,12 @@
 //! and one `shafts_cut` read seven shafts.
 
 use bevy::platform::collections::{HashMap, HashSet};
-use voxel_core::opgen::{self, Value};
+use bevy::prelude::*;
+use serde::{Deserialize, Serialize};
+use voxel_core::opgen::Value;
 use voxel_core::worldop::{WorldOp, FIELD_SLOTS};
 
-use crate::level::{NodeDef, NodeKind};
+
 
 /// A compiled level graph.
 #[derive(Debug)]
@@ -121,11 +123,12 @@ fn flatten<'a>(nodes: &'a [NodeDef], region: Option<[f32; 4]>, path: &str, out: 
     for (i, node) in nodes.iter().enumerate() {
         let label = match &node.name {
             Some(n) => n.to_string(),
-            None => format!("{path}[{i}] ({})", kind_name(&node.kind)),
+            None => format!("{path}[{i}] ({})", node.node.kind()),
         };
-        if let NodeKind::Region { axes, nodes: inner } = &node.kind {
+        let inner = node.node.0.children();
+        if let Some(axes) = node.node.0.gate() {
             let region = Some(match region {
-                None => *axes,
+                None => axes,
                 Some(o) => [
                     o[0].max(axes[0]),
                     o[1].min(axes[1]),
@@ -145,42 +148,8 @@ fn flatten<'a>(nodes: &'a [NodeDef], region: Option<[f32; 4]>, path: &str, out: 
     }
 }
 
-fn kind_name(kind: &NodeKind) -> &'static str {
-    match kind {
-        NodeKind::Region { .. } => "region",
-        NodeKind::HeightZero => "height_zero",
-        NodeKind::SdfVoid => "sdf_void",
-        NodeKind::WarpNone => "warp_none",
-        _ => "op",
-    }
-}
 
-/// The value an origin node produces; origins emit no op.
-fn origin_value(kind: &NodeKind) -> Option<Value> {
-    match kind {
-        NodeKind::HeightZero => Some(Value::Height),
-        NodeKind::SdfVoid => Some(Value::Sdf),
-        NodeKind::WarpNone => Some(Value::Warp),
-        _ => None,
-    }
-}
 
-/// The ports of a node, whichever kind it is.
-fn ports(kind: &NodeKind) -> (&'static [opgen::Port], &'static [opgen::Port]) {
-    if let Some(value) = origin_value(kind) {
-        // An origin consumes nothing and produces the register's initial
-        // state. Leaked as a static so every kind answers the same shape.
-        return (&[], match value {
-            Value::Height => &[("height", Value::Height)],
-            Value::Sdf => &[("sdf", Value::Sdf)],
-            _ => &[("warp", Value::Warp)],
-        });
-    }
-    // Every other node is an op, and the op table declares its ports.
-    kind.op(0)
-        .and_then(|op| opgen::ports(op.kind))
-        .unwrap_or((&[], &[]))
-}
 
 /// Does gate `outer` contain every point of gate `inner`?
 ///
@@ -221,7 +190,7 @@ pub fn compile(nodes: &[NodeDef]) -> Result<Program, Error> {
     // with the spawners that read them.
     let mut fields: HashMap<String, u32> = HashMap::default();
     for f in &flat {
-        if !matches!(f.node.kind, NodeKind::Field { .. }) {
+        if f.node.node.kind() != "field" {
             continue;
         }
         let Some(name) = f.name else {
@@ -249,7 +218,7 @@ pub fn compile(nodes: &[NodeDef]) -> Result<Program, Error> {
     let mut ops = Vec::with_capacity(flat.len());
 
     for (i, f) in flat.iter().enumerate() {
-        let (ins, outs) = ports(&f.node.kind);
+        let (ins, outs) = f.node.node.0.ports();
 
         for (port, _) in f.node.wires.iter() {
             if !ins.iter().any(|(p, _)| p == port) {
@@ -285,7 +254,7 @@ pub fn compile(nodes: &[NodeDef]) -> Result<Program, Error> {
                         name: name.clone(),
                     });
                 }
-                let (_, produced) = ports(&flat[j].node.kind);
+                let (_, produced) = flat[j].node.node.0.ports();
                 let got = produced.first().map(|(_, v)| *v);
                 if got != Some(*want) {
                     return Err(Error::WrongType {
@@ -343,7 +312,7 @@ pub fn compile(nodes: &[NodeDef]) -> Result<Program, Error> {
             .and_then(|n| fields.get(n))
             .copied()
             .unwrap_or_default();
-        if let Some(op) = f.node.kind.op(slot) {
+        if let Some(op) = f.node.node.0.op(slot) {
             ops.push(match f.region {
                 Some(band) => op.region(band),
                 None => op,
@@ -366,6 +335,79 @@ pub fn names(nodes: &[NodeDef]) -> Vec<String> {
         .map(str::to_string)
         .collect()
 }
+
+pub mod node;
+pub mod nodes;
+pub mod registry;
+
+pub use node::{AnyNode, CloneNode, Domain, Node, Ports, ReflectNode};
+pub use registry::with_registry;
+
+/// One node of a level's graph: a name, the inputs it consumes, and what
+/// it is.
+///
+/// Every input is named. There is no ordering rule that supplies one
+/// implicitly, because an edge nothing writes down is an edge no level can
+/// rewire, no editor can draw and no invalidation can follow — which is
+/// what the generator's shared registers were.
+#[derive(Reflect, Clone, Debug, PartialEq, Default)]
+pub struct NodeDef {
+    /// What other nodes call this one. Required only where something
+    /// refers to it, so the long unbranching middle of a chain need not
+    /// invent names nothing uses.
+    pub name: Option<String>,
+    /// Port name to the node feeding it. A port may take several sources
+    /// where the domain genuinely merges — the megastructure's seven
+    /// region-gated `shafts_xz` into one `shafts_cut` — and the compiler
+    /// checks those gates are disjoint.
+    pub wires: Wires,
+    /// What this node IS. Its type is the kind, its fields are the schema.
+    pub node: AnyNode,
+}
+
+/// A node's inputs, by port name.
+///
+/// A `BTreeMap` so a port is written once and the file round-trips in a
+/// stable order — a level is a document under version control, and a map
+/// that reshuffled its keys on every save would make every diff a lie.
+#[derive(Reflect, Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
+#[serde(transparent)]
+pub struct Wires(pub std::collections::BTreeMap<String, Wire>);
+
+impl Wires {
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    pub fn get(&self, port: &str) -> Option<&Wire> {
+        self.0.get(port)
+    }
+
+    /// Every (port, wire) pair, for the compiler's unknown-port check.
+    pub fn iter(&self) -> impl Iterator<Item = (&String, &Wire)> {
+        self.0.iter()
+    }
+}
+
+/// What a port is wired to.
+#[derive(Reflect, Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(untagged)]
+pub enum Wire {
+    One(String),
+    /// Several producers into one port, for a value only one of them
+    /// defines at any given point.
+    Many(Vec<String>),
+}
+
+impl Wire {
+    pub fn sources(&self) -> &[String] {
+        match self {
+            Wire::One(name) => std::slice::from_ref(name),
+            Wire::Many(names) => names,
+        }
+    }
+}
+
 
 #[cfg(test)]
 mod tests;

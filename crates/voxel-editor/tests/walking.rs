@@ -7,11 +7,12 @@
 
 use bevy::platform::collections::HashSet;
 use voxel_editor::{rows, Num, RowKind};
+use voxel_engine::graph::registry;
 use voxel_engine::LevelDef;
 
 fn planet() -> LevelDef {
     let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../levels/planet.json");
-    LevelDef::from_json(&std::fs::read_to_string(path).unwrap()).unwrap()
+    LevelDef::from_json(&std::fs::read_to_string(path).unwrap(), &registry::engine_kinds()).unwrap()
 }
 
 fn open(paths: &[&str]) -> HashSet<String> {
@@ -56,7 +57,7 @@ fn no_declared_range_excludes_a_value_a_level_ships() {
             "{}/../../levels/{name}.json",
             env!("CARGO_MANIFEST_DIR")
         );
-        let level = LevelDef::from_json(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        let level = LevelDef::from_json(&std::fs::read_to_string(&path).unwrap(), &registry::engine_kinds()).unwrap();
         for row in rows(&level, &everything(&level)) {
             let RowKind::Number {
                 value,
@@ -102,18 +103,40 @@ fn nothing_is_walked_that_is_not_open() {
     assert!(rows(&level, &open(&[".lod"])).len() > shut.len());
 }
 
-/// The node vocabulary is an enum, so the palette is `EnumInfo` and needs
-/// no registration list to go stale.
+/// The vocabulary is the type registry, not an enum.
+///
+/// So the palette cannot go stale against a list somebody forgot to
+/// extend, and a host's kinds appear in it without this crate — or the
+/// engine — naming them.
 #[test]
-fn a_node_row_offers_every_kind_in_the_vocabulary() {
-    let level = planet();
-    let rows = rows(&level, &open(&[".nodes", ".nodes[4]"]));
-    let RowKind::Variant { options, current, .. } = &row_at(&rows, ".nodes[4].kind").kind else {
-        panic!("a node kind is an enum")
+fn the_vocabulary_is_whatever_is_registered() {
+    let kinds = registry::engine_kinds();
+    let names: Vec<&str> = {
+        let reg = kinds.read();
+        registry::kinds(&reg).into_iter().map(|(k, _)| k).collect()
     };
-    assert!(options.len() > 10, "the whole op set: {options:?}");
-    assert!(options.contains(&"HeightFbm".to_string()));
-    assert!(options.contains(current), "the current variant is offered");
+    assert!(names.len() > 15, "the whole shipped set: {names:?}");
+    for expected in ["height_fbm", "region", "sdf_void", "shafts_cut"] {
+        assert!(names.contains(&expected), "{expected} missing from {names:?}");
+    }
+}
+
+/// A node walks as the struct it IS: the editor reaches its fields through
+/// the boxed trait object, so opening one shows `HeightFbm`'s parameters
+/// and not a wrapper.
+#[test]
+fn a_node_walks_as_its_own_type() {
+    let level = planet();
+    let rows = rows(&level, &open(&[".nodes", ".nodes[4]", ".nodes[4].node"]));
+    let node = row_at(&rows, ".nodes[4].node");
+    assert!(
+        matches!(node.kind, RowKind::Group { .. }),
+        "a node is a struct, not an opaque value"
+    );
+    assert!(
+        rows.iter().any(|r| r.path == ".nodes[4].node.amp"),
+        "its own fields are reachable"
+    );
 }
 
 /// A material id is a choice among the ids this level defines, not a
@@ -170,8 +193,8 @@ fn a_colour_pair_is_two_swatches() {
 #[test]
 fn rebuilds_reaches_the_numbers_inside_a_restreaming_section() {
     let level = planet();
-    let rows = rows(&level, &open(&[".nodes", ".nodes[4]", ".nodes[4].kind"]));
-    assert!(row_at(&rows, ".nodes[4].kind.amp").rebuilds);
+    let rows = rows(&level, &open(&[".nodes", ".nodes[4]", ".nodes[4].node"]));
+    assert!(row_at(&rows, ".nodes[4].node.amp").rebuilds);
     // And does not leak sideways into the cheap sections.
     let rows = rows_of_materials(&level);
     assert!(!rows.iter().any(|r| r.rebuilds), "a material is a table upload");

@@ -221,7 +221,11 @@ mod tests {
 
     #[test]
     fn water_color_reads_the_material_table_with_fallback() {
-        let mut level = LevelDef::from_json(include_str!("../../../levels/planet.json")).unwrap();
+        let mut level = LevelDef::from_json(
+            include_str!("../../../levels/planet.json"),
+            &voxel_engine::graph::registry::engine_kinds(),
+        )
+        .unwrap();
         // planet material 4 is the river surface color.
         let c = surface_for(&level).color(4);
         assert!(c[0] > 0.0 && c[2] > c[0], "unexpected river tint {c:?}");

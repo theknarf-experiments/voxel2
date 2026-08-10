@@ -19,7 +19,16 @@ fn shipped_json(name: &str) -> serde_json::Value {
 }
 
 fn shipped(name: &str) -> LevelDef {
-    serde_json::from_value(shipped_json(name)).unwrap()
+    from_json_value(shipped_json(name))
+}
+
+/// Parse with the engine's node kinds in scope. The node set is open, so
+/// a kind is only a name until a registry says what type it is.
+fn from_json_value(v: serde_json::Value) -> LevelDef {
+    voxel_engine::graph::with_registry(&voxel_engine::graph::registry::engine_kinds(), || {
+        serde_json::from_value(v)
+    })
+    .unwrap()
 }
 
 /// A shipped level with one field replaced. Patching the JSON keeps these
@@ -27,7 +36,7 @@ fn shipped(name: &str) -> LevelDef {
 fn level_with(name: &str, field: &str, value: serde_json::Value) -> LevelDef {
     let mut level = shipped_json(name);
     level[field] = value;
-    serde_json::from_value(level).unwrap()
+    from_json_value(level)
 }
 
 /// Just enough app to run a system that loads worlds. Deliberately NOT

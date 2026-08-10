@@ -1,9 +1,10 @@
 use super::*;
+use crate::graph::registry;
 use crate::level::LevelDef;
 
 fn shipped(name: &str) -> LevelDef {
     let path = format!("{}/../../levels/{name}.json", env!("CARGO_MANIFEST_DIR"));
-    LevelDef::from_json(&std::fs::read_to_string(path).unwrap()).unwrap()
+    LevelDef::from_json(&std::fs::read_to_string(path).unwrap(), &registry::engine_kinds()).unwrap()
 }
 
 /// The program each level compiled to before it was a graph.
@@ -71,7 +72,12 @@ fn fields_are_allocated_in_declaration_order() {
 // document somebody hand-wrote is a compiler they will guess against.
 
 fn node(json: &str) -> NodeDef {
-    serde_json::from_str(json).unwrap()
+    with_registry(&registry::engine_kinds(), || serde_json::from_str(json)).unwrap()
+}
+
+/// Parse a list of nodes with the engine's kinds in scope.
+fn parse(json: &str) -> Result<Vec<NodeDef>, serde_json::Error> {
+    with_registry(&registry::engine_kinds(), || serde_json::from_str(json))
 }
 
 fn err(nodes: &[NodeDef]) -> String {
@@ -156,8 +162,7 @@ fn a_port_that_does_not_exist_is_refused() {
 /// one packed gate a `WorldOp` carries.
 #[test]
 fn nested_scopes_intersect_into_one_gate() {
-    let nodes: Vec<NodeDef> = serde_json::from_str(
-        r#"[
+    let nodes: Vec<NodeDef> = parse(r#"[
           {"kind":"sdf_void","name":"void"},
           {"kind":"region","axes":[0.0,0.8,0.0,1.0],"nodes":[
             {"kind":"region","axes":[0.2,1.0,0.0,0.5],"nodes":[
@@ -165,8 +170,7 @@ fn nested_scopes_intersect_into_one_gate() {
             ]}
           ]}
         ]"#,
-    )
-    .unwrap();
+    ).unwrap();
     let ops = compile(&nodes).unwrap().ops;
     assert_eq!(ops.len(), 1, "origins and scopes emit nothing");
     let band = voxel_core::worldop::unpack_region(ops[0].region);
@@ -204,14 +208,14 @@ fn a_read_sees_the_writes_its_own_region_can_reach() {
     };
 
     // Ungated: both gated writes are still standing, so both are named.
-    let both: Vec<NodeDef> = serde_json::from_str(&level(
+    let both: Vec<NodeDef> = parse(&level(
         r#"{"kind":"shafts_cut","in":{"sdf":"void","shafts":["a","b"]}}"#,
     ))
     .unwrap();
     assert_eq!(compile(&both).unwrap().ops.len(), 3);
 
     // Naming only one of them from outside is a stale read, and says so.
-    let partial: Vec<NodeDef> = serde_json::from_str(&level(
+    let partial: Vec<NodeDef> = parse(&level(
         r#"{"kind":"shafts_cut","in":{"sdf":"void","shafts":"a"}}"#,
     ))
     .unwrap();
@@ -220,7 +224,7 @@ fn a_read_sees_the_writes_its_own_region_can_reach() {
 
     // Gated to one region: only that region's write is reachable, so
     // naming just it is right and naming both is not.
-    let inside: Vec<NodeDef> = serde_json::from_str(&level(
+    let inside: Vec<NodeDef> = parse(&level(
         r#"{"kind":"region","axes":[0.0,0.4,0.0,1.0],"nodes":[
              {"kind":"shafts_cut","in":{"sdf":"void","shafts":"a"}}
            ]}"#,

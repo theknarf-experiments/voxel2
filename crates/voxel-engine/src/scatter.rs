@@ -285,7 +285,11 @@ mod tests {
 
     fn shipped_planet() -> crate::LevelDef {
         let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../levels/planet.json");
-        crate::LevelDef::from_json(&std::fs::read_to_string(path).unwrap()).unwrap()
+        crate::LevelDef::from_json(
+            &std::fs::read_to_string(path).unwrap(),
+            &crate::graph::registry::engine_kinds(),
+        )
+        .unwrap()
     }
 
     /// The whole point of [`coverage`]: a population painted where its

@@ -15,6 +15,7 @@ use voxel_core::csg::CsgOp;
 use voxel_core::worldop::*;
 
 use crate::planning::{HostPlanning, OpsSource, WorldQuery};
+use crate::graph::NodeDef;
 use crate::schema;
 use crate::streaming::StreamingRebuild;
 use crate::{LodConfig, VoxelEnginePlugin};
@@ -742,261 +743,6 @@ pub struct DoorDef {
     pub salt: i32,
 }
 
-/// Everything a level's graph is made of: one vocabulary, one tag.
-///
-/// Point-domain ops (the JSON authoring form of `voxel_core::WorldOp`),
-/// the scope that gates them, and the origins their chains start from.
-/// A node's kind is what says where it runs and what it may be wired to;
-/// see `crate::graph` for the compiler that checks that.
-#[derive(Reflect, Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-pub enum NodeKind {
-    /// A region gate and the nodes it applies to.
-    ///
-    /// Nesting intersects: a box inside a box is a box, so any depth still
-    /// compiles to the single packed gate a `WorldOp` carries. What this
-    /// replaces is the same four numbers repeated on sixty rows, with the
-    /// district structure they describe left implicit.
-    Region {
-        /// `[a0, a1, b0, b1]` in the axes `region_axes` samples.
-        axes: [f32; 4],
-        nodes: Vec<NodeDef>,
-    },
-    /// Sea level: the height register before anything adds to it.
-    ///
-    /// An origin emits no op — it IS the initial register state. It exists
-    /// so that "every input is named" has no exception at the start of a
-    /// chain, and so the editor can show where one begins.
-    HeightZero,
-    /// Empty space: the SDF register before anything merges into it.
-    ///
-    /// The default because it is the emptiest thing a node can be: a new
-    /// node in an editor should start as something that changes nothing.
-    #[default]
-    SdfVoid,
-    /// No domain warp: the offset height and field ops sample through
-    /// before any `warp_xz` bends it.
-    WarpNone,
-    /// A band-limited FBM heightfield band added to the height register.
-    HeightFbm {
-        #[serde(default)]
-        offset: [f32; 2],
-        /// Cycles per meter of the first octave.
-        scale: f32,
-        /// Amplitude in meters.
-        amp: f32,
-        octaves: u32,
-        /// Octave shaping: plain fbm, ridged crests, or rounded billows.
-        #[serde(default)]
-        mode: NoiseModeDef,
-    },
-    /// Domain-warp the XZ coordinate later height ops sample (swirled
-    /// coastlines, eroded-looking ridges).
-    WarpXz {
-        #[serde(default)]
-        offset: [f32; 2],
-        scale: f32,
-        /// Warp amplitude in meters.
-        amp: f32,
-        octaves: u32,
-    },
-    /// Anisotropic 3D noise solid: union it in (floating islands, mesas)
-    /// or carve it out (caves, overhangs).
-    Fbm3 {
-        /// Cycles per meter horizontally.
-        scale: f32,
-        /// Vertical-to-horizontal frequency ratio (>1 squashes flat).
-        #[serde(default = "default_one")]
-        y_ratio: f32,
-        octaves: u32,
-        /// Noise iso level the surface sits at (~[-0.5, 0.5]).
-        threshold: f32,
-        /// Meters per unit of noise beyond the threshold.
-        width: f32,
-        #[serde(default)]
-        offset: [f32; 3],
-        #[serde(default)]
-        carve: bool,
-        #[serde(default = "mat_grass")]
-        #[reflect(@schema::OneOf("materials[].id"))]
-        material: u32,
-    },
-    /// Constant meters added to the height register.
-    HeightOffset { value: f32 },
-    /// Cliff step: terrain crossing the `[start, end]` altitude band grows
-    /// an `amp`-meter wall (iq's Rainforest cliff term).
-    HeightStep { start: f32, end: f32, amp: f32 },
-    /// Accumulate an FBM band into a field register: named world data for
-    /// spawner densities and gameplay queries (never the SDF itself).
-    Field {
-        #[serde(default)]
-        offset: [f32; 2],
-        scale: f32,
-        amp: f32,
-        octaves: u32,
-        #[serde(default)]
-        mode: NoiseModeDef,
-        #[serde(default)]
-        bias: f32,
-    },
-    /// Sample the two region axes every band op in this program tests.
-    /// Must come before them; in practice, first.
-    RegionAxes {
-        /// Cycles per meter of each axis. 1e-4 is a ten-kilometre region.
-        scale: [f32; 2],
-        /// Sample offsets `(a_x, a_z, b_x, b_z)`, which is what makes the
-        /// two axes independent of each other.
-        offset: [f32; 4],
-        #[serde(default = "d_band_octaves")]
-        octaves: u32,
-    },
-    /// Add terrain shaped by a region: dunes in one, ridges in another.
-    ///
-    /// Faded in smoothly by how firmly the point is inside the region,
-    /// because two heights must blend where two materials cannot.
-    HeightBandFbm {
-        /// The region, in the axes `region_axes` sampled.
-        a: [f32; 2],
-        #[serde(default = "d_full_band")]
-        b: [f32; 2],
-        #[serde(default)]
-        offset: [f32; 2],
-        scale: f32,
-        amp: f32,
-        octaves: u32,
-        #[serde(default)]
-        mode: NoiseModeDef,
-        /// Constant metres this region sits above (or below) the ground
-        /// around it. The FBM is zero-mean, so without a lift a region
-        /// digs as much as it raises.
-        #[serde(default)]
-        lift: f32,
-        /// Half-width of the fade at the region edge, in band units.
-        /// Derived from the band by default, and that is almost always
-        /// what you want: a feather wider than HALF the band leaves both
-        /// edges still fading at its centre, so the region can never
-        /// reach full weight and its terrain sits at partial amplitude
-        /// everywhere.
-        #[serde(default)]
-        feather: Option<f32>,
-    },
-    /// Repaint the surface material inside a band of two noise axes.
-    ///
-    /// The engine has no idea what a region IS — it compares two numbers
-    /// against a box and swaps a material id. A level composes several of
-    /// these over one `height_surface` to divide a plane into regions,
-    /// and names them whatever it likes in its own file.
-    MaterialBand {
-        /// Material to repaint FROM: only ground the earlier ops left as
-        /// this id is affected, so roads and water are never touched.
-        from: u32,
-        /// Material to repaint TO.
-        #[reflect(@schema::OneOf("materials[].id"))]
-        material: u32,
-        /// Half-open band on the first axis, in 0..1.
-        a: [f32; 2],
-        /// Half-open band on the second axis, in 0..1.
-        #[serde(default = "d_full_band")]
-        b: [f32; 2],
-    },
-    /// Turn the accumulated height into ground.
-    HeightSurface {
-        #[serde(default = "mat_grass")]
-        #[reflect(@schema::OneOf("materials[].id"))]
-        material: u32,
-    },
-    /// Solid mass at coarse LODs (the structure reads as filled from afar).
-    CoarseSolid {
-        #[serde(default = "mat_concrete")]
-        #[reflect(@schema::OneOf("materials[].id"))]
-        material: u32,
-    },
-    /// Establish the structural Y lattice used by slabs/holes/walls/beams.
-    ///
-    /// Carries the same `lod` gate as everything that reads it: a
-    /// district whose storeys are hundreds of metres apart can afford to
-    /// exist at coarse LOD, and its slabs cannot do that without the
-    /// lattice that puts them at a height. Without it `fy` stays at `p.y`
-    /// and every floor in the world collapses onto y = 0.
-    LatticeY {
-        spacing: f32,
-        #[serde(default)]
-        lod: LodGateDef,
-    },
-    /// Floor slabs on the lattice.
-    SlabsY {
-        half_thickness: f32,
-        #[serde(default = "mat_concrete")]
-        #[reflect(@schema::OneOf("materials[].id"))]
-        material: u32,
-        #[serde(default)]
-        lod: LodGateDef,
-    },
-    /// Hash-gated holes cut through the slabs on an XZ grid.
-    GridHoles {
-        cell: f32,
-        chance: f32,
-        half: [f32; 3],
-        #[serde(default)]
-        lod: LodGateDef,
-    },
-    /// Square columns on a jittered XZ grid.
-    PillarsXz {
-        spacing: f32,
-        jitter: f32,
-        /// Base and hash-scaled extra half-width.
-        girth: [f32; 2],
-        #[serde(default = "mat_concrete")]
-        #[reflect(@schema::OneOf("materials[].id"))]
-        material: u32,
-        #[serde(default)]
-        lod: LodGateDef,
-    },
-    /// Hash-gated axis-aligned walls with optional doorways.
-    Walls {
-        /// "x" walls are x-normal (vary along x), "z" walls z-normal.
-        axis: String,
-        spacing: f32,
-        half_thickness: f32,
-        chance: f32,
-        /// Decorrelation salt added to the wall index in the gate hash.
-        #[serde(default)]
-        salt: i32,
-        #[serde(default)]
-        door: Option<DoorDef>,
-        #[serde(default = "mat_concrete")]
-        #[reflect(@schema::OneOf("materials[].id"))]
-        material: u32,
-        #[serde(default)]
-        lod: LodGateDef,
-    },
-    /// Vertical shaft registers on a jittered XZ grid (cut them with
-    /// `shafts_cut`; catwalks with `beams`).
-    ShaftsXz {
-        spacing: f32,
-        jitter: f32,
-        /// Base and hash-scaled extra radius.
-        radius: [f32; 2],
-    },
-    /// Carve the shafts out of everything merged so far.
-    ShaftsCut,
-    /// Meta: the world has a water surface at this sea level (drives the
-    /// ocean draw and shoreline; no SDF effect).
-    /// Catwalk beams bridging the shafts on every Nth lattice level.
-    Beams {
-        every: u32,
-        half_width: f32,
-        #[serde(default)]
-        y: f32,
-        half_height: f32,
-        reach: f32,
-        #[serde(default = "mat_concrete")]
-        #[reflect(@schema::OneOf("materials[].id"))]
-        material: u32,
-        #[serde(default)]
-        lod: LodGateDef,
-    },
-}
 
 /// Octave shaping for `height_fbm`.
 #[derive(Reflect, Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
@@ -1008,21 +754,21 @@ pub enum NoiseModeDef {
     Billow,
 }
 
-fn d_full_band() -> [f32; 2] {
+pub(crate) fn d_full_band() -> [f32; 2] {
     [0.0, 1.0]
 }
-fn d_band_octaves() -> u32 {
+pub(crate) fn d_band_octaves() -> u32 {
     2
 }
 
-fn mat_grass() -> u32 {
+pub(crate) fn mat_grass() -> u32 {
     1
 }
-fn mat_concrete() -> u32 {
+pub(crate) fn mat_concrete() -> u32 {
     2
 }
 
-fn gate_flags(lod: LodGateDef, auto: u32) -> u32 {
+pub(crate) fn gate_flags(lod: LodGateDef, auto: u32) -> u32 {
     match lod {
         LodGateDef::Auto => auto,
         LodGateDef::All => 0,
@@ -1031,265 +777,30 @@ fn gate_flags(lod: LodGateDef, auto: u32) -> u32 {
     }
 }
 
-impl NodeKind {
-    /// Pack into the 64-byte interpreter form.
-    /// Lower to the interpreter form, or `None` for a node that emits no
-    /// op: an origin is the register file's initial state, and a scope is
-    /// a gate its children carry.
-    ///
-    /// `field_slot` is what the compiler allocated for this node's name —
-    /// the level no longer writes slot numbers and no longer has to keep
-    /// them agreeing with the spawners that read them.
-    pub fn op(&self, field_slot: u32) -> Option<WorldOp> {
-        let op = match *self {
-            NodeKind::Region { .. }
-            | NodeKind::HeightZero
-            | NodeKind::SdfVoid
-            | NodeKind::WarpNone => return None,
-            NodeKind::HeightFbm {
-                offset,
-                scale,
-                amp,
-                octaves,
-                mode,
-            } => WorldOp::new(WOP_HEIGHT_FBM)
-                .p0([offset[0], offset[1], scale, amp])
-                .p1([octaves as f32, mode as u32 as f32, 0.0, 0.0]),
-            NodeKind::WarpXz {
-                offset,
-                scale,
-                amp,
-                octaves,
-            } => WorldOp::new(WOP_WARP_XZ)
-                .p0([scale, amp, offset[0], offset[1]])
-                .p1([octaves as f32, 0.0, 0.0, 0.0]),
-            NodeKind::Fbm3 {
-                scale,
-                y_ratio,
-                octaves,
-                threshold,
-                width,
-                offset,
-                carve,
-                material,
-            } => WorldOp::new(WOP_FBM3)
-                .material(material)
-                .p0([scale, scale * y_ratio, threshold, width])
-                .p1([
-                    offset[0],
-                    offset[1],
-                    offset[2],
-                    if carve { 1.0 } else { 0.0 },
-                ])
-                .p2([octaves as f32, 0.0, 0.0, 0.0]),
-            NodeKind::HeightOffset { value } => {
-                WorldOp::new(WOP_HEIGHT_OFFSET).p0([value, 0.0, 0.0, 0.0])
-            }
-            NodeKind::HeightStep { start, end, amp } => {
-                WorldOp::new(WOP_HEIGHT_STEP).p0([start, end, amp, 0.0])
-            }
-            NodeKind::Field {
-                offset,
-                scale,
-                amp,
-                octaves,
-                mode,
-                bias,
-            } => WorldOp::new(WOP_FIELD)
-                .p0([offset[0], offset[1], scale, amp])
-                .p1([octaves as f32, mode as u32 as f32, field_slot as f32, bias]),
-            NodeKind::RegionAxes {
-                scale,
-                offset,
-                octaves,
-            } => WorldOp::new(WOP_REGION_AXES)
-                .p0([offset[0], offset[1], scale[0], scale[1]])
-                .p1([offset[2], offset[3], octaves as f32, 0.0]),
-            NodeKind::HeightBandFbm {
-                a,
-                b,
-                offset,
-                scale,
-                amp,
-                octaves,
-                mode,
-                lift,
-                feather,
-            } => WorldOp::new(WOP_HEIGHT_BAND_FBM)
-                .p0([offset[0], offset[1], scale, amp])
-                .p1([
-                    octaves as f32,
-                    mode as u32 as f32,
-                    feather.unwrap_or_else(|| voxel_worldgen::program::band_feather(a)),
-                    lift,
-                ])
-                .p2([a[0], a[1], b[0], b[1]]),
-            NodeKind::MaterialBand {
-                from,
-                material,
-                a,
-                b,
-            } => WorldOp::new(WOP_MATERIAL_BAND)
-                .material(material)
-                .p0([a[0], a[1], b[0], b[1]])
-                .p1([0.0, 0.0, from as f32, 0.0]),
-            NodeKind::HeightSurface { material } => {
-                WorldOp::new(WOP_HEIGHT_SURFACE).material(material)
-            }
-            NodeKind::CoarseSolid { material } => WorldOp::new(WOP_COARSE_SOLID)
-                .flags(WOP_FLAG_COARSE_ONLY)
-                .material(material),
-            NodeKind::LatticeY { spacing, lod } => WorldOp::new(WOP_LATTICE_Y)
-                .flags(gate_flags(lod, WOP_FLAG_FINE_ONLY))
-                .p0([spacing, 0.0, 0.0, 0.0]),
-            NodeKind::SlabsY {
-                half_thickness,
-                material,
-                lod,
-            } => WorldOp::new(WOP_SLABS_Y)
-                .flags(gate_flags(lod, WOP_FLAG_FINE_ONLY))
-                .material(material)
-                .p0([half_thickness, 0.0, 0.0, 0.0]),
-            NodeKind::GridHoles {
-                cell,
-                chance,
-                half,
-                lod,
-            } => WorldOp::new(WOP_GRID_HOLES)
-                .flags(gate_flags(lod, WOP_FLAG_FINE_ONLY))
-                .p0([cell, chance, 0.0, 0.0])
-                .p1([half[0], half[1], half[2], 0.0]),
-            NodeKind::PillarsXz {
-                spacing,
-                jitter,
-                girth,
-                material,
-                lod,
-            } => WorldOp::new(WOP_PILLARS_XZ)
-                .flags(gate_flags(lod, WOP_FLAG_FINE_ONLY))
-                .material(material)
-                .p0([spacing, jitter, girth[0], girth[1]]),
-            NodeKind::Walls {
-                ref axis,
-                spacing,
-                half_thickness,
-                chance,
-                salt,
-                ref door,
-                material,
-                lod,
-            } => {
-                let axis_flag = if axis == "z" { 1.0 } else { 0.0 };
-                let mut op = WorldOp::new(WOP_WALLS)
-                    .flags(gate_flags(lod, WOP_FLAG_FINE_ONLY))
-                    .material(material)
-                    .p0([spacing, half_thickness, chance, axis_flag]);
-                if let Some(d) = door {
-                    op = op
-                        .p1([salt as f32, d.cell, d.chance, d.salt as f32])
-                        .p2([d.half[0], d.half[1], d.half[2], d.y]);
-                } else {
-                    // No doorways: chance 0 never passes the hash gate.
-                    op = op.p1([salt as f32, 1.0, 0.0, 0.0]);
-                }
-                op
-            }
-            NodeKind::ShaftsXz {
-                spacing,
-                jitter,
-                radius,
-            } => WorldOp::new(WOP_SHAFTS_XZ).p0([spacing, jitter, radius[0], radius[1]]),
-            NodeKind::ShaftsCut => WorldOp::new(WOP_SHAFTS_CUT),
-            NodeKind::Beams {
-                every,
-                half_width,
-                y,
-                half_height,
-                reach,
-                material,
-                lod,
-            } => WorldOp::new(WOP_BEAMS)
-                .flags(gate_flags(lod, WOP_FLAG_FINE_ONLY))
-                .material(material)
-                .p0([every as f32, half_width, y, half_height])
-                .p1([reach, 0.0, 0.0, 0.0]),
-        };
-        Some(op)
-    }
-}
-
-/// One node of a level's graph: a name, the inputs it consumes, and what
-/// it is.
-///
-/// Every input is named. There is no ordering rule that supplies one
-/// implicitly, because an edge nothing writes down is an edge no level can
-/// rewire, no editor can draw and no invalidation can follow — which is
-/// what the generator's shared registers were.
-#[derive(Reflect, Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
-pub struct NodeDef {
-    /// What other nodes call this one. Required only where something
-    /// refers to it, so the long unbranching middle of a chain need not
-    /// invent names nothing uses.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub name: Option<String>,
-    /// Port name to the node feeding it. A port may take several sources
-    /// where the domain genuinely merges — the megastructure's seven
-    /// region-gated `shafts_xz` into one `shafts_cut` — and the compiler
-    /// checks those gates are disjoint.
-    #[serde(default, rename = "in", skip_serializing_if = "Wires::is_empty")]
-    pub wires: Wires,
-    #[serde(flatten)]
-    pub kind: NodeKind,
-}
-
-/// A node's inputs, by port name.
-///
-/// A `BTreeMap` so a port is written once and the file round-trips in a
-/// stable order — a level is a document under version control, and a map
-/// that reshuffled its keys on every save would make every diff a lie.
-#[derive(Reflect, Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
-#[serde(transparent)]
-pub struct Wires(pub std::collections::BTreeMap<String, Wire>);
-
-impl Wires {
-    pub fn is_empty(&self) -> bool {
-        self.0.is_empty()
-    }
-
-    pub fn get(&self, port: &str) -> Option<&Wire> {
-        self.0.get(port)
-    }
-
-    /// Every (port, wire) pair, for the compiler's unknown-port check.
-    pub fn iter(&self) -> impl Iterator<Item = (&String, &Wire)> {
-        self.0.iter()
-    }
-}
-
-/// What a port is wired to.
-#[derive(Reflect, Serialize, Deserialize, Clone, Debug, PartialEq)]
-#[serde(untagged)]
-pub enum Wire {
-    One(String),
-    /// Several producers into one port, for a value only one of them
-    /// defines at any given point.
-    Many(Vec<String>),
-}
-
-impl Wire {
-    pub fn sources(&self) -> &[String] {
-        match self {
-            Wire::One(name) => std::slice::from_ref(name),
-            Wire::Many(names) => names,
-        }
-    }
-}
-
-
 
 impl LevelDef {
-    pub fn from_json(json: &str) -> Result<Self, serde_json::Error> {
-        serde_json::from_str(json)
+    /// Read a level, resolving each node's `"kind"` through `registry`.
+    ///
+    /// The registry is needed because the node set is OPEN: a kind names a
+    /// registered type, and which types exist is decided by whatever the
+    /// host registered. Hosts pass the app's registry; tests and tools that
+    /// only need the engine's own kinds can use
+    /// [`crate::graph::registry::engine_kinds`].
+    pub fn from_json(
+        json: &str,
+        registry: &bevy::reflect::TypeRegistryArc,
+    ) -> Result<Self, serde_json::Error> {
+        crate::graph::with_registry(registry, || serde_json::from_str(json))
+    }
+
+    /// Write a level back, with each node's params serialized by its own
+    /// type. The inverse of [`LevelDef::from_json`], and it needs the
+    /// registry for the same reason.
+    pub fn to_json(
+        &self,
+        registry: &bevy::reflect::TypeRegistryArc,
+    ) -> Result<String, serde_json::Error> {
+        crate::graph::with_registry(registry, || serde_json::to_string_pretty(self))
     }
 
     /// This level's generator at `seed`. Layers need one to sample the
@@ -1598,6 +1109,7 @@ fn watch_level_file(
     mut source: ResMut<LevelSource>,
     mut level: ResMut<LevelDef>,
     planner: Res<HostPlanner>,
+    registry: Res<AppTypeRegistry>,
 ) {
     if !source.poll.tick(time.delta()).just_finished() {
         return;
@@ -1612,7 +1124,7 @@ fn watch_level_file(
 
     let new = match std::fs::read_to_string(&source.path)
         .map_err(|e| e.to_string())
-        .and_then(|json| LevelDef::from_json(&json).map_err(|e| e.to_string()))
+        .and_then(|json| LevelDef::from_json(&json, &registry.0).map_err(|e| e.to_string()))
     {
         Ok(new) => new,
         Err(e) => {
@@ -1746,7 +1258,7 @@ mod tests {
     /// the canopy layout: every number here is visible in the level file.
     #[test]
     fn a_recipe_packs_into_the_components_the_shader_reads() {
-        let planet = LevelDef::from_json(&shipped("planet.json")).unwrap();
+        let planet = LevelDef::from_json(&shipped("planet.json"), &crate::graph::registry::engine_kinds()).unwrap();
         let canopy = planet
             .materials
             .iter()
@@ -1779,7 +1291,7 @@ mod tests {
     /// instead of asking why.
     #[test]
     fn an_edit_to_anything_the_world_is_built_from_rebuilds_it() {
-        let planet = LevelDef::from_json(&shipped("planet.json")).unwrap();
+        let planet = LevelDef::from_json(&shipped("planet.json"), &crate::graph::registry::engine_kinds()).unwrap();
         assert!(
             !needs_regen(&planet, &planet),
             "an unchanged level must not rebuild — a repaint would loop"
@@ -1888,7 +1400,7 @@ mod tests {
     fn the_rebuilds_attribute_says_what_needs_regen_does() {
         use bevy::reflect::Typed;
 
-        let planet = LevelDef::from_json(&shipped("planet.json")).unwrap();
+        let planet = LevelDef::from_json(&shipped("planet.json"), &crate::graph::registry::engine_kinds()).unwrap();
         let root = LevelDef::type_info();
 
         /// A field, an edit big enough for `PartialEq` to see, and whether
@@ -1970,7 +1482,7 @@ mod tests {
     #[test]
     fn a_level_can_be_reached_by_field_path() {
         use bevy::reflect::GetPath;
-        let mut planet = LevelDef::from_json(&shipped("planet.json")).unwrap();
+        let mut planet = LevelDef::from_json(&shipped("planet.json"), &crate::graph::registry::engine_kinds()).unwrap();
 
         // The path BRP would address, on the real shipped schema. Found by
         // VARIANT, not by index: a path only reaches the fields the
@@ -2008,7 +1520,7 @@ mod tests {
 
     #[test]
     fn shipped_levels_parse() {
-        let planet = LevelDef::from_json(&shipped("planet.json")).unwrap();
+        let planet = LevelDef::from_json(&shipped("planet.json"), &crate::graph::registry::engine_kinds()).unwrap();
         // Planning is the host's: the engine carries the block
         // without ever parsing it.
         assert!(planet.planning.is_object());
@@ -2046,7 +1558,7 @@ mod tests {
         assert!(planet.materials.iter().any(|m| m.id() == 1));
         assert!(planet.materials.iter().any(|m| m.id() == 3));
 
-        let mega = LevelDef::from_json(&shipped("megastructure.json")).unwrap();
+        let mega = LevelDef::from_json(&shipped("megastructure.json"), &crate::graph::registry::engine_kinds()).unwrap();
         assert!(mega.planning.is_object());
         let packed = crate::graph::compile(&mega.nodes).unwrap().ops;
         assert!(mega.scatter.is_empty());
@@ -2061,9 +1573,10 @@ mod tests {
 
     #[test]
     fn levels_roundtrip() {
-        let planet = LevelDef::from_json(&shipped("planet.json")).unwrap();
-        let json = serde_json::to_string(&planet).unwrap();
-        let back = LevelDef::from_json(&json).unwrap();
+        let planet = LevelDef::from_json(&shipped("planet.json"), &crate::graph::registry::engine_kinds()).unwrap();
+        let reg = crate::graph::registry::engine_kinds();
+        let json = planet.to_json(&reg).unwrap();
+        let back = LevelDef::from_json(&json, &reg).unwrap();
         assert_eq!(back.nodes, planet.nodes);
         assert_eq!(back.materials, planet.materials);
         assert_eq!(back.environment, planet.environment);
@@ -2080,7 +1593,7 @@ mod tests {
         //
         // The megastructure has no such oracle — see the test below,
         // which asserts what is actually true of it instead.
-        let planet = LevelDef::from_json(&shipped("planet.json")).unwrap();
+        let planet = LevelDef::from_json(&shipped("planet.json"), &crate::graph::registry::engine_kinds()).unwrap();
         let packed = crate::graph::compile(&planet.nodes).unwrap().ops;
         assert_eq!(packed, voxel_worldgen::program::planet_program());
     }
@@ -2094,7 +1607,7 @@ mod tests {
     /// architecture, a band nothing paints, a material with no recipe.
     #[test]
     fn every_megastructure_district_is_whole() {
-        let mega = LevelDef::from_json(&shipped("megastructure.json")).unwrap();
+        let mega = LevelDef::from_json(&shipped("megastructure.json"), &crate::graph::registry::engine_kinds()).unwrap();
         let ops = crate::graph::compile(&mega.nodes).unwrap().ops;
 
         assert_eq!(ops[0].kind, WOP_REGION_AXES, "the axes must be filled first");
@@ -2139,7 +1652,7 @@ mod tests {
     /// them honest when somebody retunes the axis scale or octaves.
     #[test]
     fn no_megastructure_district_is_a_sliver() {
-        let mega = LevelDef::from_json(&shipped("megastructure.json")).unwrap();
+        let mega = LevelDef::from_json(&shipped("megastructure.json"), &crate::graph::registry::engine_kinds()).unwrap();
         let gen = mega.generator(0);
         // Through `surface_material_weight`, which is the same query the
         // host gates content with — so this measures the districts as

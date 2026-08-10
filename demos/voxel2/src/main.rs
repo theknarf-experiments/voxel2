@@ -253,7 +253,12 @@ fn main() {
             std::process::exit(1);
         }
     };
-    let level = match LevelDef::from_json(&json) {
+    // The node set is open, so parsing needs to know which kinds exist.
+    // Built here rather than taken from the App because the level is read
+    // before there is one; a host with its own kinds registers them onto
+    // this before parsing.
+    let kinds = voxel_engine::graph::registry::engine_kinds();
+    let level = match LevelDef::from_json(&json, &kinds) {
         Ok(level) => level,
         Err(e) => {
             eprintln!("failed to parse level '{path}': {e}");

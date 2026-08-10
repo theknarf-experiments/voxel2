@@ -672,7 +672,11 @@ mod tests {
 
     fn shipped(name: &str) -> LevelDef {
         let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../levels/");
-        LevelDef::from_json(&std::fs::read_to_string(format!("{path}{name}")).unwrap()).unwrap()
+        LevelDef::from_json(
+            &std::fs::read_to_string(format!("{path}{name}")).unwrap(),
+            &voxel_engine::graph::registry::engine_kinds(),
+        )
+        .unwrap()
     }
 
     fn validate_stack_of(level: &LevelDef) -> Result<(), String> {
