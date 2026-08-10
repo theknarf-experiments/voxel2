@@ -199,11 +199,11 @@ fn a_colour_pair_is_two_swatches() {
     );
     assert!(matches!(
         row_at(&rows, &format!(".materials[{at}].low")).kind,
-        RowKind::Color(_)
+        RowKind::Color { .. }
     ));
     assert!(matches!(
         row_at(&rows, &format!(".materials[{at}].mid[0]")).kind,
-        RowKind::Color(_)
+        RowKind::Color { .. }
     ));
 }
 
@@ -414,4 +414,33 @@ fn a_section_filter_applies_only_at_the_top() {
         rows.iter().any(|r| r.path.ends_with(".node.nodes")),
         "a scope's own `nodes` must survive a tab that hides the section"
     );
+}
+
+/// A colour opens into the numbers it is made of, which is how one is
+/// edited: the swatch says what it IS, the components are what it is made
+/// of, and each of those is an ordinary draggable number.
+#[test]
+fn a_colour_opens_into_its_components() {
+    let level = planet();
+    let at = level
+        .materials
+        .iter()
+        .position(|m| matches!(m, voxel_engine::level::MaterialDef::Surface { .. }))
+        .expect("planet ships a surface material");
+    let base = format!(".materials[{at}].base");
+    let rows = rows(
+        &level,
+        &open(&[".materials", &format!(".materials[{at}]"), &base]),
+    );
+
+    let RowKind::Color { rgb, expanded } = row_at(&rows, &base).kind else {
+        panic!("base is a colour")
+    };
+    assert!(expanded);
+    for (i, want) in rgb.iter().enumerate() {
+        let RowKind::Number { value, .. } = row_at(&rows, &format!("{base}[{i}]")).kind else {
+            panic!("a component is a number")
+        };
+        assert_eq!(value as f32, *want, "component {i}");
+    }
 }

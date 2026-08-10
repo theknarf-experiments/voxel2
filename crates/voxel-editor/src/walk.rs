@@ -58,8 +58,13 @@ pub enum RowKind {
     },
     Bool(bool),
     Text(String),
-    /// Linear RGB, from a field marked [`schema::AsColor`].
-    Color([f32; 3]),
+    /// Linear RGB, from a field marked [`schema::AsColor`]. Opens into its
+    /// own components, which is how a colour is EDITED: the swatch says
+    /// what it is and the numbers under it are what it is made of.
+    Color {
+        rgb: [f32; 3],
+        expanded: bool,
+    },
     /// A [`schema::OneOf`] reference: the value must be one of `options`.
     Choice {
         current: String,
@@ -307,8 +312,22 @@ fn emit(
             docs,
             depth,
             rebuilds: hints.rebuilds,
-            kind: RowKind::Color(rgb),
+            kind: RowKind::Color { rgb, expanded },
         });
+        if expanded {
+            // Without the colour hint, or every component would be a
+            // one-element swatch of itself.
+            children(
+                cx,
+                value,
+                path,
+                depth + 1,
+                Hints {
+                    color: false,
+                    ..hints
+                },
+            );
+        }
         return;
     }
 

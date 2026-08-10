@@ -190,7 +190,9 @@ fn menu(
 /// columns start at the same x on every row.
 fn gutter(row: &Row, style: &PanelStyle) -> Box<dyn SceneList> {
     let expanded = match row.kind {
-        RowKind::Group { expanded, .. } | RowKind::Variant { expanded, .. } => expanded,
+        RowKind::Group { expanded, .. }
+        | RowKind::Variant { expanded, .. }
+        | RowKind::Color { expanded, .. } => expanded,
         _ => {
             let w = px(style.gutter);
             return Box::new(bsn_list!(Node {
@@ -418,7 +420,7 @@ fn value_widget(row: &Row, style: &PanelStyle) -> Box<dyn SceneList> {
             Box::new(vec![cell(style.value, self::text(s, style.font))])
         }
 
-        RowKind::Color(rgb) => {
+        RowKind::Color { rgb, .. } => {
             let value = Color::linear_rgb(rgb[0], rgb[1], rgb[2]);
             Box::new(bsn_list!(
                 @FeathersColorSwatch
