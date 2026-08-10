@@ -305,6 +305,12 @@ fn main() {
             }),
             ..default()
         }))
+        .insert_resource(bevy::light::DirectionalLightShadowMap {
+            size: std::env::var("VOXEL_SHADOW_MAP")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(2048),
+        })
         .insert_resource(HostScene(scene))
         .insert_resource(WorldProps(
             [(0, props::PropTable::for_level(std::path::Path::new(&path)))]
@@ -455,6 +461,22 @@ fn setup_scene(mut commands: Commands, scene: Res<HostScene>) {
     //
     // `VOXEL_MSAA=0|2|4|fxaa` overrides, so the alternatives stay
     // measurable without a rebuild.
+
+    // How a shadow edge is filtered. Bevy defaults to `Gaussian`, nine
+    // taps a lookup, and `hw` is a single hardware 2x2 — which turns out
+    // to buy almost nothing, because nine taps hit the same cache lines
+    // as one. Kept as a handle, not because it is a win; see the shadow
+    // table in `sync_world_suns` for what is and is not.
+    match std::env::var("VOXEL_SHADOW_FILTER").as_deref() {
+        Ok("hw") => {
+            camera.insert(bevy::light::ShadowFilteringMethod::Hardware2x2);
+        }
+        Ok("gaussian") => {
+            camera.insert(bevy::light::ShadowFilteringMethod::Gaussian);
+        }
+        _ => {}
+    }
+
     use bevy::render::view::Msaa;
     match std::env::var("VOXEL_MSAA").as_deref() {
         Ok("0") => {
@@ -521,18 +543,29 @@ fn sync_world_suns(
     //     4 / 180               1.70%          66.7%
     //     shadows off           0.65%          84.6%
     //
-    // Two things worth knowing before spending this. Halving the cascades
-    // buys a third of what turning shadows off buys, so most of the cost
-    // is the PCF sampling in the fragment shaders, not the cascade
-    // renders — cutting cascade COUNT is the weak lever. And shortening
-    // the range is not free even though the far field looks like it is
-    // already handled: large-scale terrain shadowing IS baked into the
-    // mesh, but the props are not, and the mid-distance tree shadows are
-    // carrying more of how a forest reads than they look like they do.
+    // Shortening the RANGE is not free even though the far field looks
+    // like it is already handled: large-scale terrain shadowing IS baked
+    // into the mesh, and impostors are not casters at all, so beyond the
+    // props there should be nothing to draw. Measured, that is wrong.
     // Against 420 m, a 250 m range changes 2.8% of the forest band by
-    // more than 24/255 and a 180 m range changes 4.6% — for comparison
-    // the MSAA-to-FXAA switch changed 0.001%. It reads as a flatter,
-    // washed-out middle distance.
+    // more than 24/255 and a 180 m range changes 4.6% — the MSAA-to-FXAA
+    // switch, for scale, changed 0.001%. It reads as a flat, washed-out
+    // middle distance.
+    //
+    // FOUR THINGS THAT ARE NOT THE LEVER, each measured, so nobody spends
+    // the night on them twice:
+    //   - cascade COUNT. 4 -> 2 buys a third of what off buys.
+    //   - filter taps. `VOXEL_SHADOW_FILTER=hw` swaps Bevy's default
+    //     9-tap Gaussian for a single hardware 2x2 and is worth almost
+    //     nothing (1.86% against 2.58% — inside the run-to-run noise).
+    //     Nine taps land in the same cache lines as one, so the bill is
+    //     the FIRST fetch, not the count.
+    //   - shadow map size. 2048 -> 1024 on top of `hw`: nothing again.
+    //   - caster count. Putting `NotShadowCaster` on all 7,715 prop trees
+    //     changed nothing either, so the shadow-map RENDER is not it.
+    // Which leaves the one thing off removes and none of these do: the
+    // per-fragment shadow-map fetch across a full screen of receivers.
+    // Shadows here are close to all-or-nothing.
     //
     // So this is an art call with a real price on both sides, not a
     // setting to quietly pick.
