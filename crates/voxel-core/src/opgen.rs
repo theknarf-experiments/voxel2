@@ -25,6 +25,92 @@
 
 use crate::worldop::*;
 
+/// A value the interpreter carries between ops — the register file, named
+/// as the things the registers MEAN.
+///
+/// One variant per group of registers that move together: an op that
+/// writes the SDF always writes the material with it, and the Y lattice is
+/// `level` and `fy` or neither. Naming the group rather than the register
+/// is what lets a level wire two ops together without knowing that a
+/// register file exists at all — the level says `"in": {"lattice": "floors"}`
+/// and the compiler lowers that back to `level`/`fy`.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Value {
+    /// `h` — the heightfield accumulator.
+    Height,
+    /// `d` and `mat` — the SDF accumulator and the material it carries.
+    /// One value, because nothing writes one without the other.
+    Sdf,
+    /// `ta`, `tb` — the two region axes, paid for once per sample.
+    Regions,
+    /// `warp` — the XZ offset later height and field ops sample through.
+    Warp,
+    /// `level`, `fy` — the Y lattice.
+    Lattice,
+    /// `sxz`, `sr`, `shaft` — the shaft locals.
+    Shafts,
+    /// A named scalar field. CPU-side consumers only: the GPU interpreter
+    /// skips the op that fills it.
+    Field,
+}
+
+impl Value {
+    /// The interpreter registers this value occupies.
+    ///
+    /// The guard test reads these back off the op bodies, so a body that
+    /// touches `fy` without declaring [`Value::Lattice`] fails the build
+    /// rather than compiling into a wiring the level cannot see.
+    pub const fn registers(self) -> &'static [&'static str] {
+        match self {
+            Value::Height => &["h"],
+            Value::Sdf => &["d", "mat"],
+            Value::Regions => &["ta", "tb"],
+            Value::Warp => &["warp"],
+            Value::Lattice => &["level", "fy"],
+            Value::Shafts => &["sxz", "sr", "shaft"],
+            Value::Field => &["fields"],
+        }
+    }
+
+    /// Every value, for the guard test and for the compiler's allocator.
+    pub const ALL: &'static [Value] = &[
+        Value::Height,
+        Value::Sdf,
+        Value::Regions,
+        Value::Warp,
+        Value::Lattice,
+        Value::Shafts,
+        Value::Field,
+    ];
+}
+
+/// A named port on an op: what a level wires to, and what type it carries.
+pub type Port = (&'static str, Value);
+
+/// Ops with no GPU twin, and so no entry in [`OPS`]: the interpreter arm is
+/// hand-written in `voxel_worldgen::program` and the density shader skips
+/// them through its default arm. They still have a wiring surface, so a
+/// level can name one and the compiler can check it.
+pub const META_PORTS: &[(u32, &[Port], &[Port])] = &[(
+    WOP_FIELD,
+    &[("warp", Value::Warp)],
+    &[("field", Value::Field)],
+)];
+
+/// Every op kind's ports, whether or not it has a GPU twin.
+///
+/// One lookup for the compiler, so nothing has to know which ops are
+/// spliced into shaders and which are CPU-side meta ops.
+pub fn ports(kind: u32) -> Option<(&'static [Port], &'static [Port])> {
+    if let Some(op) = OPS.iter().find(|o| o.kind == kind) {
+        return Some((op.ins, op.outs));
+    }
+    META_PORTS
+        .iter()
+        .find(|(k, ..)| *k == kind)
+        .map(|(_, ins, outs)| (*ins, *outs))
+}
+
 /// One generator op's single-source definition.
 pub struct OpDef {
     /// Rust const name (must exist in `voxel_core::worldop`).
@@ -32,6 +118,15 @@ pub struct OpDef {
     pub kind: u32,
     /// Part of the height-only replay (shadow bake, seabed, eval_height).
     pub height: bool,
+    /// What this op consumes and produces.
+    ///
+    /// The ports are the op's PUBLIC surface — a level names them and the
+    /// compiler checks them — while the registers below are the private
+    /// lowering. Declared here rather than inferred from the body because
+    /// the body is a text dialect, and a wiring surface read out of text
+    /// is a wiring surface that changes when someone renames a local.
+    pub ins: &'static [Port],
+    pub outs: &'static [Port],
     /// Body in the shared dialect.
     pub body: &'static str,
     /// How this op bounds the registers over a BOX, in plain Rust against
@@ -55,6 +150,8 @@ pub const OPS: &[OpDef] = &[
         name: "WOP_HEIGHT_FBM",
         kind: WOP_HEIGHT_FBM,
         height: true,
+        ins: &[("height", Value::Height), ("warp", Value::Warp)],
+        outs: &[("height", Value::Height)],
         body: "\
 h += @FBM(pxz + warp + @p0.xy, @p0.z, to_i(@p1.x), @VS@to_u(@p1.y)) * @p0.w;",
         range: Some("\
@@ -67,6 +164,8 @@ h += @FBM(pxz + warp + @p0.xy, @p0.z, to_i(@p1.x), @VS@to_u(@p1.y)) * @p0.w;",
         name: "WOP_HEIGHT_OFFSET",
         kind: WOP_HEIGHT_OFFSET,
         height: true,
+        ins: &[("height", Value::Height)],
+        outs: &[("height", Value::Height)],
         body: "h += @p0.x;",
         range: Some("\
             h = h + @p0.x;"),
@@ -75,6 +174,8 @@ h += @FBM(pxz + warp + @p0.xy, @p0.z, to_i(@p1.x), @VS@to_u(@p1.y)) * @p0.w;",
         name: "WOP_HEIGHT_STEP",
         kind: WOP_HEIGHT_STEP,
         height: true,
+        ins: &[("height", Value::Height)],
+        outs: &[("height", Value::Height)],
         body: "h += @p0.z * smoothstep(@p0.x, @p0.y, h);",
         range: Some("\
             // smoothstep is in [0, 1], but which part of it depends on
@@ -92,6 +193,8 @@ h += @FBM(pxz + warp + @p0.xy, @p0.z, to_i(@p1.x), @VS@to_u(@p1.y)) * @p0.w;",
         name: "WOP_WARP_XZ",
         kind: WOP_WARP_XZ,
         height: true,
+        ins: &[("warp", Value::Warp)],
+        outs: &[("warp", Value::Warp)],
         body: "\
 let q = pxz + @p0.zw;
 let oct = to_i(@p1.x);
@@ -115,6 +218,8 @@ warp.y += @FBM(q + v2(713.0, -337.0), @p0.x, oct, @VS@0) * @p0.y;",
         name: "WOP_FBM3",
         kind: WOP_FBM3,
         height: false,
+        ins: &[("sdf", Value::Sdf)],
+        outs: &[("sdf", Value::Sdf)],
         body: "\
 let q = p + @p1.xyz;
 let n = fbm3(q, @p0.x, @p0.y, to_i(@p2.x), vs);
@@ -130,6 +235,8 @@ if @p1.w < 0.5 {
         name: "WOP_HEIGHT_SURFACE",
         kind: WOP_HEIGHT_SURFACE,
         height: false,
+        ins: &[("height", Value::Height), ("sdf", Value::Sdf)],
+        outs: &[("sdf", Value::Sdf)],
         body: "\
 let nd = p.y - h;
 if nd < d { d = nd; mat = @mat; }",
@@ -141,6 +248,8 @@ if nd < d { d = nd; mat = @mat; }",
         name: "WOP_REGION_AXES",
         kind: WOP_REGION_AXES,
         height: true,
+        ins: &[],
+        outs: &[("regions", Value::Regions)],
         body: "\
 ta = @FBM(pxz + @p0.xy, @p0.z, to_i(@p1.z), @VS@0) + 0.5;
 tb = @FBM(pxz + @p1.xy, @p0.w, to_i(@p1.z), @VS@0) + 0.5;",
@@ -154,6 +263,8 @@ tb = @FBM(pxz + @p1.xy, @p0.w, to_i(@p1.z), @VS@0) + 0.5;",
         name: "WOP_HEIGHT_BAND_FBM",
         kind: WOP_HEIGHT_BAND_FBM,
         height: true,
+        ins: &[("height", Value::Height), ("warp", Value::Warp), ("regions", Value::Regions)],
+        outs: &[("height", Value::Height)],
         body: "\
 let fa = @p1.z;
 let wa = smoothstep(@p2.x - fa, @p2.x + fa, ta) * (1.0 - smoothstep(@p2.y - fa, @p2.y + fa, ta));
@@ -177,6 +288,8 @@ h += min(wa, wb) * (@p1.w + @FBM(pxz + warp + @p0.xy, @p0.z, to_i(@p1.x), @VS@to
         name: "WOP_MATERIAL_BAND",
         kind: WOP_MATERIAL_BAND,
         height: false,
+        ins: &[("sdf", Value::Sdf), ("regions", Value::Regions)],
+        outs: &[("sdf", Value::Sdf)],
         body: "\
 if mat == to_u(@p1.z) && ta >= @p0.x && ta < @p0.y && tb >= @p0.z && tb < @p0.w { mat = @mat; }",
         // Repaints only; the SDF and the height are untouched, so a box
@@ -188,6 +301,8 @@ if mat == to_u(@p1.z) && ta >= @p0.x && ta < @p0.y && tb >= @p0.z && tb < @p0.w 
         name: "WOP_COARSE_SOLID",
         kind: WOP_COARSE_SOLID,
         height: false,
+        ins: &[("sdf", Value::Sdf)],
+        outs: &[("sdf", Value::Sdf)],
         body: "if SOLID < d { d = SOLID; mat = @mat; }",
         range: None,
     },
@@ -195,6 +310,8 @@ if mat == to_u(@p1.z) && ta >= @p0.x && ta < @p0.y && tb >= @p0.z && tb < @p0.w 
         name: "WOP_LATTICE_Y",
         kind: WOP_LATTICE_Y,
         height: false,
+        ins: &[],
+        outs: &[("lattice", Value::Lattice)],
         body: "\
 level = round_half_up(p.y / @p0.x);
 fy = p.y - level * @p0.x;",
@@ -204,6 +321,8 @@ fy = p.y - level * @p0.x;",
         name: "WOP_SLABS_Y",
         kind: WOP_SLABS_Y,
         height: false,
+        ins: &[("sdf", Value::Sdf), ("lattice", Value::Lattice)],
+        outs: &[("sdf", Value::Sdf)],
         body: "\
 let nd = abs(fy) - @p0.x;
 if nd < d { d = nd; mat = @mat; }",
@@ -213,6 +332,8 @@ if nd < d { d = nd; mat = @mat; }",
         name: "WOP_GRID_HOLES",
         kind: WOP_GRID_HOLES,
         height: false,
+        ins: &[("sdf", Value::Sdf), ("lattice", Value::Lattice)],
+        outs: &[("sdf", Value::Sdf)],
         body: "\
 let cell = @p0.x;
 let c = to_iv2(floor2(pxz / cell));
@@ -227,6 +348,8 @@ if hash3(iv3(c.x, to_i(level), c.y)) < @p0.y {
         name: "WOP_PILLARS_XZ",
         kind: WOP_PILLARS_XZ,
         height: false,
+        ins: &[("sdf", Value::Sdf)],
+        outs: &[("sdf", Value::Sdf)],
         body: "\
 let sp = @p0.x;
 let c = iv2(to_i(round_half_up(pxz.x / sp)), to_i(round_half_up(pxz.y / sp)));
@@ -241,6 +364,8 @@ if nd < d { d = nd; mat = @mat; }",
         name: "WOP_WALLS",
         kind: WOP_WALLS,
         height: false,
+        ins: &[("sdf", Value::Sdf), ("lattice", Value::Lattice)],
+        outs: &[("sdf", Value::Sdf)],
         body: "\
 let sp = @p0.x;
 var a = p.x;
@@ -265,6 +390,8 @@ if hash2(iv2(to_i(wi) + to_i(@p1.x), to_i(level))) < @p0.z {
         name: "WOP_SHAFTS_XZ",
         kind: WOP_SHAFTS_XZ,
         height: false,
+        ins: &[],
+        outs: &[("shafts", Value::Shafts)],
         body: "\
 let sp = @p0.x;
 let c = iv2(to_i(round_half_up(pxz.x / sp)), to_i(round_half_up(pxz.y / sp)));
@@ -278,6 +405,8 @@ shaft = length(sxz) - sr;",
         name: "WOP_SHAFTS_CUT",
         kind: WOP_SHAFTS_CUT,
         height: false,
+        ins: &[("sdf", Value::Sdf), ("shafts", Value::Shafts)],
+        outs: &[("sdf", Value::Sdf)],
         body: "d = max(d, -shaft);",
         range: None,
     },
@@ -285,6 +414,8 @@ shaft = length(sxz) - sr;",
         name: "WOP_BEAMS",
         kind: WOP_BEAMS,
         height: false,
+        ins: &[("sdf", Value::Sdf), ("lattice", Value::Lattice), ("shafts", Value::Shafts)],
+        outs: &[("sdf", Value::Sdf)],
         body: "\
 let n = @p0.x;
 if abs(level - round_half_up(level / n) * n) < 0.5 {
@@ -535,5 +666,81 @@ mod tests {
                 op.name
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod port_tests {
+    use super::*;
+
+    /// Does `body` use `ident` as a whole word?
+    ///
+    /// `h` must not match `hash`, and `d` must not match `sd_box` — the
+    /// registers are one and two letters long, so anything short of a real
+    /// token scan reports every op as touching everything.
+    fn touches(body: &str, ident: &str) -> bool {
+        let is_word = |c: char| c.is_ascii_alphanumeric() || c == '_';
+        // `@mat` is a read of the op's own material PARAM, not the `mat`
+        // register; it appears in ops that never read the register.
+        let body = body.replace("@mat", "");
+        body.split(|c: char| !is_word(c))
+            .any(|token| token == ident)
+    }
+
+    /// An op body may touch no register its ports do not carry.
+    ///
+    /// This is what makes the ports a real declaration rather than a
+    /// comment: the wiring a level sees and the registers the interpreter
+    /// moves are the same set, checked, so an op that quietly starts
+    /// reading the lattice cannot also quietly stop being wired to it.
+    #[test]
+    fn an_op_touches_only_the_registers_its_ports_carry() {
+        for op in OPS {
+            let declared: Vec<&str> = op
+                .ins
+                .iter()
+                .chain(op.outs)
+                .flat_map(|(_, v)| v.registers().iter().copied())
+                .collect();
+            for value in Value::ALL {
+                for reg in value.registers() {
+                    if touches(op.body, reg) && !declared.contains(reg) {
+                        panic!(
+                            "{} touches `{reg}` but no port of it carries {value:?} \
+                             (declares {declared:?})",
+                            op.name
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// And every port an op declares is one the body actually uses.
+    ///
+    /// The other direction, because a spurious port is a dependency a
+    /// level would be made to wire for nothing.
+    #[test]
+    fn an_op_declares_no_port_it_does_not_use() {
+        for op in OPS {
+            for (port, value) in op.ins.iter().chain(op.outs) {
+                let used = value.registers().iter().any(|r| touches(op.body, r));
+                assert!(
+                    used,
+                    "{} declares port `{port}` carrying {value:?}, which its body never touches",
+                    op.name
+                );
+            }
+        }
+    }
+
+    /// Every kind in the table is reachable through one lookup, meta ops
+    /// included.
+    #[test]
+    fn ports_are_found_for_table_ops_and_meta_ops_alike() {
+        for op in OPS {
+            assert!(ports(op.kind).is_some(), "{}", op.name);
+        }
+        assert!(ports(WOP_FIELD).is_some(), "WOP_FIELD is CPU-only, not absent");
     }
 }
