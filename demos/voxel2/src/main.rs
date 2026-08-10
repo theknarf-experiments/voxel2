@@ -292,6 +292,48 @@ fn main() {
         .add_plugins(DefaultPlugins.set(WindowPlugin {
             primary_window: Some(Window {
                 title,
+                // How many pixels a logical point costs, and the largest
+                // lever on this frame by a wide margin.
+                //
+                // The display is Retina, so the default is 2: a 1280x720
+                // window is really 2560x1440, 3.7 megapixels. That single
+                // fact is behind every fill-bound result here — it is why
+                // MSAA was worth 18 fps, why terrain shading is the most
+                // expensive shader in the frame, and why the shadow fetch
+                // resisted every attempt to make it cheaper per fragment.
+                //
+                // Flying at 45 m/s, interleaved A/B/A/B so drift cannot
+                // pick a winner (it had, twice, before this was measured
+                // that way):
+                //
+                //   scale  physical    p90   p99   miss 60fps  make 120fps
+                //     2.0  2560x1440  13.0  17.4    2.0%          64%
+                //     1.5  1920x1080   8.7  13.3    0.27%         87%
+                //    1.25  1600x900    8.9  12.9    0.12%         87%
+                //     1.0  1280x720    8.8  13.0    0.15%         87%
+                //
+                // 1.5 is the knee and it is the difference between 89-92
+                // fps and a pegged 118-120 with vsync on. Below it there
+                // is nothing further to win.
+                //
+                // NOT the default, for one reason: it cannot be verified
+                // here. Both capture paths normalise to 1280x720 — the
+                // offscreen mirror bypasses the swapchain entirely and the
+                // window grab rescales — so there is no way to look at
+                // what the softening actually costs on a Retina panel.
+                // Every other visible trade tonight was decided on a
+                // measured pixel diff; this one cannot be, so it stays a
+                // handle until someone can look at it.
+                resolution: {
+                    let mut r = bevy::window::WindowResolution::default();
+                    if let Some(s) = std::env::var("VOXEL_RENDER_SCALE")
+                        .ok()
+                        .and_then(|v| v.parse::<f32>().ok())
+                    {
+                        r.set_scale_factor_override(Some(s));
+                    }
+                    r
+                },
                 // Frame time is the only usable signal for render work:
                 // the display is 120 Hz, so with vsync on, fps quantizes
                 // to 120/60/40 and a frame sitting near the 8.3 ms
