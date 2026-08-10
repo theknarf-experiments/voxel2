@@ -1743,6 +1743,35 @@ mod tests {
         assert_eq!(back.materials, planet.materials);
     }
 
+    /// A level can be SNAPSHOTTED and put back through reflection, which
+    /// is what an undo stack is: a copy taken by something that does not
+    /// know what a level is.
+    ///
+    /// Through the DYNAMIC form rather than `reflect_clone`, because bevy
+    /// implements that for `[f32; 3]` no more than for a boxed trait
+    /// object, and a level is full of both.
+    #[test]
+    fn a_level_can_be_snapshotted_and_restored() {
+        use bevy::reflect::PartialReflect;
+        let reg = crate::graph::registry::engine_kinds();
+        let planet = LevelDef::from_json_known(&shipped("planet.json"), &reg).unwrap();
+
+        let snapshot = planet.to_dynamic();
+        let mut edited = planet.clone();
+        edited.lod.max_level -= 1;
+        // Whatever recipe it was, make it a different one.
+        edited.materials[0] = serde_json::from_str::<MaterialDef>(
+            r#"{"type":"surface","id":99,"base":[1.0,0.0,1.0]}"#,
+        )
+        .unwrap();
+        assert_ne!(edited.materials, planet.materials);
+
+        edited.try_apply(snapshot.as_ref()).expect("restores");
+        assert_eq!(edited.lod.max_level, planet.lod.max_level);
+        assert_eq!(edited.materials, planet.materials, "a recipe comes back");
+        assert_eq!(edited.nodes, planet.nodes, "and so do the nodes");
+    }
+
     #[test]
     fn levels_roundtrip() {
         let planet = LevelDef::from_json_known(

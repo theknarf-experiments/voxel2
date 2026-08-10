@@ -37,6 +37,54 @@ pub enum Value {
 #[derive(Resource, Default)]
 pub struct Pending(pub Vec<Edit>);
 
+/// Documents as they were before each batch of edits MADE HERE.
+///
+/// A value poked over BRP or a level reloaded from disk is not this
+/// crate's to undo: they do not come through the queue, and a tool that
+/// silently reverted somebody else's write would be worse than one that
+/// admits it only owns its own.
+///
+/// Whole snapshots rather than inverse operations: an inverse has to know
+/// what every widget MEANS, and a switched enum variant has no inverse at
+/// all — the fields it replaced are gone. A document is small, and this is
+/// a dev tool.
+///
+/// The dynamic form, because bevy can `reflect_clone` neither `[f32; 3]`
+/// nor a boxed trait object, and a level is full of both. `try_apply`
+/// takes it back.
+#[derive(Resource, Default)]
+pub struct History {
+    steps: Vec<(usize, Box<dyn PartialReflect>)>,
+    /// Enough to undo a session's worth of tuning without holding every
+    /// document a long session ever produced.
+    pub depth: usize,
+}
+
+impl History {
+    fn remember_dynamic(&mut self, root: usize, snapshot: Box<dyn PartialReflect>) {
+        if self.depth == 0 {
+            self.depth = 64;
+        }
+        self.steps.push((root, snapshot));
+        let over = self.steps.len().saturating_sub(self.depth);
+        self.steps.drain(..over);
+    }
+
+    #[allow(dead_code)]
+    fn remember(&mut self, root: usize, document: &dyn PartialReflect) {
+        if self.depth == 0 {
+            self.depth = 64;
+        }
+        self.steps.push((root, document.to_dynamic()));
+        let over = self.steps.len().saturating_sub(self.depth);
+        self.steps.drain(..over);
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.steps.is_empty()
+    }
+}
+
 /// A number was dragged sideways.
 ///
 /// The value is `from + distance * speed`, where the distance is the
@@ -197,6 +245,42 @@ pub fn on_bool(
 /// Exclusive because reaching a resource whose type is only known at
 /// runtime needs the world and the registry at once — the same price the
 /// panel pays to read it.
+/// Put the document back as it was before the last batch of edits.
+///
+/// Exclusive for the same reason `apply` is: reaching an arbitrary
+/// reflected resource needs the `World` and the registry together.
+pub fn undo(world: &mut World) {
+    if !world.resource::<EditorState>().undo {
+        return;
+    }
+    world.resource_mut::<EditorState>().undo = false;
+    let Some((root, was)) = world.resource_mut::<History>().steps.pop() else {
+        info!("editor: nothing to undo");
+        return;
+    };
+    let Some(mut document) = document_mut(world, root) else {
+        return;
+    };
+    if let Err(e) = document.as_partial_reflect_mut().try_apply(was.as_ref()) {
+        warn!("editor: undo did not take — {e}");
+    }
+}
+
+/// The document a root names, ready to be written.
+fn document_mut(world: &mut World, root: usize) -> Option<Mut<'_, dyn Reflect>> {
+    let roots = world.resource::<EditorRoots>().clone();
+    let root = roots.0.get(root)?;
+    let registry = world.resource::<AppTypeRegistry>().clone();
+    let registry = registry.read();
+    let registration = registry.get_with_type_path(root.type_path)?;
+    let reflect = registration.data::<ReflectComponent>()?;
+    let component_id = world.components().get_id(registration.type_id())?;
+    let entity = world.resource_entities().get(component_id)?;
+    // A resource is an entity in 0.19, and going through `Mut` is what
+    // marks it changed — which is the whole mechanism.
+    reflect.reflect_mut(world.entity_mut(entity))
+}
+
 pub fn apply(world: &mut World) {
     // Read before taking: `resource_mut` marks the queue changed whether or
     // not there was anything in it.
@@ -204,6 +288,10 @@ pub fn apply(world: &mut World) {
         return;
     }
     let edits = std::mem::take(&mut world.resource_mut::<Pending>().0);
+    // One step per BATCH, not per edit: a drag queues one a frame and
+    // undoing it a pixel at a time would be its own kind of unusable.
+    let mut remember = true;
+    let mut history: Vec<(usize, Box<dyn PartialReflect>)> = Vec::new();
     let roots = world.resource::<EditorRoots>().clone();
     let registry = world.resource::<AppTypeRegistry>().clone();
     let registry = registry.read();
@@ -231,6 +319,12 @@ pub fn apply(world: &mut World) {
         let Some(mut document) = reflect.reflect_mut(world.entity_mut(entity)) else {
             continue;
         };
+        // Before the first edit of this batch touches it.
+        if remember {
+            remember = false;
+            let snapshot = document.as_partial_reflect().to_dynamic();
+            history.push((edit.root, snapshot));
+        }
 
         let slot = match path::resolve_mut(document.as_partial_reflect_mut(), &edit.path) {
             Ok(slot) => slot,
@@ -269,6 +363,11 @@ pub fn apply(world: &mut World) {
             // must not take the session down with it.
             warn!("editor: '{}' would not take that value — {e}", edit.path);
         }
+    }
+    for (root, snapshot) in history {
+        world
+            .resource_mut::<History>()
+            .remember_dynamic(root, snapshot);
     }
 }
 

@@ -193,6 +193,13 @@ impl PartialReflect for AnyNode {
     fn try_apply(&mut self, value: &dyn PartialReflect) -> Result<(), ApplyError> {
         self.0.as_partial_reflect_mut().try_apply(value)
     }
+    /// Cloned as ITSELF, not as the dynamic struct the inspection half
+    /// reports. Reflection has no other way to copy a boxed trait object,
+    /// and without this a document holding nodes cannot be snapshotted —
+    /// which is what an undo stack is.
+    fn reflect_clone(&self) -> Result<Box<dyn Reflect>, bevy::reflect::ReflectCloneError> {
+        Ok(Box::new(self.clone()))
+    }
     fn reflect_kind(&self) -> ReflectKind {
         self.0.as_partial_reflect().reflect_kind()
     }

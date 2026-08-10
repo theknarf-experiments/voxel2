@@ -21,7 +21,7 @@ mod row;
 mod style;
 mod walk;
 
-pub use edit::{on_drag, on_drag_done, on_pick};
+pub use edit::{on_drag, on_drag_done, on_pick, undo, History};
 pub use panel::on_tab;
 pub use panel::save;
 pub use row::{DragsNum, FieldPath, PicksOption, SelectsRoot, WritesNum};
@@ -132,6 +132,8 @@ pub struct EditorState {
     /// rather than only a keystroke so tooling can drive it, which is also
     /// the only way this is testable on a running panel.
     pub save: bool,
+    /// Set to put the document back as it was before the last edit.
+    pub undo: bool,
     /// Panel width in logical pixels, dragged by the grip on its inner
     /// edge. Here rather than on the node because the panel is respawned
     /// whenever the document changes.
@@ -148,6 +150,7 @@ impl Default for EditorState {
             camera: canvas::GraphCamera::default(),
             selected: None,
             save: false,
+            undo: false,
             width: 620.0,
         }
     }
@@ -235,6 +238,7 @@ impl Plugin for EditorPlugin {
             .init_resource::<EditorState>()
             .init_resource::<edit::Pending>()
             .init_resource::<panel::Dragging>()
+            .init_resource::<edit::History>()
             .init_resource::<PanelStyle>()
             .init_resource::<graph::GraphStyle>()
             .register_type::<EditorState>()
@@ -263,6 +267,7 @@ impl Plugin for EditorPlugin {
                     // `panel::active`.
                     (
                         edit::apply,
+                        edit::undo,
                         panel::rebuild,
                         panel::apply_camera,
                         // After the rebuild, so a panel respawned this

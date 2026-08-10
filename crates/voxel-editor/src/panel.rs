@@ -240,7 +240,7 @@ pub fn toggle(keys: Res<ButtonInput<KeyCode>>, mut state: ResMut<EditorState>) {
     }
 }
 
-/// Ask the host to save, on the usual key or on the flag.
+/// The panel's own keys: save, and undo.
 ///
 /// Only while the panel is OPEN: a level editor that wrote the file on a
 /// stray keystroke in a game window would be a trap.
@@ -250,10 +250,15 @@ pub fn save(
     mut asked: MessageWriter<crate::SaveRequested>,
 ) {
     let held = |k: [KeyCode; 2]| k.iter().any(|k| keys.pressed(*k));
-    let combo = keys.just_pressed(KeyCode::KeyS)
-        && (held([KeyCode::SuperLeft, KeyCode::SuperRight])
-            || held([KeyCode::ControlLeft, KeyCode::ControlRight]));
-    if !state.open || !(combo || state.save) {
+    let modifier = held([KeyCode::SuperLeft, KeyCode::SuperRight])
+        || held([KeyCode::ControlLeft, KeyCode::ControlRight]);
+    if !state.open {
+        return;
+    }
+    if keys.just_pressed(KeyCode::KeyZ) && modifier {
+        state.undo = true;
+    }
+    if !(keys.just_pressed(KeyCode::KeyS) && modifier || state.save) {
         return;
     }
     state.save = false;

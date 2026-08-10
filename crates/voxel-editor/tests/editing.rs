@@ -53,6 +53,7 @@ fn app() -> App {
             ..default()
         })
         .init_resource::<Pending>()
+        .init_resource::<voxel_editor::History>()
         .add_systems(Update, (apply, note_rebuild).chain());
     // Settle the insert's own change tick.
     app.update();
@@ -425,5 +426,54 @@ fn drag(app: &mut App, widget: Entity, x: f32) {
             },
             widget,
         ));
+    app.update();
+}
+
+/// Undo puts the document back as it was before the last batch.
+///
+/// A batch, not an edit: a drag queues one a frame, and undoing a drag a
+/// pixel at a time would be its own kind of unusable.
+#[test]
+fn undo_restores_what_the_last_batch_changed() {
+    let mut app = app();
+    app.add_systems(Update, voxel_editor::undo);
+
+    let was = app.world().resource::<LevelDef>().materials[0].id();
+    edit(&mut app, ".materials[0].id", 77.0, Num::U32);
+    assert_eq!(app.world().resource::<LevelDef>().materials[0].id(), 77);
+
+    app.world_mut().resource_mut::<EditorState>().undo = true;
+    app.update();
+    assert_eq!(
+        app.world().resource::<LevelDef>().materials[0].id(),
+        was,
+        "the id comes back"
+    );
+
+    // A variant change has no inverse — the fields it replaced are gone —
+    // which is why the step is a whole snapshot.
+    let before = format!("{:?}", app.world().resource::<LevelDef>().materials[0]);
+    app.world_mut().resource_mut::<Pending>().0.push(Edit {
+        root: 0,
+        path: ".materials[0]".into(),
+        value: Value::Variant("Zoned".into()),
+    });
+    app.update();
+    assert_ne!(
+        format!("{:?}", app.world().resource::<LevelDef>().materials[0]),
+        before
+    );
+    app.world_mut().resource_mut::<EditorState>().undo = true;
+    app.update();
+    assert_eq!(
+        format!("{:?}", app.world().resource::<LevelDef>().materials[0]),
+        before,
+        "a switched recipe comes back whole"
+    );
+
+    // And undoing with nothing to undo is a no-op, not a panic.
+    app.world_mut().resource_mut::<EditorState>().undo = true;
+    app.update();
+    app.world_mut().resource_mut::<EditorState>().undo = true;
     app.update();
 }
