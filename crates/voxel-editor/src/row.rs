@@ -70,6 +70,9 @@ pub struct PicksOption {
     /// — a material id is a `u32` and a prefab name is a `String`, and the
     /// menu that offers them is the same menu.
     pub num: Option<Num>,
+    /// The value NAMES a variant of the enum at `path` rather than being
+    /// one it can hold. Picking it changes what the row contains.
+    pub variant: bool,
 }
 
 pub fn scene(row: &Row, style: &PanelStyle) -> impl Scene {
@@ -131,6 +134,41 @@ pub fn scene(row: &Row, style: &PanelStyle) -> impl Scene {
             {doc_line(row.docs, style.indent * row.depth as f32, style)},
         ]
     }
+}
+
+/// A dropdown of what a field may hold: the level's own answers, or an
+/// enum's own variants.
+fn menu(
+    current: &str,
+    options: &[String],
+    path: &str,
+    num: Option<Num>,
+    variant: bool,
+    style: &PanelStyle,
+) -> Box<dyn SceneList> {
+    let items: Vec<_> = options
+        .iter()
+        .map(|option| {
+            let (path, value) = (path.to_string(), option.clone());
+            let caption = Box::new(vec![text(option.clone(), style.font)]) as Box<dyn SceneList>;
+            bsn! {
+                @FeathersMenuItem { @caption: {caption} }
+                PicksOption { path: {path}, value: {value}, num: {num}, variant: {variant} }
+            }
+        })
+        .collect();
+    let caption = Box::new(vec![text(current.to_string(), style.font)]) as Box<dyn SceneList>;
+    Box::new(bsn_list!(
+        @FeathersMenu
+        Node { width: {px(style.value)}, flex_shrink: 0.0 }
+        Children [
+            (
+                @FeathersMenuButton { @caption: {caption} }
+                Node { flex_grow: 1.0, min_width: px(0), height: px(style.tab) }
+            ),
+            (@FeathersMenuPopup Children [ {items} ]),
+        ]
+    ))
 }
 
 /// The disclosure column: a chevron for a container, empty for a leaf.
@@ -267,8 +305,15 @@ fn value_widget(row: &Row, style: &PanelStyle) -> Box<dyn SceneList> {
         RowKind::Group { summary, .. } => {
             Box::new(vec![cell(style.value, text(summary.clone(), style.font))])
         }
-        RowKind::Variant { current, .. } => {
-            Box::new(vec![cell(style.value, text(current.clone(), style.font))])
+        RowKind::Variant {
+            current, options, ..
+        } => {
+            // A dynamic value knows the variant it holds but not its
+            // siblings; better an inert row than a menu of nothing.
+            if options.is_empty() {
+                return Box::new(vec![cell(style.value, text(current.clone(), style.font))]);
+            }
+            menu(current, options, &row.path, None, true, style)
         }
 
         RowKind::Number { value, num, range } => match range {

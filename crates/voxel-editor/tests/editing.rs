@@ -197,6 +197,7 @@ fn picking_a_reference_writes_it() {
             path: ".materials[0].id".into(),
             value: id.to_string(),
             num: Some(Num::U32),
+            variant: false,
         })
         .id();
     app.world_mut()
@@ -227,6 +228,7 @@ fn picking_a_reference_writes_it() {
             path: format!(".nodes[{at}].wires.0{{{port}}}.0"),
             value: name.clone(),
             num: None,
+            variant: false,
         })
         .id();
     app.world_mut()
@@ -274,4 +276,69 @@ fn the_panel_asks_to_save_and_only_when_open() {
 
     app.update();
     assert_eq!(asked(&mut app), 1, "and only once");
+}
+
+/// Picking a variant changes what the field IS, with the new variant's
+/// own fields at their defaults.
+///
+/// A `zoned` material is not a `surface` one with different numbers, so
+/// nothing is carried across: switching a recipe is a real edit, and the
+/// row that follows it shows what actually has to be filled in.
+#[test]
+fn picking_a_variant_changes_the_shape_of_the_field() {
+    use voxel_editor::PicksOption;
+    let mut app = app();
+    app.add_observer(voxel_editor::on_pick);
+
+    // A unit variant: the shaping of a noise op.
+    let at = app
+        .world()
+        .resource::<LevelDef>()
+        .nodes
+        .iter()
+        .position(|n| n.node.0.kind() == "height_fbm")
+        .expect("planet has fbm height");
+    let path = format!(".nodes[{at}].node.mode");
+    let item = app
+        .world_mut()
+        .spawn(PicksOption {
+            path: path.clone(),
+            value: "Ridged".into(),
+            num: None,
+            variant: true,
+        })
+        .id();
+    app.world_mut()
+        .trigger(bevy::ui_widgets::Activate { entity: item });
+    app.update();
+
+    let mode = app.world().resource::<LevelDef>().nodes[at]
+        .node
+        .0
+        .as_reflect()
+        .reflect_path(".mode")
+        .unwrap();
+    let bevy::reflect::ReflectRef::Enum(mode) = mode.reflect_ref() else {
+        panic!("mode is an enum")
+    };
+    assert_eq!(mode.variant_name(), "Ridged");
+
+    // And a struct variant: a whole different material recipe.
+    let item = app
+        .world_mut()
+        .spawn(PicksOption {
+            path: ".materials[0]".into(),
+            value: "Zoned".into(),
+            num: None,
+            variant: true,
+        })
+        .id();
+    app.world_mut()
+        .trigger(bevy::ui_widgets::Activate { entity: item });
+    app.update();
+    let materials = &app.world().resource::<LevelDef>().materials;
+    assert!(
+        matches!(materials[0], voxel_engine::level::MaterialDef::Zoned { .. }),
+        "the recipe changed"
+    );
 }

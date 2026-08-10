@@ -9,6 +9,7 @@
 //! system applies. The queue is also where undo will hang.
 
 use bevy::prelude::*;
+use bevy::reflect::{TypeInfo, TypeRegistry};
 use bevy::ui_widgets::ValueChange;
 
 use crate::path;
@@ -27,6 +28,9 @@ pub enum Value {
     Num(f64, Num),
     Bool(bool),
     Text(String),
+    /// A different variant of the enum at this path. What the variant
+    /// CONTAINS is built here, from the registry — see [`variant`].
+    Variant(String),
 }
 
 /// Edits waiting for the exclusive system that can apply them.
@@ -49,6 +53,14 @@ pub fn on_pick(
     let Ok(pick) = picks.get(activate.event_target()) else {
         return;
     };
+    if pick.variant {
+        pending.0.push(Edit {
+            root: state.root,
+            path: pick.path.clone(),
+            value: Value::Variant(pick.value.clone()),
+        });
+        return;
+    }
     let value = match pick.num {
         Some(num) => match pick.value.parse::<f64>() {
             Ok(v) => Value::Num(v, num),
@@ -160,7 +172,18 @@ pub fn apply(world: &mut World) {
                 continue;
             }
         };
-        let wanted = typed(&edit.value);
+        let wanted = match &edit.value {
+            // A variant needs its fields, and only the slot knows what
+            // type it is. Everything else is the value as given.
+            Value::Variant(name) => match variant(slot, name, &registry) {
+                Ok(built) => built,
+                Err(e) => {
+                    warn!("editor: '{}' cannot become {name} — {e}", edit.path);
+                    continue;
+                }
+            },
+            value => typed(value),
+        };
         // An edit that changes nothing must not be applied.
         //
         // Not an optimisation — a correctness fix, and one any widget that
@@ -186,9 +209,128 @@ pub fn apply(world: &mut World) {
 /// count or a `usize` step budget, and `try_apply` refuses a mismatch
 /// rather than rounding one into the other. Rounding here, once, is the
 /// only place that conversion is allowed to happen.
+/// Build the named variant of the enum at `slot`, with every field at its
+/// type's default.
+///
+/// Switching a recipe is a real edit — a `zoned` material is not a
+/// `surface` one with different numbers — so the new variant arrives
+/// EMPTY rather than carrying whatever happened to be in the old one at
+/// the same position. A field whose type the registry cannot default is a
+/// refusal with the type named, never a half-built value.
+fn variant(
+    slot: &dyn PartialReflect,
+    name: &str,
+    registry: &TypeRegistry,
+) -> Result<Box<dyn PartialReflect>, String> {
+    use bevy::reflect::enums::{DynamicEnum, DynamicVariant, VariantInfo};
+    use bevy::reflect::structs::DynamicStruct;
+    use bevy::reflect::tuple::DynamicTuple;
+    let Some(TypeInfo::Enum(info)) = slot.get_represented_type_info() else {
+        return Err("it is not an enum".into());
+    };
+    let Some(want) = info.variant(name) else {
+        return Err("no such variant".into());
+    };
+    let default = |ty: &'static bevy::reflect::TypeInfo| empty(ty, registry);
+    let built = match want {
+        VariantInfo::Unit(_) => DynamicVariant::Unit,
+        VariantInfo::Tuple(v) => {
+            let mut fields = DynamicTuple::default();
+            for i in 0..v.field_len() {
+                let field = v.field_at(i).ok_or("missing field")?;
+                fields.insert_boxed(default(field.type_info().ok_or("unknown field type")?)?);
+            }
+            DynamicVariant::Tuple(fields)
+        }
+        VariantInfo::Struct(v) => {
+            let mut fields = DynamicStruct::default();
+            for i in 0..v.field_len() {
+                let field = v.field_at(i).ok_or("missing field")?;
+                fields.insert_boxed(
+                    field.name(),
+                    default(field.type_info().ok_or("unknown field type")?)?,
+                );
+            }
+            DynamicVariant::Struct(fields)
+        }
+    };
+    let mut out = DynamicEnum::new(name, built);
+    out.set_represented_type(slot.get_represented_type_info());
+    Ok(Box::new(out))
+}
+
+/// A value of `ty` with nothing in it.
+///
+/// The type's own `Default` where it has one, and otherwise built from the
+/// SHAPE the registry describes: bevy registers no `ReflectDefault` for
+/// `[f32; 3]`, and refusing to switch a material recipe over a colour that
+/// is three zeroes either way would be an odd place to stop.
+fn empty(
+    ty: &'static bevy::reflect::TypeInfo,
+    registry: &TypeRegistry,
+) -> Result<Box<dyn PartialReflect>, String> {
+    use bevy::reflect::array::DynamicArray;
+    use bevy::reflect::list::DynamicList;
+    use bevy::reflect::map::DynamicMap;
+    use bevy::reflect::set::DynamicSet;
+    use bevy::reflect::structs::DynamicStruct;
+    use bevy::reflect::tuple::DynamicTuple;
+    use bevy::reflect::tuple_struct::DynamicTupleStruct;
+
+    if let Some(default) =
+        registry.get_type_data::<bevy::reflect::std_traits::ReflectDefault>(ty.type_id())
+    {
+        return Ok(default.default().into_partial_reflect());
+    }
+    let field = |ty: Option<&'static bevy::reflect::TypeInfo>| {
+        ty.ok_or_else(|| "a field of unknown type".to_string())
+            .and_then(|ty| empty(ty, registry))
+    };
+    Ok(match ty {
+        TypeInfo::Struct(info) => {
+            let mut out = DynamicStruct::default();
+            for i in 0..info.field_len() {
+                let f = info.field_at(i).ok_or("missing field")?;
+                out.insert_boxed(f.name(), field(f.type_info())?);
+            }
+            Box::new(out)
+        }
+        TypeInfo::TupleStruct(info) => {
+            let mut out = DynamicTupleStruct::default();
+            for i in 0..info.field_len() {
+                out.insert_boxed(field(info.field_at(i).ok_or("missing field")?.type_info())?);
+            }
+            Box::new(out)
+        }
+        TypeInfo::Tuple(info) => {
+            let mut out = DynamicTuple::default();
+            for i in 0..info.field_len() {
+                out.insert_boxed(field(info.field_at(i).ok_or("missing field")?.type_info())?);
+            }
+            Box::new(out)
+        }
+        TypeInfo::Array(info) => {
+            let mut items = Vec::with_capacity(info.capacity());
+            for _ in 0..info.capacity() {
+                items.push(field(info.item_info())?);
+            }
+            Box::new(DynamicArray::new(items.into_boxed_slice()))
+        }
+        // Empty is the right answer for anything that HOLDS things.
+        TypeInfo::List(_) => Box::new(DynamicList::default()),
+        TypeInfo::Map(_) => Box::new(DynamicMap::default()),
+        TypeInfo::Set(_) => Box::new(DynamicSet::default()),
+        TypeInfo::Enum(_) | TypeInfo::Opaque(_) => {
+            return Err(format!("{} has no default", ty.type_path()))
+        }
+    })
+}
+
 fn typed(value: &Value) -> Box<dyn PartialReflect> {
     match *value {
         Value::Text(ref s) => Box::new(s.clone()),
+        // Handled at the slot, which is the only thing that knows the type.
+        Value::Variant(_) => unreachable!("a variant is built from the slot"),
         Value::Bool(b) => Box::new(b),
         Value::Num(v, num) => match num {
             Num::F32 => Box::new(v as f32),
