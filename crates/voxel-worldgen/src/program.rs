@@ -179,6 +179,107 @@ pub fn eval(ops: &[WorldOp], seed: u32, p: Vec3, vs: f32) -> (f32, u32) {
     (d, mat)
 }
 
+/// What the xz-only ops leave behind for one column: the registers the
+/// density shader's `Column` struct carries.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Column {
+    pub h: f32,
+    pub ta: f32,
+    pub tb: f32,
+    pub sxz: Vec2,
+    pub sr: f32,
+    pub shaft: f32,
+}
+
+/// The xz-only half of the program, run once for a whole column.
+#[allow(clippy::collapsible_match, clippy::collapsible_if)]
+pub fn eval_column(ops: &[WorldOp], seed: u32, xz: Vec2, vs: f32) -> Column {
+    let coarse = vs >= WOP_COARSE_VOXEL_M;
+    let mut h = 0.0f32;
+    let mut warp = Vec2::ZERO;
+    let mut ta = 0.0f32;
+    let mut tb = 0.0f32;
+    let mut sxz = Vec2::ZERO;
+    let mut sr = 0.0f32;
+    let mut shaft = BIG;
+    let pxz = xz;
+    let hash2 = |q: IVec2| crate::hash2(seed, q);
+    let fbm_mode = |q: Vec2, sc: f32, o: i32, s: f32, m: u32| crate::fbm_mode(seed, q, sc, o, s, m);
+
+    for op in ops {
+        if coarse && op.flags & WOP_FLAG_FINE_ONLY != 0 {
+            continue;
+        }
+        if !coarse && op.flags & WOP_FLAG_COARSE_ONLY != 0 {
+            continue;
+        }
+        if !region_gate(op.region, ta, tb) {
+            continue;
+        }
+        include!(concat!(env!("OUT_DIR"), "/op_arms_column.rs"));
+    }
+    Column {
+        h,
+        ta,
+        tb,
+        sxz,
+        sr,
+        shaft,
+    }
+}
+
+/// The program evaluated the way the GPU evaluates it: the xz-only ops
+/// once for the column, then everything else per sample.
+///
+/// Nothing in the engine calls this — [`eval`] is one linear loop, which is
+/// what a planning layer sampling scattered points wants. It exists so a
+/// test can assert the two agree, because the density shader runs THIS
+/// shape and a disagreement between them is a world that renders
+/// differently from the one gameplay queries. See
+/// `voxel_core::opgen::Axis` for which ops land in which half, and
+/// `voxel_engine::graph` for the per-level check that the split is
+/// order-safe.
+// The shell declares the whole register file and the whole shim set and
+// does not care which half uses what — that is derived, and a shell that
+// tracked it would need editing every time an op moved between the loops.
+#[allow(clippy::collapsible_match, clippy::collapsible_if)]
+#[allow(unused_variables, unused_mut)]
+pub fn eval_split(ops: &[WorldOp], seed: u32, p: Vec3, vs: f32) -> (f32, u32) {
+    let coarse = vs >= WOP_COARSE_VOXEL_M;
+    let col = eval_column(ops, seed, Vec2::new(p.x, p.z), vs);
+    let Column {
+        h,
+        ta,
+        tb,
+        mut sxz,
+        mut sr,
+        mut shaft,
+    } = col;
+    let mut d = BIG;
+    let mut mat = 1u32;
+    let mut level = 0.0f32;
+    let mut fy = p.y;
+    let pxz = Vec2::new(p.x, p.z);
+    let hash2 = |q: IVec2| crate::hash2(seed, q);
+    let hash3 = |q: IVec3| hash3_seeded(seed, q);
+    let fbm3 = |q: Vec3, fx: f32, fy: f32, o: i32, s: f32| fbm3_seeded(seed, q, fx, fy, o, s);
+    let fbm_mode = |q: Vec2, sc: f32, o: i32, s: f32, m: u32| crate::fbm_mode(seed, q, sc, o, s, m);
+
+    for op in ops {
+        if coarse && op.flags & WOP_FLAG_FINE_ONLY != 0 {
+            continue;
+        }
+        if !coarse && op.flags & WOP_FLAG_COARSE_ONLY != 0 {
+            continue;
+        }
+        if !region_gate(op.region, ta, tb) {
+            continue;
+        }
+        include!(concat!(env!("OUT_DIR"), "/op_arms_sample.rs"));
+    }
+    (d, mat)
+}
+
 /// Height (meters) of the program's heightfield component at `xz` — the sum
 /// of its height ops only. Twin of the height-only loops in the mesh
 /// (shadow bake) and water (seabed) shaders.
@@ -800,6 +901,53 @@ mod tests {
         for i in 0..200 {
             let p = Vec3::new(i as f32 * 13.7, (i % 7) as f32 * 11.0, i as f32 * -7.9);
             assert_eq!(eval(&ops, seed, p, 1.0), eval(&ops, seed, p, 1.0));
+        }
+    }
+
+    /// The two-loop evaluator is the one the GPU runs. It has to produce
+    /// the SAME world as the linear one every planning layer, spawner and
+    /// terrain query uses — bit for bit, because the split is a
+    /// reordering and a reordering that changes a float has changed the
+    /// surface a chunk meshes.
+    ///
+    /// Both shipped programs, at both sides of the coarse cutoff, and at
+    /// heights that put samples above, inside and below the structures.
+    #[test]
+    fn the_split_evaluator_is_the_linear_one() {
+        for (name, ops) in [("planet", planet_program()), ("mega", mega_program())] {
+            for seed in [0u32, 7, 1337] {
+                for vs in [1.0f32, 2.0, 4.0, 8.0] {
+                    for i in 0..300 {
+                        let p = Vec3::new(
+                            i as f32 * 137.0 - 9000.0,
+                            (i % 41) as f32 * 23.0 - 300.0,
+                            i as f32 * -91.0 + 4000.0,
+                        );
+                        assert_eq!(
+                            eval(&ops, seed, p, vs),
+                            eval_split(&ops, seed, p, vs),
+                            "{name} seed={seed} vs={vs} p={p:?}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// And the column half agrees with the height-only replay about `h` —
+    /// the replay is a third interpreter (shadow bake, seabed), and it
+    /// runs a SUBSET of the column ops.
+    #[test]
+    fn the_column_pass_and_the_height_replay_agree_about_height() {
+        for ops in [planet_program(), mega_program()] {
+            for i in 0..300 {
+                let xz = Vec2::new(i as f32 * 211.0 - 7000.0, i as f32 * -137.0);
+                assert_eq!(
+                    eval_column(&ops, 0, xz, 1.0).h,
+                    eval_height(&ops, 0, xz, 1.0),
+                    "xz={xz:?}"
+                );
+            }
         }
     }
 

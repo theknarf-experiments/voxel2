@@ -18,6 +18,14 @@ fn main() {
         "op_arms_height.rs",
         voxel_core::opgen::rust_arms(voxel_core::opgen::Ctx::Height),
     );
+    write(
+        "op_arms_column.rs",
+        voxel_core::opgen::rust_arms(voxel_core::opgen::Ctx::Column),
+    );
+    write(
+        "op_arms_sample.rs",
+        voxel_core::opgen::rust_arms(voxel_core::opgen::Ctx::Sample),
+    );
     write("op_arms_range.rs", voxel_core::opgen::rust_range_arms());
     println!("cargo:rerun-if-changed=build.rs");
 }

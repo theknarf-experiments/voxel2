@@ -82,6 +82,25 @@ impl Value {
         }
     }
 
+    /// The WGSL type of each register, positionally matching
+    /// [`Value::registers`].
+    ///
+    /// Only the split needs these: a column pass hands its registers to a
+    /// sample pass through a struct, and a struct has to say what is in
+    /// it. Kept beside the names so the pair cannot go out of step.
+    pub const fn register_types(self) -> &'static [&'static str] {
+        match self {
+            Value::Height => &["f32"],
+            Value::Sdf => &["f32", "u32"],
+            Value::Regions => &["f32", "f32"],
+            Value::Warp => &["vec2<f32>"],
+            Value::Lattice => &["f32", "f32"],
+            Value::Shafts => &["vec2<f32>", "f32", "f32"],
+            Value::Field => &["f32"],
+            Value::Host(_) => &[],
+        }
+    }
+
     /// Is there exactly ONE of this value, so that writing it replaces
     /// what was there?
     ///
@@ -450,18 +469,136 @@ if abs(level - round_half_up(level / n) * n) < 0.5 {
     },
 ];
 
-/// Emission context: the full interpreter or the height-only replay.
+/// Which axes a sample of an op can depend on.
+///
+/// DERIVED from the bodies and the ports, never declared. A volumetric
+/// evaluator runs the program in two loops — once per COLUMN of samples
+/// and once per sample — and which loop an op belongs in is not a taste
+/// question: it belongs in the column loop iff its result cannot vary
+/// with y. Deriving that is what stops the two arm lists from being a
+/// pair of hand-maintained sets that agree by habit.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Axis {
+    /// A function of xz alone: evaluated once per column.
+    Column,
+    /// Varies down the column: evaluated once per sample.
+    Sample,
+}
+
+/// Does `body` read the sample position's Y?
+///
+/// `p.x` and `p.z` are the column's own coordinates and say nothing about
+/// y. Anything else that mentions `p` — `p.y`, or `p` passed whole to
+/// `fbm3` — is what makes an op per-sample. Word boundaries matter: `pxz`
+/// is the column position and `@p1.xyz` is a parameter, and a scan short
+/// of a token walk reports both as reading y.
+fn reads_y(body: &str) -> bool {
+    let is_word = |c: char| c.is_ascii_alphanumeric() || c == '_';
+    let bytes = body.as_bytes();
+    for (i, &c) in bytes.iter().enumerate() {
+        if c != b'p' {
+            continue;
+        }
+        if i > 0 && is_word(bytes[i - 1] as char) {
+            continue;
+        }
+        let rest = &body[i + 1..];
+        if rest.starts_with(is_word) {
+            continue; // pxz, p0, p1 — a longer identifier.
+        }
+        if !(rest.starts_with(".x") || rest.starts_with(".z")) {
+            return true;
+        }
+    }
+    false
+}
+
+/// Every op's axis class, to a fixpoint.
+///
+/// Two rules, applied until nothing moves: an op is per-sample if its body
+/// reads y or if it reads a value something per-sample writes, and a value
+/// is per-sample as soon as any per-sample op writes it. The second rule
+/// is what carries y-dependence through the register file — nothing in
+/// `WOP_COARSE_SOLID` mentions y, but it writes the SDF, and the SDF is
+/// per-sample because `WOP_HEIGHT_SURFACE` compares it against `p.y`.
+fn axis_table() -> Vec<Axis> {
+    let mut axes: Vec<Axis> = OPS
+        .iter()
+        .map(|op| {
+            if reads_y(op.body) {
+                Axis::Sample
+            } else {
+                Axis::Column
+            }
+        })
+        .collect();
+    loop {
+        let sample_values: Vec<Value> = OPS
+            .iter()
+            .zip(&axes)
+            .filter(|(_, a)| **a == Axis::Sample)
+            .flat_map(|(op, _)| op.outs.iter().map(|(_, v)| *v))
+            .collect();
+        let mut moved = false;
+        for (i, op) in OPS.iter().enumerate() {
+            if axes[i] == Axis::Sample {
+                continue;
+            }
+            if op.ins.iter().any(|(_, v)| sample_values.contains(v)) {
+                axes[i] = Axis::Sample;
+                moved = true;
+            }
+        }
+        if !moved {
+            return axes;
+        }
+    }
+}
+
+/// The axis class of one op kind, or [`Axis::Sample`] for a kind that is
+/// not in the table — an unknown op is one this analysis has no grounds to
+/// hoist.
+pub fn axis(kind: u32) -> Axis {
+    match OPS.iter().position(|op| op.kind == kind) {
+        Some(i) => axis_table()[i],
+        None => Axis::Sample,
+    }
+}
+
+/// The values a column pass has to hand the sample pass: every
+/// [`Axis::Column`] value that some [`Axis::Sample`] op reads.
+///
+/// A column value nothing per-sample reads (the warp, which only height
+/// ops consume) stays inside the column pass and is not carried.
+pub fn carried_values() -> Vec<Value> {
+    let axes = axis_table();
+    let mut out = Vec::new();
+    for (op, a) in OPS.iter().zip(&axes) {
+        if *a != Axis::Sample {
+            continue;
+        }
+        for (_, v) in op.ins {
+            let written_by_column = OPS
+                .iter()
+                .zip(&axes)
+                .any(|(w, wa)| *wa == Axis::Column && w.outs.iter().any(|(_, o)| o == v));
+            if written_by_column && !out.contains(v) {
+                out.push(*v);
+            }
+        }
+    }
+    out
+}
+
+/// Emission context: the full interpreter, the height-only replay, or one
+/// half of a volumetric evaluator's two-loop split.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Ctx {
     Full,
     Height,
-    /// Everything the height replay does NOT do.
-    ///
-    /// The height chain depends only on xz, so a volumetric evaluator can
-    /// run it once per COLUMN and this per sample. The split is exactly
-    /// `OpDef::height`, and it is sound because no `height: false` arm
-    /// reads a register the height arms own except `h`, `ta` and `tb`,
-    /// which the column pass hands over.
+    /// The xz-only half, run once per column of samples.
+    Column,
+    /// Everything the column pass does not do, run once per sample.
     Sample,
 }
 
@@ -469,8 +606,8 @@ fn substitute(body: &str, ctx: Ctx, wgsl: bool) -> String {
     let mut s = body.to_string();
     // FBM entry point + optional vs argument.
     let fbm = match (ctx, wgsl) {
-        (Ctx::Full | Ctx::Sample, false) => "fbm_mode",
-        (Ctx::Full | Ctx::Sample, true) => "fbm",
+        (Ctx::Full | Ctx::Sample | Ctx::Column, false) => "fbm_mode",
+        (Ctx::Full | Ctx::Sample | Ctx::Column, true) => "fbm",
         (Ctx::Height, _) => "hfbm",
     };
     s = s.replace("@FBM", fbm);
@@ -523,11 +660,16 @@ fn indent(text: &str, by: &str) -> String {
 }
 
 fn ops_for(ctx: Ctx) -> impl Iterator<Item = &'static OpDef> {
-    OPS.iter().filter(move |op| match ctx {
-        Ctx::Full => true,
-        Ctx::Height => op.height,
-        Ctx::Sample => !op.height,
-    })
+    let axes = axis_table();
+    OPS.iter()
+        .enumerate()
+        .filter(move |(i, op)| match ctx {
+            Ctx::Full => true,
+            Ctx::Height => op.height,
+            Ctx::Column => axes[*i] == Axis::Column,
+            Ctx::Sample => axes[*i] == Axis::Sample,
+        })
+        .map(|(_, op)| op)
 }
 
 /// The Rust `match op.kind { ... }` statement for `include!`.
@@ -588,25 +730,47 @@ pub fn wgsl_arms(ctx: Ctx) -> String {
     out
 }
 
+/// The registers a column pass hands over, in one fixed order: the struct
+/// that carries them, the statement that fills it, and the statements that
+/// unpack it.
+///
+/// Generated rather than written, because the failure it prevents is
+/// silent. A sample arm that reads `sxz` while the shell still declares a
+/// local `sxz = 0` compiles and renders — it just renders the wrong world.
+/// Every mention of a carried register comes from this one list, so
+/// hoisting an op cannot leave a stale local behind.
+pub fn wgsl_column_struct() -> (String, String, String) {
+    let carried = carried_values();
+    let regs: Vec<(&str, &str)> = carried
+        .iter()
+        .flat_map(|v| {
+            v.registers()
+                .iter()
+                .copied()
+                .zip(v.register_types().iter().copied())
+        })
+        .collect();
+    let fields = regs
+        .iter()
+        .map(|(n, t)| format!("    {n}: {t},"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let names = regs.iter().map(|(n, _)| *n).collect::<Vec<_>>().join(", ");
+    let unpack = regs
+        .iter()
+        .map(|(n, _)| format!("var {n} = col.{n};"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    (
+        format!("struct Column {{\n{fields}\n}}"),
+        format!("return Column({names});"),
+        unpack,
+    )
+}
+
 /// Module-level WGSL helper shims the generated arms call. `Height`
 /// contexts additionally need the vs-less `hfbm` wrapper, whose body
 /// differs per shader (coarse_fbm), so shells define that one.
-/// The height arms in the FULL dialect, for a volumetric evaluator that
-/// runs the height chain once per column. Same ops as `Ctx::Height`, but
-/// the vs-aware FBM the density shader has rather than the replay shells'.
-pub fn wgsl_column_arms() -> String {
-    let mut out = String::new();
-    for op in OPS.iter().filter(|op| op.height) {
-        out.push_str(&format!(
-            "case {}u: {{ // {}\n{}\n}}\n",
-            op.kind,
-            op.name,
-            indent(&substitute(op.body, Ctx::Full, true), "    ")
-        ));
-    }
-    out
-}
-
 pub fn wgsl_helpers(ctx: Ctx) -> String {
     let mut out = String::from(
         "\
@@ -694,6 +858,115 @@ mod tests {
 }
 
 #[cfg(test)]
+mod axis_tests {
+    use super::*;
+
+    /// `p.x`/`p.z` are the column's, `p.y` and a whole `p` are not, and
+    /// neither `pxz` nor a `@p1` parameter is a read of the position.
+    #[test]
+    fn reads_y_walks_tokens_rather_than_characters() {
+        assert!(reads_y("let nd = p.y - h;"));
+        assert!(reads_y("let q = p + @p1.xyz;"));
+        assert!(!reads_y("let c = to_iv2(floor2(pxz / cell));"));
+        assert!(!reads_y(
+            "h += @FBM(pxz + warp + @p0.xy, @p0.z, to_i(@p1.x));"
+        ));
+        assert!(!reads_y("var a = p.x;\nvar b = p.z;"));
+    }
+
+    /// The two loops partition the table: every op runs in exactly one.
+    #[test]
+    fn column_and_sample_partition_the_ops() {
+        let column: Vec<&str> = ops_for(Ctx::Column).map(|o| o.name).collect();
+        let sample: Vec<&str> = ops_for(Ctx::Sample).map(|o| o.name).collect();
+        assert_eq!(column.len() + sample.len(), OPS.len());
+        for op in OPS {
+            assert!(
+                column.contains(&op.name) != sample.contains(&op.name),
+                "{} is in neither loop or in both",
+                op.name
+            );
+        }
+    }
+
+    /// The height replay is a function of xz, so every op in it must be
+    /// one the derivation agrees is xz-only.
+    ///
+    /// The other direction does NOT hold: `WOP_SHAFTS_XZ` is xz-only and
+    /// is not part of the replay, because the replay computes `h` for the
+    /// shadow bake and the seabed and shafts contribute nothing to it.
+    /// One flag said both things until this test separated them.
+    #[test]
+    fn every_replay_op_is_column_class() {
+        for op in OPS.iter().filter(|op| op.height) {
+            assert_eq!(
+                axis(op.kind),
+                Axis::Column,
+                "{} is in the height replay but depends on y",
+                op.name
+            );
+        }
+    }
+
+    /// A sample arm may read a column register only through a value the
+    /// column pass hands over.
+    ///
+    /// This is the split's soundness argument, and it was a comment until
+    /// now: a sample arm that reaches for a column register nobody carries
+    /// would read whatever the shell happened to initialise it to.
+    #[test]
+    fn sample_arms_read_column_registers_only_through_carried_values() {
+        let carried = carried_values();
+        for op in ops_for(Ctx::Sample) {
+            for value in Value::ALL {
+                let written_by_column =
+                    ops_for(Ctx::Column).any(|w| w.outs.iter().any(|(_, o)| o == value));
+                if !written_by_column || carried.contains(value) {
+                    continue;
+                }
+                for reg in value.registers() {
+                    assert!(
+                        !super::port_tests::touches(op.body, reg),
+                        "{} reads `{reg}`, which the column pass computes and does not carry",
+                        op.name
+                    );
+                }
+            }
+        }
+    }
+
+    /// What the derivation currently decides, written down so a change to
+    /// it is a change someone made on purpose.
+    ///
+    /// Not a restatement of the rule: the point is that adding an op, or
+    /// rewiring one's ports, moves ops between these lists, and this is
+    /// where that shows up in a diff.
+    #[test]
+    fn the_derived_split_is_this() {
+        let mut column: Vec<&str> = ops_for(Ctx::Column).map(|o| o.name).collect();
+        column.sort_unstable();
+        assert_eq!(
+            column,
+            [
+                "WOP_HEIGHT_BAND_FBM",
+                "WOP_HEIGHT_FBM",
+                "WOP_HEIGHT_OFFSET",
+                "WOP_HEIGHT_STEP",
+                "WOP_REGION_AXES",
+                "WOP_SHAFTS_XZ",
+                "WOP_WARP_XZ",
+            ]
+        );
+        let mut carried: Vec<String> = carried_values()
+            .iter()
+            .flat_map(|v| v.registers().iter().map(|r| r.to_string()))
+            .collect();
+        carried.sort();
+        assert_eq!(carried, ["h", "shaft", "sr", "sxz", "ta", "tb"]);
+    }
+}
+
+#[cfg(test)]
 mod port_tests {
     use super::*;
 
@@ -702,7 +975,7 @@ mod port_tests {
     /// `h` must not match `hash`, and `d` must not match `sd_box` — the
     /// registers are one and two letters long, so anything short of a real
     /// token scan reports every op as touching everything.
-    fn touches(body: &str, ident: &str) -> bool {
+    pub(super) fn touches(body: &str, ident: &str) -> bool {
         let is_word = |c: char| c.is_ascii_alphanumeric() || c == '_';
         // `@mat` is a read of the op's own material PARAM, not the `mat`
         // register; it appears in ops that never read the register.

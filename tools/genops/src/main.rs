@@ -4,16 +4,25 @@
 //! voxel-render fails when the spliced text goes stale.
 
 use voxel_core::layout::{wgsl_material_accessors, wgsl_struct, wgsl_texel_index, CHUNK_PARAMS};
-use voxel_core::opgen::{wgsl_arms, wgsl_column_arms, wgsl_helpers, Ctx};
+use voxel_core::opgen::{wgsl_arms, wgsl_column_struct, wgsl_helpers, Ctx};
 
 const HELPERS_BEGIN: &str = "// GENOPS HELPERS BEGIN";
 const HELPERS_END: &str = "// GENOPS HELPERS END";
 const ARMS_BEGIN: &str = "// GENOPS ARMS BEGIN";
 const ARMS_END: &str = "// GENOPS ARMS END";
-/// The height chain, spliced separately where an evaluator runs it once
-/// per column instead of once per sample.
+/// The xz-only arms, spliced separately where an evaluator runs them once
+/// per column instead of once per sample. Which ops those are is derived
+/// (`opgen::Axis`), not listed here.
 const COLUMN_BEGIN: &str = "// GENOPS COLUMN ARMS BEGIN";
 const COLUMN_END: &str = "// GENOPS COLUMN ARMS END";
+/// The handover: what the column pass carries, how it is packed, and how
+/// the sample pass reads it back.
+const CSTRUCT_BEGIN: &str = "// GENOPS COLUMN STRUCT BEGIN";
+const CSTRUCT_END: &str = "// GENOPS COLUMN STRUCT END";
+const CRETURN_BEGIN: &str = "// GENOPS COLUMN RETURN BEGIN";
+const CRETURN_END: &str = "// GENOPS COLUMN RETURN END";
+const CUNPACK_BEGIN: &str = "// GENOPS COLUMN UNPACK BEGIN";
+const CUNPACK_END: &str = "// GENOPS COLUMN UNPACK END";
 /// GPU struct layouts (voxel-core::layout) rather than op bodies: the
 /// per-chunk uniform, and the material recipes' named slot accessors.
 const PARAMS_BEGIN: &str = "// GENMAT CHUNKPARAMS BEGIN";
@@ -58,28 +67,28 @@ fn splice_if_present(text: &str, begin: &str, end: &str, content: &str, indent: 
 }
 
 fn main() {
-    // (path, helper dialect, arms ctx, column arms ctx if the file has a
-    // separate column pass).
+    // (path, helper dialect, arms ctx, does the file split into two
+    // passes).
     let targets = [
         (
             "crates/voxel-render/src/shaders/voxel_world_density.wgsl",
             Ctx::Full,
             Ctx::Sample,
-            Some(Ctx::Height),
+            true,
             "            ",
         ),
         (
             "crates/voxel-render/src/shaders/voxel_mesh_chunks.wgsl",
             Ctx::Height,
             Ctx::Height,
-            None,
+            false,
             "            ",
         ),
         (
             "demos/voxel2/src/voxel_water.wgsl",
             Ctx::Height,
             Ctx::Height,
-            None,
+            false,
             "            ",
         ),
     ];
@@ -93,18 +102,23 @@ fn main() {
             "",
         );
         let text = splice(&text, ARMS_BEGIN, ARMS_END, &wgsl_arms(arms), arm_indent);
-        let text = match column {
-            // The column pass runs the height chain, but inside the
-            // volumetric evaluator — so it keeps the full dialect's
-            // vs-aware FBM, not the replay shells'.
-            Some(_) => splice(
+        // The column pass runs inside the volumetric evaluator, so it
+        // keeps the full dialect's vs-aware FBM rather than the replay
+        // shells'.
+        let text = if column {
+            let (cstruct, creturn, cunpack) = wgsl_column_struct();
+            let text = splice(
                 &text,
                 COLUMN_BEGIN,
                 COLUMN_END,
-                &wgsl_column_arms(),
+                &wgsl_arms(Ctx::Column),
                 arm_indent,
-            ),
-            None => text,
+            );
+            let text = splice(&text, CSTRUCT_BEGIN, CSTRUCT_END, &cstruct, "");
+            let text = splice(&text, CRETURN_BEGIN, CRETURN_END, &creturn, "    ");
+            splice(&text, CUNPACK_BEGIN, CUNPACK_END, &cunpack, "    ")
+        } else {
+            text
         };
         let text = splice_if_present(
             &text,

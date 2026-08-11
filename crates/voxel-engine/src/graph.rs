@@ -26,7 +26,7 @@ use bevy::platform::collections::{HashMap, HashSet};
 use bevy::prelude::*;
 use bevy::reflect::ReflectMut;
 use serde::{Deserialize, Serialize};
-use voxel_core::opgen::Value;
+use voxel_core::opgen::{Axis, Value};
 use voxel_core::worldop::{WorldOp, FIELD_SLOTS};
 
 /// A compiled level graph.
@@ -83,6 +83,11 @@ pub enum Error {
     Unnamed {
         at: String,
     },
+    WriteAfterHoistedRead {
+        at: String,
+        value: Value,
+        reader: String,
+    },
 }
 
 impl Error {
@@ -101,7 +106,8 @@ impl Error {
             | Error::WrongType { at, .. }
             | Error::StaleRead { at, .. }
             | Error::TooManyFields { at, .. }
-            | Error::Unnamed { at } => at,
+            | Error::Unnamed { at }
+            | Error::WriteAfterHoistedRead { at, .. } => at,
         }
     }
 }
@@ -158,6 +164,13 @@ impl std::fmt::Display for Error {
             Error::Unnamed { at } => {
                 write!(f, "{at} is referred to by name but has none")
             }
+            Error::WriteAfterHoistedRead { at, value, reader } => write!(
+                f,
+                "'{at}' writes {value:?} after '{reader}' has read it, and {value:?} \
+                 depends only on xz — so it is computed once per COLUMN, before any \
+                 per-sample op runs, and this write would reach '{reader}' too. Move \
+                 it above '{reader}', or put the two in regions that do not overlap"
+            ),
         }
     }
 }
@@ -280,8 +293,25 @@ pub fn compile(nodes: &[NodeDef]) -> Result<Program, Error> {
     let mut live: HashMap<Value, Vec<usize>> = HashMap::default();
     let mut ops = Vec::with_capacity(flat.len());
 
+    // Per-sample nodes that have read an xz-only value, and so have
+    // already seen everything the column pass will ever write to it. The
+    // density shader evaluates the program in two loops — every xz-only op
+    // once per column, then the rest once per sample — which is only the
+    // same program as the linear one when nothing writes such a value
+    // after a per-sample node has read it. `carried_values` names exactly
+    // the values that cross between the loops.
+    let carried = voxel_core::opgen::carried_values();
+    let mut hoisted_reads: HashMap<Value, Vec<usize>> = HashMap::default();
+
     for (i, f) in flat.iter().enumerate() {
         let (ins, outs) = f.node.node.0.ports();
+        let slot = f
+            .name
+            .and_then(|n| fields.get(n))
+            .copied()
+            .unwrap_or_default();
+        let op = f.node.node.0.op(slot);
+        let axis = op.as_ref().map(|o| voxel_core::opgen::axis(o.kind));
 
         for (port, _) in f.node.wires.iter() {
             if !ins.iter().any(|(p, _)| p == port) {
@@ -366,6 +396,10 @@ pub fn compile(nodes: &[NodeDef]) -> Result<Program, Error> {
                     live: label(&visible),
                 });
             }
+
+            if axis == Some(Axis::Sample) && carried.contains(want) {
+                hoisted_reads.entry(*want).or_default().push(i);
+            }
         }
 
         // Writes. An ungated write replaces the value everywhere; a gated
@@ -375,17 +409,30 @@ pub fn compile(nodes: &[NodeDef]) -> Result<Program, Error> {
             if !produced.is_single() {
                 continue;
             }
+            // A column write cannot come after a sample read of the same
+            // value unless the two are in regions that never both apply —
+            // the same disjointness that lets nine districts each write a
+            // lattice. `gates_overlap` is where that is decided, once.
+            if axis == Some(Axis::Column) {
+                if let Some(readers) = hoisted_reads.get(produced) {
+                    if let Some(&j) = readers
+                        .iter()
+                        .find(|&&j| gates_overlap(flat[j].region, f.region))
+                    {
+                        return Err(Error::WriteAfterHoistedRead {
+                            at: f.label.clone(),
+                            value: *produced,
+                            reader: flat[j].label.clone(),
+                        });
+                    }
+                }
+            }
             let standing = live.entry(*produced).or_default();
             standing.retain(|&j| !covers(f.region, flat[j].region));
             standing.push(i);
         }
 
-        let slot = f
-            .name
-            .and_then(|n| fields.get(n))
-            .copied()
-            .unwrap_or_default();
-        if let Some(op) = f.node.node.0.op(slot) {
+        if let Some(op) = op {
             ops.push(match f.region {
                 Some(band) => op.region(band),
                 None => op,

@@ -146,6 +146,57 @@ fn branching_a_single_slot_value_says_what_replaced_it() {
     assert!(e.contains("one thing is live at a time"), "{e}");
 }
 
+/// The density shader runs every xz-only op for the whole column before
+/// it runs any per-sample op, so a height written after the surface has
+/// read it would reach the surface anyway — the level would render as
+/// something its own reading order does not describe.
+///
+/// Caught here rather than discovered as a mismatch between the GPU and
+/// the CPU mirror, which is where it would otherwise turn up: as props
+/// floating over ground that is not where the placer thinks it is.
+#[test]
+fn raising_the_height_after_the_surface_reads_it_is_refused() {
+    let nodes = vec![
+        node(r#"{"kind":"height_zero","name":"sea"}"#),
+        node(r#"{"kind":"sdf_void","name":"void"}"#),
+        node(r#"{"kind":"height_offset","name":"a","in":{"height":"sea"},"value":1.0}"#),
+        node(r#"{"kind":"height_surface","in":{"height":"a","sdf":"void"},"material":1}"#),
+        node(r#"{"kind":"height_offset","name":"late","in":{"height":"a"},"value":9.0}"#),
+    ];
+    let e = err(&nodes);
+    assert!(e.contains("'late'") && e.contains("Height"), "{e}");
+    assert!(e.contains("once per COLUMN"), "{e}");
+}
+
+/// And the megastructure's shape is legal: seven `shafts_xz`, each read by
+/// its own district's `beams` and each written after the district before
+/// it read one. They never both apply, so hoisting them cannot mix them
+/// up — which is the same disjointness the liveness rules already use, and
+/// the reason this check asks `gates_overlap` rather than comparing
+/// positions.
+#[test]
+fn a_write_after_a_read_is_fine_when_the_two_regions_never_meet() {
+    let level = shipped("megastructure");
+    compile(&level.nodes).expect("disjoint districts should compile");
+
+    // The same shape with the gates overlapping is not fine.
+    let nodes = parse(
+        r#"[
+        {"kind":"sdf_void","name":"void"},
+        {"kind":"region","axes":[0.0,1.0,0.0,1.0],"nodes":[
+            {"kind":"shafts_xz","name":"s1","spacing":190.0,"jitter":60.0,"radius":[9.0,7.0]},
+            {"kind":"shafts_cut","name":"cut","in":{"sdf":"void","shafts":"s1"}}
+        ]},
+        {"kind":"region","axes":[0.0,1.0,0.0,1.0],"nodes":[
+            {"kind":"shafts_xz","name":"s2","spacing":640.0,"jitter":120.0,"radius":[26.0,14.0]}
+        ]}
+    ]"#,
+    )
+    .unwrap();
+    let e = err(&nodes);
+    assert!(e.contains("Shafts") && e.contains("'cut'"), "{e}");
+}
+
 #[test]
 fn a_duplicate_name_is_refused() {
     let nodes = vec![

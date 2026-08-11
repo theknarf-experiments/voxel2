@@ -4,13 +4,13 @@
 //! after editing the op table to refresh the shaders.
 
 use voxel_core::layout::{wgsl_material_accessors, wgsl_struct, wgsl_texel_index, CHUNK_PARAMS};
-use voxel_core::opgen::{wgsl_arms, wgsl_column_arms, wgsl_helpers, Ctx};
+use voxel_core::opgen::{wgsl_arms, wgsl_column_struct, wgsl_helpers, Ctx};
 
 /// (path, helper dialect, arms ctx, has a separate column block).
 ///
-/// The density shader splits the program: the height chain runs once per
+/// The density shader splits the program: the xz-only ops run once per
 /// COLUMN and the rest per sample, so its arms are `Ctx::Sample` and its
-/// column block is the height ops in the full dialect.
+/// column block is `Ctx::Column` in the full dialect.
 const SHADERS: &[(&str, Ctx, Ctx, bool)] = &[
     (
         "src/shaders/voxel_world_density.wgsl",
@@ -69,15 +69,45 @@ fn spliced_shader_regions_match_the_op_table() {
             "{path}: arms stale — run `mise run genops`"
         );
         if *column {
+            let (cstruct, creturn, cunpack) = wgsl_column_struct();
             assert_eq!(
                 region(
                     &text,
                     "// GENOPS COLUMN ARMS BEGIN",
                     "// GENOPS COLUMN ARMS END"
                 ),
-                indented(&wgsl_column_arms(), "            "),
+                indented(&wgsl_arms(Ctx::Column), "            "),
                 "{path}: column arms stale — run `mise run genops`"
             );
+            for (begin, end, want, indent, what) in [
+                (
+                    "// GENOPS COLUMN STRUCT BEGIN",
+                    "// GENOPS COLUMN STRUCT END",
+                    cstruct,
+                    "",
+                    "column struct",
+                ),
+                (
+                    "// GENOPS COLUMN RETURN BEGIN",
+                    "// GENOPS COLUMN RETURN END",
+                    creturn,
+                    "    ",
+                    "column return",
+                ),
+                (
+                    "// GENOPS COLUMN UNPACK BEGIN",
+                    "// GENOPS COLUMN UNPACK END",
+                    cunpack,
+                    "    ",
+                    "column unpack",
+                ),
+            ] {
+                assert_eq!(
+                    region(&text, begin, end),
+                    indented(&want, indent),
+                    "{path}: {what} stale — run `mise run genops`"
+                );
+            }
         }
     }
 }
@@ -86,18 +116,71 @@ fn spliced_shader_regions_match_the_op_table() {
 /// program would silently skip it.
 #[test]
 fn the_two_passes_partition_the_op_table() {
-    let height = wgsl_column_arms();
+    let column = wgsl_arms(Ctx::Column);
     let sample = wgsl_arms(Ctx::Sample);
     let full = wgsl_arms(Ctx::Full);
     for line in full.lines().filter(|l| l.starts_with("case ")) {
-        let in_height = height.lines().any(|h| h == line);
+        let in_column = column.lines().any(|h| h == line);
         let in_sample = sample.lines().any(|s| s == line);
         assert!(
-            in_height != in_sample,
+            in_column != in_sample,
             "{line} is in {} passes, must be exactly one",
-            u8::from(in_height) + u8::from(in_sample)
+            u8::from(in_column) + u8::from(in_sample)
         );
     }
+}
+
+/// The column arms compile against a shell that has NO sample position and
+/// none of the per-sample registers.
+///
+/// This is what makes the axis derivation load-bearing rather than
+/// advisory: an op the analysis wrongly calls xz-only reaches for `p.y` or
+/// `d` here, and there is nothing by that name to reach for. The real
+/// `eval_column` has exactly this shell.
+#[test]
+fn column_arms_compile_without_a_sample_position() {
+    let src = format!(
+        "\
+struct WorldOp {{ head: vec4<u32>, p0: vec4<f32>, p1: vec4<f32>, p2: vec4<f32> }}
+struct WorldProgram {{ count: vec4<u32>, ops: array<WorldOp, 8> }}
+var<private> prog: WorldProgram;
+const BIG: f32 = 1.0e6;
+fn hash2(p: vec2<i32>) -> f32 {{ return f32(p.x + p.y) * 0.001; }}
+fn fbm(q: vec2<f32>, s: f32, o: i32, vs: f32, m: u32) -> f32 {{ return q.x + s + f32(o) + vs + f32(m); }}
+fn round_half_up(x: f32) -> f32 {{ return floor(x + 0.5); }}
+{helpers}
+{cstruct}
+fn eval_column(pxz: vec2<f32>, vs: f32) -> Column {{
+    var h = 0.0;
+    var warp = vec2<f32>(0.0);
+    var ta = 0.0;
+    var tb = 0.0;
+    var sxz = vec2<f32>(0.0);
+    var sr = 0.0;
+    var shaft = BIG;
+    for (var i = 0u; i < prog.count.x; i++) {{
+        let op = prog.ops[i];
+        switch op.head.x {{
+{arms}
+            default {{}}
+        }}
+    }}
+    {creturn}
+}}
+",
+        helpers = wgsl_helpers(Ctx::Full),
+        cstruct = wgsl_column_struct().0,
+        creturn = wgsl_column_struct().1,
+        arms = wgsl_arms(Ctx::Column),
+    );
+    let module = naga::front::wgsl::parse_str(&src)
+        .unwrap_or_else(|e| panic!("column WGSL does not parse: {e}\n{src}"));
+    naga::valid::Validator::new(
+        naga::valid::ValidationFlags::all(),
+        naga::valid::Capabilities::all(),
+    )
+    .validate(&module)
+    .unwrap_or_else(|e| panic!("column WGSL does not validate: {e:?}\n{src}"));
 }
 
 /// The generated arms compile as WGSL: a minimal standalone module with

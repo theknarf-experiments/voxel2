@@ -247,15 +247,22 @@ struct WorldSample {
     mat: u32,
 }
 
-/// What the height chain produces for one column. Everything in it
-/// depends on xz alone, which is why it is computed once per column
-/// rather than once per sample — on a heightfield world that IS the
-/// program, evaluated 38 times over for every column before this split.
+/// What the xz-only ops produce for one column, and everything the sample
+/// pass reads back from them. Which ops those are, and which of their
+/// registers have to travel, is derived from the op table
+/// (`voxel_core::opgen::Axis`) — on a heightfield world the whole program
+/// is in here, and it was evaluated 38 times over for every column before
+/// this split.
+// GENOPS COLUMN STRUCT BEGIN (generated from voxel-core::opgen — run `mise run genops` after editing the op table)
 struct Column {
     h: f32,
     ta: f32,
     tb: f32,
+    sxz: vec2<f32>,
+    sr: f32,
+    shaft: f32,
 }
+// GENOPS COLUMN STRUCT END
 
 fn eval_column(pxz: vec2<f32>, vs: f32) -> Column {
     let coarse = vs >= COARSE_VOXEL_M;
@@ -263,10 +270,13 @@ fn eval_column(pxz: vec2<f32>, vs: f32) -> Column {
     var warp = vec2<f32>(0.0);
     var ta = 0.0;
     var tb = 0.0;
+    var sxz = vec2<f32>(0.0);
+    var sr = 0.0;
+    var shaft = BIG;
     let w = world_header();
     for (var i = 0u; i < w.count.y; i++) {
         let op = prog.ops[w.count.x + i];
-        // The same LOD gating the sample pass applies: a height op can
+        // The same LOD gating the sample pass applies: a column op can
         // be fine- or coarse-only too, and the two passes must agree
         // about which ops exist or the column is not the column.
         if (coarse && (op.head.y & 1u) != 0u) { continue; }
@@ -299,25 +309,37 @@ fn eval_column(pxz: vec2<f32>, vs: f32) -> Column {
                 let wb = smoothstep(op.p2.z - fa, op.p2.z + fa, tb) * (1.0 - smoothstep(op.p2.w - fa, op.p2.w + fa, tb));
                 h += min(wa, wb) * (op.p1.w + fbm(pxz + warp + op.p0.xy, op.p0.z, to_i(op.p1.x), vs, to_u(op.p1.y)) * op.p0.w);
             }
+            case 9u: { // WOP_SHAFTS_XZ
+                let sp = op.p0.x;
+                let c = iv2(to_i(round_half_up(pxz.x / sp)), to_i(round_half_up(pxz.y / sp)));
+                let jit = v2(hash2(c + iv2(41, 13)) - 0.5, hash2(c + iv2(-7, 99)) - 0.5) * op.p0.y;
+                sxz = pxz - to_v2(c) * sp - jit;
+                sr = op.p0.z + hash2(c) * op.p0.w;
+                shaft = length(sxz) - sr;
+            }
 // GENOPS COLUMN ARMS END
             default: {}
         }
     }
-    return Column(h, ta, tb);
+// GENOPS COLUMN RETURN BEGIN (generated from voxel-core::opgen — run `mise run genops` after editing the op table)
+    return Column(h, ta, tb, sxz, sr, shaft);
+// GENOPS COLUMN RETURN END
 }
 
 fn eval_program(p: vec3<f32>, vs: f32, col: Column) -> WorldSample {
     let coarse = vs >= COARSE_VOXEL_M;
-    let h = col.h;
-    let ta = col.ta;
-    let tb = col.tb;
+// GENOPS COLUMN UNPACK BEGIN (generated from voxel-core::opgen — run `mise run genops` after editing the op table)
+    var h = col.h;
+    var ta = col.ta;
+    var tb = col.tb;
+    var sxz = col.sxz;
+    var sr = col.sr;
+    var shaft = col.shaft;
+// GENOPS COLUMN UNPACK END
     var d = BIG;
     var mat = 1u;
     var level = 0.0;
     var fy = p.y;
-    var sxz = vec2<f32>(0.0);
-    var sr = 0.0;
-    var shaft = BIG;
     let pxz = p.xz;
 
     let w = world_header();
@@ -392,14 +414,6 @@ fn eval_program(p: vec3<f32>, vs: f32, col: Column) -> WorldSample {
                     }
                     if wall < d { d = wall; mat = op.head.z; }
                 }
-            }
-            case 9u: { // WOP_SHAFTS_XZ
-                let sp = op.p0.x;
-                let c = iv2(to_i(round_half_up(pxz.x / sp)), to_i(round_half_up(pxz.y / sp)));
-                let jit = v2(hash2(c + iv2(41, 13)) - 0.5, hash2(c + iv2(-7, 99)) - 0.5) * op.p0.y;
-                sxz = pxz - to_v2(c) * sp - jit;
-                sr = op.p0.z + hash2(c) * op.p0.w;
-                shaft = length(sxz) - sr;
             }
             case 10u: { // WOP_SHAFTS_CUT
                 d = max(d, -shaft);
