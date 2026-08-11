@@ -351,8 +351,8 @@ mod tests {
 
     fn shipped_planet() -> crate::LevelDef {
         let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../levels/planet.json");
-        crate::LevelDef::from_json_known(
-            &std::fs::read_to_string(path).unwrap(),
+        crate::LevelDef::from_path_known(
+            std::path::Path::new(&path),
             &crate::graph::registry::engine_kinds(),
         )
         .unwrap()

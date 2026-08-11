@@ -85,14 +85,31 @@ into their components. Cmd+Z undoes a whole edit, Cmd+S writes the level
 back to the file it came from. A level that stops compiling says why across
 the top of the panel and keeps the running world.
 
-**Live editing**: the level file is watched while running. Materials,
-environment and LOD tuning apply instantly; changes to the nodes,
-providers, or LOD topology rebuild the streamed world in place — copying
-a different level over the watched file swaps the whole world without a
-restart. The file holds only what the engine owns: the camera, lights,
-clear color and prop models are the host's, written in Rust in
-`demos/voxel2/src/`, and the seed is a runtime input a game picks per
-save.
+**Prefabs**: an authored object — a group of local-space CSG ops that
+`placements` stamps into the world — normally lives in a file of its own,
+and a level's `prefabs` list is one line per prefab:
+
+```json
+"prefabs": [ { "use": "prefabs/monolith_circle.json" } ],
+"placements": [ { "prefab": "monolith_circle", "position": [...] } ]
+```
+
+The **file carries the name**, so a prefab reads on its own and two levels
+naming the same file get the same object — edit it once and it changes in
+both. Paths are relative to the level, so a level moved between
+directories takes its prefabs with it; a prefab written inline is still a
+prefab, just one only its own level can reach. Saving puts each half back
+where it came from: the level keeps its one line, the prefab keeps the
+shapes.
+
+**Live editing**: the level file *and every prefab it uses* are watched
+while running. Materials, environment and LOD tuning apply instantly;
+changes to the nodes, providers, or LOD topology rebuild the streamed
+world in place — copying a different level over the watched file swaps the
+whole world without a restart. The file holds only what the engine owns:
+the camera, lights, clear color and prop models are the host's, written in
+Rust in `demos/voxel2/src/`, and the seed is a runtime input a game picks
+per save.
 
 Flycam: mouse look (hold right button), WASD + QE, shift to run, scroll for
 speed. Env vars:

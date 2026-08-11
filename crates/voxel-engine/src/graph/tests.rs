@@ -4,11 +4,7 @@ use crate::level::LevelDef;
 
 fn shipped(name: &str) -> LevelDef {
     let path = format!("{}/../../levels/{name}.json", env!("CARGO_MANIFEST_DIR"));
-    LevelDef::from_json_known(
-        &std::fs::read_to_string(path).unwrap(),
-        &registry::engine_kinds(),
-    )
-    .unwrap()
+    LevelDef::from_path_known(std::path::Path::new(&path), &registry::engine_kinds()).unwrap()
 }
 
 /// The program each level compiled to before it was a graph.

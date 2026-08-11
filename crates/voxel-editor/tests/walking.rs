@@ -13,11 +13,7 @@ use voxel_engine::LevelDef;
 
 fn planet() -> LevelDef {
     let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../levels/planet.json");
-    LevelDef::from_json_known(
-        &std::fs::read_to_string(path).unwrap(),
-        &registry::engine_kinds(),
-    )
-    .unwrap()
+    LevelDef::from_path_known(std::path::Path::new(&path), &registry::engine_kinds()).unwrap()
 }
 
 fn open(paths: &[&str]) -> HashSet<String> {
@@ -59,11 +55,9 @@ fn a_number_row_carries_the_levels_own_value_and_type() {
 fn no_declared_range_excludes_a_value_a_level_ships() {
     for name in ["planet", "megastructure", "purgatory"] {
         let path = format!("{}/../../levels/{name}.json", env!("CARGO_MANIFEST_DIR"));
-        let level = LevelDef::from_json_known(
-            &std::fs::read_to_string(&path).unwrap(),
-            &registry::engine_kinds(),
-        )
-        .unwrap();
+        let level =
+            LevelDef::from_path_known(std::path::Path::new(&&path), &registry::engine_kinds())
+                .unwrap();
         for row in rows(&level, &everything(&level)) {
             let RowKind::Number {
                 value,
@@ -326,11 +320,9 @@ fn a_newtype_does_not_cost_a_row() {
 fn every_reference_a_level_makes_resolves() {
     for name in ["planet", "megastructure", "purgatory"] {
         let path = format!("{}/../../levels/{name}.json", env!("CARGO_MANIFEST_DIR"));
-        let level = LevelDef::from_json_known(
-            &std::fs::read_to_string(&path).unwrap(),
-            &registry::engine_kinds(),
-        )
-        .unwrap();
+        let level =
+            LevelDef::from_path_known(std::path::Path::new(&&path), &registry::engine_kinds())
+                .unwrap();
         let mut seen = 0;
         for row in rows(&level, &everything(&level)) {
             let RowKind::Choice {
@@ -456,11 +448,9 @@ fn the_types_with_no_widget_are_the_ones_we_know_about() {
     let mut unsupported: Vec<String> = Vec::new();
     for name in ["planet", "megastructure", "purgatory"] {
         let path = format!("{}/../../levels/{name}.json", env!("CARGO_MANIFEST_DIR"));
-        let level = LevelDef::from_json_known(
-            &std::fs::read_to_string(&path).unwrap(),
-            &registry::engine_kinds(),
-        )
-        .unwrap();
+        let level =
+            LevelDef::from_path_known(std::path::Path::new(&&path), &registry::engine_kinds())
+                .unwrap();
         for row in rows(&level, &everything(&level)) {
             if let RowKind::Unsupported(ty) = row.kind {
                 unsupported.push(ty.to_string());

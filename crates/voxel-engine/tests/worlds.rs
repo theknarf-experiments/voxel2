@@ -26,8 +26,11 @@ fn shipped(name: &str) -> LevelDef {
 /// a kind is only a name until a registry says what type it is — and the
 /// kinds the GAME defines are not this crate's to know, so they drop.
 fn from_json_value(v: serde_json::Value) -> LevelDef {
-    LevelDef::from_json_known(
+    // Patched text, but the prefabs it names are the real ones beside
+    // the level it was patched from.
+    LevelDef::from_json_known_in(
         &v.to_string(),
+        std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../../levels/")),
         &voxel_engine::graph::registry::engine_kinds(),
     )
     .unwrap()

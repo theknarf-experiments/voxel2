@@ -7,6 +7,8 @@
 //! exactly this file. The engine has no hardcoded worlds — a lush planet
 //! and a concrete megacity are the same interpreter fed different data.
 
+pub mod prefab;
+
 use std::sync::Arc;
 
 use bevy::prelude::*;
@@ -334,6 +336,61 @@ impl CsgOpDef {
     }
 }
 
+/// A reusable authored object: local-space CSG ops that a
+/// [`PlacementDef`] stamps into the world wherever it likes.
+///
+/// Normally one per file — `{"use": "prefabs/monolith_circle.json"}` in a
+/// level, and the file holds the name and the ops. That is what makes a
+/// prefab shareable: two levels naming the same file get the same object,
+/// and editing the file changes it in both. Written inline it is still a
+/// prefab, just one only its own level can reach.
+#[derive(Reflect, Deserialize, Clone, Debug, PartialEq, Default)]
+pub struct PrefabDef {
+    /// What a placement calls it. Unique within a level.
+    #[reflect(@schema::Title)]
+    pub name: String,
+    /// The object, in its own local space, around the origin.
+    pub ops: Vec<CsgOpDef>,
+    /// The file this prefab's text lives in, relative to the level that
+    /// used it — `None` for one written inline.
+    ///
+    /// Read from the `use` key the loader leaves behind, and the reason
+    /// saving can put the prefab back where it came from instead of
+    /// swallowing it into the level.
+    #[serde(rename = "use", default)]
+    #[reflect(@schema::Hidden)]
+    pub from: Option<String>,
+}
+
+impl PrefabDef {
+    /// This prefab without its link to the file it came from — what gets
+    /// written INTO that file.
+    pub fn detached(&self) -> Self {
+        Self {
+            from: None,
+            ..self.clone()
+        }
+    }
+}
+
+impl Serialize for PrefabDef {
+    /// In a level, a prefab that lives in a file is one line naming it;
+    /// everything else about it belongs to that file, and
+    /// [`prefab::write`] has already put it there.
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeStruct;
+        if let Some(path) = &self.from {
+            let mut out = s.serialize_struct("PrefabDef", 1)?;
+            out.serialize_field("use", path)?;
+            return out.end();
+        }
+        let mut out = s.serialize_struct("PrefabDef", 2)?;
+        out.serialize_field("name", &self.name)?;
+        out.serialize_field("ops", &self.ops)?;
+        out.end()
+    }
+}
+
 /// A hand-authored instance of a prefab (or inline ops) in the world —
 /// VoxelPlugin's placeable asset items as level data. Applied after the
 /// procedural op providers, ordered by `priority`.
@@ -341,7 +398,7 @@ impl CsgOpDef {
 pub struct PlacementDef {
     /// Name into the level's `prefabs` table...
     #[serde(default)]
-    #[reflect(@schema::OneOf("prefabs{}"))]
+    #[reflect(@schema::OneOf("prefabs[].name"))]
     pub prefab: Option<String>,
     /// ...or inline local-space ops.
     #[serde(default)]
@@ -733,10 +790,15 @@ pub struct LevelDef {
     /// tuning a colour is instant.
     #[serde(default)]
     pub materials: Vec<MaterialDef>,
-    /// Named prefabs: reusable local-space CSG op groups for placements.
+    /// Reusable authored objects, each usually in a file of its own.
+    ///
+    /// A list rather than a map keyed by name, because a prefab that lives
+    /// in its own file carries its own name — a level that named it again
+    /// would be a second copy of the name to keep in step, and two levels
+    /// could give one file two names.
     #[serde(default)]
     #[reflect(@schema::Rebuilds)]
-    pub prefabs: std::collections::HashMap<String, Vec<CsgOpDef>>,
+    pub prefabs: Vec<PrefabDef>,
     /// Hand-authored prefab instances in the world.
     #[serde(default)]
     #[reflect(@schema::Rebuilds)]
@@ -818,7 +880,42 @@ impl LevelDef {
         json: &str,
         registry: &bevy::reflect::TypeRegistryArc,
     ) -> Result<Self, serde_json::Error> {
-        crate::graph::with_registry(registry, || serde_json::from_str(json))
+        Self::read(json, None, registry, false)
+    }
+
+    /// Read a level from a file, resolving its prefabs relative to it.
+    ///
+    /// The path is what makes `{"use": "prefabs/monolith_circle.json"}`
+    /// mean something, so a level with prefabs in it comes through here
+    /// (or [`LevelDef::from_path_known`]) rather than through a string.
+    pub fn from_path(
+        path: &std::path::Path,
+        registry: &bevy::reflect::TypeRegistryArc,
+    ) -> Result<Self, String> {
+        let text = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
+        Self::read(&text, path.parent(), registry, false).map_err(|e| e.to_string())
+    }
+
+    /// [`LevelDef::from_path`] for a crate that can see only some of the
+    /// kinds — see [`LevelDef::from_json_known`].
+    pub fn from_path_known(
+        path: &std::path::Path,
+        registry: &bevy::reflect::TypeRegistryArc,
+    ) -> Result<Self, String> {
+        let text = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
+        Self::read(&text, path.parent(), registry, true).map_err(|e| e.to_string())
+    }
+
+    /// [`LevelDef::from_json_known`] for text a caller built from a level
+    /// it has the path of — a fixture with one field patched, a tool
+    /// rewriting a document. The text is not on disk, but the prefabs it
+    /// names still are, and `base` says where.
+    pub fn from_json_known_in(
+        json: &str,
+        base: &std::path::Path,
+        registry: &bevy::reflect::TypeRegistryArc,
+    ) -> Result<Self, serde_json::Error> {
+        Self::read(json, Some(base), registry, true)
     }
 
     /// Read a level, dropping every node whose kind `registry` does not
@@ -835,18 +932,36 @@ impl LevelDef {
         json: &str,
         registry: &bevy::reflect::TypeRegistryArc,
     ) -> Result<Self, serde_json::Error> {
-        let known: Vec<String> = {
-            let reg = registry.read();
-            crate::graph::registry::kinds(&reg)
-                .into_iter()
-                .map(|(kind, _)| kind.to_string())
-                .collect()
-        };
+        Self::read(json, None, registry, true)
+    }
+
+    /// Splice the prefabs, then read what that leaves.
+    ///
+    /// One place, because the two things that could disagree — what the
+    /// document says and where its prefabs are — have to be decided
+    /// together.
+    fn read(
+        json: &str,
+        base: Option<&std::path::Path>,
+        registry: &bevy::reflect::TypeRegistryArc,
+        drop_unknown: bool,
+    ) -> Result<Self, serde_json::Error> {
+        use serde::de::Error as _;
         let mut doc: serde_json::Value = serde_json::from_str(json)?;
-        if let Some(nodes) = doc.get_mut("nodes").and_then(|n| n.as_array_mut()) {
-            nodes.retain(|n| known.iter().any(|k| n["kind"] == k.as_str()));
+        prefab::resolve(&mut doc, base).map_err(serde_json::Error::custom)?;
+        if drop_unknown {
+            let known: Vec<String> = {
+                let reg = registry.read();
+                crate::graph::registry::kinds(&reg)
+                    .into_iter()
+                    .map(|(kind, _)| kind.to_string())
+                    .collect()
+            };
+            if let Some(nodes) = doc.get_mut("nodes").and_then(|n| n.as_array_mut()) {
+                nodes.retain(|n| known.iter().any(|k| n["kind"] == k.as_str()));
+            }
         }
-        Self::from_json(&doc.to_string(), registry)
+        crate::graph::with_registry(registry, || serde_json::from_value(doc))
     }
 
     /// Write a level back, with each node's params serialized by its own
@@ -1035,8 +1150,31 @@ struct AppliedLevel(LevelDef);
 #[derive(Resource)]
 struct LevelSource {
     path: std::path::PathBuf,
-    mtime: Option<std::time::SystemTime>,
+    /// The level file and every prefab file it uses, each with the mtime
+    /// it was last seen at.
+    ///
+    /// A prefab is a level's text as much as the level file is, so editing
+    /// one has to reload the level that uses it — otherwise hot reload
+    /// would work on levels and quietly not on the things levels are made
+    /// of. Re-derived on every reload, because a reload can add a `use` or
+    /// take one away.
+    watched: Vec<(std::path::PathBuf, Option<std::time::SystemTime>)>,
     poll: Timer,
+}
+
+/// Every file a level's text lives in, with its mtime right now.
+fn watch_list(
+    level: &LevelDef,
+    path: &std::path::Path,
+) -> Vec<(std::path::PathBuf, Option<std::time::SystemTime>)> {
+    let base = path.parent().unwrap_or(std::path::Path::new("."));
+    std::iter::once(path.to_path_buf())
+        .chain(prefab::sources(&level.prefabs, base))
+        .map(|p| {
+            let mtime = std::fs::metadata(&p).and_then(|m| m.modified()).ok();
+            (p, mtime)
+        })
+        .collect()
 }
 
 impl Plugin for LevelPlugin {
@@ -1048,10 +1186,9 @@ impl Plugin for LevelPlugin {
             .insert_resource(WorldSeed(self.seed))
             .insert_resource(HostPlanner(self.planner.clone()));
         if let Some(path) = &self.source {
-            let mtime = std::fs::metadata(path).and_then(|m| m.modified()).ok();
             app.insert_resource(LevelSource {
                 path: path.clone(),
-                mtime,
+                watched: watch_list(&level, path),
                 poll: Timer::from_seconds(0.5, TimerMode::Repeating),
             })
             .add_systems(Update, (watch_level_file, save_level));
@@ -1114,8 +1251,8 @@ pub(crate) fn build_world_query(
     let mut placed: Vec<(i32, Vec<CsgOp>)> = Vec::new();
     for p in &level.placements {
         let local: &[CsgOpDef] = match (&p.prefab, &p.ops) {
-            (Some(name), _) => match level.prefabs.get(name) {
-                Some(ops) => ops,
+            (Some(name), _) => match level.prefabs.iter().find(|p| p.name == *name) {
+                Some(prefab) => &prefab.ops,
                 None => {
                     warn!("placement references unknown prefab '{name}'");
                     continue;
@@ -1191,9 +1328,9 @@ fn save_level(
     };
     match save_to(&level, &source.path, &registry.0) {
         Ok(()) => {
-            source.mtime = std::fs::metadata(&source.path)
-                .and_then(|m| m.modified())
-                .ok();
+            // Every file we just wrote, prefabs included — the watcher
+            // must not read its own writing back as an edit.
+            source.watched = watch_list(&level, &source.path.clone());
             info!("level saved: {}", source.path.display());
         }
         Err(e) => warn!("level save: {e}"),
@@ -1217,18 +1354,20 @@ fn watch_level_file(
     if !source.poll.tick(time.delta()).just_finished() {
         return;
     }
-    let Ok(mtime) = std::fs::metadata(&source.path).and_then(|m| m.modified()) else {
-        return;
-    };
-    if source.mtime == Some(mtime) {
+    // Any of them: a prefab edit is a level edit.
+    let now = |p: &std::path::Path| std::fs::metadata(p).and_then(|m| m.modified()).ok();
+    if !source.watched.iter().any(|(p, seen)| now(p) != *seen) {
         return;
     }
-    source.mtime = Some(mtime);
+    // Re-stamped before the parse, not after, so a prefab that does not
+    // parse is complained about once rather than every poll.
+    source.watched = source
+        .watched
+        .iter()
+        .map(|(p, _)| (p.clone(), now(p)))
+        .collect();
 
-    let new = match std::fs::read_to_string(&source.path)
-        .map_err(|e| e.to_string())
-        .and_then(|json| LevelDef::from_json(&json, &registry.0).map_err(|e| e.to_string()))
-    {
+    let new = match LevelDef::from_path(std::path::Path::new(&source.path), &registry.0) {
         Ok(new) => new,
         Err(e) => {
             warn!("level reload: {e}");
@@ -1247,6 +1386,9 @@ fn watch_level_file(
             return;
         }
     }
+    // The reload may have added a `use` or dropped one, so what to watch
+    // is re-derived from what actually loaded rather than kept.
+    source.watched = watch_list(&new, &source.path.clone());
     *level = new;
 }
 
@@ -1377,6 +1519,11 @@ pub fn save_to(
     path: &std::path::Path,
     registry: &bevy::reflect::TypeRegistryArc,
 ) -> Result<(), String> {
+    // The prefabs first, and only then the level: a level pointing at a
+    // file that is not there yet is a level that does not load, and a
+    // crash between the two writes should leave the readable half.
+    let base = path.parent().unwrap_or(std::path::Path::new("."));
+    prefab::write(&level.prefabs, base)?;
     let json = level.to_json(registry).map_err(|e| e.to_string())?;
     // A trailing newline, because a level is a text file under version
     // control and every other tool that writes one leaves it.
@@ -1404,9 +1551,11 @@ mod tests {
         staleness(new, old) == Some(Invalidates::World)
     }
 
-    fn shipped(name: &str) -> String {
+    /// A shipped level's path. A level's prefabs live beside it, so it
+    /// loads through its path rather than its text.
+    fn shipped(name: &str) -> std::path::PathBuf {
         let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../levels/");
-        std::fs::read_to_string(format!("{path}{name}")).unwrap()
+        std::path::PathBuf::from(format!("{path}{name}"))
     }
 
     /// A recipe lands in the exact components the shader reads.
@@ -1418,7 +1567,7 @@ mod tests {
     /// the canopy layout: every number here is visible in the level file.
     #[test]
     fn a_recipe_packs_into_the_components_the_shader_reads() {
-        let planet = LevelDef::from_json_known(
+        let planet = LevelDef::from_path_known(
             &shipped("planet.json"),
             &crate::graph::registry::engine_kinds(),
         )
@@ -1455,7 +1604,7 @@ mod tests {
     /// instead of asking why.
     #[test]
     fn an_edit_to_anything_the_world_is_built_from_rebuilds_it() {
-        let planet = LevelDef::from_json_known(
+        let planet = LevelDef::from_path_known(
             &shipped("planet.json"),
             &crate::graph::registry::engine_kinds(),
         )
@@ -1551,7 +1700,7 @@ mod tests {
     fn the_rebuilds_attribute_says_what_needs_regen_does() {
         use bevy::reflect::Typed;
 
-        let planet = LevelDef::from_json_known(
+        let planet = LevelDef::from_path_known(
             &shipped("planet.json"),
             &crate::graph::registry::engine_kinds(),
         )
@@ -1643,7 +1792,7 @@ mod tests {
     #[test]
     fn a_level_can_be_reached_by_field_path() {
         use bevy::reflect::GetPath;
-        let mut planet = LevelDef::from_json_known(
+        let mut planet = LevelDef::from_path_known(
             &shipped("planet.json"),
             &crate::graph::registry::engine_kinds(),
         )
@@ -1691,7 +1840,7 @@ mod tests {
     /// `generator()`, three calls below where the level was accepted.
     #[test]
     fn a_level_that_does_not_compile_is_refused_not_fatal() {
-        let mut planet = LevelDef::from_json_known(
+        let mut planet = LevelDef::from_path_known(
             &shipped("planet.json"),
             &crate::graph::registry::engine_kinds(),
         )
@@ -1722,7 +1871,7 @@ mod tests {
 
     #[test]
     fn shipped_levels_parse() {
-        let planet = LevelDef::from_json_known(
+        let planet = LevelDef::from_path_known(
             &shipped("planet.json"),
             &crate::graph::registry::engine_kinds(),
         )
@@ -1735,7 +1884,7 @@ mod tests {
         assert!(planet.materials.iter().any(|m| m.id() == 1));
         assert!(planet.materials.iter().any(|m| m.id() == 3));
 
-        let mega = LevelDef::from_json_known(
+        let mega = LevelDef::from_path_known(
             &shipped("megastructure.json"),
             &crate::graph::registry::engine_kinds(),
         )
@@ -1755,14 +1904,21 @@ mod tests {
     #[test]
     fn saving_writes_a_level_that_loads() {
         let reg = crate::graph::registry::engine_kinds();
-        let mut planet = LevelDef::from_json_known(&shipped("planet.json"), &reg).unwrap();
+        let mut planet = LevelDef::from_path_known(&shipped("planet.json"), &reg).unwrap();
         planet.lod.max_level -= 1;
 
-        let path = std::env::temp_dir().join("voxel2-save-test.json");
+        // Its own directory: saving writes the level AND its prefabs,
+        // and what has to load is the pair.
+        let dir = std::env::temp_dir().join("voxel2-save-test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("level.json");
         save_to(&planet, &path, &reg).expect("writes");
-        let back =
-            LevelDef::from_json_known(&std::fs::read_to_string(&path).unwrap(), &reg).unwrap();
-        std::fs::remove_file(&path).ok();
+        let back = LevelDef::from_path_known(&path, &reg).unwrap();
+        assert_eq!(
+            back.prefabs, planet.prefabs,
+            "the prefab came back through its own file"
+        );
+        std::fs::remove_dir_all(&dir).ok();
 
         assert_eq!(
             back.lod.max_level, planet.lod.max_level,
@@ -1783,7 +1939,7 @@ mod tests {
     fn a_level_can_be_snapshotted_and_restored() {
         use bevy::reflect::PartialReflect;
         let reg = crate::graph::registry::engine_kinds();
-        let planet = LevelDef::from_json_known(&shipped("planet.json"), &reg).unwrap();
+        let planet = LevelDef::from_path_known(&shipped("planet.json"), &reg).unwrap();
 
         let snapshot = planet.to_dynamic();
         let mut edited = planet.clone();
@@ -1803,14 +1959,16 @@ mod tests {
 
     #[test]
     fn levels_roundtrip() {
-        let planet = LevelDef::from_json_known(
+        let planet = LevelDef::from_path_known(
             &shipped("planet.json"),
             &crate::graph::registry::engine_kinds(),
         )
         .unwrap();
         let reg = crate::graph::registry::engine_kinds();
         let json = planet.to_json(&reg).unwrap();
-        let back = LevelDef::from_json(&json, &reg).unwrap();
+        // Back through the same directory: the round trip includes the
+        // `use` lines, which mean nothing without it.
+        let back = LevelDef::from_json_known_in(&json, shipped("").as_path(), &reg).unwrap();
         assert_eq!(back.nodes, planet.nodes);
         assert_eq!(back.materials, planet.materials);
         assert_eq!(back.environment, planet.environment);
@@ -1825,7 +1983,7 @@ mod tests {
         //
         // The megastructure has no such oracle — see the test below,
         // which asserts what is actually true of it instead.
-        let planet = LevelDef::from_json_known(
+        let planet = LevelDef::from_path_known(
             &shipped("planet.json"),
             &crate::graph::registry::engine_kinds(),
         )
@@ -1843,7 +2001,7 @@ mod tests {
     /// architecture, a band nothing paints, a material with no recipe.
     #[test]
     fn every_megastructure_district_is_whole() {
-        let mega = LevelDef::from_json_known(
+        let mega = LevelDef::from_path_known(
             &shipped("megastructure.json"),
             &crate::graph::registry::engine_kinds(),
         )
@@ -1903,7 +2061,7 @@ mod tests {
     /// them honest when somebody retunes the axis scale or octaves.
     #[test]
     fn no_megastructure_district_is_a_sliver() {
-        let mega = LevelDef::from_json_known(
+        let mega = LevelDef::from_path_known(
             &shipped("megastructure.json"),
             &crate::graph::registry::engine_kinds(),
         )

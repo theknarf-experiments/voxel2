@@ -714,8 +714,8 @@ mod tests {
     /// Engine kinds plus this game's, which is what a level names.
     fn shipped(name: &str) -> LevelDef {
         let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../levels/");
-        LevelDef::from_json(
-            &std::fs::read_to_string(format!("{path}{name}")).unwrap(),
+        LevelDef::from_path(
+            std::path::Path::new(&format!("{path}{name}")),
             &super::nodes::kinds(),
         )
         .unwrap()
@@ -1171,8 +1171,8 @@ mod output_is_unchanged {
             ),
         ] {
             let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../levels/");
-            let level = LevelDef::from_json(
-                &std::fs::read_to_string(format!("{path}{name}")).unwrap(),
+            let level = LevelDef::from_path(
+                std::path::Path::new(&format!("{path}{name}")),
                 &crate::planning::nodes::kinds(),
             )
             .unwrap();
@@ -1205,10 +1205,10 @@ mod output_is_unchanged {
             env!("CARGO_MANIFEST_DIR"),
             "/../../levels/megastructure.json"
         );
-        let text = std::fs::read_to_string(path).unwrap();
         let kinds = crate::planning::nodes::kinds();
-        let with = LevelDef::from_json(&text, &kinds).unwrap();
-        let mut without = LevelDef::from_json(&text, &kinds).unwrap();
+        let path = std::path::Path::new(path);
+        let with = LevelDef::from_path(path, &kinds).unwrap();
+        let mut without = LevelDef::from_path(path, &kinds).unwrap();
         without.nodes.retain(|n| n.node.kind() != "population");
         assert!(
             without.nodes.len() < with.nodes.len(),

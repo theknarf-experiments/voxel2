@@ -246,20 +246,13 @@ fn main() {
     let path = std::env::args()
         .nth(1)
         .unwrap_or_else(|| "levels/planet.json".to_string());
-    let json = match std::fs::read_to_string(&path) {
-        Ok(json) => json,
-        Err(e) => {
-            eprintln!("failed to read level '{path}': {e}");
-            std::process::exit(1);
-        }
-    };
     // The node set is open, so parsing needs to know which kinds exist.
     // Built here rather than taken from the App because the level is read
     // before there is one; a host with its own kinds registers them onto
     // this before parsing.
     // Every kind a level can name: the engine's, plus this game's.
     let kinds = planning::nodes::kinds();
-    let level = match LevelDef::from_json(&json, &kinds) {
+    let level = match LevelDef::from_path(std::path::Path::new(&path), &kinds) {
         Ok(level) => level,
         Err(e) => {
             eprintln!("failed to parse level '{path}': {e}");

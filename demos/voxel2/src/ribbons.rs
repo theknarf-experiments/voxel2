@@ -225,8 +225,11 @@ mod tests {
 
     #[test]
     fn water_color_reads_the_material_table_with_fallback() {
-        let mut level = LevelDef::from_json(
-            include_str!("../../../levels/planet.json"),
+        let mut level = LevelDef::from_path(
+            std::path::Path::new(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../levels/planet.json"
+            )),
             &crate::planning::nodes::kinds(),
         )
         .unwrap();

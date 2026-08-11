@@ -1,0 +1,102 @@
+{
+  "name": "monolith_circle",
+  "ops": [
+    {
+      "shape": "cylinder",
+      "center": [
+        0.0,
+        4.0,
+        0.0
+      ],
+      "radius": 1.1,
+      "half_height": 4.5,
+      "material": 3
+    },
+    {
+      "shape": "box",
+      "center": [
+        7.0,
+        1.8,
+        0.0
+      ],
+      "half": [
+        0.7,
+        2.2,
+        0.5
+      ],
+      "yaw_deg": 0.0,
+      "material": 3
+    },
+    {
+      "shape": "box",
+      "center": [
+        -7.0,
+        1.8,
+        0.0
+      ],
+      "half": [
+        0.7,
+        2.2,
+        0.5
+      ],
+      "yaw_deg": 0.0,
+      "material": 3
+    },
+    {
+      "shape": "box",
+      "center": [
+        0.0,
+        1.8,
+        7.0
+      ],
+      "half": [
+        0.7,
+        2.2,
+        0.5
+      ],
+      "yaw_deg": 90.0,
+      "material": 3
+    },
+    {
+      "shape": "box",
+      "center": [
+        0.0,
+        1.8,
+        -7.0
+      ],
+      "half": [
+        0.7,
+        2.2,
+        0.5
+      ],
+      "yaw_deg": 90.0,
+      "material": 3
+    },
+    {
+      "shape": "box",
+      "center": [
+        5.0,
+        3.6,
+        5.0
+      ],
+      "half": [
+        2.2,
+        0.5,
+        0.6
+      ],
+      "yaw_deg": -45.0,
+      "material": 3
+    },
+    {
+      "shape": "cylinder",
+      "center": [
+        0.0,
+        -1.2,
+        0.0
+      ],
+      "radius": 9.5,
+      "half_height": 1.5,
+      "material": 3
+    }
+  ]
+}

@@ -149,11 +149,8 @@ fn ensure_loaded(
     if let Some(id) = far.world {
         return Some(id);
     }
-    let json = std::fs::read_to_string(&far.path)
-        .inspect_err(|e| error!("portal: cannot read '{}': {e}", far.path))
-        .ok()?;
-    let level = LevelDef::from_json(&json, &registry.0)
-        .inspect_err(|e| error!("portal: cannot parse '{}': {e}", far.path))
+    let level = LevelDef::from_path(std::path::Path::new(&far.path), &registry.0)
+        .inspect_err(|e| error!("portal: cannot load '{}': {e}", far.path))
         .ok()?;
 
     // At its authored detail. There used to be a hand-picked cap here,

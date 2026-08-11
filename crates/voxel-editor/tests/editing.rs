@@ -27,11 +27,7 @@ fn note_rebuild(level: Res<LevelDef>, mut flag: ResMut<Rebuilt>) {
 
 fn planet() -> LevelDef {
     let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../levels/planet.json");
-    LevelDef::from_json_known(
-        &std::fs::read_to_string(path).unwrap(),
-        &registry::engine_kinds(),
-    )
-    .unwrap()
+    LevelDef::from_path_known(std::path::Path::new(&path), &registry::engine_kinds()).unwrap()
 }
 
 fn app() -> App {
