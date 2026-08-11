@@ -15,7 +15,7 @@ pub mod flow;
 pub mod path;
 pub mod program;
 
-use glam::Vec2;
+use glam::{Vec2, Vec3};
 
 /// Mirrors the WGSL `hash2` (level seed mixed in; 0 = identity).
 pub(crate) fn hash2(seed: u32, p: glam::IVec2) -> f32 {
@@ -312,6 +312,69 @@ impl Generator {
         1.0 - x * x * (3.0 - 2.0 * x)
     }
 
+    /// Every floor in a vertical span at one column, deepest last: a `y`
+    /// where the FULL program has air above and solid below.
+    ///
+    /// The heightfield answers "where is the ground" with one number per
+    /// column, which is the whole world for a planet and none of it for an
+    /// interior — a lattice of slabs has a floor every few metres and the
+    /// height chain does not know any of them exist. This walks the actual
+    /// SDF instead, so a cave floor, the underside of an overhang and a
+    /// megastructure's twentieth storey are all just floors.
+    ///
+    /// SAMPLED, not solved: `eval_range` declines on any program with a
+    /// lattice in it (nothing bounds those ops yet), so there is no
+    /// interval to prune with and this walks at `step` and bisects each
+    /// sign change. **`step` must be finer than the thinnest floor to be
+    /// found** — a slab thinner than one step can fall between two samples
+    /// and not exist. The shipped interior's thinnest is 1.2 m thick.
+    ///
+    /// Appends to `out` rather than returning, because the caller is a
+    /// placement loop running this per attempt and a Vec per attempt is
+    /// the allocation that costs more than the march.
+    pub fn floors(&self, xz: Vec2, span: [f32; 2], step: f32, voxel_size: f32, out: &mut Vec<f32>) {
+        let step = step.max(0.05);
+        let solid = |y: f32| self.sample(Vec3::new(xz.x, y, xz.y), voxel_size).0 <= 0.0;
+        let mut y = span[1];
+        let mut above = solid(y);
+        while y > span[0] {
+            let next = (y - step).max(span[0]);
+            let below = solid(next);
+            // Air over solid, walking down: a surface you could stand on.
+            // Solid over air is a ceiling, and nothing is placed on those.
+            if !above && below {
+                let (mut lo, mut hi) = (next, y);
+                for _ in 0..8 {
+                    let mid = 0.5 * (lo + hi);
+                    if solid(mid) {
+                        lo = mid;
+                    } else {
+                        hi = mid;
+                    }
+                }
+                out.push(hi);
+            }
+            above = below;
+            if next <= span[0] {
+                break;
+            }
+            y = next;
+        }
+    }
+
+    /// Surface normal from the SDF gradient — the volumetric twin of
+    /// [`Generator::normal`], which can only ever describe a heightfield.
+    pub fn normal_at(&self, p: Vec3, voxel_size: f32) -> Vec3 {
+        let e = 0.5;
+        let d = |o: Vec3| self.sample(p + o, voxel_size).0;
+        let g = Vec3::new(
+            d(Vec3::new(e, 0.0, 0.0)) - d(Vec3::new(-e, 0.0, 0.0)),
+            d(Vec3::new(0.0, e, 0.0)) - d(Vec3::new(0.0, -e, 0.0)),
+            d(Vec3::new(0.0, 0.0, e)) - d(Vec3::new(0.0, 0.0, -e)),
+        );
+        g.normalize_or(Vec3::Y)
+    }
+
     /// Approximate surface up-ness (normal Y) via central differences.
     pub fn up(&self, xz: Vec2, voxel_size: f32) -> f32 {
         self.normal(xz, voxel_size).y
@@ -325,5 +388,83 @@ impl Generator {
         let hz = self.height(xz + Vec2::new(0.0, e), voxel_size)
             - self.height(xz - Vec2::new(0.0, e), voxel_size);
         glam::Vec3::new(-hx, 2.0 * e, -hz).normalize()
+    }
+}
+
+#[cfg(test)]
+mod floor_tests {
+    use super::*;
+
+    /// The interior has floors, and the heightfield cannot see one of
+    /// them. This is the whole reason the march exists.
+    #[test]
+    fn the_interior_has_floors_the_heightfield_does_not_know_about() {
+        let g = Generator::new(program::mega_program(), 0, program::DEFAULT_SUN_DIR);
+        assert_eq!(
+            g.height(Vec2::new(120.0, -80.0), 1.0),
+            0.0,
+            "an interior has no height chain, so every column reads 0"
+        );
+        let mut found = 0;
+        let mut floors = Vec::new();
+        for i in 0..40 {
+            let xz = Vec2::new(i as f32 * 37.0 - 700.0, i as f32 * -53.0 + 400.0);
+            floors.clear();
+            g.floors(xz, [-200.0, 200.0], 0.5, 1.0, &mut floors);
+            for &y in &floors {
+                // Standing ON it: solid just below, air just above.
+                assert!(
+                    g.sample(Vec3::new(xz.x, y - 0.3, xz.y), 1.0).0 <= 0.0,
+                    "no solid under the floor at {y}"
+                );
+                assert!(
+                    g.sample(Vec3::new(xz.x, y + 0.3, xz.y), 1.0).0 > 0.0,
+                    "no air over the floor at {y}"
+                );
+            }
+            found += floors.len();
+        }
+        assert!(found > 40, "400 m of interior column found {found} floors");
+    }
+
+    /// And on a planet it agrees with the heightfield it replaces: the
+    /// topmost floor over open ground IS the terrain height.
+    #[test]
+    fn the_topmost_floor_is_the_heightfield_where_there_is_one() {
+        let g = Generator::default();
+        let mut floors = Vec::new();
+        let mut checked = 0;
+        for i in 0..60 {
+            let xz = Vec2::new(i as f32 * 211.0 - 6000.0, i as f32 * -137.0 + 2000.0);
+            let h = g.height(xz, 1.0);
+            floors.clear();
+            g.floors(xz, [h - 40.0, h + 40.0], 0.25, 1.0, &mut floors);
+            let Some(&top) = floors.first() else { continue };
+            assert!(
+                (top - h).abs() < 0.5,
+                "topmost floor {top} but the heightfield says {h}"
+            );
+            checked += 1;
+        }
+        assert!(checked > 40, "only {checked} columns had a surface at all");
+    }
+
+    /// A floor is flat-side-up: the gradient normal points at the sky.
+    #[test]
+    fn a_floor_normal_points_up() {
+        let g = Generator::new(program::mega_program(), 0, program::DEFAULT_SUN_DIR);
+        let mut floors = Vec::new();
+        let mut checked = 0;
+        for i in 0..30 {
+            let xz = Vec2::new(i as f32 * 71.0 - 500.0, i as f32 * 43.0);
+            floors.clear();
+            g.floors(xz, [-150.0, 150.0], 0.5, 1.0, &mut floors);
+            for &y in floors.iter() {
+                let n = g.normal_at(Vec3::new(xz.x, y + 0.1, xz.y), 1.0);
+                assert!(n.y > 0.5, "floor normal {n:?} at {y} is not up");
+                checked += 1;
+            }
+        }
+        assert!(checked > 20);
     }
 }

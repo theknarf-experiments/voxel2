@@ -96,6 +96,21 @@ pub enum ScatterOutput {
     Points,
 }
 
+/// Where a placement looks for the surface it stands on.
+#[derive(Reflect, Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SurfaceMode {
+    /// The height chain: one surface per column, and only the top one.
+    /// Nothing in a cave, under an overhang or on an interior floor — and
+    /// in a world with no height ops at all, no surface anywhere.
+    #[default]
+    Heightfield,
+    /// Every floor the FULL program puts inside `altitude`, one of them
+    /// picked at random. Costs a march down the column; see
+    /// [`voxel_worldgen::Generator::floors`].
+    Floors,
+}
+
 /// A scatter population: WHERE props go. What they look like is the
 /// host's business — the engine spawns entities carrying
 /// [`crate::scatter::ScatterInstance`] and the host dresses them.
@@ -132,8 +147,19 @@ pub struct ScatterDef {
     #[serde(default = "default_one")]
     #[reflect(@schema::Range(0.0, 1.0))]
     pub chance: f32,
-    /// Altitude band the class lives in.
+    /// Altitude band the class lives in. Also the span `surface: floors`
+    /// searches, so an interior population says which storeys it wants by
+    /// saying where it lives.
     pub altitude: [f32; 2],
+    /// Where to look for the surface.
+    #[serde(default)]
+    pub surface: SurfaceMode,
+    /// March step for `surface: floors`, in meters. Must be finer than the
+    /// thinnest floor to be found: a slab thinner than one step can fall
+    /// between two samples and not exist. Unused by `heightfield`.
+    #[serde(default = "d_floor_step")]
+    #[reflect(@schema::Range(0.05, 4.0))]
+    pub floor_step: f32,
     /// Minimum surface up-ness (1 = flat).
     #[serde(default)]
     #[reflect(@schema::Range(0.0, 1.0))]
@@ -235,6 +261,9 @@ fn d_scatter_radius() -> i32 {
 }
 fn d_detail_vs() -> f32 {
     4.0
+}
+fn d_floor_step() -> f32 {
+    0.5
 }
 fn d_cover_full_at() -> f32 {
     1.0

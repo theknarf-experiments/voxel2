@@ -1309,6 +1309,70 @@
         "type": "tubes"
       },
       "max_chunk_edge_m": 128.0
+    },
+    {
+      "kind": "population",
+      "name": "rubble",
+      "radius_tiles": 2,
+      "in": {
+        "gate": "districts"
+      },
+      "per_tile": 14,
+      "placement": {
+        "align": "normal",
+        "tilt_deg": 4.0
+      },
+      "chance": 0.55,
+      "altitude": [
+        -140.0,
+        140.0
+      ],
+      "surface": "floors",
+      "floor_step": 0.5,
+      "detail_vs": 1.0,
+      "min_up": 0.9,
+      "sink_scaled": 0.25,
+      "variants": [
+        {
+          "scale": [
+            0.6,
+            1.7
+          ]
+        }
+      ],
+      "region": "warrens"
+    },
+    {
+      "kind": "population",
+      "name": "pipe",
+      "radius_tiles": 2,
+      "in": {
+        "gate": "districts"
+      },
+      "per_tile": 8,
+      "placement": {
+        "align": "normal",
+        "tilt_deg": 4.0
+      },
+      "chance": 0.4,
+      "altitude": [
+        -140.0,
+        140.0
+      ],
+      "surface": "floors",
+      "floor_step": 0.5,
+      "detail_vs": 1.0,
+      "min_up": 0.94,
+      "sink_scaled": 0.15,
+      "variants": [
+        {
+          "scale": [
+            0.8,
+            1.9
+          ]
+        }
+      ],
+      "region": "stacks"
     }
   ]
 }

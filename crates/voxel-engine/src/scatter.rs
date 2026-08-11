@@ -105,15 +105,23 @@ fn carved(cut_ops: &[voxel_core::csg::CsgOp], p: Vec3) -> bool {
 }
 
 /// Align-to-normal, random tilt cone, then yaw.
+///
+/// `surface` is the normal of the floor a march already found, or `None`
+/// where the surface is the heightfield's and the column can be asked. It
+/// is asked HERE and not by the caller because most attempts never reach
+/// this function, and four height evaluations per rejected attempt is a
+/// real cost on a population that tries nine hundred times a tile.
 fn placement_rotation(
     generator: &voxel_worldgen::Generator,
     rules: &crate::level::PlacementRulesDef,
     xz: Vec2,
+    surface: Option<Vec3>,
     yaw: f32,
     rng: &mut Rng,
 ) -> Quat {
     let base = if rules.align == "normal" {
-        Quat::from_rotation_arc(Vec3::Y, generator.normal(xz, 4.0))
+        let n = surface.unwrap_or_else(|| generator.normal(xz, 4.0));
+        Quat::from_rotation_arc(Vec3::Y, n)
     } else {
         Quat::IDENTITY
     };
@@ -165,6 +173,9 @@ pub fn tile_placements(
     let attempts = (def.per_tile as f32 * density) as u32;
 
     let mut out = Vec::new();
+    // Reused across attempts: the march appends, and a Vec per attempt
+    // would cost more than the march does.
+    let mut found = Vec::new();
     for _ in 0..attempts {
         let xz = origin + Vec2::new(rng.next_f32(), rng.next_f32()) * size;
         if rng.next_f32() > field_gate(generator, &def.density, xz) * (inputs.gate_weight)(xz) {
@@ -173,9 +184,40 @@ pub fn tile_placements(
         if def.clearance && on_clearance(clearance, xz) {
             continue;
         }
-        // Seat on the band-limited surface the mid-LOD terrain shows
-        // across the streaming radius (tiles appear at the rim).
-        let y = generator.height(xz, def.detail_vs);
+        // Where the surface IS. The heightfield knows one per column and
+        // an interior has none at all, so a population that lives indoors
+        // marches the program instead — see `SurfaceMode`.
+        //
+        // The rng is only drawn from in the floors branch, so adding this
+        // moved no prop in a world that does not use it: the placement
+        // loop's early-outs consume the stream in an order every shipped
+        // level's props already depend on.
+        // The up-ness gate reads the population's own `detail_vs` while
+        // the alignment normal reads a fixed 4 m, and they have since
+        // before this branch existed. Left apart rather than tidied into
+        // one, because tidying them moves every prop on the planet.
+        let (y, up, surface_normal) = match def.surface {
+            crate::level::SurfaceMode::Heightfield => {
+                // The band-limited surface the mid-LOD terrain shows
+                // across the streaming radius (tiles appear at the rim).
+                let y = generator.height(xz, def.detail_vs);
+                (y, generator.up(xz, def.detail_vs), None)
+            }
+            crate::level::SurfaceMode::Floors => {
+                found.clear();
+                generator.floors(xz, def.altitude, def.floor_step, def.detail_vs, &mut found);
+                if found.is_empty() {
+                    continue;
+                }
+                let pick = ((rng.next_f32() * found.len() as f32) as usize).min(found.len() - 1);
+                let y = found[pick];
+                // Read just ABOVE the surface: the gradient exactly on it
+                // is where two of the program's `min`s meet, and can come
+                // back as either.
+                let n = generator.normal_at(Vec3::new(xz.x, y + 0.1, xz.y), def.detail_vs);
+                (y, n.y, Some(n))
+            }
+        };
         if carved(cut_ops, Vec3::new(xz.x, y, xz.y)) {
             continue;
         }
@@ -183,7 +225,6 @@ pub fn tile_placements(
         if gate <= 0.0 || (gate < 1.0 && rng.next_f32() > gate) {
             continue;
         }
-        let up = generator.up(xz, def.detail_vs);
         if up < def.min_up || up > def.placement.max_up || rng.next_f32() >= def.chance {
             continue;
         }
@@ -207,7 +248,14 @@ pub fn tile_placements(
             .unwrap_or(def.sink_m + def.sink_scaled * scale);
         out.push(Placement {
             position: Vec3::new(xz.x, y - sink, xz.y),
-            rotation: placement_rotation(generator, &def.placement, xz, yaw, &mut rng),
+            rotation: placement_rotation(
+                generator,
+                &def.placement,
+                xz,
+                surface_normal,
+                yaw,
+                &mut rng,
+            ),
             scale,
             variant: variant as u32,
             seed: rng.next_u64(),
@@ -239,6 +287,15 @@ pub fn coverage(def: &ScatterDef, inputs: &PlacementInputs<'_>, xz: Vec2) -> f32
     let w = patch * def.chance * field_gate(generator, &def.density, xz) * (inputs.gate_weight)(xz);
     if w <= 0.0 {
         return 0.0;
+    }
+    // The remaining two gates read a column's one surface, which is a
+    // question `surface: floors` has no single answer to — a column with
+    // twenty storeys has twenty heights and twenty normals. Callers want
+    // this for painting a population across kilometres of ground, and an
+    // interior has no ground to paint, so it stops at the planar gates
+    // rather than inventing an answer.
+    if def.surface == crate::level::SurfaceMode::Floors {
+        return w;
     }
     let y = generator.height(xz, def.detail_vs);
     let w = w * altitude_gate(def.altitude, def.placement.altitude_falloff, y);

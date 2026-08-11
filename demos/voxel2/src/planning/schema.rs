@@ -525,6 +525,36 @@ pub fn validate_level(level: &LevelDef) -> Result<(), String> {
         }
     }
 
+    // A population that marches for floors must march the FINE world.
+    //
+    // The generator gates its structural ops at `WOP_COARSE_VOXEL_M`: at
+    // or above that voxel size an interior is the solid mass its coarse
+    // LODs draw, with no slabs in it and so no floors. A population left
+    // on the default `detail_vs` reads that world, finds nothing, and
+    // places nothing — silently, and looking exactly like a level whose
+    // gates are wrong. It cost an afternoon once.
+    for node in &level.nodes {
+        let Some(p) = node
+            .node
+            .0
+            .as_any()
+            .downcast_ref::<super::nodes::Population>()
+        else {
+            continue;
+        };
+        if p.0.surface == voxel_engine::level::SurfaceMode::Floors
+            && p.0.detail_vs >= voxel_core::worldop::WOP_COARSE_VOXEL_M
+        {
+            return Err(format!(
+                "population {:?} looks for floors at detail_vs {} — at {} and above the \
+                 generator draws its coarse world, which has no floors in it",
+                node.name.as_deref().unwrap_or("?"),
+                p.0.detail_vs,
+                voxel_core::worldop::WOP_COARSE_VOXEL_M
+            ));
+        }
+    }
+
     // A volumetric source needs a volumetric emit: with `cell_y_m` at zero
     // the emit's cells are planar and its sites land in one y-row.
     for node in &level.nodes {

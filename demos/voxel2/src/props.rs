@@ -67,8 +67,7 @@ impl PropTable {
     pub fn for_level(level_path: &std::path::Path) -> Self {
         match level_path.file_stem().and_then(|s| s.to_str()) {
             Some("purgatory") => Self::purgatory(),
-            // The megastructure scatters nothing; an empty table is right.
-            Some("megastructure") => Self::default(),
+            Some("megastructure") => Self::megastructure(),
             _ => Self::planet(),
         }
     }
@@ -103,6 +102,43 @@ impl PropTable {
                 }],
                 blob_shadow: false,
                 squash: Vec3::new(1.0, 0.85, 1.0),
+            },
+        );
+        Self(classes)
+    }
+
+    /// The megastructure's floor litter.
+    ///
+    /// Nothing grew here: these sit on the storeys the level's slab
+    /// lattice builds, found by marching the program rather than by
+    /// asking a heightfield that an interior does not have. The models are
+    /// the ones the demo already has, read differently — a flattened
+    /// `Rock` is a heap of spalled concrete, and a `Log` on a floor is a
+    /// dropped conduit.
+    fn megastructure() -> Self {
+        let mut classes = HashMap::new();
+        classes.insert(
+            "rubble".to_string(),
+            PropClass {
+                variants: vec![PropVariant {
+                    model: Model::Rock,
+                    trunk: Color::srgb(0.1100, 0.1080, 0.1050),
+                    foliage: Color::srgb(0.1500, 0.1470, 0.1420),
+                }],
+                blob_shadow: false,
+                squash: Vec3::new(1.4, 0.38, 1.4),
+            },
+        );
+        classes.insert(
+            "conduit".to_string(),
+            PropClass {
+                variants: vec![PropVariant {
+                    model: Model::Log,
+                    trunk: Color::srgb(0.1900, 0.1780, 0.1550),
+                    foliage: Color::srgb(0.2100, 0.1950, 0.1700),
+                }],
+                blob_shadow: false,
+                squash: Vec3::new(1.0, 0.8, 1.0),
             },
         );
         Self(classes)

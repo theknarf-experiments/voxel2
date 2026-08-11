@@ -896,6 +896,23 @@ mod tests {
         let err = validate_level(&bad).unwrap_err();
         assert!(err.contains("nosuchregion"), "{err}");
 
+        // A population that marches for floors at the coarse voxel size
+        // marches a world with no floors in it — nothing is misspelled,
+        // nothing is unwired, and it places nothing.
+        let mut coarse = shipped("megastructure.json");
+        for node in &mut coarse.nodes {
+            if let Some(p) = node
+                .node
+                .0
+                .as_any_mut()
+                .downcast_mut::<super::nodes::Population>()
+            {
+                p.0.detail_vs = voxel_core::worldop::WOP_COARSE_VOXEL_M;
+            }
+        }
+        let err = validate_level(&coarse).unwrap_err();
+        assert!(err.contains("coarse world"), "{err}");
+
         // How far a structure reaches from its site is geometry, not
         // wiring: a port says a structure IS named, and only measuring the
         // variants says the emit index can still find it.
@@ -1005,11 +1022,23 @@ mod tests {
             "the tree density wire must resolve to the field node's slot"
         );
 
-        assert!(
-            super::nodes::populations(&shipped("megastructure.json").nodes, &program.fields)
-                .is_empty(),
-            "the megastructure scatters nothing"
-        );
+        // The interior scatters too, and every one of its populations has
+        // to say `surface: floors` — an interior has no height chain, so
+        // a heightfield population there would place nothing at all and
+        // look like a level authoring mistake rather than a missing
+        // feature. That is exactly what it looked like until it wasn't.
+        let interior =
+            super::nodes::populations(&shipped("megastructure.json").nodes, &program.fields);
+        assert!(!interior.is_empty(), "the megastructure scatters nothing");
+        use voxel_engine::level::SurfaceMode;
+        for def in &interior {
+            assert_eq!(
+                def.surface,
+                SurfaceMode::Floors,
+                "'{}' reads a heightfield the megastructure does not have",
+                def.class
+            );
+        }
     }
 
     /// A population's gate is half wire, half parameter, and only the
@@ -1126,7 +1155,14 @@ mod output_is_unchanged {
                 4096.0,
                 (50200, 5809, 5809, 146),
             ),
-            ("megastructure.json", Vec3::ZERO, 2048.0, (18778, 0, 0, 772)),
+            // Was (18778, 0, 0, 772) before the interior had populations.
+            // A population brings a top dependency of its own, so more of
+            // this window is resident than was — and `ops_in` reports what
+            // is RESIDENT, not what exists. That the difference is only
+            // that is what `adding_populations_only_adds_coverage` holds;
+            // this number additionally moves whenever a population's
+            // `radius_tiles` does, so it is not the whole story alone.
+            ("megastructure.json", Vec3::ZERO, 2048.0, (21973, 0, 0, 961)),
             (
                 "purgatory.json",
                 Vec3::new(-5604.0, 0.0, 5660.0),
@@ -1152,6 +1188,65 @@ mod output_is_unchanged {
                 planner.markers_in(min2, max2, None).len(),
             );
             assert_eq!(got, want, "{name}: (ops, clearance, ribbons, markers)");
+        }
+    }
+
+    /// Scattering props over a level may not change the level.
+    ///
+    /// A population carves nothing, but it does bring a top dependency,
+    /// and a top dependency changes what is RESIDENT — which is what the
+    /// counts above report. So those counts moving is expected and says
+    /// nothing about whether the world moved. This is the part that says
+    /// it did not: every op and every marker the megastructure served
+    /// before it had props is still served, unmoved.
+    #[test]
+    fn adding_populations_only_adds_coverage() {
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../levels/megastructure.json"
+        );
+        let text = std::fs::read_to_string(path).unwrap();
+        let kinds = crate::planning::nodes::kinds();
+        let with = LevelDef::from_json(&text, &kinds).unwrap();
+        let mut without = LevelDef::from_json(&text, &kinds).unwrap();
+        without.nodes.retain(|n| n.node.kind() != "population");
+        assert!(
+            without.nodes.len() < with.nodes.len(),
+            "the interior has no populations to remove"
+        );
+
+        let focus = Vec3::ZERO;
+        let (min, max) = (focus - Vec3::splat(2048.0), focus + Vec3::splat(2048.0));
+        let (min2, max2) = (Vec2::new(min.x, min.z), Vec2::new(max.x, max.z));
+        let wa = super::tests::world_at(&without, 0, focus);
+        let wb = super::tests::world_at(&with, 0, focus);
+
+        let ops = |w: &voxel_engine::WorldQuery| -> std::collections::HashSet<String> {
+            w.ops_in(min, max, 12.8)
+                .iter()
+                .map(|o| format!("{:?}{:?}{:?}{}", o.center, o.half, o.kind, o.material))
+                .collect()
+        };
+        let marks = |w: &voxel_engine::WorldQuery| -> std::collections::HashSet<String> {
+            w.planner_as::<super::RegionPlanner>()
+                .unwrap()
+                .markers_in(min2, max2, None)
+                .iter()
+                .map(|m| format!("{:?}{:?}", m.pos, m.kind))
+                .collect()
+        };
+        for (what, a, b) in [
+            ("op", ops(&wa), ops(&wb)),
+            ("marker", marks(&wa), marks(&wb)),
+        ] {
+            let lost: Vec<&String> = a.difference(&b).collect();
+            assert!(
+                lost.is_empty(),
+                "{} {what}s the level served without props are gone: {:?}",
+                lost.len(),
+                &lost[..lost.len().min(3)]
+            );
+            assert!(b.len() >= a.len(), "{what}s: {} -> {}", a.len(), b.len());
         }
     }
 }
