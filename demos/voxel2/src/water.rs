@@ -177,7 +177,7 @@ impl Plugin for WaterPlugin {
             return;
         };
         render_app
-            .init_resource::<crate::instanced::PendingPropQueues<WaterMarker>>()
+            .init_resource::<voxel_render::pbr_view::PendingDrawQueues<WaterMarker>>()
             .init_resource::<WaterGpu>()
             .init_resource::<ExtractedWaterCamera>()
             .init_resource::<RiverWater>()
@@ -196,7 +196,7 @@ impl Plugin for WaterPlugin {
             )
             .add_systems(
                 Render,
-                crate::instanced::queue_props::<WaterMarker, DrawWaterCommands>
+                voxel_render::pbr_view::queue_by_marker::<WaterMarker, DrawWaterCommands>
                     .in_set(RenderSystems::Queue),
             );
     }
@@ -276,7 +276,7 @@ fn init_water_pipeline(
         }),
         ..default()
     };
-    commands.insert_resource(crate::instanced::PropPipelineRes::<WaterMarker>::new(
+    commands.insert_resource(voxel_render::pbr_view::DrawPipeline::<WaterMarker>::new(
         &view_layouts,
         layout,
         base_descriptor,
@@ -285,7 +285,7 @@ fn init_water_pipeline(
 
 #[allow(clippy::too_many_arguments)]
 fn prepare_water_bind_group(
-    pipeline: Option<Res<crate::instanced::PropPipelineRes<WaterMarker>>>,
+    pipeline: Option<Res<voxel_render::pbr_view::DrawPipeline<WaterMarker>>>,
     camera: Res<ExtractedWaterCamera>,
     markers: Query<&WaterMarker>,
     rivers: Res<RiverWater>,

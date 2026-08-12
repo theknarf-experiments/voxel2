@@ -14,7 +14,10 @@
 //! ours from the same key, the same way.
 
 use bevy::{
-    core_pipeline::tonemapping::{DebandDither, Tonemapping},
+    core_pipeline::{
+        core_3d::{Opaque3d, Opaque3dBatchSetKey, Opaque3dBinKey},
+        tonemapping::{DebandDither, Tonemapping},
+    },
     ecs::query::Has,
     light::ShadowFilteringMethod,
     pbr::{
@@ -23,12 +26,20 @@ use bevy::{
     },
     prelude::*,
     render::{
-        camera::ExtractedCamera,
-        render_resource::RenderPipelineDescriptor,
+        camera::{DirtySpecializations, ExtractedCamera, PendingQueues},
+        mesh::allocator::MeshSlabs,
+        render_phase::{
+            BinnedRenderPhaseType, DrawFunctions, InputUniformIndex, ViewBinnedRenderPhases,
+        },
+        render_resource::{
+            Canonical, RenderPipeline, RenderPipelineDescriptor, Specializer, SpecializerKey,
+            Variants,
+        },
         view::{ExtractedView, RenderVisibleEntities},
     },
     shader::ShaderDefVal,
 };
+use std::marker::PhantomData;
 
 /// Everything a pipeline key depends on, mirroring the inputs of Bevy's
 /// own view key so both stay in step.
@@ -172,5 +183,171 @@ fn tonemap_method_def(key: MeshPipelineKey) -> ShaderDefVal {
         "TONEMAP_METHOD_PBR_NEUTRAL".into()
     } else {
         "TONEMAP_METHOD_TONY_MC_MAPFACE".into()
+    }
+}
+
+// --- drawing through it ------------------------------------------------------
+
+/// Replaces a descriptor's groups 0 and 1 with the view's own, per key.
+///
+/// One specializer for every pipeline that shades this way: terrain
+/// chunks, water, and each instanced prop population had a copy under
+/// four names, and a copy is a chance for one of them to stop agreeing
+/// with the view bind group Bevy built.
+pub struct ViewSpecializer {
+    pub view_layouts: MeshPipelineViewLayouts,
+}
+
+/// The whole key: a specialized pipeline differs only in what the view
+/// bind group contains, and Bevy derives all of that from this.
+#[derive(Copy, Clone, PartialEq, Eq, Hash, SpecializerKey)]
+pub struct ViewKey(pub MeshPipelineKey);
+
+impl Specializer<RenderPipeline> for ViewSpecializer {
+    type Key = ViewKey;
+
+    fn specialize(
+        &self,
+        key: Self::Key,
+        descriptor: &mut RenderPipelineDescriptor,
+    ) -> Result<Canonical<Self::Key>, BevyError> {
+        specialize_for_view(&self.view_layouts, key.0, descriptor);
+        Ok(key)
+    }
+}
+
+/// The pipeline that draws one marker's entities, and the layout of the
+/// bind group it wants at group 2.
+///
+/// Keyed by the MARKER rather than by the renderer, so a renderer that
+/// builds its own descriptor still gets the resource and
+/// [`queue_by_marker`] without declaring a struct of its own. Four of
+/// them declared this same pair of fields.
+#[derive(Resource)]
+pub struct DrawPipeline<M> {
+    pub layout: bevy::render::render_resource::BindGroupLayoutDescriptor,
+    pub variants: Variants<RenderPipeline, ViewSpecializer>,
+    marker: PhantomData<fn() -> M>,
+}
+
+impl<M> DrawPipeline<M> {
+    pub fn new(
+        view_layouts: &MeshPipelineViewLayouts,
+        layout: bevy::render::render_resource::BindGroupLayoutDescriptor,
+        descriptor: RenderPipelineDescriptor,
+    ) -> Self {
+        Self {
+            layout,
+            variants: Variants::new(
+                ViewSpecializer {
+                    view_layouts: view_layouts.clone(),
+                },
+                descriptor,
+            ),
+            marker: PhantomData,
+        }
+    }
+}
+
+/// Per-view queue bookkeeping, one set per marker type.
+#[derive(Resource, Deref, DerefMut)]
+pub struct PendingDrawQueues<M> {
+    #[deref]
+    pub queues: PendingQueues,
+    marker: PhantomData<fn() -> M>,
+}
+
+impl<M> Default for PendingDrawQueues<M> {
+    fn default() -> Self {
+        Self {
+            queues: PendingQueues::default(),
+            marker: PhantomData,
+        }
+    }
+}
+
+/// Put every `M` a view can see into the opaque phase, drawn by `D`.
+///
+/// This was four copies of seventy-odd lines — terrain, grass, impostors,
+/// water — differing only in which entities a view should look for, which
+/// pipeline to specialize and which draw to run. Those are the two type
+/// parameters and the marker on the pipeline.
+pub fn queue_by_marker<M, D>(
+    pipeline_cache: Res<bevy::render::render_resource::PipelineCache>,
+    pipeline: Option<ResMut<DrawPipeline<M>>>,
+    mut opaque_render_phases: ResMut<ViewBinnedRenderPhases<Opaque3d>>,
+    opaque_draw_functions: Res<DrawFunctions<Opaque3d>>,
+    views: Query<PbrViewQuery>,
+    dirty_specializations: Res<DirtySpecializations>,
+    mut pending_queues: ResMut<PendingDrawQueues<M>>,
+) where
+    M: Component,
+    D: 'static,
+{
+    let Some(mut pipeline) = pipeline else {
+        return;
+    };
+    let draw_function = opaque_draw_functions.read().id::<D>();
+
+    for (
+        view,
+        camera,
+        view_visible_entities,
+        msaa,
+        tonemapping,
+        dither,
+        shadow_filter_method,
+        distance_fog,
+    ) in views.iter()
+    {
+        let mesh_key = view_key(
+            view,
+            camera,
+            msaa,
+            tonemapping,
+            dither,
+            shadow_filter_method,
+            distance_fog,
+        );
+        let Some(opaque_phase) = opaque_render_phases.get_mut(&view.retained_view_entity) else {
+            continue;
+        };
+        let Some(visible) = view_visible_entities.get::<M>() else {
+            continue;
+        };
+        let view_pending = pending_queues.prepare_for_new_frame(view.retained_view_entity);
+
+        for &main_entity in
+            dirty_specializations.iter_to_dequeue(view.retained_view_entity, visible)
+        {
+            opaque_phase.remove(main_entity);
+        }
+        for (render_entity, main_entity) in dirty_specializations.iter_to_queue(
+            view.retained_view_entity,
+            visible,
+            &view_pending.prev_frame,
+        ) {
+            let Ok(pipeline_id) = pipeline
+                .variants
+                .specialize(&pipeline_cache, ViewKey(mesh_key))
+            else {
+                continue;
+            };
+            opaque_phase.add(
+                Opaque3dBatchSetKey {
+                    draw_function,
+                    pipeline: pipeline_id,
+                    material_bind_group_index: None,
+                    lightmap_slab: None,
+                    slabs: MeshSlabs::default(),
+                },
+                Opaque3dBinKey {
+                    asset_id: AssetId::<Mesh>::invalid().untyped(),
+                },
+                (*render_entity, *main_entity),
+                InputUniformIndex::default(),
+                BinnedRenderPhaseType::NonMesh,
+            );
+        }
     }
 }

@@ -12,41 +12,34 @@
 //! uniform's contents and the scatter class it reads. Everything else is
 //! [`PropPlugin`].
 //!
-//! Water is not a `Prop` — it has no mesh and no instances — but it draws
-//! the same way, so it shares [`PropPipelineRes`], [`PropSpecializer`] and
-//! [`queue_props`] from here.
+//! What is shared with EVERY pipeline that shades through Bevy's PBR —
+//! terrain and water included — is `voxel_render::pbr_view`: the
+//! specializer, `DrawPipeline<M>` and `queue_by_marker`.
 
 use bevy::{
     asset::AssetServer,
     camera::primitives::Aabb,
-    core_pipeline::core_3d::{Opaque3d, Opaque3dBatchSetKey, Opaque3dBinKey, CORE_3D_DEPTH_FORMAT},
+    core_pipeline::core_3d::{Opaque3d, CORE_3D_DEPTH_FORMAT},
     ecs::{
         query::ROQueryItem,
         system::{lifetimeless::SRes, SystemParamItem},
     },
     mesh::VertexBufferLayout,
-    pbr::{
-        MeshPipelineKey, MeshPipelineViewLayouts, SetMeshViewBindGroup,
-        SetMeshViewBindingArrayBindGroup,
-    },
+    pbr::{MeshPipelineViewLayouts, SetMeshViewBindGroup, SetMeshViewBindingArrayBindGroup},
     prelude::*,
     render::{
-        camera::{DirtySpecializations, PendingQueues},
         extract_component::{ExtractComponent, ExtractComponentPlugin},
-        mesh::allocator::MeshSlabs,
         render_phase::{
-            AddRenderCommand, BinnedRenderPhaseType, DrawFunctions, InputUniformIndex, PhaseItem,
-            RenderCommand, RenderCommandResult, SetItemPipeline, TrackedRenderPass,
-            ViewBinnedRenderPhases,
+            AddRenderCommand, PhaseItem, RenderCommand, RenderCommandResult, SetItemPipeline,
+            TrackedRenderPass,
         },
         render_resource::{
             binding_types::uniform_buffer, encase::internal::WriteInto, BindGroup,
             BindGroupEntries, BindGroupLayoutDescriptor, BindGroupLayoutEntries, Buffer,
-            BufferInitDescriptor, BufferUsages, Canonical, ColorTargetState, ColorWrites,
-            CompareFunction, DepthStencilState, FragmentState, IndexFormat, PipelineCache,
-            PrimitiveState, RenderPipeline, RenderPipelineDescriptor, ShaderStages, ShaderType,
-            Specializer, SpecializerKey, TextureFormat, UniformBuffer, Variants, VertexAttribute,
-            VertexFormat, VertexState, VertexStepMode,
+            BufferInitDescriptor, BufferUsages, ColorTargetState, ColorWrites, CompareFunction,
+            DepthStencilState, FragmentState, IndexFormat, PipelineCache, PrimitiveState,
+            RenderPipelineDescriptor, ShaderStages, ShaderType, TextureFormat, UniformBuffer,
+            VertexAttribute, VertexFormat, VertexState, VertexStepMode,
         },
         renderer::{RenderDevice, RenderQueue},
         Extract, Render, RenderApp, RenderStartup, RenderSystems,
@@ -55,27 +48,6 @@ use bevy::{
 use bytemuck::Pod;
 use std::marker::PhantomData;
 use voxel_render::{ScatterPoint, ScatterPoints};
-
-/// Replaces groups 0 and 1 with the view's own, per pipeline key.
-pub struct PropSpecializer {
-    pub view_layouts: MeshPipelineViewLayouts,
-}
-
-#[derive(Copy, Clone, PartialEq, Eq, Hash, SpecializerKey)]
-pub struct PropKey(pub MeshPipelineKey);
-
-impl Specializer<RenderPipeline> for PropSpecializer {
-    type Key = PropKey;
-
-    fn specialize(
-        &self,
-        key: Self::Key,
-        descriptor: &mut RenderPipelineDescriptor,
-    ) -> Result<Canonical<Self::Key>, BevyError> {
-        voxel_render::pbr_view::specialize_for_view(&self.view_layouts, key.0, descriptor);
-        Ok(key)
-    }
-}
 
 /// A static mesh on the GPU, and how many indices it has.
 pub struct PropMesh {
@@ -200,141 +172,6 @@ pub fn prop_pipeline<Env: ShaderType>(
         ..default()
     };
     (layout, descriptor)
-}
-
-/// A pipeline to draw one marker's population with.
-///
-/// Keyed by the marker rather than by the renderer, so a renderer that
-/// builds its own descriptor (water) still gets the resource, the queue
-/// system and the specializer from here.
-#[derive(Resource)]
-pub struct PropPipelineRes<M> {
-    pub layout: BindGroupLayoutDescriptor,
-    pub variants: Variants<RenderPipeline, PropSpecializer>,
-    marker: PhantomData<fn() -> M>,
-}
-
-impl<M> PropPipelineRes<M> {
-    pub fn new(
-        view_layouts: &MeshPipelineViewLayouts,
-        layout: BindGroupLayoutDescriptor,
-        descriptor: RenderPipelineDescriptor,
-    ) -> Self {
-        Self {
-            layout,
-            variants: Variants::new(
-                PropSpecializer {
-                    view_layouts: view_layouts.clone(),
-                },
-                descriptor,
-            ),
-            marker: PhantomData,
-        }
-    }
-}
-
-/// Per-view queue bookkeeping, one set per marker type.
-#[derive(Resource, Deref, DerefMut)]
-pub struct PendingPropQueues<M> {
-    #[deref]
-    pub queues: PendingQueues,
-    marker: std::marker::PhantomData<fn() -> M>,
-}
-
-impl<M> Default for PendingPropQueues<M> {
-    fn default() -> Self {
-        Self {
-            queues: PendingQueues::default(),
-            marker: std::marker::PhantomData,
-        }
-    }
-}
-
-/// Put every marker this view can see into the opaque phase.
-///
-/// Grass, impostors and water had this system three times, at
-/// seventy-six lines each and byte-identical bar the names. What differs
-/// between them is only WHICH entities to look for, WHICH pipeline to
-/// specialize and WHICH draw to run — so those are the three parameters,
-/// and the rest is written once.
-pub fn queue_props<M, D>(
-    pipeline_cache: Res<PipelineCache>,
-    pipeline: Option<ResMut<PropPipelineRes<M>>>,
-    mut opaque_render_phases: ResMut<ViewBinnedRenderPhases<Opaque3d>>,
-    opaque_draw_functions: Res<DrawFunctions<Opaque3d>>,
-    views: Query<voxel_render::pbr_view::PbrViewQuery>,
-    dirty_specializations: Res<DirtySpecializations>,
-    mut pending_queues: ResMut<PendingPropQueues<M>>,
-) where
-    M: Component,
-    D: 'static,
-{
-    let Some(mut pipeline) = pipeline else {
-        return;
-    };
-    let draw_function = opaque_draw_functions.read().id::<D>();
-
-    for (
-        view,
-        camera,
-        view_visible_entities,
-        msaa,
-        tonemapping,
-        dither,
-        shadow_filter_method,
-        distance_fog,
-    ) in views.iter()
-    {
-        let mesh_key = voxel_render::pbr_view::view_key(
-            view,
-            camera,
-            msaa,
-            tonemapping,
-            dither,
-            shadow_filter_method,
-            distance_fog,
-        );
-        let Some(opaque_phase) = opaque_render_phases.get_mut(&view.retained_view_entity) else {
-            continue;
-        };
-        let Some(visible) = view_visible_entities.get::<M>() else {
-            continue;
-        };
-        let view_pending = pending_queues.prepare_for_new_frame(view.retained_view_entity);
-
-        for &main_entity in
-            dirty_specializations.iter_to_dequeue(view.retained_view_entity, visible)
-        {
-            opaque_phase.remove(main_entity);
-        }
-        for (render_entity, main_entity) in dirty_specializations.iter_to_queue(
-            view.retained_view_entity,
-            visible,
-            &view_pending.prev_frame,
-        ) {
-            let Ok(pipeline_id) = pipeline
-                .variants
-                .specialize(&pipeline_cache, PropKey(mesh_key))
-            else {
-                continue;
-            };
-            opaque_phase.add(
-                Opaque3dBatchSetKey {
-                    draw_function,
-                    pipeline: pipeline_id,
-                    material_bind_group_index: None,
-                    lightmap_slab: None,
-                    slabs: MeshSlabs::default(),
-                },
-                Opaque3dBinKey {
-                    asset_id: AssetId::<Mesh>::invalid().untyped(),
-                },
-                (*render_entity, *main_entity),
-                InputUniformIndex::default(),
-                BinnedRenderPhaseType::NonMesh,
-            );
-        }
-    }
 }
 
 // --- one population ----------------------------------------------------------
@@ -463,7 +300,11 @@ fn init_prop_pipeline<P: Prop>(
         P::shader(&asset_server),
         std::mem::size_of::<P::Vertex>() as u64,
     );
-    commands.insert_resource(PropPipelineRes::<P>::new(&view_layouts, layout, descriptor));
+    commands.insert_resource(voxel_render::pbr_view::DrawPipeline::<P>::new(
+        &view_layouts,
+        layout,
+        descriptor,
+    ));
 }
 
 fn extract_prop_instances<P: Prop>(
@@ -485,7 +326,7 @@ fn extract_prop_instances<P: Prop>(
 
 #[allow(clippy::too_many_arguments)]
 fn prepare_prop_bind_group<P: Prop>(
-    pipeline: Option<Res<PropPipelineRes<P>>>,
+    pipeline: Option<Res<voxel_render::pbr_view::DrawPipeline<P>>>,
     pipeline_cache: Res<PipelineCache>,
     render_device: Res<RenderDevice>,
     render_queue: Res<RenderQueue>,
@@ -577,7 +418,7 @@ impl<P: Prop> Plugin for PropPlugin<P> {
         };
         render_app
             .init_resource::<PropBuffers<P>>()
-            .init_resource::<PendingPropQueues<P>>()
+            .init_resource::<voxel_render::pbr_view::PendingDrawQueues<P>>()
             .init_resource::<PropBindGroup<P>>()
             .init_resource::<PropEnv<P>>()
             .init_resource::<P::Style>()
@@ -593,7 +434,8 @@ impl<P: Prop> Plugin for PropPlugin<P> {
             )
             .add_systems(
                 Render,
-                queue_props::<P, PropCommands<P>>.in_set(RenderSystems::Queue),
+                voxel_render::pbr_view::queue_by_marker::<P, PropCommands<P>>
+                    .in_set(RenderSystems::Queue),
             );
     }
 }

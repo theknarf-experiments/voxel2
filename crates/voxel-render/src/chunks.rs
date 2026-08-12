@@ -23,7 +23,7 @@ use bevy::{
         visibility::{self, VisibilityClass},
     },
     core_pipeline::{
-        core_3d::{Opaque3d, Opaque3dBatchSetKey, Opaque3dBinKey, CORE_3D_DEPTH_FORMAT},
+        core_3d::{Opaque3d, CORE_3D_DEPTH_FORMAT},
         schedule::camera_driver,
     },
     ecs::{
@@ -33,29 +33,26 @@ use bevy::{
     math::DVec3,
     mesh::VertexBufferLayout,
     pbr::{
-        MeshPipelineKey, MeshPipelineViewLayouts, SetMaterialBindGroup, SetMeshViewBindGroup,
+        MeshPipelineViewLayouts, SetMaterialBindGroup, SetMeshViewBindGroup,
         SetMeshViewBindingArrayBindGroup,
     },
     prelude::*,
     render::{
-        camera::{DirtySpecializations, PendingQueues},
         extract_component::{ExtractComponent, ExtractComponentPlugin},
-        mesh::allocator::MeshSlabs,
         render_phase::{
-            AddRenderCommand, BinnedRenderPhaseType, DrawFunctions, InputUniformIndex, PhaseItem,
-            RenderCommand, RenderCommandResult, SetItemPipeline, TrackedRenderPass,
-            ViewBinnedRenderPhases,
+            AddRenderCommand, PhaseItem, RenderCommand, RenderCommandResult, SetItemPipeline,
+            TrackedRenderPass,
         },
         render_resource::{
             binding_types::{storage_buffer_read_only_sized, storage_buffer_sized, uniform_buffer},
             AsBindGroup, BindGroup, BindGroupEntries, BindGroupLayoutDescriptor,
             BindGroupLayoutEntries, Buffer, BufferDescriptor, BufferInitDescriptor, BufferUsages,
-            CachedComputePipelineId, Canonical, ColorTargetState, ColorWrites, CompareFunction,
+            CachedComputePipelineId, ColorTargetState, ColorWrites, CompareFunction,
             ComputePassDescriptor, ComputePipelineDescriptor, DepthStencilState,
             DynamicUniformBuffer, Face, FragmentState, IndexFormat, MapMode, PipelineCache,
-            PrimitiveState, RenderPipeline, RenderPipelineDescriptor, ShaderStages, ShaderType,
-            Specializer, SpecializerKey, StorageBuffer, TextureFormat, UniformBuffer, Variants,
-            VertexAttribute, VertexFormat, VertexState, VertexStepMode,
+            PrimitiveState, RenderPipelineDescriptor, ShaderStages, ShaderType, StorageBuffer,
+            TextureFormat, UniformBuffer, VertexAttribute, VertexFormat, VertexState,
+            VertexStepMode,
         },
         renderer::{RenderContext, RenderDevice, RenderGraph, RenderQueue},
         Extract, Render, RenderApp, RenderStartup, RenderSystems,
@@ -868,7 +865,7 @@ impl Plugin for VoxelChunksPlugin {
             .init_resource::<ChunkTable>()
             .init_resource::<FrameBatches>()
             .init_resource::<VoxelDrawLists>()
-            .init_resource::<PendingVoxelQueues>()
+            .init_resource::<crate::pbr_view::PendingDrawQueues<VoxelTerrainMarker>>()
             .init_resource::<ViewBindGroupRes>()
             .add_render_command::<Opaque3d, DrawVoxelChunksCommands>()
             // The draw pipeline's layout comes from Bevy's view layouts,
@@ -900,7 +897,11 @@ impl Plugin for VoxelChunksPlugin {
                 Render,
                 prepare_view_bind_group.in_set(RenderSystems::PrepareBindGroups),
             )
-            .add_systems(Render, queue_voxel_chunks.in_set(RenderSystems::Queue))
+            .add_systems(
+                Render,
+                crate::pbr_view::queue_by_marker::<VoxelTerrainMarker, DrawVoxelChunksCommands>
+                    .in_set(RenderSystems::Queue),
+            )
             .add_systems(RenderGraph, dispatch_chunk_work.before(camera_driver));
     }
 }
@@ -1255,11 +1256,8 @@ struct ChunkPipelines {
     quads: CachedComputePipelineId,
 }
 
-#[derive(Resource)]
-struct ChunkDrawPipeline {
-    chunk_layout: BindGroupLayoutDescriptor,
-    variants: Variants<RenderPipeline, VoxelChunksSpecializer>,
-}
+/// The terrain's draw pipeline, and the layout of its group-2 bind group.
+type ChunkDrawPipeline = crate::pbr_view::DrawPipeline<VoxelTerrainMarker>;
 
 #[derive(Resource, Default)]
 struct ViewBindGroupRes {
@@ -1496,15 +1494,11 @@ fn init_chunk_resources(
         },
         ..default()
     };
-    commands.insert_resource(ChunkDrawPipeline {
+    commands.insert_resource(ChunkDrawPipeline::new(
+        &view_layouts,
         chunk_layout,
-        variants: Variants::new(
-            VoxelChunksSpecializer {
-                view_layouts: view_layouts.clone(),
-            },
-            base_descriptor,
-        ),
-    });
+        base_descriptor,
+    ));
 }
 
 // --- extraction --------------------------------------------------------------
@@ -2631,32 +2625,6 @@ fn dispatch_chunk_work(
 
 // --- drawing -----------------------------------------------------------------
 
-struct VoxelChunksSpecializer {
-    view_layouts: MeshPipelineViewLayouts,
-}
-
-/// Keyed by Bevy's own mesh pipeline key: the view bind group layout, the
-/// shader defs and the color target must all agree with what the mesh
-/// view bind group actually contains, and Bevy derives all three from it.
-#[derive(Copy, Clone, PartialEq, Eq, Hash, SpecializerKey)]
-struct VoxelChunksKey(MeshPipelineKey);
-
-impl Specializer<RenderPipeline> for VoxelChunksSpecializer {
-    type Key = VoxelChunksKey;
-
-    fn specialize(
-        &self,
-        key: Self::Key,
-        descriptor: &mut RenderPipelineDescriptor,
-    ) -> Result<Canonical<Self::Key>, BevyError> {
-        crate::pbr_view::specialize_for_view(&self.view_layouts, key.0, descriptor);
-        Ok(key)
-    }
-}
-
-#[derive(Default, Deref, DerefMut, Resource)]
-struct PendingVoxelQueues(PendingQueues);
-
 fn prepare_view_bind_group(
     pipeline: Option<Res<ChunkDrawPipeline>>,
     gpu: Option<Res<ChunkGpuResources>>,
@@ -2676,7 +2644,7 @@ fn prepare_view_bind_group(
     bind_groups.chunk = Some(
         render_device.create_bind_group(
             "voxel_chunks_chunk_bg",
-            &pipeline_cache.get_bind_group_layout(&pipeline.chunk_layout),
+            &pipeline_cache.get_bind_group_layout(&pipeline.layout),
             &BindGroupEntries::sequential((
                 chunk_binding,
                 env_binding,
@@ -2687,83 +2655,6 @@ fn prepare_view_bind_group(
             )),
         ),
     );
-}
-
-#[allow(clippy::too_many_arguments)]
-fn queue_voxel_chunks(
-    pipeline_cache: Res<PipelineCache>,
-    pipeline: Option<ResMut<ChunkDrawPipeline>>,
-    mut opaque_render_phases: ResMut<ViewBinnedRenderPhases<Opaque3d>>,
-    opaque_draw_functions: Res<DrawFunctions<Opaque3d>>,
-    views: Query<crate::pbr_view::PbrViewQuery>,
-    dirty_specializations: Res<DirtySpecializations>,
-    mut pending_queues: ResMut<PendingVoxelQueues>,
-) {
-    let Some(mut pipeline) = pipeline else {
-        return;
-    };
-    let draw_function = opaque_draw_functions.read().id::<DrawVoxelChunksCommands>();
-
-    for (
-        view,
-        camera,
-        view_visible_entities,
-        msaa,
-        tonemapping,
-        dither,
-        shadow_filter_method,
-        distance_fog,
-    ) in views.iter()
-    {
-        let Some(opaque_phase) = opaque_render_phases.get_mut(&view.retained_view_entity) else {
-            continue;
-        };
-        let Some(visible) = view_visible_entities.get::<VoxelTerrainMarker>() else {
-            continue;
-        };
-        let view_pending = pending_queues.prepare_for_new_frame(view.retained_view_entity);
-        let mesh_key = crate::pbr_view::view_key(
-            view,
-            camera,
-            msaa,
-            tonemapping,
-            dither,
-            shadow_filter_method,
-            distance_fog,
-        );
-
-        for &main_entity in
-            dirty_specializations.iter_to_dequeue(view.retained_view_entity, visible)
-        {
-            opaque_phase.remove(main_entity);
-        }
-        for (render_entity, main_entity) in dirty_specializations
-            .iter_to_queue(view.retained_view_entity, visible, &view_pending.prev_frame)
-            .map(|(re, me)| (*re, *me))
-        {
-            let Ok(pipeline_id) = pipeline
-                .variants
-                .specialize(&pipeline_cache, VoxelChunksKey(mesh_key))
-            else {
-                continue;
-            };
-            opaque_phase.add(
-                Opaque3dBatchSetKey {
-                    draw_function,
-                    pipeline: pipeline_id,
-                    material_bind_group_index: None,
-                    lightmap_slab: None,
-                    slabs: MeshSlabs::default(),
-                },
-                Opaque3dBinKey {
-                    asset_id: AssetId::<Mesh>::invalid().untyped(),
-                },
-                (render_entity, main_entity),
-                InputUniformIndex::default(),
-                BinnedRenderPhaseType::NonMesh,
-            );
-        }
-    }
 }
 
 type DrawVoxelChunksCommands = (
