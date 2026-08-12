@@ -108,24 +108,59 @@ impl CsgOp {
         }
     }
 
-    /// Conservative world-space AABB (yaw-safe: uses the diagonal).
-    pub fn aabb(&self) -> (Vec3, Vec3) {
-        let c = Vec3::from(self.center);
+    /// Conservative world-space AABB (yaw-safe: uses the diagonal, and
+    /// a smooth blend reaches past the shape by its own radius).
+    pub fn aabb(&self) -> Aabb {
         let h = Vec3::from(self.half);
         let r = (h.x * h.x + h.z * h.z).sqrt().max(h.x.max(h.z));
-        let e = Vec3::new(r, h.y, r) + Vec3::splat(self.blend);
-        (c - e, c + e)
+        Aabb::around(
+            Vec3::from(self.center),
+            Vec3::new(r, h.y, r) + Vec3::splat(self.blend),
+        )
     }
 
-    /// Does this op affect the chunk box `[min, max]` (meters)?
-    pub fn touches(&self, min: Vec3, max: Vec3) -> bool {
-        let (lo, hi) = self.aabb();
-        lo.x <= max.x
-            && hi.x >= min.x
-            && lo.y <= max.y
-            && hi.y >= min.y
-            && lo.z <= max.z
-            && hi.z >= min.z
+    /// Does this op affect `box`?
+    pub fn touches(&self, r#box: Aabb) -> bool {
+        self.aabb().touches(r#box)
+    }
+}
+
+/// An axis-aligned box in world meters.
+///
+/// One name for a question asked all over: does this thing reach that
+/// place. It was written out six times before this — in the op cull, the
+/// chunk fingerprint, the edit sweep and three tests — and six copies of
+/// an inequality chain are six chances to get one `<=` backwards.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Aabb {
+    pub min: Vec3,
+    pub max: Vec3,
+}
+
+impl Aabb {
+    pub fn new(min: Vec3, max: Vec3) -> Self {
+        Self { min, max }
+    }
+
+    /// A box of half-extents `half` about `center`.
+    pub fn around(center: Vec3, half: Vec3) -> Self {
+        Self::new(center - half, center + half)
+    }
+
+    /// Do the two overlap? Touching at a face counts: a chunk reads the
+    /// samples on its own boundary.
+    pub fn touches(self, other: Self) -> bool {
+        self.min.cmple(other.max).all() && other.min.cmple(self.max).all()
+    }
+
+    /// The smallest box holding both.
+    pub fn union(self, other: Self) -> Self {
+        Self::new(self.min.min(other.min), self.max.max(other.max))
+    }
+
+    /// Grown by `by` meters on every side.
+    pub fn inflate(self, by: f32) -> Self {
+        Self::new(self.min - Vec3::splat(by), self.max + Vec3::splat(by))
     }
 }
 
@@ -146,7 +181,7 @@ mod tests {
     fn aabb_covers_rotated_box() {
         // A yawed box's corners stay inside the conservative AABB.
         let op = CsgOp::boxy(Vec3::ZERO, Vec3::new(4.0, 1.0, 1.0), 0.7, 0, false);
-        let (lo, hi) = op.aabb();
+        let b = op.aabb();
         for sx in [-1.0f32, 1.0] {
             for sz in [-1.0f32, 1.0] {
                 let corner = Vec3::new(4.0 * sx, 0.0, 1.0 * sz);
@@ -156,8 +191,8 @@ mod tests {
                     0.0,
                     corner.x * s + corner.z * c,
                 );
-                assert!(world.x >= lo.x && world.x <= hi.x);
-                assert!(world.z >= lo.z && world.z <= hi.z);
+                assert!(world.x >= b.min.x && world.x <= b.max.x);
+                assert!(world.z >= b.min.z && world.z <= b.max.z);
             }
         }
     }
@@ -178,7 +213,13 @@ mod tests {
     #[test]
     fn touches_is_conservative() {
         let op = CsgOp::cylinder(Vec3::new(100.0, 0.0, 0.0), 5.0, 10.0, 0, false);
-        assert!(op.touches(Vec3::new(90.0, -5.0, -5.0), Vec3::new(110.0, 5.0, 5.0)));
-        assert!(!op.touches(Vec3::new(200.0, 0.0, 0.0), Vec3::new(210.0, 10.0, 10.0)));
+        assert!(op.touches(Aabb::new(
+            Vec3::new(90.0, -5.0, -5.0),
+            Vec3::new(110.0, 5.0, 5.0)
+        )));
+        assert!(!op.touches(Aabb::new(
+            Vec3::new(200.0, 0.0, 0.0),
+            Vec3::new(210.0, 10.0, 10.0)
+        )));
     }
 }

@@ -1121,7 +1121,7 @@ pub fn patches_in(mgr: &LayerGraph, instance: &str, min: Vec3, max: Vec3) -> Pat
     let mut out = PatchSet::default();
     for (_, c) in mgr.view::<EmitPatches>(instance, bounds).iter() {
         for op in &c.patches.ops {
-            if op.touches(min, max) {
+            if op.touches(voxel_core::csg::Aabb::new(min, max)) {
                 out.ops.push(*op);
             }
         }
@@ -1778,7 +1778,7 @@ mod tests {
         let expect: Vec<_> = patches
             .ops
             .iter()
-            .filter(|op| op.touches(smin, smax))
+            .filter(|op| op.touches(voxel_core::csg::Aabb::new(smin, smax)))
             .copied()
             .collect();
         assert_eq!(sub.ops, expect);

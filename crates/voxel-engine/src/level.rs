@@ -13,7 +13,7 @@ use std::sync::Arc;
 
 use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
-use voxel_core::csg::CsgOp;
+use voxel_core::csg::{Aabb, CsgOp};
 use voxel_core::worldop::*;
 
 use crate::graph::{node::Invalidates, NodeDef};
@@ -401,22 +401,30 @@ pub fn authored_ops(
     level: &LevelDef,
     ground: impl Fn(bevy::math::Vec2) -> f32 + Copy,
 ) -> Vec<(i32, Vec<CsgOp>)> {
-    let mut placed: Vec<(i32, Vec<CsgOp>)> = level
-        .placements
-        .iter()
-        .filter_map(|p| {
-            let Some(local) = level.local_ops(p) else {
-                warn!(
-                    "placement references unknown prefab '{}'",
-                    p.prefab.as_deref().unwrap_or("?")
-                );
-                return None;
-            };
-            Some((p.priority, place(p, local, ground)))
-        })
+    let mut placed: Vec<(i32, Vec<CsgOp>)> = authored(level)
+        .map(|(p, local)| (p.priority, place(p, local, ground)))
         .collect();
     placed.sort_by_key(|(priority, _)| *priority);
     placed
+}
+
+/// Every placement of a level paired with the local ops it stamps.
+///
+/// The one walk over `placements`, because resolving a prefab reference
+/// is where they can disagree — and they did: the editor's copy dropped
+/// every INLINE placement, so a level authoring one saw it carved and
+/// never drawn.
+pub fn authored(level: &LevelDef) -> impl Iterator<Item = (&PlacementDef, &[CsgOpDef])> {
+    level.placements.iter().filter_map(|p| {
+        let Some(local) = level.local_ops(p) else {
+            warn!(
+                "placement references unknown prefab '{}'",
+                p.prefab.as_deref().unwrap_or("?")
+            );
+            return None;
+        };
+        Some((p, local))
+    })
 }
 
 /// Those ops as a chunk-culled source, or `None` if a level authored none.
@@ -426,9 +434,10 @@ pub fn authored_source(placed: Vec<(i32, Vec<CsgOp>)>) -> Option<OpsSource> {
     }
     let placed = Arc::new(placed);
     Some(Arc::new(move |min, max| {
+        let want = Aabb::new(min, max);
         let mut out = Vec::new();
         for (_, ops) in placed.iter() {
-            out.extend(ops.iter().filter(|op| op.touches(min, max)).copied());
+            out.extend(ops.iter().filter(|op| op.touches(want)).copied());
         }
         out
     }))
@@ -1460,32 +1469,42 @@ fn watch_level_file(
 /// them to an editor that has to ask.
 ///
 /// The node list answers for itself, per node — see [`crate::graph::changed`].
-/// Did only the AUTHORED geometry move?
+/// What an edit changed, in the terms the world is rebuilt by.
 ///
-/// The narrow case worth separating: placements and prefabs put ops in a
-/// bounded part of the world, so the chunks that care can be found rather
-/// than assumed. Everything else about a level — its nodes, its sun, its
-/// LOD topology — changes what every chunk is.
-fn only_authored_moved(new: &LevelDef, old: &LevelDef) -> bool {
-    (new.placements != old.placements || new.prefabs != old.prefabs)
-        && sun_dir(new) == sun_dir(old)
-        && new.lod.max_level == old.lod.max_level
-        && new.lod.top_radius == old.lod.top_radius
-        && new.lod.top_y == old.lod.top_y
-        && new.nodes == old.nodes
+/// ONE reading of the diff. There were two — "is anything world-level
+/// stale" and "is it only authored geometry" — listing the same five
+/// fields with opposite polarity, so a field added to a level had to be
+/// added to both and forgetting one misclassified every edit to it. Now a
+/// new field joins one arm of one `match`.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Changed {
+    /// Nothing that reaches a voxel or a layer.
+    Nothing,
+    /// The planning graph and nothing under it.
+    Plan,
+    /// Authored geometry only: the ops it puts in the world moved, and
+    /// they are in a bounded part of it, so the chunks that care can be
+    /// found rather than assumed.
+    Authored,
+    /// What every chunk is made of.
+    World,
 }
 
-fn staleness(new: &LevelDef, old: &LevelDef) -> Option<Invalidates> {
+fn changed_by(new: &LevelDef, old: &LevelDef) -> Changed {
+    // Anything here changes what an arbitrary chunk contains, so there is
+    // nothing to narrow down.
     let world = sun_dir(new) != sun_dir(old)
-        || new.placements != old.placements
-        || new.prefabs != old.prefabs
         || new.lod.max_level != old.lod.max_level
         || new.lod.top_radius != old.lod.top_radius
         || new.lod.top_y != old.lod.top_y;
     let nodes = crate::graph::changed(&new.nodes, &old.nodes);
-    match (world, nodes) {
-        (true, _) => Some(Invalidates::World),
-        (false, effect) => effect,
+    let authored = new.placements != old.placements || new.prefabs != old.prefabs;
+    match (world, nodes, authored) {
+        (true, _, _) | (_, Some(Invalidates::World), _) => Changed::World,
+        (false, None, true) => Changed::Authored,
+        (false, Some(Invalidates::Plan), true) => Changed::World,
+        (false, Some(Invalidates::Plan), false) => Changed::Plan,
+        (false, None, false) => Changed::Nothing,
     }
 }
 
@@ -1544,12 +1563,12 @@ fn apply_level_change(
     // Generation-affecting changes rebuild the streamed world.
     let sun_changed = sun_dir(&new) != sun_dir(level);
     let generator_changed = new.nodes != level.nodes || sun_changed;
-    let stale = staleness(&new, level);
+    let stale = changed_by(&new, level);
     // Only where something needs one. This runs on EVERY write to the
     // resource, and a colour dragged in the editor writes one a frame:
     // compiling the graph and rebuilding the CPU twin to hand both to
     // nobody is the whole cost of tuning a material.
-    if generator_changed || stale.is_some() {
+    if generator_changed || stale != Changed::Nothing {
         let (program, generator) = build_generator(&new, seed.0);
         if generator_changed {
             render.program = program;
@@ -1558,50 +1577,47 @@ fn apply_level_change(
         // the populations are registered — but leaves the streamed chunks
         // alone. They were carved by ops this edit cannot have changed, so
         // tearing them down would regenerate every one of them into itself.
-        if let Some(stale) = stale {
-            if stale == Invalidates::World {
+        match stale {
+            Changed::Nothing => {}
+            Changed::Plan => {}
+            // Somebody moved an authored object: rebuild the chunks that
+            // care instead of assuming all of them do. Handed out below
+            // rather than acted on here, because the rebuild reads the
+            // world's ops through `ChunkGen` and that has to be told
+            // about this edit FIRST.
+            Changed::Authored => {
+                let ground = |xz: bevy::math::Vec2| generator.height(xz, 1.0);
+                let flat = |g: &[(i32, Vec<CsgOp>)]| -> Vec<CsgOp> {
+                    g.iter().flat_map(|(_, ops)| ops.iter().copied()).collect()
+                };
+                let was = flat(&authored_ops(level, ground));
+                let now = authored_ops(&new, ground);
+                narrow = Some((
+                    crate::lod_layers::Restale {
+                        seed: seed.0 as u32,
+                        was_placed: was,
+                        now_placed: flat(&now),
+                    },
+                    authored_source(now),
+                ));
+            }
+            Changed::World => {
                 world.config.max_level = new.lod.max_level;
                 world.config.top_radius = new.lod.top_radius;
                 world.config.top_y = new.lod.top_y;
                 world.generator = generator.clone();
-                // Somebody moved an authored object: rebuild the chunks
-                // that care instead of assuming all of them do. Handed
-                // out below rather than acted on here, because the
-                // rebuild reads the world's ops through `ChunkGen` and
-                // that has to be told about this edit FIRST.
-                if only_authored_moved(&new, level) {
-                    let ground = |xz: bevy::math::Vec2| generator.height(xz, 1.0);
-                    let was = authored_ops(level, ground);
-                    let now = authored_ops(&new, ground);
-                    let flat = |g: &[(i32, Vec<CsgOp>)]| -> Vec<CsgOp> {
-                        g.iter().flat_map(|(_, ops)| ops.iter().copied()).collect()
-                    };
-                    narrow = Some((
-                        crate::lod_layers::Restale {
-                            seed: seed.0 as u32,
-                            ops: std::sync::Arc::new(generator.ops().to_vec()),
-                            was_placed: flat(&was),
-                            now_placed: flat(&now),
-                        },
-                        authored_source(now),
-                    ));
-                } else {
-                    rebuild.0 = true;
-                }
-            }
-            // The narrow path keeps the planner it already has and swaps
-            // only the authored source, below. Building a fresh one here
-            // would throw away a resident planning stack and make the
-            // next ops query wait for it to come back — which is where
-            // 1.5 s of a two-metre nudge used to go.
-            if narrow.is_none() {
-                world.query = build_world_query(&new, seed.0, &generator, planner.0.as_ref());
-            }
-            world.level = new.clone();
-            if rebuild.0 {
-                info!("level reload: {stale:?} is stale — rebuilding it");
+                rebuild.0 = true;
+                info!("level reload: the world is stale — rebuilding it");
             }
         }
+        // The authored path keeps the planner it already has and swaps
+        // only its source, below. Building a fresh one here would throw
+        // away a resident planning stack and make the next ops query wait
+        // for it to come back — 1.5 s of a two-metre nudge.
+        if narrow.is_none() {
+            world.query = build_world_query(&new, seed.0, &generator, planner.0.as_ref());
+        }
+        world.level = new.clone();
     }
 
     // A rebuilt chunk reads its ops through `ChunkGen`, and the sync that
@@ -1674,10 +1690,14 @@ mod tests {
     use super::*;
     use bevy::reflect::TypeInfo;
 
-    /// Does this edit restream the world? What [`schema::Rebuilds`]
+    /// Does this edit reach the voxels? What [`schema::Rebuilds`]
     /// promises, and the question every case below asks.
+    ///
+    /// Either arm counts: authored geometry rebuilds a dozen chunks and
+    /// the rest rebuild all of them, but a field that reached NEITHER
+    /// would be one the attribute lies about.
     fn needs_regen(new: &LevelDef, old: &LevelDef) -> bool {
-        staleness(new, old) == Some(Invalidates::World)
+        matches!(changed_by(new, old), Changed::World | Changed::Authored)
     }
 
     /// A shipped level's path. A level's prefabs live beside it, so it

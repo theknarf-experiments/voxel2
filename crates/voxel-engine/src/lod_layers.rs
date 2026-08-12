@@ -152,7 +152,6 @@ struct LodShared {
 /// the chunks it moved. See [`crate::fingerprint`].
 pub struct Restale {
     pub seed: u32,
-    pub ops: Arc<Vec<voxel_core::worldop::WorldOp>>,
     pub was_placed: Vec<CsgOp>,
     pub now_placed: Vec<CsgOp>,
 }
@@ -577,7 +576,7 @@ fn restale(shared: &LodShared) {
     // asked first. Sound because only the AUTHORED ops differ here
     // (`only_authored_moved` guarantees it): a chunk this box misses sees
     // the same two op sets either way, so its two prints cannot differ.
-    let Some((tlo, thi)) = crate::fingerprint::touched(&edit.was_placed, &edit.now_placed) else {
+    let Some(moved) = crate::fingerprint::touched(&edit.was_placed, &edit.now_placed) else {
         return; // the lists differ in nothing that occupies space
     };
     let near: Vec<(ChunkKey, u32)> = {
@@ -585,15 +584,7 @@ fn restale(shared: &LodShared) {
         state
             .shown
             .iter()
-            .filter(|(key, _)| {
-                let (lo, hi) = crate::fingerprint::read_box(**key);
-                lo.x <= thi.x
-                    && hi.x >= tlo.x
-                    && lo.y <= thi.y
-                    && hi.y >= tlo.y
-                    && lo.z <= thi.z
-                    && hi.z >= tlo.z
-            })
+            .filter(|(key, _)| crate::fingerprint::read_box(**key).touches(moved))
             .map(|(key, shown)| (*key, shown.mask))
             .collect()
     };
@@ -602,8 +593,11 @@ fn restale(shared: &LodShared) {
     let want: Vec<(ChunkKey, ShownChunk)> = near
         .into_iter()
         .filter(|(key, _)| {
-            let was = crate::fingerprint::of(*key, edit.seed, &edit.ops, &edit.was_placed);
-            let now = crate::fingerprint::of(*key, edit.seed, &edit.ops, &edit.now_placed);
+            // The generator this world is streaming — an authored edit
+            // cannot have changed it, which is why this path exists.
+            let ops = shared.generator.ops();
+            let was = crate::fingerprint::of(*key, edit.seed, ops, &edit.was_placed);
+            let now = crate::fingerprint::of(*key, edit.seed, ops, &edit.now_placed);
             was != now
         })
         .map(|(key, mask)| {

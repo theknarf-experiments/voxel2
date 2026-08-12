@@ -647,11 +647,9 @@ mod tests {
             assert_eq!(op.kind & 1, 1, "dungeon part emitted solid");
         }
         // One connected void (flood fill over overlapping AABBs).
-        let touches = |a: &CsgOp, b: &CsgOp| {
-            let (amin, amax) = a.aabb();
-            let (bmin, bmax) = b.aabb();
-            amin.cmple(bmax + Vec3::splat(0.5)).all() && bmin.cmple(amax + Vec3::splat(0.5)).all()
-        };
+        // Half a metre of slack, so parts that only just meet count as
+        // joined rather than as a dungeon in two pieces.
+        let touches = |a: &CsgOp, b: &CsgOp| a.aabb().inflate(0.5).touches(b.aabb());
         let mut joined = vec![false; ops.len()];
         joined[0] = true;
         let mut grew = true;
@@ -669,8 +667,8 @@ mod tests {
         let surface = generator().height(Vec2::new(site.x, site.z), 1.0);
         assert!(
             ops.iter().any(|op| {
-                let (min, max) = op.aabb();
-                min.y < surface && max.y > surface
+                let b = op.aabb();
+                b.min.y < surface && b.max.y > surface
             }),
             "no cut crosses the surface"
         );

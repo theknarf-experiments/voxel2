@@ -16,7 +16,7 @@ use bevy::camera::RenderTarget;
 use bevy::gizmos::config::{GizmoConfigGroup, GizmoConfigStore};
 use bevy::prelude::*;
 use voxel_core::csg::{CsgOp, CSG_KIND_CYLINDER_ADD, CSG_KIND_CYLINDER_CUT};
-use voxel_engine::level::{LevelDef, PlacementDef};
+use voxel_engine::level::LevelDef;
 
 use crate::edit::{Edit, Pending, Value};
 use crate::shapes::{self, Drag, Handle, Ray};
@@ -86,36 +86,34 @@ fn placed(
     level: &LevelDef,
     worlds: &voxel_engine::Worlds,
     live: Option<(usize, usize, Handle, [f32; 3])>,
-) -> Vec<(usize, Vec<CsgOp>)> {
+) -> Vec<(Option<usize>, Vec<CsgOp>)> {
     let Some(query) = worlds.query(0) else {
         return Vec::new();
     };
     let generator = query.generator();
     let ground = |xz: Vec2| generator.height(xz, 1.0);
-    level
-        .placements
-        .iter()
-        .filter_map(|p: &PlacementDef| {
-            let local = level.local_ops(p)?;
+    voxel_engine::level::authored(level)
+        .map(|(p, local)| {
             // Which prefab these ops came from, so a click can name the
-            // path to edit. An inline placement has none and is drawn but
-            // not grabbed — its ops are the placement's, not a prefab's.
+            // path to edit. An INLINE placement has none: it is drawn,
+            // because it is there, but its handles would have nothing to
+            // write to.
             let prefab = level
                 .prefabs
                 .iter()
-                .position(|f| Some(&f.name) == p.prefab.as_ref())?;
+                .position(|f| Some(&f.name) == p.prefab.as_ref());
             // A drag in flight is applied HERE, to a copy, so the shape
             // follows the pointer without the document — and therefore
             // the streamed world — hearing about every frame of it.
             match live {
-                Some((f, op, handle, value)) if f == prefab => {
+                Some((f, op, handle, value)) if Some(f) == prefab => {
                     let mut local = local.to_vec();
                     if let Some(def) = local.get_mut(op) {
                         apply_local(def, handle, value);
                     }
-                    Some((prefab, voxel_engine::level::place(p, &local, ground)))
+                    (prefab, voxel_engine::level::place(p, &local, ground))
                 }
-                _ => Some((prefab, voxel_engine::level::place(p, local, ground))),
+                _ => (prefab, voxel_engine::level::place(p, local, ground)),
             }
         })
         .collect()
@@ -185,7 +183,7 @@ pub fn draw(
         .map(|((drag, value), [f, i])| (f, i, drag.handle, value));
     for (prefab, ops) in placed(&level, &worlds, live) {
         for (i, op) in ops.iter().enumerate() {
-            let live = tool.selected == Some([prefab, i]);
+            let live = prefab.is_some_and(|f| tool.selected == Some([f, i]));
             outline(&mut gizmos, op, if live { LIVE } else { IDLE });
             if live {
                 handles(&mut gizmos, op, eye);
@@ -319,7 +317,7 @@ pub fn on_click(
     if let Some([prefab, i]) = tool.selected {
         if let Some(op) = all
             .iter()
-            .find(|(p, _)| *p == prefab)
+            .find(|(p, _)| *p == Some(prefab))
             .and_then(|(_, ops)| ops.get(i))
         {
             if let Some(handle) = shapes::pick_handle(op, ray) {
@@ -343,10 +341,13 @@ pub fn on_click(
     // Otherwise select whatever is under the pointer, nearest first.
     let mut best: Option<(f32, [usize; 2])> = None;
     for (prefab, ops) in &all {
+        // An inline placement is drawn but not selectable: its ops belong
+        // to the placement, and the handles write a prefab's path.
+        let Some(prefab) = *prefab else { continue };
         if let Some(i) = shapes::pick_op(ops, ray) {
             let d = Vec3::from(ops[i].center).distance(ray.origin);
             if best.is_none_or(|(bd, _)| d < bd) {
-                best = Some((d, [*prefab, i]));
+                best = Some((d, [prefab, i]));
             }
         }
     }
@@ -354,21 +355,20 @@ pub fn on_click(
     tool.drag = None;
 }
 
-/// The local value a drag starts from: the op's centre, or its extents.
+/// The local value a drag starts from: whatever field its handle writes.
+///
+/// Through `target`, so which field that is gets decided once. A cylinder
+/// carries its extents as a radius and a half height rather than three
+/// numbers, and saying so twice is how the preview and the commit come to
+/// disagree.
 fn local_start(level: &LevelDef, prefab: usize, op: usize, handle: Handle) -> [f32; 3] {
     let Some(def) = level.prefabs.get(prefab).and_then(|p| p.ops.get(op)) else {
         return [0.0; 3];
     };
-    if !handle.is_size() {
-        return def.center;
-    }
-    // A cylinder's extents are a radius and a half height rather than
-    // three numbers, so its handles write those two through the same
-    // three slots — see `write`.
-    if def.shape == "cylinder" {
-        [def.radius, def.half_height, def.radius]
-    } else {
-        def.half
+    match target(def, handle) {
+        Target::Center(_) => def.center,
+        Target::Half(_) => def.half,
+        Target::Radius | Target::HalfHeight => [def.radius, def.half_height, def.radius],
     }
 }
 
@@ -408,7 +408,7 @@ pub fn preview_drag(
     let all = placed(&level, &worlds, None);
     let Some(op) = all
         .iter()
-        .find(|(p, _)| *p == prefab)
+        .find(|(p, _)| *p == Some(prefab))
         .and_then(|(_, ops)| ops.get(i))
     else {
         return;

@@ -11,7 +11,7 @@
 //! space because that is where you can see them; what an edit writes is
 //! the local value, which is why every drag ends in [`to_local`].
 
-use bevy::math::{Mat3, Quat, Vec2, Vec3};
+use bevy::math::{Mat3, Quat, Vec3};
 use bevy::prelude::Reflect;
 use voxel_core::csg::CsgOp;
 
@@ -244,11 +244,6 @@ pub fn to_local(op: &CsgOp, drag: Drag, ray: Ray, scale: f32) -> Option<[f32; 3]
 /// The reflect path of one op inside a level.
 pub fn op_path(prefab: usize, op: usize) -> String {
     format!(".prefabs[{prefab}].ops[{op}]")
-}
-
-/// The xz of a placement, for asking the heightfield where the ground is.
-pub fn ground_xz(position: [f32; 3]) -> Vec2 {
-    Vec2::new(position[0], position[2])
 }
 
 #[cfg(test)]

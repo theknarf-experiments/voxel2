@@ -19,9 +19,8 @@
 //! — a wrong world that looks right until something else happens to
 //! rebuild it — so everything here rounds towards including more.
 
-use bevy::math::Vec3;
 use std::hash::{Hash, Hasher};
-use voxel_core::csg::CsgOp;
+use voxel_core::csg::{Aabb, CsgOp};
 use voxel_core::worldop::WorldOp;
 use voxel_core::ChunkKey;
 
@@ -34,11 +33,10 @@ use voxel_core::ChunkKey;
 const APRON_VOXELS: f64 = 2.0;
 
 /// The box a chunk's generation actually reads.
-pub fn read_box(key: ChunkKey) -> (Vec3, Vec3) {
+pub fn read_box(key: ChunkKey) -> Aabb {
     let pad = key.voxel_size_m() * APRON_VOXELS;
-    let lo = key.min_corner_m() - pad;
-    let hi = lo + key.edge_m() + pad * 2.0;
-    (lo.as_vec3(), hi.as_vec3())
+    let lo = key.min_corner_m();
+    Aabb::new(lo.as_vec3(), (lo + key.edge_m()).as_vec3()).inflate(pad as f32)
 }
 
 /// Everything that decides this chunk's voxels, hashed.
@@ -48,7 +46,7 @@ pub fn read_box(key: ChunkKey) -> (Vec3, Vec3) {
 /// NOT in here: those are invalidated by the layer graph that produced
 /// them, and a level edit is not how they change.
 pub fn of(key: ChunkKey, seed: u32, ops: &[WorldOp], placed: &[CsgOp]) -> u64 {
-    let (lo, hi) = read_box(key);
+    let read = read_box(key);
     let vs = key.voxel_size_m() as f32;
     let mut h = std::collections::hash_map::DefaultHasher::new();
     seed.hash(&mut h);
@@ -56,13 +54,13 @@ pub fn of(key: ChunkKey, seed: u32, ops: &[WorldOp], placed: &[CsgOp]) -> u64 {
     key.level.hash(&mut h);
     key.pos.to_array().hash(&mut h);
 
-    let reaching = voxel_worldgen::program::ops_reaching(ops, seed, lo, hi, vs);
+    let reaching = voxel_worldgen::program::ops_reaching(ops, seed, read.min, read.max, vs);
     for (op, reaches) in ops.iter().zip(reaching) {
         if reaches {
             hash_world_op(op, &mut h);
         }
     }
-    for op in placed.iter().filter(|op| op.touches(lo, hi)) {
+    for op in placed.iter().filter(|op| op.touches(read)) {
         hash_csg_op(op, &mut h);
     }
     h.finish()
@@ -75,24 +73,20 @@ pub fn of(key: ChunkKey, seed: u32, ops: &[WorldOp], placed: &[CsgOp]) -> u64 {
 /// ops in both lists, so its two prints are equal and asking is wasted.
 /// The union of BOTH sides, because an op that moved has to rebuild where
 /// it was as well as where it went.
-pub fn touched(was: &[CsgOp], now: &[CsgOp]) -> Option<(Vec3, Vec3)> {
-    let mut lo = Vec3::splat(f32::INFINITY);
-    let mut hi = Vec3::splat(f32::NEG_INFINITY);
-    let mut any = false;
+pub fn touched(was: &[CsgOp], now: &[CsgOp]) -> Option<Aabb> {
     // Quadratic in the number of authored ops, which is dozens. The
     // alternative is hashing them into a set, and a set of floats is a
     // set of things that compare equal and hash apart.
-    let mut swallow = |a: &[CsgOp], b: &[CsgOp]| {
+    let mut out: Option<Aabb> = None;
+    for (a, b) in [(was, now), (now, was)] {
         for op in a.iter().filter(|op| !b.contains(op)) {
-            let (olo, ohi) = op.aabb();
-            lo = lo.min(olo);
-            hi = hi.max(ohi);
-            any = true;
+            out = Some(match out {
+                None => op.aabb(),
+                Some(all) => all.union(op.aabb()),
+            });
         }
-    };
-    swallow(was, now);
-    swallow(now, was);
-    any.then_some((lo, hi))
+    }
+    out
 }
 
 /// Ops are plain data with floats in them; hash the bits.
@@ -125,6 +119,7 @@ fn hash_csg_op(op: &CsgOp, h: &mut impl Hasher) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bevy::math::Vec3;
     use voxel_core::worldop::{WorldOp, WOP_HEIGHT_OFFSET};
 
     fn key(level: u8, pos: [i32; 3]) -> ChunkKey {
@@ -140,9 +135,14 @@ mod tests {
 
         // Nudge every op in turn; the ones this chunk cannot see must
         // leave the print alone, and at least one must.
-        let (lo, hi) = read_box(k);
-        let reaching =
-            voxel_worldgen::program::ops_reaching(&ops, 0, lo, hi, k.voxel_size_m() as f32);
+        let read = read_box(k);
+        let reaching = voxel_worldgen::program::ops_reaching(
+            &ops,
+            0,
+            read.min,
+            read.max,
+            k.voxel_size_m() as f32,
+        );
         let mut unreached = 0;
         for (i, reaches) in reaching.iter().enumerate() {
             let mut edited = ops.clone();
@@ -196,8 +196,8 @@ mod tests {
     fn the_touched_box_covers_where_an_op_was_and_where_it_went() {
         let was = CsgOp::boxy(Vec3::new(0.0, 0.0, 0.0), Vec3::splat(1.0), 0.0, 3, false);
         let now = CsgOp::boxy(Vec3::new(50.0, 0.0, 0.0), Vec3::splat(1.0), 0.0, 3, false);
-        let (lo, hi) = touched(std::slice::from_ref(&was), std::slice::from_ref(&now)).unwrap();
-        assert!(lo.x <= -1.0 && hi.x >= 51.0, "{lo:?} {hi:?}");
+        let all = touched(std::slice::from_ref(&was), std::slice::from_ref(&now)).unwrap();
+        assert!(all.min.x <= -1.0 && all.max.x >= 51.0, "{all:?}");
 
         // Unchanged lists touch nothing, whatever is in them.
         let same = [was, now];
@@ -217,13 +217,11 @@ mod tests {
             3,
             false,
         )];
-        let (tlo, thi) = touched(&was, &now).unwrap();
+        let moved = touched(&was, &now).unwrap();
         for i in -6..6 {
             for j in -6..6 {
                 let k = key(0, [i, 0, j]);
-                let (lo, hi) = read_box(k);
-                let outside = lo.x > thi.x || hi.x < tlo.x || lo.z > thi.z || hi.z < tlo.z;
-                if outside {
+                if !read_box(k).touches(moved) {
                     assert_eq!(
                         of(k, 0, &ops, &was),
                         of(k, 0, &ops, &now),
@@ -239,7 +237,7 @@ mod tests {
     #[test]
     fn the_apron_is_inside_the_fingerprint() {
         let k = key(0, [0, 0, 0]);
-        let (lo, _) = read_box(k);
+        let lo = read_box(k).min;
         // Inside the apron on x, in the middle of the chunk on y and z —
         // a level-0 chunk is only a few metres tall, so a probe picked
         // out of the air lands above it.
