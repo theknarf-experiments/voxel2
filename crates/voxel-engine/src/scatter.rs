@@ -196,12 +196,16 @@ pub fn tile_placements(
         // the alignment normal reads a fixed 4 m, and they have since
         // before this branch existed. Left apart rather than tidied into
         // one, because tidying them moves every prop on the planet.
-        let (y, up, surface_normal) = match def.surface {
+        let (y, known_up, surface_normal) = match def.surface {
             crate::level::SurfaceMode::Heightfield => {
                 // The band-limited surface the mid-LOD terrain shows
                 // across the streaming radius (tiles appear at the rim).
-                let y = generator.height(xz, def.detail_vs);
-                (y, generator.up(xz, def.detail_vs), None)
+                // `up` is DEFERRED: it is a central difference, so four
+                // more full walks of the program, and the altitude gate
+                // below rejects a large share of candidates without ever
+                // needing it. Moving it draws no rng, so every prop stays
+                // exactly where it was.
+                (generator.height(xz, def.detail_vs), None, None)
             }
             crate::level::SurfaceMode::Floors => {
                 found.clear();
@@ -215,7 +219,7 @@ pub fn tile_placements(
                 // is where two of the program's `min`s meet, and can come
                 // back as either.
                 let n = generator.normal_at(Vec3::new(xz.x, y + 0.1, xz.y), def.detail_vs);
-                (y, n.y, Some(n))
+                (y, Some(n.y), Some(n))
             }
         };
         if carved(cut_ops, Vec3::new(xz.x, y, xz.y)) {
@@ -225,6 +229,7 @@ pub fn tile_placements(
         if gate <= 0.0 || (gate < 1.0 && rng.next_f32() > gate) {
             continue;
         }
+        let up = known_up.unwrap_or_else(|| generator.up(xz, def.detail_vs));
         if up < def.min_up || up > def.placement.max_up || rng.next_f32() >= def.chance {
             continue;
         }

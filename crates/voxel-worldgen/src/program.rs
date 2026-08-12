@@ -41,10 +41,17 @@ fn value_noise3(seed: u32, p: Vec3) -> f32 {
     let i = IVec3::new(i.x as i32, i.y as i32, i.z as i32);
     let u = f * f * f * (f * (f * 6.0 - 15.0) + 10.0);
     let corner = |dx: i32, dy: i32, dz: i32| hash3_seeded(seed, i + IVec3::new(dx, dy, dz));
-    let x00 = corner(0, 0, 0) + (corner(1, 0, 0) - corner(0, 0, 0)) * u.x;
-    let x10 = corner(0, 1, 0) + (corner(1, 1, 0) - corner(0, 1, 0)) * u.x;
-    let x01 = corner(0, 0, 1) + (corner(1, 0, 1) - corner(0, 0, 1)) * u.x;
-    let x11 = corner(0, 1, 1) + (corner(1, 1, 1) - corner(0, 1, 1)) * u.x;
+    // Each corner ONCE. Written as `c000 + (c100 - c000) * u.x` this
+    // called the hash twice per lerp — twelve hashes for the eight
+    // corners of a cell, where the WGSL twin's `mix` does eight.
+    let (c000, c100) = (corner(0, 0, 0), corner(1, 0, 0));
+    let (c010, c110) = (corner(0, 1, 0), corner(1, 1, 0));
+    let (c001, c101) = (corner(0, 0, 1), corner(1, 0, 1));
+    let (c011, c111) = (corner(0, 1, 1), corner(1, 1, 1));
+    let x00 = c000 + (c100 - c000) * u.x;
+    let x10 = c010 + (c110 - c010) * u.x;
+    let x01 = c001 + (c101 - c001) * u.x;
+    let x11 = c011 + (c111 - c011) * u.x;
     let y0 = x00 + (x10 - x00) * u.y;
     let y1 = x01 + (x11 - x01) * u.y;
     y0 + (y1 - y0) * u.z

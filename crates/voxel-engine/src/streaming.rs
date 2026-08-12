@@ -447,7 +447,14 @@ pub fn can_hold_surface(generator: &voxel_worldgen::Generator, key: ChunkKey) ->
     let apron = 4.0 * key.voxel_size_m() as f32;
     let min = key.min_corner_m().as_vec3() - Vec3::splat(apron);
     let max = min + Vec3::splat(key.edge_m() as f32 + 2.0 * apron);
-    uniform_sign(generator, min, max, key.voxel_size_m() as f32, PRUNE_SPLITS).is_none()
+    uniform_sign(
+        generator,
+        min,
+        max,
+        key.voxel_size_m() as f32,
+        *PRUNE_SPLITS,
+    )
+    .is_none()
 }
 
 /// How many times [`can_hold_surface`] may halve a box it cannot decide.
@@ -459,13 +466,28 @@ pub fn can_hold_surface(generator: &voxel_worldgen::Generator, key: ChunkKey) ->
 /// ONE 38³ density pass and a GPU round trip if the answer is wrong, so
 /// the trade is lopsided by orders of magnitude and the cost only lands on
 /// chunks that were marginal in the first place.
-const PRUNE_SPLITS: u32 = 3;
-// Measured on the planet: 3 splits prune 37% of resident chunks and
-// settle in 1.79 s; 4 prunes 39% and settles in 2.27; 5 prunes 40% and
-// settles in 2.56. The bound is loose because the LOD field is already
-// surface-hugging, so what reaches it is marginal by construction —
-// subdividing asks a harder question more times, and the CPU it spends
-// is not repaid by the GPU passes it saves.
+/// Octree depth `can_hold_surface` subdivides to before giving up.
+///
+/// Re-measured 2026-08-12 after the pipeline got roughly twice as fast:
+/// the balance is CPU pruning against GPU density passes, and moving the
+/// GPU side moved the knee. 3 was right when a density pass was dearer;
+/// now 5 is, and 6 buys nothing back. Planet settle, 3 samples at a
+/// loading budget of 192: splits 3 -> 1.76 s, 4 -> 1.77, 5 -> 1.65,
+/// 6 -> 1.69.
+///
+/// Env-overridable for the same reason the frame budgets are: where the
+/// knee sits is a property of the machine as much as of the code.
+static PRUNE_SPLITS: std::sync::LazyLock<u32> = std::sync::LazyLock::new(|| {
+    std::env::var("VOXEL_PRUNE_SPLITS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(5)
+}); // Measured on the planet: 3 splits prune 37% of resident chunks and
+    // settle in 1.79 s; 4 prunes 39% and settles in 2.27; 5 prunes 40% and
+    // settles in 2.56. The bound is loose because the LOD field is already
+    // surface-hugging, so what reaches it is marginal by construction —
+    // subdividing asks a harder question more times, and the CPU it spends
+    // is not repaid by the GPU passes it saves.
 
 /// `Some(true)` if the box is entirely solid, `Some(false)` if entirely
 /// air, `None` if a surface could cross it.
