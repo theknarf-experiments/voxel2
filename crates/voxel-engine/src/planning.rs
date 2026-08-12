@@ -195,6 +195,21 @@ impl WorldQuery {
         self
     }
 
+    /// Replace the stack-independent sources, KEEPING the planner.
+    ///
+    /// Authored geometry and planning are independent: moving a placement
+    /// cannot change what a road or a ruin decides. Rebuilding the
+    /// planner for one anyway means the next ops query waits for a whole
+    /// planning stack to regenerate from cold — measured at 1.5 s on the
+    /// planet, for an edit that moved a rock two metres.
+    pub fn replacing_sources(&self, sources: Vec<OpsSource>) -> Self {
+        Self {
+            planner: self.planner.clone(),
+            sources,
+            generator: self.generator.clone(),
+        }
+    }
+
     /// True when nothing can produce ops — the streamer then skips the
     /// provider entirely.
     pub fn is_empty(&self) -> bool {

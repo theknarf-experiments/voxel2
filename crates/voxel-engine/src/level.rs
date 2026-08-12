@@ -391,6 +391,49 @@ impl Serialize for PrefabDef {
     }
 }
 
+/// Every authored placement of a level, in the world, grouped by
+/// priority — the ONE list of what a level's `placements` put where.
+///
+/// Read twice and built once: `build_world_query` turns it into an op
+/// source, and `fingerprint` hashes it to decide which chunks an edit to
+/// it changed. Two loops over `placements` would be two answers to that.
+pub fn authored_ops(
+    level: &LevelDef,
+    ground: impl Fn(bevy::math::Vec2) -> f32 + Copy,
+) -> Vec<(i32, Vec<CsgOp>)> {
+    let mut placed: Vec<(i32, Vec<CsgOp>)> = level
+        .placements
+        .iter()
+        .filter_map(|p| {
+            let Some(local) = level.local_ops(p) else {
+                warn!(
+                    "placement references unknown prefab '{}'",
+                    p.prefab.as_deref().unwrap_or("?")
+                );
+                return None;
+            };
+            Some((p.priority, place(p, local, ground)))
+        })
+        .collect();
+    placed.sort_by_key(|(priority, _)| *priority);
+    placed
+}
+
+/// Those ops as a chunk-culled source, or `None` if a level authored none.
+pub fn authored_source(placed: Vec<(i32, Vec<CsgOp>)>) -> Option<OpsSource> {
+    if placed.is_empty() {
+        return None;
+    }
+    let placed = Arc::new(placed);
+    Some(Arc::new(move |min, max| {
+        let mut out = Vec::new();
+        for (_, ops) in placed.iter() {
+            out.extend(ops.iter().filter(|op| op.touches(min, max)).copied());
+        }
+        out
+    }))
+}
+
 /// One placement's local ops, in the world.
 ///
 /// Translate, yaw, uniform scale, and optional terrain seating. Public and
@@ -1301,40 +1344,13 @@ pub(crate) fn build_world_query(
     generator: &Arc<voxel_worldgen::Generator>,
     planner: Option<&Arc<dyn HostPlanning>>,
 ) -> WorldQuery {
-    let mut sources: Vec<OpsSource> = Vec::new();
-
-    // Authored placements: resolve prefab refs, bake world-space ops once
-    // (translate + yaw + uniform scale; optional terrain seating), then
-    // serve them AABB-culled like any other source — ordered by priority
-    // after the procedural providers.
-    let mut placed: Vec<(i32, Vec<CsgOp>)> = Vec::new();
-    for p in &level.placements {
-        let Some(local) = level.local_ops(p) else {
-            warn!(
-                "placement references unknown prefab '{}'",
-                p.prefab.as_deref().unwrap_or("?")
-            );
-            continue;
-        };
-        placed.push((p.priority, place(p, local, |xz| generator.height(xz, 1.0))));
-    }
-    placed.sort_by_key(|(priority, _)| *priority);
-    if !placed.is_empty() {
-        let placed = Arc::new(placed);
-        sources.push(Arc::new(move |min, max| {
-            let mut out = Vec::new();
-            for (_, ops) in placed.iter() {
-                out.extend(ops.iter().filter(|op| op.touches(min, max)).copied());
-            }
-            out
-        }));
-    }
-
     let mut world = WorldQuery::new(generator.clone());
     if let Some(planner) = planner.and_then(|h| h.build(level, seed, generator)) {
         world = world.with_planner(planner);
     }
-    for source in sources {
+    // Authored placements are served after the planner's ops, ordered by
+    // priority among themselves.
+    if let Some(source) = authored_source(authored_ops(level, |xz| generator.height(xz, 1.0))) {
         world = world.with_source(source);
     }
     world
@@ -1486,7 +1502,11 @@ fn apply_level_change(
     planner: Res<HostPlanner>,
     // Grouped: the two are the two halves of one answer — everything, or
     // just these chunks — and clippy caps a system at seven arguments.
-    (mut rebuild, lod): (ResMut<StreamingRebuild>, Res<crate::lod_layers::LodLayers>),
+    (mut rebuild, lod, chunks): (
+        ResMut<StreamingRebuild>,
+        Res<crate::lod_layers::LodLayers>,
+        Res<crate::chunkgen::ChunkGen>,
+    ),
     mut reloaded: MessageWriter<LevelReloaded>,
     // Grouped: the two registries are always touched together, and
     // clippy caps a system's arguments at seven.
@@ -1505,6 +1525,9 @@ fn apply_level_change(
         return;
     }
     let level = &applied.0;
+    // Filled in below if this edit only moved authored geometry; acted on
+    // after the borrow of `worlds` ends.
+    let mut narrow: Option<(crate::lod_layers::Restale, Option<OpsSource>)> = None;
     // Only the world this plugin loaded reloads. A portal's far side was
     // loaded from its own file and is nobody's business here.
     let (Some(world), Some(render)) = (worlds.get_mut(0), render.get_mut(0)) else {
@@ -1541,35 +1564,63 @@ fn apply_level_change(
                 world.config.top_radius = new.lod.top_radius;
                 world.config.top_y = new.lod.top_y;
                 world.generator = generator.clone();
-                // Somebody moved an authored object: find the chunks that
-                // care instead of assuming all of them do. If this world
-                // is not streaming yet there is nothing built to fix, and
-                // the full rebuild is the honest fallback.
-                let narrow = only_authored_moved(&new, level)
-                    && lod.restale(
-                        0,
+                // Somebody moved an authored object: rebuild the chunks
+                // that care instead of assuming all of them do. Handed
+                // out below rather than acted on here, because the
+                // rebuild reads the world's ops through `ChunkGen` and
+                // that has to be told about this edit FIRST.
+                if only_authored_moved(&new, level) {
+                    let ground = |xz: bevy::math::Vec2| generator.height(xz, 1.0);
+                    let was = authored_ops(level, ground);
+                    let now = authored_ops(&new, ground);
+                    let flat = |g: &[(i32, Vec<CsgOp>)]| -> Vec<CsgOp> {
+                        g.iter().flat_map(|(_, ops)| ops.iter().copied()).collect()
+                    };
+                    narrow = Some((
                         crate::lod_layers::Restale {
                             seed: seed.0 as u32,
                             ops: std::sync::Arc::new(generator.ops().to_vec()),
-                            was_placed: crate::fingerprint::placed_ops(level, &generator),
-                            now_placed: crate::fingerprint::placed_ops(&new, &generator),
+                            was_placed: flat(&was),
+                            now_placed: flat(&now),
                         },
-                    );
-                if narrow {
-                    // `restale` says what it actually did, once it has
-                    // done it. Saying "rebuilding the world" here as
-                    // well would be both a lie and — at one line per
-                    // edit — the thing that makes a drag unreadable.
-                    debug!("level edit: authored geometry moved");
+                        authored_source(now),
+                    ));
                 } else {
                     rebuild.0 = true;
                 }
             }
-            world.query = build_world_query(&new, seed.0, &generator, planner.0.as_ref());
+            // The narrow path keeps the planner it already has and swaps
+            // only the authored source, below. Building a fresh one here
+            // would throw away a resident planning stack and make the
+            // next ops query wait for it to come back — which is where
+            // 1.5 s of a two-metre nudge used to go.
+            if narrow.is_none() {
+                world.query = build_world_query(&new, seed.0, &generator, planner.0.as_ref());
+            }
             world.level = new.clone();
             if rebuild.0 {
                 info!("level reload: {stale:?} is stale — rebuilding it");
             }
+        }
+    }
+
+    // A rebuilt chunk reads its ops through `ChunkGen`, and the sync that
+    // normally refreshes it runs in PreUpdate — a frame LATER than this.
+    // Forcing a rebuild before then regenerates the chunk from the
+    // previous edit's ops, which reads as a world one edit behind the
+    // handles. So the provider is pushed here, before anything is asked
+    // to rebuild, rather than left to a system that runs afterwards.
+    if let Some((edit, source)) = narrow {
+        // Planning is untouched by moving a rock, so the planner is kept.
+        // Rebuilding it would make the next ops query wait for a whole
+        // planning stack to regenerate from cold — 1.5 s on the planet.
+        if let Some(world) = worlds.get_mut(0) {
+            world.query = world.query.replacing_sources(source.into_iter().collect());
+        }
+        chunks.set_ops_providers(worlds.ops_providers());
+        if !lod.restale(0, edit) {
+            // Nothing streaming yet, so nothing built to fix.
+            rebuild.0 = true;
         }
     }
 

@@ -439,12 +439,8 @@ impl WorldLod {
         };
         let between: voxel_layers::BetweenPasses = {
             let shared = shared.clone();
-            Arc::new(move |graph| {
-                // First, so the chunks it rebuilds are asked for before
-                // the settle below waits on them: one pass destroys,
-                // rebuilds, settles and reveals, and nothing is ever
-                // missing between two of those steps.
-                restale(&shared, graph);
+            Arc::new(move |_| {
+                restale(&shared);
                 settle_builds(&shared);
                 refresh_masks(&shared);
                 // One reveal per pass: everything this pass generated
@@ -535,50 +531,88 @@ impl WorldLod {
 /// Instead the pipeline regenerates in place while the old mesh keeps
 /// drawing, and every rebuilt mesh is HELD until all of them are ready.
 /// Half a swapped set is a crack, so the set swaps together.
+/// Rebuild chunks that are already SHOWN, without a hole.
+///
+/// `hold` keeps the drawn mesh in place until its replacement is built,
+/// and `commit` is the swap — ready-before-swap for a chunk replacing
+/// ITSELF, which is the same rule the field follows for a chunk replacing
+/// its neighbour. `LayerGraph::invalidate` cannot do this: it frees the
+/// mesh first, so the hole lasts as long as the round trip.
+fn rebuild_shown(shared: &LodShared, want: Vec<(ChunkKey, ShownChunk)>) {
+    if want.is_empty() {
+        return;
+    }
+    let mut batch = crate::chunkgen::ChunkBatch::default();
+    for (key, w) in &want {
+        batch.add(&shared.chunks, *key, w.mask, true, w.ops.clone());
+    }
+    // The lock is NOT held across the wait: a create finishing meanwhile
+    // has to be able to record itself.
+    let outcome = batch.wait(CREATE_TIMEOUT);
+    let want: HashMap<ChunkKey, ShownChunk> = want.into_iter().collect();
+    let mut state = shared.state.lock().unwrap();
+    for key in outcome.built {
+        shared.chunks.commit(key);
+        state.shown.insert(key, want[&key].clone());
+    }
+    shared.publish_resident(&state);
+    // A stalled chunk keeps what it had, so the next scan tries again.
+    shared
+        .stalled
+        .fetch_add(outcome.stalled.len(), Ordering::Relaxed);
+}
+
 /// Rebuild the chunks an authored edit changed, and only those.
 ///
-/// Every resident chunk is fingerprinted against the world as it was and
-/// as it is; the ones whose number moved are invalidated, which destroys
-/// and re-asks them. The pass this runs inside does the rest.
-fn restale(shared: &LodShared, graph: &voxel_layers::LayerGraph) {
+/// Every shown chunk within reach of the edit is fingerprinted against
+/// the world as it was and as it is; the ones whose number moved are
+/// rebuilt from the ops they now have.
+fn restale(shared: &LodShared) {
     let Some(edit) = shared.restale.lock().unwrap().take() else {
         return;
     };
     // Where the edit could possibly have landed. Fingerprinting is not
-    // free — it bounds the region axes over every chunk's box — and a
-    // level edit leaves almost every chunk alone, so the cheap question
-    // is asked first. Sound because only the AUTHORED ops differ here
+    // free — it bounds the region axes over every chunk's box — and an
+    // edit leaves almost every chunk alone, so the cheap question is
+    // asked first. Sound because only the AUTHORED ops differ here
     // (`only_authored_moved` guarantees it): a chunk this box misses sees
     // the same two op sets either way, so its two prints cannot differ.
     let Some((tlo, thi)) = crate::fingerprint::touched(&edit.was_placed, &edit.now_placed) else {
         return; // the lists differ in nothing that occupies space
     };
-    let mut hit = 0usize;
-    let mut seen = 0usize;
-    for level in 0..=shared.config.max_level {
-        let name = instance(level);
-        for coord in graph.resident_coords(&name) {
-            let key = ChunkKey::in_world(shared.world, level, coord);
-            let (lo, hi) = crate::fingerprint::read_box(key);
-            if lo.x > thi.x
-                || hi.x < tlo.x
-                || lo.y > thi.y
-                || hi.y < tlo.y
-                || lo.z > thi.z
-                || hi.z < tlo.z
-            {
-                continue;
-            }
-            seen += 1;
-            let was = crate::fingerprint::of(key, edit.seed, &edit.ops, &edit.was_placed);
-            let now = crate::fingerprint::of(key, edit.seed, &edit.ops, &edit.now_placed);
-            if was != now {
-                graph.invalidate(&name, coord);
-                hit += 1;
-            }
-        }
-    }
-    info!("level edit: rebuilt {hit} chunks ({seen} within reach of it)");
+    let near: Vec<(ChunkKey, u32)> = {
+        let state = shared.state.lock().unwrap();
+        state
+            .shown
+            .iter()
+            .filter(|(key, _)| {
+                let (lo, hi) = crate::fingerprint::read_box(**key);
+                lo.x <= thi.x
+                    && hi.x >= tlo.x
+                    && lo.y <= thi.y
+                    && hi.y >= tlo.y
+                    && lo.z <= thi.z
+                    && hi.z >= tlo.z
+            })
+            .map(|(key, shown)| (*key, shown.mask))
+            .collect()
+    };
+    // Out of the lock: asking for a chunk's ops is a spatial query over
+    // the planning graph, not a lookup.
+    let want: Vec<(ChunkKey, ShownChunk)> = near
+        .into_iter()
+        .filter(|(key, _)| {
+            let was = crate::fingerprint::of(*key, edit.seed, &edit.ops, &edit.was_placed);
+            let now = crate::fingerprint::of(*key, edit.seed, &edit.ops, &edit.now_placed);
+            was != now
+        })
+        .map(|(key, mask)| {
+            let ops = shared.chunks.ops_for(key);
+            (key, ShownChunk { mask, ops })
+        })
+        .collect();
+    info!("level edit: rebuilt {} chunks", want.len());
+    rebuild_shown(shared, want);
 }
 
 /// Wait for everything this pass asked for, once.
@@ -654,24 +688,7 @@ fn refresh_masks(shared: &LodShared) {
         let shown = shared.state.lock().unwrap().shown.len();
         info!("REFRESH {} of {shown} chunks", stale.len());
     }
-    let mut batch = crate::chunkgen::ChunkBatch::default();
-    for (key, want) in &stale {
-        batch.add(&shared.chunks, *key, want.mask, true, want.ops.clone());
-    }
-    // The lock is NOT held across the wait: a create finishing meanwhile
-    // has to be able to record itself.
-    let outcome = batch.wait(CREATE_TIMEOUT);
-    let rebuilt: HashMap<ChunkKey, ShownChunk> = stale.into_iter().collect();
-    let mut state = shared.state.lock().unwrap();
-    for key in outcome.built {
-        shared.chunks.commit(key);
-        state.shown.insert(key, rebuilt[&key].clone());
-    }
-    shared.publish_resident(&state);
-    // A stalled chunk keeps its OLD mask, so the next scan tries again.
-    shared
-        .stalled
-        .fetch_add(outcome.stalled.len(), Ordering::Relaxed);
+    rebuild_shown(shared, stale);
 }
 
 /// Build a LOD graph per registered world once configuration exists, and

@@ -682,22 +682,6 @@ impl LayerGraph {
     pub fn resident_in(&self, instance: &str) -> usize {
         self.entry(layer_key(instance)).grid.read().unwrap().len()
     }
-
-    /// Every coordinate this instance currently holds.
-    ///
-    /// For a consumer deciding which of them an edit made stale. Taken as
-    /// a snapshot rather than iterated under the lock, because what the
-    /// caller does with each one is [`LayerGraph::invalidate`], which
-    /// takes that lock itself.
-    pub fn resident_coords(&self, instance: &str) -> Vec<IVec3> {
-        self.entry(layer_key(instance))
-            .grid
-            .read()
-            .unwrap()
-            .keys()
-            .copied()
-            .collect()
-    }
 }
 
 /// A root of the generation graph: "this layer, this level, this much

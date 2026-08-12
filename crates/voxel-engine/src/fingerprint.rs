@@ -25,8 +25,6 @@ use voxel_core::csg::CsgOp;
 use voxel_core::worldop::WorldOp;
 use voxel_core::ChunkKey;
 
-use crate::level::LevelDef;
-
 /// How far outside its own box a chunk reads.
 ///
 /// The density pass samples 38 points across 32 cells, with sample `i`
@@ -95,24 +93,6 @@ pub fn touched(was: &[CsgOp], now: &[CsgOp]) -> Option<(Vec3, Vec3)> {
     swallow(was, now);
     swallow(now, was);
     any.then_some((lo, hi))
-}
-
-/// Every authored placement's ops, in world space — the input `of` takes.
-///
-/// Built once per sweep rather than per chunk: `place` seats each
-/// placement on the terrain, and doing that thirteen thousand times over
-/// is the only part of this that would cost anything.
-pub fn placed_ops(level: &LevelDef, generator: &voxel_worldgen::Generator) -> Vec<CsgOp> {
-    let ground = |xz: bevy::math::Vec2| generator.height(xz, 1.0);
-    level
-        .placements
-        .iter()
-        .filter_map(|p| Some(crate::level::place(p, level.local_ops(p)?, ground)))
-        .reduce(|mut a, b| {
-            a.extend(b);
-            a
-        })
-        .unwrap_or_default()
 }
 
 /// Ops are plain data with floats in them; hash the bits.
