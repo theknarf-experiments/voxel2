@@ -158,6 +158,22 @@ static GEN_BUDGET: std::sync::LazyLock<usize> =
 const RETRY_BUDGET: usize = 32;
 static MESH_BUDGET: std::sync::LazyLock<usize> =
     std::sync::LazyLock::new(|| env_budget("VOXEL_MESH_BUDGET", 12));
+/// The same two budgets before anything has ever been drawn.
+///
+/// Every number in the table above is a frame-time cost, and a frame has
+/// to be worth protecting for that to be a cost at all. Until the first
+/// chunk is revealed there is no picture: the budget stops being a
+/// question about frames and becomes one about how fast the machine can
+/// be fed. Measured at 96, past which settle stops improving because the
+/// arena and the counts ring are 512 and other things start to bind.
+///
+/// This is deliberately NOT keyed on `settled`, which is false every time
+/// the camera moves — including the flight the table above was measured
+/// on, which is exactly when 12 is right.
+static LOAD_GEN_BUDGET: std::sync::LazyLock<usize> =
+    std::sync::LazyLock::new(|| env_budget("VOXEL_LOAD_GEN_BUDGET", 96));
+static LOAD_MESH_BUDGET: std::sync::LazyLock<usize> =
+    std::sync::LazyLock::new(|| env_budget("VOXEL_LOAD_MESH_BUDGET", 96));
 const STAGING_BUFFERS: usize = 3;
 
 // --- main-world <-> render-world plumbing ------------------------------------
@@ -1103,6 +1119,9 @@ enum Pending {
 struct ChunkTable {
     chunks: HashMap<ChunkKey, RenderChunk>,
     empty_classified: usize,
+    /// Has anything ever been made visible? Until it has there is no
+    /// picture, which is what the loading budgets key on.
+    revealed: bool,
 }
 
 struct GenEntry {
@@ -1891,8 +1910,10 @@ fn plan_frame_inner(
                 }
             }
             ChunkCommand::Commit(key) => {
+                let table = &mut *table;
                 if let Some(chunk) = table.chunks.get_mut(&key) {
                     chunk.visible = true;
+                    table.revealed = true;
                     match chunk.pending.take() {
                         Some(Pending::Held { alloc, index_count }) => {
                             if let ChunkState::Meshed { alloc: old, .. } = chunk.state {
@@ -1956,6 +1977,15 @@ fn plan_frame_inner(
             }
         }
     }
+
+    // Budgets for THIS frame. Phase 1 has just applied the commands, so
+    // a world that revealed its first chunk this frame is already out of
+    // the loading case.
+    let (gen_budget, mesh_budget) = if table.revealed {
+        (*GEN_BUDGET, *MESH_BUDGET)
+    } else {
+        (*LOAD_GEN_BUDGET, *LOAD_MESH_BUDGET)
+    };
 
     // 2. Drain finished count readbacks.
     while let Ok(staging_idx) = gpu.map_rx.try_recv() {
@@ -2113,7 +2143,7 @@ fn plan_frame_inner(
                     || matches!(c.pending, Some(Pending::ReadyToMesh { .. }))
             })
             .map(|(k, _)| *k)
-            .take((*MESH_BUDGET).min((COUNTS_SLOTS as usize).saturating_sub(*GEN_BUDGET)))
+            .take(mesh_budget.min((COUNTS_SLOTS as usize).saturating_sub(gen_budget)))
             .collect()
     };
     if let Ok(mut st) = stats.0.lock() {
@@ -2259,7 +2289,7 @@ fn plan_frame_inner(
         queued.sort_by(|a, b| a.1.total_cmp(&b.1));
         let mut started = 0u64;
         let mut starved = false;
-        for (key, _) in queued.into_iter().take(*GEN_BUDGET) {
+        for (key, _) in queued.into_iter().take(gen_budget) {
             let Some(slot) = gpu.arena_free.pop() else {
                 starved = true;
                 break;
