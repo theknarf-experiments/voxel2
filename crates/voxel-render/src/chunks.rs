@@ -1147,6 +1147,17 @@ struct ChunkTable {
     /// Has anything ever been made visible? Until it has there is no
     /// picture, which is what the loading budgets key on.
     revealed: bool,
+    /// The camera JUMPED rather than moved, so everything resident is
+    /// being replaced and what is on screen is the wrong world. Same
+    /// situation as a first load, and it gets the same budgets until the
+    /// pipeline drains.
+    reloading: bool,
+    /// Whether the jump has actually produced work yet. The LOD thread
+    /// issues its requests asynchronously, so `awaiting` is still 0 on
+    /// the frame the camera moves — without this the flag is set and
+    /// cleared in the same frame and never buys anything.
+    reload_saw_work: bool,
+    last_camera: DVec3,
 }
 
 struct GenEntry {
@@ -2003,10 +2014,25 @@ fn plan_frame_inner(
         }
     }
 
+    // A teleport is a first load wearing a stale picture: the whole
+    // resident set is replaced and nothing on screen belongs where the
+    // camera now is, so a long frame spoils nothing there either.
+    //
+    // Detected as a DISCONTINUITY, not as "unsettled" — the camera moving
+    // fast is exactly when the small budget is right, and the table above
+    // was measured on it. 500 m in one frame is 30 km/s at 60 fps, which
+    // no movement produces; the 60 m/s autopilot moves a metre.
+    const TELEPORT_M: f64 = 500.0;
+    if camera.0.distance(table.last_camera) > TELEPORT_M {
+        table.reloading = true;
+        table.reload_saw_work = false;
+    }
+    table.last_camera = camera.0;
+
     // Budgets for THIS frame. Phase 1 has just applied the commands, so
     // a world that revealed its first chunk this frame is already out of
     // the loading case.
-    let (gen_budget, mesh_budget) = if table.revealed {
+    let (gen_budget, mesh_budget) = if table.revealed && !table.reloading {
         (*GEN_BUDGET, *MESH_BUDGET)
     } else {
         (*LOAD_GEN_BUDGET, *LOAD_MESH_BUDGET)
@@ -2543,6 +2569,13 @@ fn plan_frame_inner(
         }
         counts.insert("with_ops", with_ops);
         counts.insert("total_ops", total_ops);
+        // Drained: whatever the jump asked for is on screen now. Only
+        // once it has asked — see `reload_saw_work`.
+        if awaiting > 0 {
+            table.reload_saw_work = true;
+        } else if table.reload_saw_work {
+            table.reloading = false;
+        }
         s.tracked = table.chunks.len();
         s.meshed = meshed;
         s.awaiting = awaiting;
