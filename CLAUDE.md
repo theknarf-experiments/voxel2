@@ -39,7 +39,7 @@ architecture. Design plan: `~/.claude/plans/binary-twirling-brooks.md`.
   `VOXEL_AUTOPILOT=<m/s>`.
 - PREFER live verification over relaunch cycles: a dev build always
   serves the BRP, so just drive it via `cargo run -p voxctl -q -- status | goto X Y Z [DIR] |
-  ribbons/markers/ops X Z [R] | scan X Z [R] [STEP] | shot PATH`
+  ribbons/markers X Z [R] | scan X Z [R] [STEP] | shot PATH`
   (offscreen screenshots; wait ~1 s for the file, ~10-15 s after a goto
   for streaming). `scan` ranks scenic spots; `portal [N]`/F1,F2,… (one key
   per other shipped level) opens a window onto it, loaded on demand and
@@ -116,13 +116,16 @@ architecture. Design plan: `~/.claude/plans/binary-twirling-brooks.md`.
 - Never blend disagreeing SDFs across LOD (phantom surfaces); hard-cut and
   let fog cover it.
 - Slab exhaustion wedges generation (AwaitingAlloc holds arena slots): the
-  HUD shows `arena free: 0` + full classes. Fix class sizing, not budgets.
+  HUD shows `arena free: 0`, and `slab: P/Q pages` with a `longest free
+  run` far below what a chunk needs. The pool is pages, not size classes
+  (a7da99c → aa5c845), so the fix is fragmentation or total pages — never
+  budgets.
 - Layer determinism: all randomness from `chunk_seed`; reads only within
   declared padded bounds (asserted, with the needed padding in the message).
 - Planning generation is **dependency-driven**: consumers `ensure_loaded`
   the region they are about to query (the LOD planner does this per epoch,
   plus a streamer-radius pass), then read. `voxctl status` →
-  `stream.read_generated` must stay ~0; anything else means a consumer's
+  `planning.reads_missed` must stay 0; anything else means a consumer's
   working set is uncovered and is generating on whatever thread reads.
 - CPU mirrors sample the program via `program::with_program` (thread-local
   snapshot). Never call `program::program()` per sample — the `Arc` clone

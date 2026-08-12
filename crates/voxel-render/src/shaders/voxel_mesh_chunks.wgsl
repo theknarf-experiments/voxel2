@@ -197,11 +197,11 @@ fn coarse_vertex(c: vec3<i32>) -> vec4<f32> {
     var mask = 0u;
     for (var i = 0u; i < 8u; i++) {
         s[i] = sample_sdf(base + corner_offset(i) * 2);
-        if (s[i] < 0.0) {
+        if (is_solid(s[i])) {
             mask |= 1u << i;
         }
     }
-    if (mask == 0u || mask == 255u) {
+    if (!cell_has_vertex(mask)) {
         return vec4<f32>(0.0);
     }
     var sum = vec3<f32>(0.0);
@@ -209,7 +209,7 @@ fn coarse_vertex(c: vec3<i32>) -> vec4<f32> {
     for (var e = 0u; e < 12u; e++) {
         let a = EDGES[e].x;
         let b = EDGES[e].y;
-        if ((s[a] < 0.0) != (s[b] < 0.0)) {
+        if (is_solid(s[a]) != is_solid(s[b])) {
             let t = s[a] / (s[a] - s[b]);
             sum += mix(vec3<f32>(corner_offset(a)), vec3<f32>(corner_offset(b)), t);
             n += 1.0;
@@ -224,22 +224,37 @@ const EDGES = array<vec2<u32>, 12>(
     vec2(0u, 4u), vec2(1u, 5u), vec2(2u, 6u), vec2(3u, 7u),
 );
 
+// Inside the surface. One definition, because every skip rule below is
+// built out of it and the count and emit passes must reach the same
+// answer from different code.
+fn is_solid(d: f32) -> bool {
+    return d < 0.0;
+}
+
 fn cell_sign_mask(c: vec3<i32>) -> u32 {
     var mask = 0u;
     for (var i = 0u; i < 8u; i++) {
-        if (sample_sdf(c + corner_offset(i)) < 0.0) {
+        if (is_solid(sample_sdf(c + corner_offset(i)))) {
             mask |= 1u << i;
         }
     }
     return mask;
 }
 
+// THE vertex skip rule: a cell emits one iff its corners are not all the
+// same sign. `sn_count` allocates from it and `sn_vertices` writes from
+// it, so it is a function rather than an inequality written twice —
+// which is what it was. The two passes still sample separately (the emit
+// pass needs the distances, the count pass does not), but they no longer
+// each carry a copy of the DECISION.
+fn cell_has_vertex(mask: u32) -> bool {
+    return mask != 0u && mask != 255u;
+}
+
 fn quad_exists(c: vec3<i32>, axis: u32) -> bool {
     var e = vec3<i32>(0);
     e[axis] = 1;
-    let s0 = sample_sdf(c);
-    let s1 = sample_sdf(c + e);
-    return (s0 < 0.0) != (s1 < 0.0);
+    return is_solid(sample_sdf(c)) != is_solid(sample_sdf(c + e));
 }
 
 @compute @workgroup_size(4, 4, 4)
@@ -248,8 +263,7 @@ fn sn_count(@builtin(global_invocation_id) id: vec3<u32>) {
         return;
     }
     let c = vec3<i32>(id) - vec3<i32>(1); // -1..=32
-    let mask = cell_sign_mask(c);
-    if (mask != 0u && mask != 255u) {
+    if (cell_has_vertex(cell_sign_mask(c))) {
         atomicAdd(&counts[params.counts_slot].verts, 1u);
     }
     for (var axis = 0u; axis < 3u; axis++) {
@@ -270,11 +284,11 @@ fn sn_vertices(@builtin(global_invocation_id) id: vec3<u32>) {
     var mask = 0u;
     for (var i = 0u; i < 8u; i++) {
         s[i] = sample_sdf(c + corner_offset(i));
-        if (s[i] < 0.0) {
+        if (is_solid(s[i])) {
             mask |= 1u << i;
         }
     }
-    if (mask == 0u || mask == 255u) {
+    if (!cell_has_vertex(mask)) {
         cell_indices[cell_slot_index(c)] = NONE;
         return;
     }
@@ -284,7 +298,7 @@ fn sn_vertices(@builtin(global_invocation_id) id: vec3<u32>) {
     for (var e = 0u; e < 12u; e++) {
         let a = EDGES[e].x;
         let b = EDGES[e].y;
-        if ((s[a] < 0.0) != (s[b] < 0.0)) {
+        if (is_solid(s[a]) != is_solid(s[b])) {
             let t = s[a] / (s[a] - s[b]);
             sum += mix(vec3<f32>(corner_offset(a)), vec3<f32>(corner_offset(b)), t);
             n += 1.0;
@@ -614,7 +628,7 @@ fn sn_quads(@builtin(global_invocation_id) id: vec3<u32>) {
         }
 
         let q = atomicAdd(&counts[params.counts_slot].quads, 1u);
-        write_quad(q, quad, s0 < 0.0, alt);
+        write_quad(q, quad, is_solid(s0), alt);
     }
 }
 

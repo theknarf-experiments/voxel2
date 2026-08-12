@@ -167,7 +167,11 @@ pub trait HostPlanning: Send + Sync + 'static {
 /// consumer — the chunk ops provider, prop scattering, debug overlays,
 /// gameplay — reads through this, which is what keeps the engine from
 /// growing a side channel per feature.
-#[derive(Resource, Clone, Default)]
+/// No `Default`: a `WorldQuery` without a generator is a world with no
+/// terrain, and the one this used to produce was the SHIPPED PLANET —
+/// `Generator`'s `Default` was `planet_program()`, so anything that
+/// defaulted this silently got one particular level's heightfield.
+#[derive(Resource, Clone)]
 pub struct WorldQuery {
     planner: Option<Arc<dyn WorldPlanner>>,
     sources: Vec<OpsSource>,

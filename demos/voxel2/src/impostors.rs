@@ -255,3 +255,39 @@ pub struct ImpostorEnv {
     base: Vec4,
     size: Vec4,
 }
+
+#[cfg(test)]
+mod tests {
+    /// [`FADE_FROM`] and the shader's multiplier are ONE number written
+    /// twice, and the two are load-bearing in opposite directions: the
+    /// host sets the cull distance to `paint_starts / FADE_FROM` so that
+    /// the shader's fade-out — which begins at `cull * FADE_FROM` — lands
+    /// exactly where the ground paint begins. Drift them and the
+    /// impostors either fade across the wrong span or stop before the
+    /// paint arrives, which is the ring of bare ground the whole
+    /// arrangement exists to prevent.
+    ///
+    /// Every other twin in this repo has a guard (the op table, the
+    /// layout regions, the water shader's world table). This one was a
+    /// comment.
+    #[test]
+    fn the_shaders_fade_start_is_fade_from() {
+        let wgsl = include_str!("voxel_impostor.wgsl");
+        assert_eq!(
+            wgsl.matches("env.size.z * ").count(),
+            1,
+            "a second `env.size.z *` appeared — this test would pin the wrong one"
+        );
+        let declared: f32 = wgsl
+            .split("env.size.z * ")
+            .nth(1)
+            .and_then(|rest| rest.split([',', ')', ';']).next())
+            .and_then(|n| n.trim().parse().ok())
+            .expect("voxel_impostor.wgsl multiplies env.size.z by a literal");
+        assert_eq!(
+            declared,
+            super::FADE_FROM,
+            "voxel_impostor.wgsl and FADE_FROM disagree about where the fade starts"
+        );
+    }
+}

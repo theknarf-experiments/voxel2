@@ -206,12 +206,6 @@ pub struct Generator {
     has_height: bool,
 }
 
-impl Default for Generator {
-    fn default() -> Self {
-        Self::new(program::planet_program(), 0, program::DEFAULT_SUN_DIR)
-    }
-}
-
 impl Generator {
     pub fn new(ops: Vec<voxel_core::worldop::WorldOp>, seed: u32, sun: glam::Vec3) -> Self {
         let has_height = ops.iter().any(|op| op.is_height_op());
@@ -431,7 +425,7 @@ mod floor_tests {
     /// topmost floor over open ground IS the terrain height.
     #[test]
     fn the_topmost_floor_is_the_heightfield_where_there_is_one() {
-        let g = Generator::default();
+        let g = Generator::new(program::planet_program(), 0, program::DEFAULT_SUN_DIR);
         let mut floors = Vec::new();
         let mut checked = 0;
         for i in 0..60 {
