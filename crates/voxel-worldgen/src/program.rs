@@ -372,6 +372,67 @@ pub fn eval_range(ops: &[WorldOp], seed: u32, min: Vec3, max: Vec3, vs: f32) -> 
     Some(d)
 }
 
+/// Which ops can affect a box, as a mask over `ops`.
+///
+/// The question a cache key asks. A chunk is decided by the ops that
+/// actually reach it, and most do not: an op is out if this chunk's voxel
+/// size gates it out, or if the region band it is confined to provably
+/// does not contain the box. Editing an op no chunk here can see must not
+/// rebuild that chunk, and this is what says so.
+///
+/// CONSERVATIVE: an op that straddles a band edge, or that this cannot
+/// decide, is in. Over-reporting costs a rebuild nobody needed;
+/// under-reporting leaves a stale chunk, which is a wrong world that
+/// looks right.
+///
+/// Unlike [`eval_range`], this needs no `range` rule on anything: the
+/// only registers it tracks are the region axes, and the one op that
+/// writes those has a rule. That is what makes it work on the
+/// megastructure, where almost nothing else can be bounded — and the
+/// megastructure, with nine districts, is where it pays.
+pub fn ops_reaching(ops: &[WorldOp], seed: u32, min: Vec3, max: Vec3, vs: f32) -> Vec<bool> {
+    let coarse = vs >= WOP_COARSE_VOXEL_M;
+    let mut ta = Interval::point(0.5);
+    let mut tb = Interval::point(0.5);
+    let (lo, hi) = (Vec2::new(min.x, min.z), Vec2::new(max.x, max.z));
+    let frange =
+        |lo: Vec2, hi: Vec2, s: f32, o: i32, m: u32| crate::fbm_range(seed, lo, hi, s, o, vs, m);
+    ops.iter()
+        .map(|op| {
+            // The LOD gate is exact — the interpreters skip on the same
+            // two bits — so an op the wrong side of it is simply absent.
+            if coarse && op.flags & WOP_FLAG_FINE_ONLY != 0 {
+                return false;
+            }
+            if !coarse && op.flags & WOP_FLAG_COARSE_ONLY != 0 {
+                return false;
+            }
+            let reaches = region_gate_range(op.region, ta, tb) != Some(false);
+            // The axes THIS box sees, for every gate after this one. A
+            // warp does not move them: the region ops sample the
+            // unwarped column, exactly as the interpreters do.
+            if reaches && op.kind == WOP_REGION_AXES {
+                let oct = op.p1[2] as i32;
+                ta = frange(
+                    lo + Vec2::new(op.p0[0], op.p0[1]),
+                    hi + Vec2::new(op.p0[0], op.p0[1]),
+                    op.p0[2],
+                    oct,
+                    0,
+                ) + 0.5;
+                tb = frange(
+                    lo + Vec2::new(op.p1[0], op.p1[1]),
+                    hi + Vec2::new(op.p1[0], op.p1[1]),
+                    op.p0[3],
+                    oct,
+                    0,
+                ) + 0.5;
+            }
+            reaches
+        })
+        .collect()
+}
+
 /// [`region_gate`] over an interval: `Some(true)`/`Some(false)` when the
 /// whole box is on one side of the gate, `None` when it straddles.
 fn region_gate_range(packed: u32, ta: Interval, tb: Interval) -> Option<bool> {
@@ -1178,5 +1239,99 @@ mod range_tests {
         )
         .unwrap();
         assert!(deep.is_negative(), "the deep should be all solid: {deep:?}");
+    }
+}
+
+#[cfg(test)]
+mod reach_tests {
+    use super::*;
+
+    /// The safety property, and the only one that matters: an op this
+    /// says cannot reach a box must not change a single sample in it.
+    ///
+    /// Checked by DELETING each unreachable op and re-evaluating the box.
+    /// Over-reporting is allowed — it costs a rebuild nobody needed —
+    /// but an op wrongly called unreachable leaves a stale chunk, which
+    /// is a wrong world that looks right.
+    #[test]
+    fn an_op_that_cannot_reach_a_box_changes_nothing_in_it() {
+        let mut checked = 0;
+        for (name, ops) in [("planet", planet_program()), ("mega", mega_program())] {
+            for vs in [1.0f32, 8.0] {
+                for i in 0..60 {
+                    let min = Vec3::new(
+                        i as f32 * 211.0 - 6000.0,
+                        (i % 13) as f32 * 40.0 - 240.0,
+                        i as f32 * -137.0 + 3000.0,
+                    );
+                    let max = min + Vec3::splat(32.0 * vs);
+                    let reach = ops_reaching(&ops, 0, min, max, vs);
+                    for (k, _) in ops.iter().enumerate().filter(|(_, _)| true) {
+                        if reach[k] {
+                            continue;
+                        }
+                        // The same program with that op gone.
+                        let mut without = ops.clone();
+                        without.remove(k);
+                        for s in 0..8 {
+                            let p = min
+                                + (max - min)
+                                    * Vec3::new(
+                                        (s & 1) as f32,
+                                        ((s >> 1) & 1) as f32,
+                                        ((s >> 2) & 1) as f32,
+                                    );
+                            assert_eq!(
+                                eval(&ops, 0, p, vs),
+                                eval(&without, 0, p, vs),
+                                "{name} vs={vs}: op {k} was called unreachable at {p:?}"
+                            );
+                            checked += 1;
+                        }
+                    }
+                }
+            }
+        }
+        // Planet is ungated and prunes nothing, so the property is
+        // exercised by the interior alone: 7,680 comparisons when this
+        // was written.
+        assert!(checked > 5000, "only {checked} comparisons");
+    }
+
+    /// It has to actually prune, or it is a cache key that never hits.
+    /// The megastructure's nine districts are the case: a chunk inside
+    /// one sees its own ops and not the other eight's.
+    #[test]
+    fn a_district_does_not_see_the_other_districts_ops() {
+        let ops = mega_program();
+        let gated = ops.iter().filter(|op| op.region != 0).count();
+        let mut best = 0;
+        for i in 0..40 {
+            let min = Vec3::new(i as f32 * 337.0 - 4000.0, -60.0, i as f32 * -211.0);
+            let reach = ops_reaching(&ops, 0, min, min + Vec3::splat(32.0), 1.0);
+            let out = reach.iter().filter(|r| !**r).count();
+            best = best.max(out);
+        }
+        // `mega_program` is the small REFERENCE fixture, not the shipped
+        // megastructure — 16 ops and 12 gated, against the level's 43 and
+        // nine districts. The bar is where a real regression lands, not
+        // where this fixture happens to sit.
+        assert!(gated >= 8, "the interior should be mostly gated: {gated}");
+        assert!(
+            best >= 4,
+            "no box excluded more than {best} of {} ops",
+            ops.len()
+        );
+    }
+
+    /// A heightfield world has almost nothing to gate, and must say so
+    /// rather than pretending: editing a height op DOES change every
+    /// chunk.
+    #[test]
+    fn an_ungated_program_reaches_everywhere() {
+        let ops = planet_program();
+        let reach = ops_reaching(&ops, 0, Vec3::splat(-16.0), Vec3::splat(16.0), 1.0);
+        let unreached = reach.iter().filter(|r| !**r).count();
+        assert!(unreached <= 2, "{unreached} of {} pruned", ops.len());
     }
 }

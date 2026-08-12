@@ -2,6 +2,7 @@
 //! budgets, edit application, and persistence.
 
 pub mod chunkgen;
+pub mod fingerprint;
 pub mod graph;
 pub mod layers;
 pub mod level;
