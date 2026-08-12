@@ -1555,13 +1555,21 @@ fn apply_level_change(
                             now_placed: crate::fingerprint::placed_ops(&new, &generator),
                         },
                     );
-                if !narrow {
+                if narrow {
+                    // `restale` says what it actually did, once it has
+                    // done it. Saying "rebuilding the world" here as
+                    // well would be both a lie and — at one line per
+                    // edit — the thing that makes a drag unreadable.
+                    debug!("level edit: authored geometry moved");
+                } else {
                     rebuild.0 = true;
                 }
             }
             world.query = build_world_query(&new, seed.0, &generator, planner.0.as_ref());
             world.level = new.clone();
-            info!("level reload: {stale:?} is stale — rebuilding it");
+            if rebuild.0 {
+                info!("level reload: {stale:?} is stale — rebuilding it");
+            }
         }
     }
 

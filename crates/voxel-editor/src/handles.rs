@@ -372,9 +372,17 @@ fn local_start(level: &LevelDef, prefab: usize, op: usize, handle: Handle) -> [f
     }
 }
 
-/// While the button is down, steer the selected op.
+/// While the button is down, steer the selected op — and write NOTHING.
+///
+/// No `Pending` in this signature, on purpose. A placement edit restreams
+/// the chunks it touches, and doing that once a frame floods the log and
+/// makes the drag useless; the rule is "preview while held, commit on
+/// release", the same one `CommitOnRelease` gives the panel's rows. It
+/// was a comment once and the comment was wrong — a refactor left a
+/// `write` in this path and nothing could catch it. Now the queue is not
+/// reachable from here.
 #[allow(clippy::too_many_arguments)]
-pub fn on_drag(
+pub fn preview_drag(
     mouse: Res<ButtonInput<MouseButton>>,
     state: Res<EditorState>,
     mut tool: ResMut<ShapeTool>,
@@ -382,41 +390,21 @@ pub fn on_drag(
     worlds: Option<Res<voxel_engine::Worlds>>,
     cameras: Cameras,
     windows: Query<&Window>,
-    mut pending: ResMut<Pending>,
 ) {
-    let released = mouse.just_released(MouseButton::Left);
-    if !mouse.pressed(MouseButton::Left) && !released {
-        tool.drag = None;
-        tool.preview = None;
+    if !mouse.pressed(MouseButton::Left) {
         return;
     }
     let (Some(drag), Some([prefab, i])) = (tool.drag, tool.selected) else {
         return;
     };
-    // Let go: the document hears about the whole drag, once, and pays for
-    // one restream instead of one per frame.
-    if released {
-        if let (Some(value), Some(level)) = (tool.preview, level.as_ref()) {
-            write(
-                &mut pending,
-                level,
-                state.root,
-                prefab,
-                i,
-                drag.handle,
-                value,
-            );
-        }
-        tool.drag = None;
-        tool.preview = None;
-        return;
-    }
     let (Some(level), Some(worlds)) = (level, worlds) else {
         return;
     };
     let Some(ray) = pointer_ray(&cameras, &windows, state.width) else {
         return;
     };
+    // The UNDRAGGED shape: the grab was measured against it, so steering
+    // off the preview would let the drag chase itself.
     let all = placed(&level, &worlds, None);
     let Some(op) = all
         .iter()
@@ -430,7 +418,30 @@ pub fn on_drag(
         .iter()
         .find(|p| p.prefab.as_deref() == level.prefabs.get(prefab).map(|f| f.name.as_str()))
         .map_or(1.0, |p| p.scale);
-    let Some(value) = shapes::to_local(op, drag, ray, scale) else {
+    if let Some(value) = shapes::to_local(op, drag, ray, scale) {
+        tool.preview = Some(value);
+    }
+}
+
+/// Let go: the document hears about the whole drag, once.
+pub fn commit_drag(
+    mouse: Res<ButtonInput<MouseButton>>,
+    state: Res<EditorState>,
+    mut tool: ResMut<ShapeTool>,
+    level: Option<Res<LevelDef>>,
+    mut pending: ResMut<Pending>,
+) {
+    // A button released without a drag in flight, or a drag abandoned
+    // because the pointer left the world, both end the same way: forget
+    // it. Only a drag that reached a value writes one.
+    if mouse.pressed(MouseButton::Left) {
+        return;
+    }
+    let taken = (tool.drag.take(), tool.preview.take());
+    let (Some(drag), Some(value)) = taken else {
+        return;
+    };
+    let (Some([prefab, i]), Some(level)) = (tool.selected, level) else {
         return;
     };
     write(
@@ -553,4 +564,96 @@ fn configure(mut store: ResMut<GizmoConfigStore>) {
     // to is a handle you cannot use.
     config.depth_bias = -1.0;
     config.line.width = 2.0;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use voxel_engine::level::{CsgOpDef, PrefabDef};
+
+    /// A level with one prefab holding one box, which is all `write`
+    /// needs to name a path.
+    fn level() -> LevelDef {
+        // Through the parser, because a level's serde defaults are not
+        // its `Default` and a fixture built the other way is a level
+        // nothing would load.
+        let mut level = LevelDef::from_json(
+            r#"{"lod":{"max_level":8,"top_radius":3,"top_y":[-1,0],
+                "split_k":2.5,"merge_k":3.0},"nodes":[]}"#,
+            &voxel_engine::graph::registry::engine_kinds(),
+        )
+        .unwrap();
+        level.prefabs.push(PrefabDef {
+            name: "thing".into(),
+            ops: vec![CsgOpDef {
+                shape: "box".into(),
+                op: "add".into(),
+                center: [0.0; 3],
+                half: [1.0; 3],
+                radius: 0.0,
+                half_height: 0.0,
+                yaw_deg: 0.0,
+                material: voxel_engine::level::d_op_material(),
+                blend: 0.0,
+            }],
+            from: None,
+        });
+        level
+    }
+
+    fn app(pressed: bool) -> App {
+        let mut app = App::new();
+        let mut mouse = ButtonInput::<MouseButton>::default();
+        if pressed {
+            mouse.press(MouseButton::Left);
+        } else {
+            // Pressed then released, so `just_released` is true and the
+            // button reads as up — a real frame of letting go.
+            mouse.press(MouseButton::Left);
+            mouse.release(MouseButton::Left);
+        }
+        app.insert_resource(mouse)
+            .insert_resource(EditorState::default())
+            .insert_resource(level())
+            .init_resource::<Pending>()
+            .insert_resource(ShapeTool {
+                selected: Some([0, 0]),
+                drag: Some(Drag {
+                    handle: Handle::MoveX,
+                    from: 0.0,
+                    start: [0.0; 3],
+                }),
+                preview: Some([7.0, 0.0, 0.0]),
+                ..default()
+            })
+            .add_systems(Update, commit_drag);
+        app
+    }
+
+    /// The rule the whole thing turns on: a placement edit restreams the
+    /// chunks it touches, so a drag must write once, at the end.
+    ///
+    /// `preview_drag` cannot break this — it has no `Pending` to write
+    /// to — so what is left to check is that letting go DOES write, and
+    /// that holding on does not.
+    #[test]
+    fn a_held_drag_writes_nothing_and_releasing_writes_once() {
+        let mut held = app(true);
+        held.update();
+        assert!(
+            held.world().resource::<Pending>().0.is_empty(),
+            "the document heard about a drag still in flight"
+        );
+        // And the drag is still live, so the next frame keeps steering.
+        assert!(held.world().resource::<ShapeTool>().drag.is_some());
+
+        let mut let_go = app(false);
+        let_go.update();
+        let queued = &let_go.world().resource::<Pending>().0;
+        assert_eq!(queued.len(), 1, "one edit for the whole gesture");
+        assert_eq!(queued[0].path, ".prefabs[0].ops[0].center[0]");
+        // Cleared, so a second frame with the button up writes nothing.
+        let_go.update();
+        assert_eq!(let_go.world().resource::<Pending>().0.len(), 1);
+    }
 }

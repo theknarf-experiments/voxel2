@@ -301,7 +301,8 @@ impl Plugin for EditorPlugin {
                     // undo, saving and the partial rebuild for nothing.
                     (
                         handles::on_click,
-                        handles::on_drag,
+                        handles::preview_drag,
+                        handles::commit_drag,
                         handles::on_nudge,
                         handles::count_sharing,
                     )
