@@ -301,15 +301,6 @@ impl WorldQuery {
         self.planner.as_ref().is_none_or(|p| p.is_idle())
     }
 
-    /// Cut ops (carved voids) overlapping the box: spawners consult this
-    /// so props never seat on heightfield ground that a cave mouth or
-    /// doorway has carved away.
-    pub fn cuts_in(&self, min: Vec3, max: Vec3) -> Vec<CsgOp> {
-        let mut ops = self.ops_in(min, max, 0.0);
-        ops.retain(|op| op.kind & 1 == 1);
-        ops
-    }
-
     /// Downcast to the concrete planner — see [`WorldPlanning::as_any`].
     pub fn planner_as<P: 'static>(&self) -> Option<&P> {
         self.planner.as_ref()?.as_any().downcast_ref::<P>()

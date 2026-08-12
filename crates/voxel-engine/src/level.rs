@@ -74,8 +74,8 @@ pub struct EnvDef {
     pub sun_direction: [f32; 3],
 }
 
-fn d_sun_direction() -> [f32; 3] {
-    voxel_worldgen::program::DEFAULT_SUN_DIR.to_array()
+voxel_core::defaults! {
+    d_sun_direction: [f32; 3] = voxel_worldgen::program::DEFAULT_SUN_DIR.to_array();
 }
 
 impl Default for EnvDef {
@@ -251,30 +251,15 @@ pub struct ScatterVariantDef {
     pub scale: [f32; 2],
 }
 
-fn d_true() -> bool {
-    true
-}
-
-fn d_scatter_tile() -> f32 {
-    64.0
-}
-fn d_scatter_radius() -> i32 {
-    6
-}
-fn d_detail_vs() -> f32 {
-    4.0
-}
-fn d_floor_step() -> f32 {
-    0.5
-}
-fn d_cover_full_at() -> f32 {
-    1.0
-}
-fn d_any_altitude() -> [f32; 2] {
-    [f32::MIN, f32::MAX]
-}
-fn d_unit_scale() -> [f32; 2] {
-    [1.0, 1.0]
+voxel_core::defaults! {
+    d_true: bool = true;
+    d_scatter_tile: f32 = 64.0;
+    d_scatter_radius: i32 = 6;
+    d_detail_vs: f32 = 4.0;
+    d_floor_step: f32 = 0.5;
+    d_cover_full_at: f32 = 1.0;
+    d_any_altitude: [f32; 2] = [f32::MIN, f32::MAX];
+    d_unit_scale: [f32; 2] = [1.0, 1.0];
 }
 
 /// One authored CSG primitive in a prefab's local space.
@@ -304,11 +289,9 @@ pub struct CsgOpDef {
     pub blend: f32,
 }
 
-fn d_op_add() -> String {
-    "add".into()
-}
-pub fn d_op_material() -> u32 {
-    3
+voxel_core::defaults! {
+    d_op_add: String = "add".into();
+    pub d_op_material: u32 = 3;
 }
 
 impl CsgOpDef {
@@ -708,32 +691,16 @@ pub struct ZonesDef {
     pub border: f32,
 }
 
-fn default_grain() -> f32 {
-    0.35
-}
-fn default_fade() -> f32 {
-    0.004
-}
-fn default_zoned_fade() -> f32 {
-    0.002
-}
-fn default_steep() -> [f32; 2] {
-    [0.72, 0.45]
-}
-fn default_border() -> f32 {
-    60.0
-}
-pub fn default_one() -> f32 {
-    1.0
-}
-fn default_crowns() -> [f32; 2] {
-    [0.35, 0.9]
-}
-fn default_strata() -> [f32; 2] {
-    [0.15, 1.2]
-}
-fn default_patch_amount() -> f32 {
-    0.5
+voxel_core::defaults! {
+    default_grain: f32 = 0.35;
+    default_fade: f32 = 0.004;
+    default_zoned_fade: f32 = 0.002;
+    default_steep: [f32; 2] = [0.72, 0.45];
+    default_border: f32 = 60.0;
+    pub default_one: f32 = 1.0;
+    default_crowns: [f32; 2] = [0.35, 0.9];
+    default_strata: [f32; 2] = [0.15, 1.2];
+    default_patch_amount: f32 = 0.5;
 }
 
 impl MaterialDef {
@@ -1137,13 +1104,6 @@ fn sun_dir(level: &LevelDef) -> Vec3 {
     Vec3::from(level.environment.sun_direction).normalize_or(Vec3::Y)
 }
 
-/// Coverage-eval rendering: monotone-white geometry and no water, so a
-/// single background-colored pixel below the horizon means missing world
-/// coverage. Set from [`LevelPlugin::hole_eval`] — the engine itself
-/// reads no environment variables.
-#[derive(Resource, Default, Clone, Copy)]
-pub struct HoleEval(pub bool);
-
 pub fn eval_holes_mode() -> bool {
     HOLE_EVAL.load(std::sync::atomic::Ordering::Relaxed)
 }
@@ -1219,12 +1179,6 @@ impl LevelPlugin {
             remote_port: None,
             planner: None,
         }
-    }
-
-    /// Hot-reload the level from the file it was loaded from.
-    pub fn watching(mut self, path: impl Into<std::path::PathBuf>) -> Self {
-        self.source = Some(path.into());
-        self
     }
 }
 

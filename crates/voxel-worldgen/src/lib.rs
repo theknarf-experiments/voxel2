@@ -203,17 +203,14 @@ pub struct Generator {
     ops: std::sync::Arc<Vec<voxel_core::worldop::WorldOp>>,
     seed: u32,
     sun: glam::Vec3,
-    has_height: bool,
 }
 
 impl Generator {
     pub fn new(ops: Vec<voxel_core::worldop::WorldOp>, seed: u32, sun: glam::Vec3) -> Self {
-        let has_height = ops.iter().any(|op| op.is_height_op());
         Self {
             ops: std::sync::Arc::new(ops),
             seed,
             sun,
-            has_height,
         }
     }
 
@@ -283,27 +280,6 @@ impl Generator {
     ) -> f32 {
         let n = fbm(self.seed, xz + offset, scale, 3, 1.0) + 0.5;
         (n * contrast + bias).clamp(0.0, 1.0)
-    }
-
-    /// Soft sun shadow: horizon march over the band-limited heightfield.
-    /// Mirrors the WGSL bake in voxel_mesh_chunks.wgsl.
-    pub fn sun_shadow(&self, pos: glam::Vec3) -> f32 {
-        // Twin of the GPU gate: a heightless program (interiors) casts
-        // no terrain shadow.
-        if !self.has_height {
-            return 1.0;
-        }
-        let sun = self.sun_direction();
-        let mut occ = 0.0f32;
-        let mut t = 8.0f32;
-        for _ in 0..9 {
-            let sp = pos + sun * t;
-            let dh = self.height(Vec2::new(sp.x, sp.z), 8.0) - sp.y;
-            occ = occ.max(dh / t);
-            t *= 1.8;
-        }
-        let x = (occ / 0.2).clamp(0.0, 1.0);
-        1.0 - x * x * (3.0 - 2.0 * x)
     }
 
     /// Every floor in a vertical span at one column, deepest last: a `y`

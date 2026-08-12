@@ -638,10 +638,6 @@ impl LayerGraph {
         self.reads_missed.load(Ordering::Relaxed)
     }
 
-    pub fn reset_reads_missed(&self) {
-        self.reads_missed.store(0, Ordering::Relaxed);
-    }
-
     /// Resident chunks across all layers. Equals the transitive dependency
     /// closure of the active top dependencies — that is the invariant this
     /// design exists to provide, and the eviction timer it replaces.

@@ -78,8 +78,9 @@ architecture. Design plan: `~/.claude/plans/binary-twirling-brooks.md`.
   loops in the mesh/water shaders ↔ `eval_height`), `ChunkParams` struct
   (2 shaders + chunks.rs), `CsgOp` and `WorldOp` layouts (voxel-core ↔
   WGSL structs — note `meta` is a reserved WGSL word, the GPU field is
-  `head`), vertex packing (mesh shader ↔ draw shader ↔ slab layouts),
-  baked-shadow march (mesh shader ↔ voxel_worldgen::sun_shadow).
+  `head`), vertex packing (mesh shader ↔ draw shader ↔ slab layouts).
+  The baked-shadow march has NO Rust twin any more: the CPU mirror was
+  unused and deleted, so the shader is the only definition.
 - **Worlds are data, not code**: never add a world-kind enum,
   world-specific shader, feature flag, or shading branch; extend the op
   set (voxel-core::worldop + both interpreters + a node struct — vegetation

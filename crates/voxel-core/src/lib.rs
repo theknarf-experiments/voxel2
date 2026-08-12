@@ -22,15 +22,6 @@ pub use voxel::Voxel;
 /// Cells per chunk axis, at every LOD level.
 pub const CHUNK_CELLS: u32 = 32;
 
-/// Density samples per chunk axis: 33 cell corners plus an apron
-/// (one sample below, two above) for gradients and skirts.
-pub const CHUNK_SAMPLES: u32 = 36;
-
-/// Offset of the sample grid relative to the cell-corner grid: sample index
-/// `i` holds the value at corner `i + SAMPLE_OFFSET`, so samples cover
-/// corners `-1..=34` for cells `0..32`.
-pub const SAMPLE_OFFSET: i32 = -1;
-
 /// Voxel edge length in meters at LOD 0.
 pub const BASE_VOXEL_M: f64 = 0.1;
 
@@ -55,4 +46,18 @@ macro_rules! timed {
         }
         __out
     }};
+}
+
+/// Serde `default` stubs: a name, a type and a value.
+///
+/// `#[serde(default = "...")]` names a FUNCTION, so every authored default
+/// needs one to exist. Fifty-three of them were three lines each to say a
+/// single number, and their names are the documentation — `d_scatter_tile`
+/// and `d_floor_step` are both `0.5` and must stay two names, so this
+/// collapses the syntax and nothing else.
+#[macro_export]
+macro_rules! defaults {
+    ($($vis:vis $name:ident: $ty:ty = $value:expr;)*) => {
+        $($vis fn $name() -> $ty { $value })*
+    };
 }

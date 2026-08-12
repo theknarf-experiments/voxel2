@@ -160,14 +160,10 @@ pub struct LinkDef {
     pub cut: bool,
 }
 
-pub fn d_full_frac() -> [f32; 2] {
-    [1.0, 1.0]
-}
-pub fn d_turn() -> f32 {
-    45.0
-}
-pub fn d_link_step() -> f32 {
-    3.0
+voxel_core::defaults! {
+    pub d_full_frac: [f32; 2] = [1.0, 1.0];
+    pub d_turn: f32 = 45.0;
+    pub d_link_step: f32 = 3.0;
 }
 
 impl StructureDef {
@@ -338,80 +334,32 @@ pub enum EmitDef {
     },
 }
 
-pub fn d_cell() -> i32 {
-    256
-}
-pub fn d_flow_cell() -> i32 {
-    512
-}
-pub fn d_margin() -> f32 {
-    32.0
-}
-pub fn d_altitude() -> [f32; 2] {
-    [f32::MIN, f32::MAX]
-}
-pub fn d_up_interval() -> [f32; 2] {
-    [0.0, 1.0]
-}
-pub fn d_reach() -> f32 {
-    700.0
-}
-pub fn d_corridor() -> f32 {
-    192.0
-}
-pub fn d_slope_penalty() -> f32 {
-    60.0
-}
-pub fn d_path_step() -> f32 {
-    8.0
-}
-pub fn d_flow_steps() -> usize {
-    400
-}
-pub fn d_spill() -> f32 {
-    7.0
-}
-pub fn d_worm_steps() -> u32 {
-    70
-}
-pub fn d_worm_radius() -> [f32; 2] {
-    [2.2, 3.6]
-}
-pub fn d_burial() -> f32 {
-    2.4
-}
-pub fn d_half_w() -> f32 {
-    2.4
-}
-pub fn d_thickness() -> f32 {
-    0.5
-}
-pub fn d_true() -> bool {
-    true
-}
-pub fn d_course_width() -> [f32; 2] {
-    [2.0, 7.0]
-}
-pub fn d_cell3() -> i32 {
-    128
-}
-pub fn d_cell3_y() -> i32 {
-    132
-}
-pub fn d_margin3() -> f32 {
-    24.0
-}
-pub fn d_reach3() -> f32 {
-    400.0
-}
-pub fn d_tube_material() -> u32 {
-    2
-}
-pub fn d_tube_bore() -> f32 {
-    1.5
-}
-pub fn d_tube_lift() -> f32 {
-    3.0
+voxel_core::defaults! {
+    pub d_cell: i32 = 256;
+    pub d_flow_cell: i32 = 512;
+    pub d_margin: f32 = 32.0;
+    pub d_altitude: [f32; 2] = [f32::MIN, f32::MAX];
+    pub d_up_interval: [f32; 2] = [0.0, 1.0];
+    pub d_reach: f32 = 700.0;
+    pub d_corridor: f32 = 192.0;
+    pub d_slope_penalty: f32 = 60.0;
+    pub d_path_step: f32 = 8.0;
+    pub d_flow_steps: usize = 400;
+    pub d_spill: f32 = 7.0;
+    pub d_worm_steps: u32 = 70;
+    pub d_worm_radius: [f32; 2] = [2.2, 3.6];
+    pub d_burial: f32 = 2.4;
+    pub d_half_w: f32 = 2.4;
+    pub d_thickness: f32 = 0.5;
+    pub d_true: bool = true;
+    pub d_course_width: [f32; 2] = [2.0, 7.0];
+    pub d_cell3: i32 = 128;
+    pub d_cell3_y: i32 = 132;
+    pub d_margin3: f32 = 24.0;
+    pub d_reach3: f32 = 400.0;
+    pub d_tube_material: u32 = 2;
+    pub d_tube_bore: f32 = 1.5;
+    pub d_tube_lift: f32 = 3.0;
 }
 impl EmitDef {
     /// `structure` is whatever the emit's `structure` port is wired to.
@@ -626,10 +574,7 @@ pub fn validate_level(level: &LevelDef) -> Result<(), String> {
     Ok(())
 }
 
-pub fn d_relax_strength() -> f32 {
-    0.35
-}
-
-pub fn d_relax_iterations() -> u32 {
-    1
+voxel_core::defaults! {
+    pub d_relax_strength: f32 = 0.35;
+    pub d_relax_iterations: u32 = 1;
 }

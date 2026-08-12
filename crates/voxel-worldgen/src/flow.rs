@@ -8,8 +8,6 @@
 
 use glam::Vec2;
 
-/// Coarse height sampling for the descent.
-pub const FLOW_HEIGHT_VS: f32 = 8.0;
 /// Descent step (meters).
 pub const FLOW_STEP_M: f32 = 8.0;
 

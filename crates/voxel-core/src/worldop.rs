@@ -122,13 +122,6 @@ pub const WOP_HEIGHT_STEP: u32 = 16;
 /// (mode 0 = union, 1 = carve), `p2.x = octaves`.
 pub const WOP_FBM3: u32 = 15;
 
-/// Noise modes for `WOP_HEIGHT_FBM` (`p1.y`).
-pub const NOISE_MODE_FBM: u32 = 0;
-/// Sharp ridges (mountain crests, dune fields).
-pub const NOISE_MODE_RIDGED: u32 = 1;
-/// Rounded billows (rolling hills, cloudy blobs).
-pub const NOISE_MODE_BILLOW: u32 = 2;
-
 /// Skip this op at coarse LODs (voxel size >= the structural cutoff).
 pub const WOP_FLAG_FINE_ONLY: u32 = 1;
 /// Skip this op at fine LODs.
