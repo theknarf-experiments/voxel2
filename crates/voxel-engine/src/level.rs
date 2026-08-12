@@ -1444,6 +1444,21 @@ fn watch_level_file(
 /// them to an editor that has to ask.
 ///
 /// The node list answers for itself, per node — see [`crate::graph::changed`].
+/// Did only the AUTHORED geometry move?
+///
+/// The narrow case worth separating: placements and prefabs put ops in a
+/// bounded part of the world, so the chunks that care can be found rather
+/// than assumed. Everything else about a level — its nodes, its sun, its
+/// LOD topology — changes what every chunk is.
+fn only_authored_moved(new: &LevelDef, old: &LevelDef) -> bool {
+    (new.placements != old.placements || new.prefabs != old.prefabs)
+        && sun_dir(new) == sun_dir(old)
+        && new.lod.max_level == old.lod.max_level
+        && new.lod.top_radius == old.lod.top_radius
+        && new.lod.top_y == old.lod.top_y
+        && new.nodes == old.nodes
+}
+
 fn staleness(new: &LevelDef, old: &LevelDef) -> Option<Invalidates> {
     let world = sun_dir(new) != sun_dir(old)
         || new.placements != old.placements
@@ -1469,7 +1484,9 @@ fn apply_level_change(
     mut applied: ResMut<AppliedLevel>,
     seed: Res<WorldSeed>,
     planner: Res<HostPlanner>,
-    mut rebuild: ResMut<StreamingRebuild>,
+    // Grouped: the two are the two halves of one answer — everything, or
+    // just these chunks — and clippy caps a system at seven arguments.
+    (mut rebuild, lod): (ResMut<StreamingRebuild>, Res<crate::lod_layers::LodLayers>),
     mut reloaded: MessageWriter<LevelReloaded>,
     // Grouped: the two registries are always touched together, and
     // clippy caps a system's arguments at seven.
@@ -1524,7 +1541,23 @@ fn apply_level_change(
                 world.config.top_radius = new.lod.top_radius;
                 world.config.top_y = new.lod.top_y;
                 world.generator = generator.clone();
-                rebuild.0 = true;
+                // Somebody moved an authored object: find the chunks that
+                // care instead of assuming all of them do. If this world
+                // is not streaming yet there is nothing built to fix, and
+                // the full rebuild is the honest fallback.
+                let narrow = only_authored_moved(&new, level)
+                    && lod.restale(
+                        0,
+                        crate::lod_layers::Restale {
+                            seed: seed.0 as u32,
+                            ops: std::sync::Arc::new(generator.ops().to_vec()),
+                            was_placed: crate::fingerprint::placed_ops(level, &generator),
+                            now_placed: crate::fingerprint::placed_ops(&new, &generator),
+                        },
+                    );
+                if !narrow {
+                    rebuild.0 = true;
+                }
             }
             world.query = build_world_query(&new, seed.0, &generator, planner.0.as_ref());
             world.level = new.clone();

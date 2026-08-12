@@ -138,6 +138,23 @@ struct LodShared {
     unpruned: AtomicUsize,
     /// Of the unpruned, how many were blocked by carrying ops.
     had_ops: AtomicUsize,
+    /// An authored edit waiting to be applied to the chunks that care.
+    ///
+    /// Drained by the residency pass rather than by whoever wrote it: a
+    /// rebuilt chunk is only asked for by `create`, and the one moment it
+    /// is settled and revealed is `between`. Invalidating from a system
+    /// instead frees the chunk and leaves its replacement queued forever
+    /// — a hole, until the camera happens to move.
+    restale: Mutex<Option<Restale>>,
+}
+
+/// A level edit that moved authored geometry, and what it takes to find
+/// the chunks it moved. See [`crate::fingerprint`].
+pub struct Restale {
+    pub seed: u32,
+    pub ops: Arc<Vec<voxel_core::worldop::WorldOp>>,
+    pub was_placed: Vec<CsgOp>,
+    pub now_placed: Vec<CsgOp>,
 }
 
 impl LodShared {
@@ -277,6 +294,22 @@ impl LodLayers {
         self.worlds.is_empty()
     }
 
+    /// Rebuild only the chunks an authored edit changed.
+    ///
+    /// Queued for the residency pass and answered there — see
+    /// [`restale`]. `false` if this world is not streaming yet, in which
+    /// case there is nothing built to be stale.
+    pub fn restale(&self, world: voxel_core::WorldId, edit: Restale) -> bool {
+        let Some(lod) = self.worlds.iter().find(|w| w.shared.world == world) else {
+            return false;
+        };
+        *lod.shared.restale.lock().unwrap() = Some(edit);
+        // Nothing MOVED, so no dependency would ask for the pass that
+        // settles what this is about to rebuild.
+        lod.runtime.force_pass();
+        true
+    }
+
     /// Sum over worlds — what the HUD and the settle metric report.
     pub fn resident(&self) -> usize {
         self.worlds.iter().map(WorldLod::resident).sum()
@@ -357,6 +390,7 @@ impl WorldLod {
             anchor: Anchor::default(),
             state: Mutex::new(LodState::default()),
             stalled: AtomicUsize::new(0),
+            restale: Mutex::new(None),
             pruned: AtomicUsize::new(0),
             unpruned: AtomicUsize::new(0),
             had_ops: AtomicUsize::new(0),
@@ -405,7 +439,12 @@ impl WorldLod {
         };
         let between: voxel_layers::BetweenPasses = {
             let shared = shared.clone();
-            Arc::new(move |_| {
+            Arc::new(move |graph| {
+                // First, so the chunks it rebuilds are asked for before
+                // the settle below waits on them: one pass destroys,
+                // rebuilds, settles and reveals, and nothing is ever
+                // missing between two of those steps.
+                restale(&shared, graph);
                 settle_builds(&shared);
                 refresh_masks(&shared);
                 // One reveal per pass: everything this pass generated
@@ -496,6 +535,52 @@ impl WorldLod {
 /// Instead the pipeline regenerates in place while the old mesh keeps
 /// drawing, and every rebuilt mesh is HELD until all of them are ready.
 /// Half a swapped set is a crack, so the set swaps together.
+/// Rebuild the chunks an authored edit changed, and only those.
+///
+/// Every resident chunk is fingerprinted against the world as it was and
+/// as it is; the ones whose number moved are invalidated, which destroys
+/// and re-asks them. The pass this runs inside does the rest.
+fn restale(shared: &LodShared, graph: &voxel_layers::LayerGraph) {
+    let Some(edit) = shared.restale.lock().unwrap().take() else {
+        return;
+    };
+    // Where the edit could possibly have landed. Fingerprinting is not
+    // free — it bounds the region axes over every chunk's box — and a
+    // level edit leaves almost every chunk alone, so the cheap question
+    // is asked first. Sound because only the AUTHORED ops differ here
+    // (`only_authored_moved` guarantees it): a chunk this box misses sees
+    // the same two op sets either way, so its two prints cannot differ.
+    let Some((tlo, thi)) = crate::fingerprint::touched(&edit.was_placed, &edit.now_placed) else {
+        return; // the lists differ in nothing that occupies space
+    };
+    let mut hit = 0usize;
+    let mut seen = 0usize;
+    for level in 0..=shared.config.max_level {
+        let name = instance(level);
+        for coord in graph.resident_coords(&name) {
+            let key = ChunkKey::in_world(shared.world, level, coord);
+            let (lo, hi) = crate::fingerprint::read_box(key);
+            if lo.x > thi.x
+                || hi.x < tlo.x
+                || lo.y > thi.y
+                || hi.y < tlo.y
+                || lo.z > thi.z
+                || hi.z < tlo.z
+            {
+                continue;
+            }
+            seen += 1;
+            let was = crate::fingerprint::of(key, edit.seed, &edit.ops, &edit.was_placed);
+            let now = crate::fingerprint::of(key, edit.seed, &edit.ops, &edit.now_placed);
+            if was != now {
+                graph.invalidate(&name, coord);
+                hit += 1;
+            }
+        }
+    }
+    info!("level edit: rebuilt {hit} chunks ({seen} within reach of it)");
+}
+
 /// Wait for everything this pass asked for, once.
 ///
 /// A stalled chunk is NOT recorded as carrying its mask, or the refresh

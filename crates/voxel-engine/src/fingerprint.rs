@@ -70,6 +70,33 @@ pub fn of(key: ChunkKey, seed: u32, ops: &[WorldOp], placed: &[CsgOp]) -> u64 {
     h.finish()
 }
 
+/// The box holding every op the two lists disagree about, or `None` when
+/// they agree.
+///
+/// A cheap pre-filter for [`of`]: a chunk this box misses sees the same
+/// ops in both lists, so its two prints are equal and asking is wasted.
+/// The union of BOTH sides, because an op that moved has to rebuild where
+/// it was as well as where it went.
+pub fn touched(was: &[CsgOp], now: &[CsgOp]) -> Option<(Vec3, Vec3)> {
+    let mut lo = Vec3::splat(f32::INFINITY);
+    let mut hi = Vec3::splat(f32::NEG_INFINITY);
+    let mut any = false;
+    // Quadratic in the number of authored ops, which is dozens. The
+    // alternative is hashing them into a set, and a set of floats is a
+    // set of things that compare equal and hash apart.
+    let mut swallow = |a: &[CsgOp], b: &[CsgOp]| {
+        for op in a.iter().filter(|op| !b.contains(op)) {
+            let (olo, ohi) = op.aabb();
+            lo = lo.min(olo);
+            hi = hi.max(ohi);
+            any = true;
+        }
+    };
+    swallow(was, now);
+    swallow(now, was);
+    any.then_some((lo, hi))
+}
+
 /// Every authored placement's ops, in world space — the input `of` takes.
 ///
 /// Built once per sweep rather than per chunk: `place` seats each
@@ -181,6 +208,50 @@ mod tests {
             of(far, 0, &ops, std::slice::from_ref(&moved)),
             "a chunk a kilometre away must not"
         );
+    }
+
+    /// The pre-filter must cover BOTH ends of a move: where the op went
+    /// and where it was, or the chunk it left keeps a copy of it.
+    #[test]
+    fn the_touched_box_covers_where_an_op_was_and_where_it_went() {
+        let was = CsgOp::boxy(Vec3::new(0.0, 0.0, 0.0), Vec3::splat(1.0), 0.0, 3, false);
+        let now = CsgOp::boxy(Vec3::new(50.0, 0.0, 0.0), Vec3::splat(1.0), 0.0, 3, false);
+        let (lo, hi) = touched(std::slice::from_ref(&was), std::slice::from_ref(&now)).unwrap();
+        assert!(lo.x <= -1.0 && hi.x >= 51.0, "{lo:?} {hi:?}");
+
+        // Unchanged lists touch nothing, whatever is in them.
+        let same = [was, now];
+        assert!(touched(&same, &same).is_none());
+    }
+
+    /// Anything the pre-filter skips must have had equal prints anyway —
+    /// the filter is an accelerator, never a second opinion.
+    #[test]
+    fn the_pre_filter_only_skips_chunks_whose_prints_agree() {
+        let ops = Vec::new();
+        let was = [CsgOp::boxy(Vec3::ZERO, Vec3::splat(2.0), 0.0, 3, false)];
+        let now = [CsgOp::boxy(
+            Vec3::new(4.0, 0.0, 0.0),
+            Vec3::splat(2.0),
+            0.0,
+            3,
+            false,
+        )];
+        let (tlo, thi) = touched(&was, &now).unwrap();
+        for i in -6..6 {
+            for j in -6..6 {
+                let k = key(0, [i, 0, j]);
+                let (lo, hi) = read_box(k);
+                let outside = lo.x > thi.x || hi.x < tlo.x || lo.z > thi.z || hi.z < tlo.z;
+                if outside {
+                    assert_eq!(
+                        of(k, 0, &ops, &was),
+                        of(k, 0, &ops, &now),
+                        "chunk {i},{j} was skipped but its print moved"
+                    );
+                }
+            }
+        }
     }
 
     /// The apron is part of the chunk. An op just outside its box is

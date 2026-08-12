@@ -70,6 +70,13 @@ struct Shared {
     /// this has not moved while it ran — otherwise a request that landed
     /// mid-pass would be reported as already satisfied.
     requests: AtomicUsize,
+    /// A pass has been asked for that no top dependency accounts for.
+    ///
+    /// A pass normally runs because something MOVED. Rebuilding a chunk
+    /// in place moves nothing, so without this the request would sit
+    /// there: the chunk is destroyed, its replacement is asked for, and
+    /// the `between` callback that settles and reveals it never runs.
+    forced: AtomicBool,
     /// Every top dependency is satisfied and nothing new has been asked
     /// for.
     idle: AtomicBool,
@@ -116,6 +123,7 @@ impl LayerRuntime {
             stop: AtomicBool::new(false),
             generating: AtomicBool::new(false),
             requests: AtomicUsize::new(0),
+            forced: AtomicBool::new(false),
             idle: AtomicBool::new(false),
         });
         let thread = std::thread::Builder::new()
@@ -135,6 +143,19 @@ impl LayerRuntime {
 
     pub fn graph(&self) -> &Arc<LayerGraph> {
         &self.graph
+    }
+
+    /// Run one pass even though nothing moved.
+    ///
+    /// For work that has to happen at the pass's own moment — between
+    /// every ensure and any release — but that no dependency asks for.
+    /// Rebuilding a chunk in place is the case: `invalidate` alone frees
+    /// it and queues its replacement, and only a pass settles and reveals
+    /// that replacement.
+    pub fn force_pass(&self) {
+        self.shared.forced.store(true, Ordering::Release);
+        self.shared.idle.store(false, Ordering::Release);
+        self.shared.requests.fetch_add(1, Ordering::Release);
     }
 
     /// Handle to the `index`-th top dependency, in the order given to
@@ -218,7 +239,10 @@ fn run(
         // before any release, so a region one dependency gives up and
         // another takes is never held by neither. Consecutive LOD levels
         // do exactly that at every ring boundary.
-        let worked = tops.iter().any(TopDep::changed);
+        // Taken before the test, so a force arriving during this pass
+        // is answered by the next one rather than dropped.
+        let forced = shared.forced.swap(false, Ordering::AcqRel);
+        let worked = forced || tops.iter().any(TopDep::changed);
         if worked {
             shared.generating.store(true, Ordering::Relaxed);
             graph.process_tops_with(&mut tops, |g| {
