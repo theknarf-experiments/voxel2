@@ -11,17 +11,23 @@
 //! per-renderer and stay where they are read.
 
 use bevy::{
-    core_pipeline::core_3d::CORE_3D_DEPTH_FORMAT,
+    core_pipeline::core_3d::{Opaque3d, Opaque3dBatchSetKey, Opaque3dBinKey, CORE_3D_DEPTH_FORMAT},
     mesh::VertexBufferLayout,
     pbr::{MeshPipelineKey, MeshPipelineViewLayouts},
     prelude::*,
     render::{
+        camera::{DirtySpecializations, PendingQueues},
+        mesh::allocator::MeshSlabs,
+        render_phase::{
+            BinnedRenderPhaseType, DrawFunctions, InputUniformIndex, ViewBinnedRenderPhases,
+        },
         render_resource::{
             binding_types::uniform_buffer, BindGroupLayoutDescriptor, BindGroupLayoutEntries,
             Buffer, BufferInitDescriptor, BufferUsages, Canonical, ColorTargetState, ColorWrites,
-            CompareFunction, DepthStencilState, FragmentState, PrimitiveState, RenderPipeline,
-            RenderPipelineDescriptor, ShaderStages, ShaderType, Specializer, SpecializerKey,
-            TextureFormat, VertexAttribute, VertexFormat, VertexState, VertexStepMode,
+            CompareFunction, DepthStencilState, FragmentState, PipelineCache, PrimitiveState,
+            RenderPipeline, RenderPipelineDescriptor, ShaderStages, ShaderType, Specializer,
+            SpecializerKey, TextureFormat, Variants, VertexAttribute, VertexFormat, VertexState,
+            VertexStepMode,
         },
         renderer::RenderDevice,
     },
@@ -173,4 +179,116 @@ pub fn prop_pipeline<Env: ShaderType>(
         ..default()
     };
     (layout, descriptor)
+}
+
+/// The pipeline resource a prop renderer keeps, as [`queue_props`] needs
+/// it. Each still owns its own resource — they differ in what else they
+/// hold — and this is only the part the shared queue reaches for.
+pub trait PropPipeline {
+    fn variants_mut(&mut self) -> &mut Variants<RenderPipeline, PropSpecializer>;
+}
+
+/// Per-view queue bookkeeping, one set per marker type.
+#[derive(Resource, Deref, DerefMut)]
+pub struct PendingPropQueues<M> {
+    #[deref]
+    pub queues: PendingQueues,
+    marker: std::marker::PhantomData<fn() -> M>,
+}
+
+impl<M> Default for PendingPropQueues<M> {
+    fn default() -> Self {
+        Self {
+            queues: PendingQueues::default(),
+            marker: std::marker::PhantomData,
+        }
+    }
+}
+
+/// Put every marker this view can see into the opaque phase.
+///
+/// Grass, impostors and water had this system three times, at
+/// seventy-six lines each and byte-identical bar the names. What differs
+/// between them is only WHICH entities to look for, WHICH pipeline to
+/// specialize and WHICH draw to run — so those are the three parameters,
+/// and the rest is written once.
+pub fn queue_props<M, P, D>(
+    pipeline_cache: Res<PipelineCache>,
+    pipeline: Option<ResMut<P>>,
+    mut opaque_render_phases: ResMut<ViewBinnedRenderPhases<Opaque3d>>,
+    opaque_draw_functions: Res<DrawFunctions<Opaque3d>>,
+    views: Query<voxel_render::pbr_view::PbrViewQuery>,
+    dirty_specializations: Res<DirtySpecializations>,
+    mut pending_queues: ResMut<PendingPropQueues<M>>,
+) where
+    M: Component,
+    P: Resource<Mutability = bevy::ecs::component::Mutable> + PropPipeline,
+    D: 'static,
+{
+    let Some(mut pipeline) = pipeline else {
+        return;
+    };
+    let draw_function = opaque_draw_functions.read().id::<D>();
+
+    for (
+        view,
+        camera,
+        view_visible_entities,
+        msaa,
+        tonemapping,
+        dither,
+        shadow_filter_method,
+        distance_fog,
+    ) in views.iter()
+    {
+        let mesh_key = voxel_render::pbr_view::view_key(
+            view,
+            camera,
+            msaa,
+            tonemapping,
+            dither,
+            shadow_filter_method,
+            distance_fog,
+        );
+        let Some(opaque_phase) = opaque_render_phases.get_mut(&view.retained_view_entity) else {
+            continue;
+        };
+        let Some(visible) = view_visible_entities.get::<M>() else {
+            continue;
+        };
+        let view_pending = pending_queues.prepare_for_new_frame(view.retained_view_entity);
+
+        for &main_entity in
+            dirty_specializations.iter_to_dequeue(view.retained_view_entity, visible)
+        {
+            opaque_phase.remove(main_entity);
+        }
+        for (render_entity, main_entity) in dirty_specializations.iter_to_queue(
+            view.retained_view_entity,
+            visible,
+            &view_pending.prev_frame,
+        ) {
+            let Ok(pipeline_id) = pipeline
+                .variants_mut()
+                .specialize(&pipeline_cache, crate::instanced::PropKey(mesh_key))
+            else {
+                continue;
+            };
+            opaque_phase.add(
+                Opaque3dBatchSetKey {
+                    draw_function,
+                    pipeline: pipeline_id,
+                    material_bind_group_index: None,
+                    lightmap_slab: None,
+                    slabs: MeshSlabs::default(),
+                },
+                Opaque3dBinKey {
+                    asset_id: AssetId::<Mesh>::invalid().untyped(),
+                },
+                (*render_entity, *main_entity),
+                InputUniformIndex::default(),
+                BinnedRenderPhaseType::NonMesh,
+            );
+        }
+    }
 }

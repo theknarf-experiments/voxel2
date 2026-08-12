@@ -19,7 +19,7 @@ use bevy::{
         primitives::Aabb,
         visibility::{self, VisibilityClass},
     },
-    core_pipeline::core_3d::{Opaque3d, Opaque3dBatchSetKey, Opaque3dBinKey},
+    core_pipeline::core_3d::Opaque3d,
     ecs::{
         query::ROQueryItem,
         system::{lifetimeless::SRes, SystemParamItem},
@@ -27,13 +27,10 @@ use bevy::{
     pbr::{MeshPipelineViewLayouts, SetMeshViewBindGroup, SetMeshViewBindingArrayBindGroup},
     prelude::*,
     render::{
-        camera::{DirtySpecializations, PendingQueues},
         extract_component::{ExtractComponent, ExtractComponentPlugin},
-        mesh::allocator::MeshSlabs,
         render_phase::{
-            AddRenderCommand, BinnedRenderPhaseType, DrawFunctions, InputUniformIndex, PhaseItem,
-            RenderCommand, RenderCommandResult, SetItemPipeline, TrackedRenderPass,
-            ViewBinnedRenderPhases,
+            AddRenderCommand, PhaseItem, RenderCommand, RenderCommandResult, SetItemPipeline,
+            TrackedRenderPass,
         },
         render_resource::{
             BindGroup, BindGroupEntries, BindGroupLayoutDescriptor, Buffer, IndexFormat,
@@ -89,7 +86,7 @@ impl Plugin for ImpostorPlugin {
         };
         render_app
             .init_resource::<ImpostorBuffers>()
-            .init_resource::<PendingImpostorQueues>()
+            .init_resource::<crate::instanced::PendingPropQueues<ImpostorMarker>>()
             .init_resource::<ImpostorBindGroupRes>()
             .init_resource::<ImpostorEnvUniform>()
             .init_resource::<ImpostorStyle>()
@@ -106,7 +103,15 @@ impl Plugin for ImpostorPlugin {
                 Render,
                 prepare_impostor_bind_group.in_set(RenderSystems::PrepareBindGroups),
             )
-            .add_systems(Render, queue_impostor.in_set(RenderSystems::Queue));
+            .add_systems(
+                Render,
+                crate::instanced::queue_props::<
+                    ImpostorMarker,
+                    ImpostorPipeline,
+                    DrawImpostorCommands,
+                >
+                    .in_set(RenderSystems::Queue),
+            );
     }
 }
 
@@ -375,9 +380,6 @@ fn extract_impostor_instances(
 
 // --- drawing -----------------------------------------------------------------
 
-#[derive(Default, Deref, DerefMut, Resource)]
-struct PendingImpostorQueues(PendingQueues);
-
 #[allow(clippy::too_many_arguments)]
 fn prepare_impostor_bind_group(
     pipeline: Option<Res<ImpostorPipeline>>,
@@ -408,83 +410,6 @@ fn prepare_impostor_bind_group(
         &pipeline_cache.get_bind_group_layout(&pipeline.layout),
         &BindGroupEntries::sequential((env_binding,)),
     ));
-}
-
-fn queue_impostor(
-    pipeline_cache: Res<PipelineCache>,
-    pipeline: Option<ResMut<ImpostorPipeline>>,
-    mut opaque_render_phases: ResMut<ViewBinnedRenderPhases<Opaque3d>>,
-    opaque_draw_functions: Res<DrawFunctions<Opaque3d>>,
-    views: Query<voxel_render::pbr_view::PbrViewQuery>,
-    dirty_specializations: Res<DirtySpecializations>,
-    mut pending_queues: ResMut<PendingImpostorQueues>,
-) {
-    let Some(mut pipeline) = pipeline else {
-        return;
-    };
-    let draw_function = opaque_draw_functions.read().id::<DrawImpostorCommands>();
-
-    for (
-        view,
-        camera,
-        view_visible_entities,
-        msaa,
-        tonemapping,
-        dither,
-        shadow_filter_method,
-        distance_fog,
-    ) in views.iter()
-    {
-        let mesh_key = voxel_render::pbr_view::view_key(
-            view,
-            camera,
-            msaa,
-            tonemapping,
-            dither,
-            shadow_filter_method,
-            distance_fog,
-        );
-        let Some(opaque_phase) = opaque_render_phases.get_mut(&view.retained_view_entity) else {
-            continue;
-        };
-        let Some(visible) = view_visible_entities.get::<ImpostorMarker>() else {
-            continue;
-        };
-        let view_pending = pending_queues.prepare_for_new_frame(view.retained_view_entity);
-
-        for &main_entity in
-            dirty_specializations.iter_to_dequeue(view.retained_view_entity, visible)
-        {
-            opaque_phase.remove(main_entity);
-        }
-        for (render_entity, main_entity) in dirty_specializations.iter_to_queue(
-            view.retained_view_entity,
-            visible,
-            &view_pending.prev_frame,
-        ) {
-            let Ok(pipeline_id) = pipeline
-                .variants
-                .specialize(&pipeline_cache, crate::instanced::PropKey(mesh_key))
-            else {
-                continue;
-            };
-            opaque_phase.add(
-                Opaque3dBatchSetKey {
-                    draw_function,
-                    pipeline: pipeline_id,
-                    material_bind_group_index: None,
-                    lightmap_slab: None,
-                    slabs: MeshSlabs::default(),
-                },
-                Opaque3dBinKey {
-                    asset_id: AssetId::<Mesh>::invalid().untyped(),
-                },
-                (*render_entity, *main_entity),
-                InputUniformIndex::default(),
-                BinnedRenderPhaseType::NonMesh,
-            );
-        }
-    }
 }
 
 type DrawImpostorCommands = (
@@ -534,5 +459,11 @@ where
         pass.set_index_buffer(ib.slice(..), IndexFormat::Uint32);
         pass.draw_indexed(0..buffers.mesh_index_count, 0, 0..slot.count);
         RenderCommandResult::Success
+    }
+}
+
+impl crate::instanced::PropPipeline for ImpostorPipeline {
+    fn variants_mut(&mut self) -> &mut Variants<RenderPipeline, crate::instanced::PropSpecializer> {
+        &mut self.variants
     }
 }

@@ -48,32 +48,26 @@ use bevy::{
         primitives::Aabb,
         visibility::{self, VisibilityClass},
     },
-    core_pipeline::core_3d::{Opaque3d, Opaque3dBatchSetKey, Opaque3dBinKey, CORE_3D_DEPTH_FORMAT},
+    core_pipeline::core_3d::{Opaque3d, CORE_3D_DEPTH_FORMAT},
     ecs::{
         query::ROQueryItem,
         system::{lifetimeless::SRes, SystemParamItem},
     },
-    pbr::{
-        MeshPipelineKey, MeshPipelineViewLayouts, SetMeshViewBindGroup,
-        SetMeshViewBindingArrayBindGroup,
-    },
+    pbr::{MeshPipelineViewLayouts, SetMeshViewBindGroup, SetMeshViewBindingArrayBindGroup},
     prelude::*,
     render::{
-        camera::{DirtySpecializations, PendingQueues},
         extract_component::{ExtractComponent, ExtractComponentPlugin},
-        mesh::allocator::MeshSlabs,
         render_phase::{
-            AddRenderCommand, BinnedRenderPhaseType, DrawFunctions, InputUniformIndex, PhaseItem,
-            RenderCommand, RenderCommandResult, SetItemPipeline, TrackedRenderPass,
-            ViewBinnedRenderPhases,
+            AddRenderCommand, PhaseItem, RenderCommand, RenderCommandResult, SetItemPipeline,
+            TrackedRenderPass,
         },
         render_resource::{
             binding_types::{storage_buffer_read_only_sized, uniform_buffer},
             BindGroup, BindGroupEntries, BindGroupLayoutDescriptor, BindGroupLayoutEntries, Buffer,
-            BufferInitDescriptor, BufferUsages, Canonical, ColorTargetState, ColorWrites,
-            CompareFunction, DepthStencilState, FragmentState, PipelineCache, RenderPipeline,
-            RenderPipelineDescriptor, ShaderStages, ShaderType, Specializer, SpecializerKey,
-            TextureFormat, UniformBuffer, Variants, VertexState,
+            BufferInitDescriptor, BufferUsages, ColorTargetState, ColorWrites, CompareFunction,
+            DepthStencilState, FragmentState, PipelineCache, RenderPipeline,
+            RenderPipelineDescriptor, ShaderStages, ShaderType, TextureFormat, UniformBuffer,
+            Variants, VertexState,
         },
         renderer::{RenderDevice, RenderQueue},
         Extract, Render, RenderApp, RenderStartup, RenderSystems,
@@ -184,7 +178,7 @@ impl Plugin for WaterPlugin {
             return;
         };
         render_app
-            .init_resource::<PendingWaterQueues>()
+            .init_resource::<crate::instanced::PendingPropQueues<WaterMarker>>()
             .init_resource::<WaterGpu>()
             .init_resource::<ExtractedWaterCamera>()
             .init_resource::<RiverWater>()
@@ -201,14 +195,18 @@ impl Plugin for WaterPlugin {
                 Render,
                 prepare_water_bind_group.in_set(RenderSystems::PrepareBindGroups),
             )
-            .add_systems(Render, queue_water.in_set(RenderSystems::Queue));
+            .add_systems(
+                Render,
+                crate::instanced::queue_props::<WaterMarker, WaterPipeline, DrawWaterCommands>
+                    .in_set(RenderSystems::Queue),
+            );
     }
 }
 
 #[derive(Resource)]
 struct WaterPipeline {
     layout: BindGroupLayoutDescriptor,
-    variants: Variants<RenderPipeline, WaterSpecializer>,
+    variants: Variants<RenderPipeline, crate::instanced::PropSpecializer>,
 }
 
 /// What one world's water draw binds.
@@ -288,36 +286,13 @@ fn init_water_pipeline(
     commands.insert_resource(WaterPipeline {
         layout,
         variants: Variants::new(
-            WaterSpecializer {
+            crate::instanced::PropSpecializer {
                 view_layouts: view_layouts.clone(),
             },
             base_descriptor,
         ),
     });
 }
-
-struct WaterSpecializer {
-    view_layouts: MeshPipelineViewLayouts,
-}
-
-#[derive(Copy, Clone, PartialEq, Eq, Hash, SpecializerKey)]
-struct WaterKey(MeshPipelineKey);
-
-impl Specializer<RenderPipeline> for WaterSpecializer {
-    type Key = WaterKey;
-
-    fn specialize(
-        &self,
-        key: Self::Key,
-        descriptor: &mut RenderPipelineDescriptor,
-    ) -> Result<Canonical<Self::Key>, BevyError> {
-        voxel_render::pbr_view::specialize_for_view(&self.view_layouts, key.0, descriptor);
-        Ok(key)
-    }
-}
-
-#[derive(Default, Deref, DerefMut, Resource)]
-struct PendingWaterQueues(PendingQueues);
 
 #[allow(clippy::too_many_arguments)]
 fn prepare_water_bind_group(
@@ -396,83 +371,6 @@ fn prepare_water_bind_group(
     }
 }
 
-fn queue_water(
-    pipeline_cache: Res<PipelineCache>,
-    pipeline: Option<ResMut<WaterPipeline>>,
-    mut opaque_render_phases: ResMut<ViewBinnedRenderPhases<Opaque3d>>,
-    opaque_draw_functions: Res<DrawFunctions<Opaque3d>>,
-    views: Query<voxel_render::pbr_view::PbrViewQuery>,
-    dirty_specializations: Res<DirtySpecializations>,
-    mut pending_queues: ResMut<PendingWaterQueues>,
-) {
-    let Some(mut pipeline) = pipeline else {
-        return;
-    };
-    let draw_function = opaque_draw_functions.read().id::<DrawWaterCommands>();
-
-    for (
-        view,
-        camera,
-        view_visible_entities,
-        msaa,
-        tonemapping,
-        dither,
-        shadow_filter_method,
-        distance_fog,
-    ) in views.iter()
-    {
-        let mesh_key = voxel_render::pbr_view::view_key(
-            view,
-            camera,
-            msaa,
-            tonemapping,
-            dither,
-            shadow_filter_method,
-            distance_fog,
-        );
-        let Some(opaque_phase) = opaque_render_phases.get_mut(&view.retained_view_entity) else {
-            continue;
-        };
-        let Some(visible) = view_visible_entities.get::<WaterMarker>() else {
-            continue;
-        };
-        let view_pending = pending_queues.prepare_for_new_frame(view.retained_view_entity);
-
-        for &main_entity in
-            dirty_specializations.iter_to_dequeue(view.retained_view_entity, visible)
-        {
-            opaque_phase.remove(main_entity);
-        }
-        for (render_entity, main_entity) in dirty_specializations.iter_to_queue(
-            view.retained_view_entity,
-            visible,
-            &view_pending.prev_frame,
-        ) {
-            let Ok(pipeline_id) = pipeline
-                .variants
-                .specialize(&pipeline_cache, WaterKey(mesh_key))
-            else {
-                continue;
-            };
-            opaque_phase.add(
-                Opaque3dBatchSetKey {
-                    draw_function,
-                    pipeline: pipeline_id,
-                    material_bind_group_index: None,
-                    lightmap_slab: None,
-                    slabs: MeshSlabs::default(),
-                },
-                Opaque3dBinKey {
-                    asset_id: AssetId::<Mesh>::invalid().untyped(),
-                },
-                (*render_entity, *main_entity),
-                InputUniformIndex::default(),
-                BinnedRenderPhaseType::NonMesh,
-            );
-        }
-    }
-}
-
 type DrawWaterCommands = (
     SetItemPipeline,
     SetMeshViewBindGroup<0>,
@@ -513,6 +411,12 @@ where
         let river_indices = world.river_buffer.as_ref().map_or(0, |(_, _, n)| *n * 6);
         pass.draw(0..(cells * cells * 6 + river_indices), 0..1);
         RenderCommandResult::Success
+    }
+}
+
+impl crate::instanced::PropPipeline for WaterPipeline {
+    fn variants_mut(&mut self) -> &mut Variants<RenderPipeline, crate::instanced::PropSpecializer> {
+        &mut self.variants
     }
 }
 
