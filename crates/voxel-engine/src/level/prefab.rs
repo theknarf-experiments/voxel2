@@ -107,6 +107,49 @@ pub fn write(prefabs: &[PrefabDef], base: &Path) -> Result<(), String> {
     Ok(())
 }
 
+/// The other levels beside `level` whose `prefabs` name the same file.
+///
+/// Read off the documents rather than off anything loaded, because a
+/// prefab is shared by whoever names its path and a level in memory knows
+/// only that it named it. Parsed shallowly — the `prefabs` list and
+/// nothing else — so asking is cheap enough to do when a selection moves.
+///
+/// Levels are the `.json` files beside this one. A game that keeps them
+/// elsewhere gets an empty answer rather than a wrong one.
+pub fn users(level: &Path, rel: &str) -> Vec<String> {
+    let Some(dir) = level.parent() else {
+        return Vec::new();
+    };
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut out: Vec<String> = entries
+        .filter_map(Result::ok)
+        .map(|e| e.path())
+        .filter(|p| p != level && p.extension().is_some_and(|e| e == "json"))
+        .filter(|p| names_prefab(p, rel))
+        .filter_map(|p| p.file_stem().and_then(|s| s.to_str()).map(str::to_string))
+        .collect();
+    out.sort();
+    out
+}
+
+/// Does this document's `prefabs` list name `rel`?
+fn names_prefab(path: &Path, rel: &str) -> bool {
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return false;
+    };
+    let Ok(doc) = serde_json::from_str::<Value>(&text) else {
+        return false;
+    };
+    doc.get("prefabs")
+        .and_then(Value::as_array)
+        .is_some_and(|list| {
+            list.iter()
+                .any(|e| e.get("use").and_then(Value::as_str) == Some(rel))
+        })
+}
+
 /// Every prefab file a level reads, deduplicated and in a stable order.
 ///
 /// The watcher needs these: a prefab edited on disk has to reload the
@@ -240,6 +283,23 @@ mod tests {
         let text = std::fs::read_to_string(&path).unwrap();
         assert!(text.contains("cylinder"), "{text}");
         assert!(!text.contains("\"use\""), "{text}");
+    }
+
+    /// Who else uses this file. The editor asks before letting a handle
+    /// move a shape, because an edit that quietly changed a second level
+    /// would be worse than one that says it is about to.
+    #[test]
+    fn a_shared_prefab_names_the_levels_that_share_it() {
+        let dir = scratch("users");
+        std::fs::write(dir.join("prefabs/monolith.json"), MONOLITH).unwrap();
+        let entry = r#"{"use":"prefabs/monolith.json"}"#;
+        let a = level_at(&dir, "alpha.json", entry);
+        level_at(&dir, "beta.json", entry);
+        level_at(&dir, "gamma.json", MONOLITH); // its own copy, inline
+        assert_eq!(super::users(&a, "prefabs/monolith.json"), ["beta"]);
+
+        // And a prefab nobody else names is shared with nobody.
+        assert!(super::users(&a, "prefabs/nothing.json").is_empty());
     }
 
     #[test]

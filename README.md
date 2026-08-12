@@ -102,6 +102,19 @@ prefab, just one only its own level can reach. Saving puts each half back
 where it came from: the level keeps its one line, the prefab keeps the
 shapes.
 
+With the editor open, every authored shape is **drawn where it is** and can
+be **dragged there**. Click one to select it; six handles appear on its own
+axes — three to slide it, three to grow it — and dragging one writes the
+prefab's local value through the same queue a panel row uses, so undo,
+Cmd+S and the partial rebuild need to know nothing about handles. The
+wireframes come from the same `place()` the world is carved from, so a
+handle is on the thing rather than near it. Because a prefab file can back
+several levels, the tool names the others it would change. The geometry —
+picking, handle placement, drag-to-value — is `voxel_editor::shapes`, pure
+arithmetic with tests that need no window; `ShapeTool` is reflected, so
+`voxctl raw world.mutate_resources` on `.selected` and `.nudge` performs
+exactly what a drag performs.
+
 **Live editing**: the level file *and every prefab it uses* are watched
 while running. Materials, environment and LOD tuning apply instantly;
 changes to the nodes, providers, or LOD topology rebuild the streamed

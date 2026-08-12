@@ -38,9 +38,11 @@ use bevy::prelude::*;
 pub mod canvas;
 pub mod edit;
 pub mod graph;
+pub mod handles;
 mod panel;
 mod path;
 mod row;
+pub mod shapes;
 mod style;
 mod walk;
 
@@ -274,6 +276,7 @@ impl Plugin for EditorPlugin {
             .init_resource::<edit::History>()
             .init_resource::<PanelStyle>()
             .init_resource::<graph::GraphStyle>()
+            .add_plugins(handles::plugin)
             .register_type::<EditorState>()
             .register_type::<PanelStyle>()
             .register_type::<graph::GraphStyle>()
@@ -293,6 +296,18 @@ impl Plugin for EditorPlugin {
                 (
                     panel::toggle,
                     panel::save,
+                    // The 3D manipulator queues into the same `Pending`
+                    // the rows do, so it sits in the same chain and gets
+                    // undo, saving and the partial rebuild for nothing.
+                    (
+                        handles::on_click,
+                        handles::on_drag,
+                        handles::on_nudge,
+                        handles::count_sharing,
+                    )
+                        .chain()
+                        .before(edit::apply)
+                        .run_if(panel::active),
                     // Ordered: an edit queued this frame is applied before
                     // the panel is rebuilt from it, so a row never shows
                     // the value it had a frame after you changed it. Gated
@@ -311,6 +326,9 @@ impl Plugin for EditorPlugin {
                         panel::hover,
                         panel::on_wheel,
                         panel::on_pinch,
+                        // Last: what it draws is the document as it is
+                        // AFTER this frame's edit landed.
+                        handles::draw,
                     )
                         .chain()
                         .run_if(panel::active),

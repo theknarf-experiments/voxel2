@@ -391,6 +391,43 @@ impl Serialize for PrefabDef {
     }
 }
 
+/// One placement's local ops, in the world.
+///
+/// Translate, yaw, uniform scale, and optional terrain seating. Public and
+/// separate because it is the ONE description of where an authored object
+/// actually is: the world is carved from what this returns, and an editor
+/// that drew handles from its own copy of this arithmetic would draw them
+/// next to the thing rather than on it.
+///
+/// `ground` answers the heightfield at an xz — a closure rather than a
+/// generator, because a tool drawing a placement it is not standing in
+/// does not have that world's generator to hand.
+pub fn place(
+    placement: &PlacementDef,
+    local: &[CsgOpDef],
+    ground: impl Fn(bevy::math::Vec2) -> f32,
+) -> Vec<CsgOp> {
+    let mut pos = bevy::math::Vec3::from(placement.position);
+    if placement.snap_to_terrain {
+        pos.y = ground(bevy::math::Vec2::new(pos.x, pos.z)) + placement.position[1];
+    }
+    let (sin, cos) = placement.yaw_deg.to_radians().sin_cos();
+    let rot = |v: bevy::math::Vec3| {
+        bevy::math::Vec3::new(v.x * cos - v.z * sin, v.y, v.x * sin + v.z * cos)
+    };
+    local
+        .iter()
+        .map(|def| {
+            let mut op = def.to_op();
+            op.center = (pos + rot(bevy::math::Vec3::from(op.center) * placement.scale)).to_array();
+            op.half = (bevy::math::Vec3::from(op.half) * placement.scale).to_array();
+            op.yaw += placement.yaw_deg.to_radians();
+            op.blend *= placement.scale;
+            op
+        })
+        .collect()
+}
+
 /// A hand-authored instance of a prefab (or inline ops) in the world —
 /// VoxelPlugin's placeable asset items as level data. Applied after the
 /// procedural op providers, ordered by `priority`.
@@ -935,6 +972,19 @@ impl LevelDef {
         Self::read(json, None, registry, true)
     }
 
+    /// The local-space ops a placement stamps: its prefab's, or its own
+    /// inline ones. `None` when it names a prefab this level has not got.
+    pub fn local_ops<'a>(&'a self, placement: &'a PlacementDef) -> Option<&'a [CsgOpDef]> {
+        match &placement.prefab {
+            Some(name) => self
+                .prefabs
+                .iter()
+                .find(|p| p.name == *name)
+                .map(|p| p.ops.as_slice()),
+            None => Some(&placement.ops),
+        }
+    }
+
     /// Splice the prefabs, then read what that leaves.
     ///
     /// One place, because the two things that could disagree — what the
@@ -1126,6 +1176,14 @@ impl LevelPlugin {
     }
 }
 
+/// The file the open level came from.
+///
+/// Public where [`LevelSource`] is not: a tool needs to know where the
+/// document lives — to find its prefabs' other users, say — without being
+/// handed the watcher's polling state as well.
+#[derive(Resource, Clone, Debug)]
+pub struct LevelPath(pub std::path::PathBuf);
+
 /// The world seed in play, for systems that rebuild generation state.
 #[derive(Resource, Clone, Copy, Debug)]
 pub struct WorldSeed(pub u64);
@@ -1186,6 +1244,7 @@ impl Plugin for LevelPlugin {
             .insert_resource(WorldSeed(self.seed))
             .insert_resource(HostPlanner(self.planner.clone()));
         if let Some(path) = &self.source {
+            app.insert_resource(LevelPath(path.clone()));
             app.insert_resource(LevelSource {
                 path: path.clone(),
                 watched: watch_list(&level, path),
@@ -1250,36 +1309,14 @@ pub(crate) fn build_world_query(
     // after the procedural providers.
     let mut placed: Vec<(i32, Vec<CsgOp>)> = Vec::new();
     for p in &level.placements {
-        let local: &[CsgOpDef] = match (&p.prefab, &p.ops) {
-            (Some(name), _) => match level.prefabs.iter().find(|p| p.name == *name) {
-                Some(prefab) => &prefab.ops,
-                None => {
-                    warn!("placement references unknown prefab '{name}'");
-                    continue;
-                }
-            },
-            (None, ops) => ops,
+        let Some(local) = level.local_ops(p) else {
+            warn!(
+                "placement references unknown prefab '{}'",
+                p.prefab.as_deref().unwrap_or("?")
+            );
+            continue;
         };
-        let mut pos = bevy::math::Vec3::from(p.position);
-        if p.snap_to_terrain {
-            pos.y = generator.height(bevy::math::Vec2::new(pos.x, pos.z), 1.0) + p.position[1];
-        }
-        let (sin, cos) = p.yaw_deg.to_radians().sin_cos();
-        let rot = |v: bevy::math::Vec3| {
-            bevy::math::Vec3::new(v.x * cos - v.z * sin, v.y, v.x * sin + v.z * cos)
-        };
-        let ops: Vec<CsgOp> = local
-            .iter()
-            .map(|def| {
-                let mut op = def.to_op();
-                op.center = (pos + rot(bevy::math::Vec3::from(op.center) * p.scale)).to_array();
-                op.half = (bevy::math::Vec3::from(op.half) * p.scale).to_array();
-                op.yaw += p.yaw_deg.to_radians();
-                op.blend *= p.scale;
-                op
-            })
-            .collect();
-        placed.push((p.priority, ops));
+        placed.push((p.priority, place(p, local, |xz| generator.height(xz, 1.0))));
     }
     placed.sort_by_key(|(priority, _)| *priority);
     if !placed.is_empty() {
