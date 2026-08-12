@@ -240,6 +240,19 @@ impl Generator {
         program::surface_material_weight(&self.ops, self.seed, xz, voxel_size, material)
     }
 
+    /// Is [`Self::surface_material_weight`] provably zero over a whole xz
+    /// box? Conservative — see
+    /// [`program::material_weight_is_zero_over`].
+    pub fn material_weight_is_zero_over(
+        &self,
+        lo: Vec2,
+        hi: Vec2,
+        voxel_size: f32,
+        material: u32,
+    ) -> bool {
+        program::material_weight_is_zero_over(&self.ops, self.seed, lo, hi, voxel_size, material)
+    }
+
     /// Heightfield (meters) at a world XZ, evaluated at `voxel_size`
     /// (1.0 = full detail). Mirrors the GPU exactly.
     pub fn height(&self, xz: Vec2, voxel_size: f32) -> f32 {

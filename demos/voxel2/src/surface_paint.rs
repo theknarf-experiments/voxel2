@@ -448,6 +448,7 @@ impl CoverJob {
             let cover = def.cover.as_ref().expect("filtered on having one");
             coarse_from.push((cover.material, *from_voxel_m));
             let generator = self.generator.clone();
+            let zero_generator = self.generator.clone();
             let gate = *gate;
             let inputs = voxel_engine::scatter::PlacementInputs {
                 generator: &self.generator,
@@ -455,6 +456,11 @@ impl CoverJob {
                 cut_ops: Vec::new(),
                 gate_weight: Box::new(move |xz| {
                     gate.map_or(1.0, |m| generator.surface_material_weight(xz, 8.0, m))
+                }),
+                gate_is_zero_over: Box::new(move |lo, hi| {
+                    gate.is_some_and(|m| {
+                        zero_generator.material_weight_is_zero_over(lo, hi, 8.0, m)
+                    })
                 }),
             };
             let full_at = cover.full_at.max(1.0e-6);

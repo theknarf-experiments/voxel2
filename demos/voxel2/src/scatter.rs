@@ -106,6 +106,7 @@ impl LayerChunk for ScatterChunk {
         // population that grows in the forest grows exactly where the
         // ground is forest-coloured.
         let gate_generator = world.generator.clone();
+        let zero_generator = world.generator.clone();
         let gate_material = layer.biome;
         let gate_weight = move |xz: Vec2| -> f32 {
             match gate_material {
@@ -119,6 +120,10 @@ impl LayerChunk for ScatterChunk {
             clearance,
             cut_ops,
             gate_weight: Box::new(gate_weight),
+            gate_is_zero_over: Box::new(move |lo, hi| match gate_material {
+                Some(m) => zero_generator.material_weight_is_zero_over(lo, hi, 8.0, m),
+                None => false,
+            }),
         };
         let tile = IVec2::new(ctx.coord().x, ctx.coord().z);
         self.placements = tile_placements(&layer.def, &inputs, tile);

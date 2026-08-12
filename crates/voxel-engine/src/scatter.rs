@@ -88,6 +88,17 @@ pub struct PlacementInputs<'a> {
     /// Blended weight of this population's host gate at a point. What
     /// the gate classifies is the host's business; this is only a number.
     pub gate_weight: Box<dyn Fn(Vec2) -> f32 + 'a>,
+    /// Is `gate_weight` provably zero everywhere in an xz box?
+    ///
+    /// A whole tile can then skip the per-candidate gate — 900 walks of
+    /// the program for a tile that was never going to place anything.
+    /// The rng is still drawn exactly as before and the gate still
+    /// compared, with the value it is KNOWN to have, so the stream and
+    /// every placement are untouched.
+    ///
+    /// Conservative: `false` means "cannot prove it". A host with no
+    /// bound to offer says `false` and pays what it always paid.
+    pub gate_is_zero_over: Box<dyn Fn(Vec2, Vec2) -> bool + 'a>,
 }
 
 /// Clearance the planning stack reserved (path and ribbon beds).
@@ -172,13 +183,23 @@ pub fn tile_placements(
         .unwrap_or(1.0);
     let attempts = (def.per_tile as f32 * density) as u32;
 
+    // Asked ONCE for the tile: if the host's gate cannot be anything but
+    // zero here, every attempt below rejects, and the expensive half of
+    // deciding that is the same answer 900 times.
+    let gate_dead = (inputs.gate_is_zero_over)(origin, origin + Vec2::splat(size));
+
     let mut out = Vec::new();
     // Reused across attempts: the march appends, and a Vec per attempt
     // would cost more than the march does.
     let mut found = Vec::new();
     for _ in 0..attempts {
         let xz = origin + Vec2::new(rng.next_f32(), rng.next_f32()) * size;
-        if rng.next_f32() > field_gate(generator, &def.density, xz) * (inputs.gate_weight)(xz) {
+        let gate = if gate_dead {
+            0.0
+        } else {
+            field_gate(generator, &def.density, xz) * (inputs.gate_weight)(xz)
+        };
+        if rng.next_f32() > gate {
             continue;
         }
         if def.clearance && on_clearance(clearance, xz) {
@@ -406,6 +427,9 @@ mod tests {
             cut_ops: Vec::new(),
             // The planet gates this population on its forest region.
             gate_weight: Box::new(move |xz| gen.surface_material_weight(xz, 8.0, 1)),
+            gate_is_zero_over: Box::new(move |lo, hi| {
+                gen.material_weight_is_zero_over(lo, hi, 8.0, 1)
+            }),
         };
 
         // Over a patch that has forest AND its edge. The origin is ocean,

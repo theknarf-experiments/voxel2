@@ -588,6 +588,90 @@ pub fn surface_material_weight(
     mine.clamp(0.0, 1.0)
 }
 
+/// Is [`surface_material_weight`] provably ZERO everywhere in an xz box?
+///
+/// Conservative: `false` means "cannot prove it", never "there is some".
+/// A caller uses it to skip work, so a wrong `true` would delete content
+/// while a wrong `false` only costs time.
+///
+/// The bound is the band structure read through intervals. `inside` rises
+/// from zero at `lo - f` and falls back to zero at `hi + f`, so it is
+/// identically zero over an interval that lies wholly outside
+/// `[lo - f, hi + f]`; `w` takes the `min` of the two axes, so either axis
+/// being dead kills the band. If every band that could paint `material`
+/// is dead, the weight is zero throughout.
+///
+/// Declines when `material` is the surface's own: that weight is
+/// `1 - claimed`, which needs a LOWER bound on every other band to rule
+/// out, and the bands do not carry one.
+pub fn material_weight_is_zero_over(
+    ops: &[WorldOp],
+    seed: u32,
+    lo: Vec2,
+    hi: Vec2,
+    vs: f32,
+    material: u32,
+) -> bool {
+    use voxel_core::interval::Interval;
+    let mut base = 0u32;
+    let mut ta = Interval::new(0.0, 0.0);
+    let mut tb = Interval::new(0.0, 0.0);
+    let mut seen_axes = false;
+    // An interval lies wholly outside a band's support.
+    let dead = |v: Interval, b0: f32, b1: f32| {
+        let f = band_feather([b0, b1]);
+        v.hi <= b0 - f || v.lo >= b1 + f
+    };
+    // The whole interval sits on `inside`'s plateau, where it is exactly 1.
+    let full = |v: Interval, b0: f32, b1: f32| {
+        let f = band_feather([b0, b1]);
+        v.lo >= b0 + f && v.hi <= b1 - f
+    };
+    for op in ops {
+        match op.kind {
+            WOP_REGION_AXES => {
+                let oct = op.p1[2] as i32;
+                let shift = |o: Vec2| (lo + o, hi + o);
+                let (a0, a1) = shift(Vec2::new(op.p0[0], op.p0[1]));
+                let (b0, b1) = shift(Vec2::new(op.p1[0], op.p1[1]));
+                let r = crate::fbm_range(seed, a0, a1, op.p0[2], oct, vs, 0);
+                ta = Interval::new(r.lo + 0.5, r.hi + 0.5);
+                let r = crate::fbm_range(seed, b0, b1, op.p0[3], oct, vs, 0);
+                tb = Interval::new(r.lo + 0.5, r.hi + 0.5);
+                seen_axes = true;
+            }
+            WOP_HEIGHT_SURFACE | WOP_COARSE_SOLID => base = op.material,
+            WOP_MATERIAL_BAND => {
+                if op.p1[2] as u32 != base {
+                    continue;
+                }
+                if !seen_axes {
+                    return false;
+                }
+                if op.material == material {
+                    // A band that could paint what we are asking about.
+                    if !(dead(ta, op.p0[0], op.p0[1]) || dead(tb, op.p0[2], op.p0[3])) {
+                        return false;
+                    }
+                } else if material == base
+                    && full(ta, op.p0[0], op.p0[1])
+                    && full(tb, op.p0[2], op.p0[3])
+                {
+                    // The surface's OWN material is whatever is left over,
+                    // `1 - claimed`, so proving it zero means proving
+                    // something else took all of it. A band at full weight
+                    // does: `claimed += (1 - claimed) * 1` is exactly 1
+                    // however much was claimed before it, and every band
+                    // after it then adds `* (1 - claimed)` = 0.
+                    return true;
+                }
+            }
+            _ => {}
+        }
+    }
+    material != base
+}
+
 /// WGSL-identical smoothstep (the height-op twins must agree).
 fn smoothstep(e0: f32, e1: f32, x: f32) -> f32 {
     let t = ((x - e0) / (e1 - e0)).clamp(0.0, 1.0);
