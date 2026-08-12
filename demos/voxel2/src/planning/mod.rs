@@ -126,6 +126,25 @@ impl WorldPlanner for RegionPlanner {
         out
     }
 
+    /// Covered when every emitter that could contribute an op to this box
+    /// has its index cells resident.
+    ///
+    /// Mirrors `ops_in` exactly — same emitters, same gate, same bounds —
+    /// because a coverage test that read a smaller set than the query
+    /// would declare a chunk ready and then miss a tile. Populations are
+    /// not consulted: they produce placements, never ops, so no chunk's
+    /// geometry has ever depended on one.
+    fn covers(&self, min: Vec3, max: Vec3, chunk_edge_m: f32) -> bool {
+        let Some(rt) = &self.graph else {
+            return true;
+        };
+        let mgr = rt.graph();
+        self.emitters
+            .iter()
+            .filter(|e| e.gate.is_none_or(|g| chunk_edge_m <= g))
+            .all(|e| layers::patches_cover(mgr, &e.name, min, max))
+    }
+
     fn as_any(&self) -> &(dyn std::any::Any + Send + Sync) {
         self
     }

@@ -69,6 +69,26 @@ pub trait WorldPlanner: Send + Sync + 'static {
         true
     }
 
+    /// Is the planning that could reach THIS box resident yet?
+    ///
+    /// The regional half of [`is_idle`](WorldPlanner::is_idle). A chunk
+    /// needs the layers overlapping itself, not every top dependency in
+    /// the world — a chunk at the player's feet has no dependency on a
+    /// forest tile five kilometres away, and waiting for one is how the
+    /// whole fine half of the LOD pyramid ended up queued behind the
+    /// slowest population.
+    ///
+    /// Must be PEEKED: an uncovered box is the question, not a consumer
+    /// reading outside its working set, so it cannot count against
+    /// `reads_missed`.
+    ///
+    /// The default is the global answer, which is always correct and
+    /// never earlier.
+    fn covers(&self, min: Vec3, max: Vec3, chunk_edge_m: f32) -> bool {
+        let _ = (min, max, chunk_edge_m);
+        self.is_idle()
+    }
+
     /// The host's own per-world state, if it has any. The engine never
     /// looks inside; this is how a host's systems read what its own layers
     /// published, without the engine learning what a river is.
@@ -245,14 +265,38 @@ impl WorldQuery {
     /// op grazing only the apron still shapes this chunk. Culling it would
     /// desynchronize the seam with the neighbor that keeps it.
     pub fn chunk_ops(&self, key: ChunkKey) -> Vec<CsgOp> {
-        let edge = key.edge_m() as f32;
-        if edge > OPS_HORIZON_EDGE_M {
+        if key.edge_m() as f32 > OPS_HORIZON_EDGE_M {
             return Vec::new();
         }
+        let (min, max) = Self::ops_box(key);
+        self.ops_in(min, max, key.edge_m() as f32)
+    }
+
+    /// Is the planning that could reach this chunk resident yet?
+    ///
+    /// Asked over the SAME box `chunk_ops` reads, so a chunk cannot be
+    /// declared ready and then read a tile that is not there.
+    pub fn chunk_covered(&self, key: ChunkKey) -> bool {
+        if key.edge_m() as f32 > OPS_HORIZON_EDGE_M {
+            return true;
+        }
+        let (min, max) = Self::ops_box(key);
+        self.covers(min, max, key.edge_m() as f32)
+    }
+
+    /// The world box a chunk's ops are queried over: its own, grown by the
+    /// density apron. Samples extend 2 voxels below and 3 above the
+    /// 32-cell core, so an op grazing only the apron still shapes this
+    /// chunk; culling it would desynchronize the seam with the neighbor
+    /// that keeps it.
+    ///
+    /// One definition, because the coverage test and the read must agree.
+    fn ops_box(key: ChunkKey) -> (Vec3, Vec3) {
         let pad = 4.0 * key.voxel_size_m() as f32;
-        let min = key.min_corner_m().as_vec3() - Vec3::splat(pad);
-        let max = key.min_corner_m().as_vec3() + Vec3::splat(edge + pad);
-        self.ops_in(min, max, edge)
+        (
+            key.min_corner_m().as_vec3() - Vec3::splat(pad),
+            key.min_corner_m().as_vec3() + Vec3::splat(key.edge_m() as f32 + pad),
+        )
     }
 
     /// Publish where the streaming source is, so the planner's top
@@ -299,6 +343,14 @@ impl WorldQuery {
     /// Has residency caught up? See [`WorldPlanner::is_idle`].
     pub fn is_idle(&self) -> bool {
         self.planner.as_ref().is_none_or(|p| p.is_idle())
+    }
+
+    /// Is the planning reaching this box resident? See
+    /// [`WorldPlanner::covers`].
+    pub fn covers(&self, min: Vec3, max: Vec3, chunk_edge_m: f32) -> bool {
+        self.planner
+            .as_ref()
+            .is_none_or(|p| p.covers(min, max, chunk_edge_m))
     }
 
     /// Downcast to the concrete planner — see [`WorldPlanning::as_any`].
@@ -361,14 +413,31 @@ pub fn ops_provider(world: &WorldQuery) -> Option<crate::chunkgen::OpsFn> {
         }
         // Fast path takes no lock: once planning is idle it stays idle
         // for the rest of the pass, which is nearly every chunk.
-        if !world.is_idle() {
+        //
+        // The second test is REGIONAL and only reached before that: this
+        // chunk's own planning may be resident long before the farthest
+        // population's is, and then there is nothing to wait for. It is a
+        // fast path rather than a second thing to wait on, deliberately —
+        // `wait_idle` polls on a 1 ms sleep, so N threads waiting
+        // concurrently is N milliseconds of streaming thrown away per
+        // poll, and every worker waiting on its own region would be
+        // exactly that.
+        if !world.is_idle() && !world.chunk_covered(key) {
             let _one_waiter = wait_gate.lock().unwrap_or_else(|e| e.into_inner());
-            // Checked again inside: whoever got here first has already
-            // done the waiting for everyone, and the rest must fall
-            // straight through to querying in parallel rather than
-            // re-serialising behind a wait that is already over.
-            if !world.is_idle() {
-                world.wait_idle();
+            // Wait for THIS chunk's region, not for the whole world, and
+            // stop the moment planning goes idle — at that point whatever
+            // is resident is all there will ever be, so waiting longer
+            // cannot change the answer and could not terminate if the box
+            // is outside every top dependency.
+            //
+            // Still behind the gate, and still checked again inside it:
+            // `wait_idle` polls on a 1 ms sleep, so concurrent waiters are
+            // milliseconds of streaming thrown away per poll. In practice
+            // one chunk reaches here per cold start — the coarsest level
+            // inside the ops horizon, whose box is the largest and so the
+            // last to be covered.
+            while !world.is_idle() && !world.chunk_covered(key) {
+                std::thread::sleep(std::time::Duration::from_millis(1));
             }
         }
         world.chunk_ops(key)

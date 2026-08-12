@@ -1097,10 +1097,12 @@ fn ribbon_bed_ops(a: Vec2, b: Vec2, half_w: f32, levels: [f32; 2], out: &mut Vec
     }
 }
 
-/// Patches of one emit instance overlapping the world box `[min, max]`,
-/// filtered to elements that touch it. Local: reads only the index cells
-/// within `ELEM_PAD_M` of the box.
-pub fn patches_in(mgr: &LayerGraph, instance: &str, min: Vec3, max: Vec3) -> PatchSet {
+/// The index cells a `[min, max]` query has to read.
+///
+/// One definition, because [`patches_in`] and [`patches_cover`] must
+/// agree exactly: a coverage test over a smaller box than the read would
+/// declare a chunk ready and then read a tile that is not there.
+fn patch_bounds(min: Vec3, max: Vec3) -> IAabb {
     let pad = ELEM_PAD_M as i32;
     // Real y bounds (volumetric emits bucket per y-row; a planar emit's
     // collapsed axis ignores them), padded like xz and clamped so a
@@ -1109,10 +1111,29 @@ pub fn patches_in(mgr: &LayerGraph, instance: &str, min: Vec3, max: Vec3) -> Pat
     const Y_CLAMP_M: f32 = 16_000.0;
     let y0 = min.y.max(-Y_CLAMP_M) as i32 - pad;
     let y1 = max.y.min(Y_CLAMP_M) as i32 + pad;
-    let bounds = IAabb::new(
+    IAabb::new(
         IVec3::new(min.x as i32 - pad, y0, min.z as i32 - pad),
         IVec3::new(max.x as i32 + pad, y1.max(y0 + 1), max.z as i32 + pad),
-    );
+    )
+}
+
+/// Is every index cell [`patches_in`] would read resident?
+///
+/// PEEKED: an uncovered box here is the question being asked, not a
+/// consumer reading outside its working set, so it must not count against
+/// `reads_missed`.
+pub fn patches_cover(mgr: &LayerGraph, instance: &str, min: Vec3, max: Vec3) -> bool {
+    let _peek = voxel_layers::peek();
+    mgr.view::<EmitPatches>(instance, patch_bounds(min, max))
+        .missing()
+        == 0
+}
+
+/// Patches of one emit instance overlapping the world box `[min, max]`,
+/// filtered to elements that touch it. Local: reads only the index cells
+/// within `ELEM_PAD_M` of the box.
+pub fn patches_in(mgr: &LayerGraph, instance: &str, min: Vec3, max: Vec3) -> PatchSet {
+    let bounds = patch_bounds(min, max);
     let seg_touches = |a: Vec2, b: Vec2, half_w: f32| {
         let lo = a.min(b) - Vec2::splat(half_w);
         let hi = a.max(b) + Vec2::splat(half_w);
