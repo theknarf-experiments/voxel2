@@ -9,16 +9,12 @@ use bevy::{
         primitives::Aabb,
         visibility::{self, VisibilityClass},
     },
-    core_pipeline::core_3d::{Opaque3d, Opaque3dBatchSetKey, Opaque3dBinKey, CORE_3D_DEPTH_FORMAT},
+    core_pipeline::core_3d::{Opaque3d, Opaque3dBatchSetKey, Opaque3dBinKey},
     ecs::{
         query::ROQueryItem,
         system::{lifetimeless::SRes, SystemParamItem},
     },
-    mesh::VertexBufferLayout,
-    pbr::{
-        MeshPipelineKey, MeshPipelineViewLayouts, SetMeshViewBindGroup,
-        SetMeshViewBindingArrayBindGroup,
-    },
+    pbr::{MeshPipelineViewLayouts, SetMeshViewBindGroup, SetMeshViewBindingArrayBindGroup},
     prelude::*,
     render::{
         camera::{DirtySpecializations, PendingQueues},
@@ -30,19 +26,15 @@ use bevy::{
             ViewBinnedRenderPhases,
         },
         render_resource::{
-            binding_types::uniform_buffer, BindGroup, BindGroupEntries, BindGroupLayoutDescriptor,
-            BindGroupLayoutEntries, Buffer, BufferInitDescriptor, BufferUsages, Canonical,
-            ColorTargetState, ColorWrites, CompareFunction, DepthStencilState, FragmentState,
-            IndexFormat, PipelineCache, PrimitiveState, RenderPipeline, RenderPipelineDescriptor,
-            ShaderStages, Specializer, SpecializerKey, TextureFormat, Variants, VertexAttribute,
-            VertexFormat, VertexState, VertexStepMode,
+            BindGroup, BindGroupEntries, BindGroupLayoutDescriptor, Buffer, IndexFormat,
+            PipelineCache, RenderPipeline, Variants,
         },
         renderer::RenderDevice,
         Extract, Render, RenderApp, RenderStartup, RenderSystems,
     },
 };
 use bytemuck::{Pod, Zeroable};
-use voxel_render::{ScatterPoint, ScatterPoints};
+use voxel_render::ScatterPoints;
 
 /// Marker entity anchoring one world's grass draw.
 ///
@@ -181,7 +173,7 @@ struct GrassBuffers {
 #[derive(Resource)]
 struct GrassPipeline {
     layout: BindGroupLayoutDescriptor,
-    variants: Variants<RenderPipeline, GrassSpecializer>,
+    variants: Variants<RenderPipeline, crate::instanced::PropSpecializer>,
 }
 
 #[derive(Resource, Default)]
@@ -234,106 +226,23 @@ fn init_grass_pipeline(
     asset_server: Res<AssetServer>,
     mut buffers: ResMut<GrassBuffers>,
 ) {
-    // Static tuft geometry.
     let (verts, indices) = build_tuft();
-    buffers.tuft_vertices = Some(
-        render_device.create_buffer_with_data(&BufferInitDescriptor {
-            label: Some("grass_tuft_vertices"),
-            contents: bytemuck::cast_slice(&verts),
-            usage: BufferUsages::VERTEX,
-        }),
-    );
-    buffers.tuft_indices = Some(
-        render_device.create_buffer_with_data(&BufferInitDescriptor {
-            label: Some("grass_tuft_indices"),
-            contents: bytemuck::cast_slice(&indices),
-            usage: BufferUsages::INDEX,
-        }),
-    );
-    buffers.tuft_index_count = indices.len() as u32;
+    let mesh = crate::instanced::upload_mesh(&render_device, "grass", &verts, &indices);
+    buffers.tuft_vertices = Some(mesh.vertices);
+    buffers.tuft_indices = Some(mesh.indices);
+    buffers.tuft_index_count = mesh.index_count;
 
-    // Groups 0/1 are Bevy's view bind group (see `pbr_view`); ours is the
-    // per-mesh slot at 2 and carries only look parameters — grass takes
-    // its light from the app's lights like any other surface.
-    let layout = BindGroupLayoutDescriptor::new(
-        "grass_layout",
-        &BindGroupLayoutEntries::sequential(
-            ShaderStages::VERTEX_FRAGMENT,
-            (uniform_buffer::<GrassEnv>(false),),
-        ),
-    );
     let shader: Handle<Shader> = load_embedded_asset!(asset_server.as_ref(), "voxel_grass.wgsl");
-    let base_descriptor = RenderPipelineDescriptor {
-        label: Some("grass_draw".into()),
-        // Groups 0/1 are replaced per key by the specializer.
-        layout: vec![layout.clone(), layout.clone(), layout.clone()],
-        vertex: VertexState {
-            shader: shader.clone(),
-            entry_point: Some("vertex".into()),
-            buffers: vec![
-                VertexBufferLayout {
-                    array_stride: std::mem::size_of::<BladeVertex>() as u64,
-                    step_mode: VertexStepMode::Vertex,
-                    attributes: vec![
-                        VertexAttribute {
-                            format: VertexFormat::Float32x3,
-                            offset: 0,
-                            shader_location: 0,
-                        },
-                        VertexAttribute {
-                            format: VertexFormat::Float32,
-                            offset: 12,
-                            shader_location: 1,
-                        },
-                    ],
-                },
-                VertexBufferLayout {
-                    array_stride: std::mem::size_of::<ScatterPoint>() as u64,
-                    step_mode: VertexStepMode::Instance,
-                    attributes: vec![
-                        VertexAttribute {
-                            format: VertexFormat::Float32x3,
-                            offset: 0,
-                            shader_location: 2,
-                        },
-                        VertexAttribute {
-                            format: VertexFormat::Uint32,
-                            offset: 12,
-                            shader_location: 3,
-                        },
-                    ],
-                },
-            ],
-            ..default()
-        },
-        fragment: Some(FragmentState {
-            shader,
-            entry_point: Some("fragment".into()),
-            targets: vec![Some(ColorTargetState {
-                format: TextureFormat::Rgba8UnormSrgb,
-                blend: None,
-                write_mask: ColorWrites::ALL,
-            })],
-            ..default()
-        }),
-        depth_stencil: Some(DepthStencilState {
-            format: CORE_3D_DEPTH_FORMAT,
-            depth_write_enabled: Some(true),
-            depth_compare: Some(CompareFunction::GreaterEqual),
-            stencil: default(),
-            bias: default(),
-        }),
-        // Blades are visible from both sides.
-        primitive: PrimitiveState {
-            cull_mode: None,
-            ..default()
-        },
-        ..default()
-    };
+    let (layout, base_descriptor) = crate::instanced::prop_pipeline::<GrassEnv>(
+        "grass_layout",
+        "grass_draw",
+        shader,
+        std::mem::size_of::<BladeVertex>() as u64,
+    );
     commands.insert_resource(GrassPipeline {
         layout,
         variants: Variants::new(
-            GrassSpecializer {
+            crate::instanced::PropSpecializer {
                 view_layouts: view_layouts.clone(),
             },
             base_descriptor,
@@ -356,26 +265,6 @@ fn extract_grass_instances(
 }
 
 // --- drawing -----------------------------------------------------------------
-
-struct GrassSpecializer {
-    view_layouts: MeshPipelineViewLayouts,
-}
-
-#[derive(Copy, Clone, PartialEq, Eq, Hash, SpecializerKey)]
-struct GrassKey(MeshPipelineKey);
-
-impl Specializer<RenderPipeline> for GrassSpecializer {
-    type Key = GrassKey;
-
-    fn specialize(
-        &self,
-        key: Self::Key,
-        descriptor: &mut RenderPipelineDescriptor,
-    ) -> Result<Canonical<Self::Key>, BevyError> {
-        voxel_render::pbr_view::specialize_for_view(&self.view_layouts, key.0, descriptor);
-        Ok(key)
-    }
-}
 
 #[derive(Default, Deref, DerefMut, Resource)]
 struct PendingGrassQueues(PendingQueues);
@@ -467,7 +356,7 @@ fn queue_grass(
         ) {
             let Ok(pipeline_id) = pipeline
                 .variants
-                .specialize(&pipeline_cache, GrassKey(mesh_key))
+                .specialize(&pipeline_cache, crate::instanced::PropKey(mesh_key))
             else {
                 continue;
             };

@@ -59,6 +59,7 @@ pub struct WorldScenes(pub bevy::platform::collections::HashMap<voxel_engine::Wo
 
 mod grass;
 mod impostors;
+mod instanced;
 mod instancing;
 mod planning;
 mod portal;

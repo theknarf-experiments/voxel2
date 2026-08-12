@@ -447,6 +447,17 @@ pub struct RegionCtx<'a> {
 }
 
 impl RegionCtx<'_> {
+    /// The instance this node's `source` port names.
+    ///
+    /// `expect` rather than an `Option`: the compiler checks every port
+    /// is wired before any layer registers, so a missing one is a bug in
+    /// the compiler and not something a level can write.
+    pub fn source(&self) -> String {
+        self.wired("source")
+            .expect("the source port is checked")
+            .to_string()
+    }
+
     /// What a port is wired to.
     pub fn wired(&self, port: &str) -> Option<&str> {
         match self.wires.get(port)? {
@@ -565,10 +576,7 @@ impl RegionLayer for Connect {
             slope_penalty,
             step_m,
         } = self.clone();
-        let source = ctx
-            .wired("source")
-            .expect("the source port is checked")
-            .to_string();
+        let source = ctx.source();
         let name = ctx.name.to_string();
         mgr.register_as(
             &name,
@@ -593,10 +601,7 @@ impl RegionLayer for Flow {
             max_steps,
             max_spill_rise,
         } = self.clone();
-        let source = ctx
-            .wired("source")
-            .expect("the source port is checked")
-            .to_string();
+        let source = ctx.source();
         let name = ctx.name.to_string();
         mgr.register_as(
             &name,
@@ -620,10 +625,7 @@ impl RegionLayer for Worm {
             radius,
             burial_radii,
         } = self.clone();
-        let source = ctx
-            .wired("source")
-            .expect("the source port is checked")
-            .to_string();
+        let source = ctx.source();
         let name = ctx.name.to_string();
         mgr.register_as(
             &name,
@@ -677,10 +679,7 @@ impl RegionLayer for Connect3 {
             cell_y_m,
             reach_m,
         } = self.clone();
-        let source = ctx
-            .wired("source")
-            .expect("the source port is checked")
-            .to_string();
+        let source = ctx.source();
         let name = ctx.name.to_string();
         mgr.register_as(
             &name,
@@ -705,10 +704,7 @@ impl RegionLayer for Emit {
             emit,
             ..
         } = self.clone();
-        let source = ctx
-            .wired("source")
-            .expect("the source port is checked")
-            .to_string();
+        let source = ctx.source();
         let name = ctx.name.to_string();
         mgr.register_as(
             &name,
