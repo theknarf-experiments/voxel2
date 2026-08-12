@@ -135,6 +135,18 @@ pub fn on_typed(
     });
 }
 
+/// The rows a drag can land on.
+type DragRows<'w, 's> = Query<
+    'w,
+    's,
+    (
+        &'static FieldPath,
+        &'static DragsNum,
+        Option<&'static WritesNum>,
+        Has<CommitOnRelease>,
+    ),
+>;
+
 /// A number was dragged sideways.
 ///
 /// The value is `from + distance * speed`, where the distance is the
@@ -142,49 +154,47 @@ pub fn on_typed(
 /// it drift away from the pointer, the way accumulating deltas would.
 pub fn on_drag(
     drag: On<Pointer<Drag>>,
-    rows: Query<(
-        &FieldPath,
-        &DragsNum,
-        Option<&WritesNum>,
-        Has<CommitOnRelease>,
-    )>,
+    rows: DragRows,
     state: Res<EditorState>,
     mut pending: ResMut<Pending>,
 ) {
-    let Ok((FieldPath(path), drags, num, on_release)) = rows.get(drag.event_target()) else {
-        return;
-    };
-    // A field that restreams the world waits for the pointer to be let
-    // go; dragging it would rebuild the streamed world once a frame.
-    if on_release {
-        return;
-    }
-    pending
-        .0
-        .push(dragged(&state, path, drags, num, drag.distance.x));
+    queue_drag(&drag, drag.distance.x, false, &rows, &state, &mut pending);
 }
 
 /// The end of a drag, for the fields that wait for it.
 pub fn on_drag_done(
     drag: On<Pointer<DragEnd>>,
-    rows: Query<(
-        &FieldPath,
-        &DragsNum,
-        Option<&WritesNum>,
-        Has<CommitOnRelease>,
-    )>,
+    rows: DragRows,
     state: Res<EditorState>,
     mut pending: ResMut<Pending>,
+) {
+    queue_drag(&drag, drag.distance.x, true, &rows, &state, &mut pending);
+}
+
+/// Queue the edit a drag implies, for the rows that commit at this phase.
+///
+/// `at_release` says which half of a drag the caller observes. The two
+/// halves partition the rows and must keep partitioning them: a field
+/// that restreams the world waits for the pointer to be let go, because
+/// dragging it live would rebuild the streamed world once a frame — and
+/// every other field would never move if it waited. That is one rule,
+/// `on_release == at_release`, and it used to be two guards that had to
+/// stay each other's exact complement.
+fn queue_drag<E: bevy::ecs::event::EntityEvent>(
+    drag: &On<E>,
+    distance: f32,
+    at_release: bool,
+    rows: &DragRows,
+    state: &EditorState,
+    pending: &mut Pending,
 ) {
     let Ok((FieldPath(path), drags, num, on_release)) = rows.get(drag.event_target()) else {
         return;
     };
-    if !on_release {
+    if on_release != at_release {
         return;
     }
-    pending
-        .0
-        .push(dragged(&state, path, drags, num, drag.distance.x));
+    pending.0.push(dragged(state, path, drags, num, distance));
 }
 
 fn dragged(

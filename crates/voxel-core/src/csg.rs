@@ -31,52 +31,43 @@ pub struct CsgOp {
 
 impl CsgOp {
     pub fn boxy(center: Vec3, half: Vec3, yaw: f32, material: u32, cut: bool) -> Self {
-        Self {
-            center: center.to_array(),
-            kind: if cut {
-                CSG_KIND_BOX_CUT
-            } else {
-                CSG_KIND_BOX_ADD
-            },
-            half: half.to_array(),
-            material,
-            yaw,
-            blend: 0.0,
-            _pad: [0; 2],
-        }
+        Self::of(CSG_KIND_BOX_ADD, center, half, material, cut).yaw(yaw)
     }
 
     pub fn cylinder(center: Vec3, radius: f32, half_height: f32, material: u32, cut: bool) -> Self {
-        Self {
-            center: center.to_array(),
-            kind: if cut {
-                CSG_KIND_CYLINDER_CUT
-            } else {
-                CSG_KIND_CYLINDER_ADD
-            },
-            half: [radius, half_height, radius],
-            material,
-            yaw: 0.0,
-            blend: 0.0,
-            _pad: [0; 2],
-        }
+        let half = Vec3::new(radius, half_height, radius);
+        Self::of(CSG_KIND_CYLINDER_ADD, center, half, material, cut)
     }
 
     /// Sphere: `half.x` = radius (spheres ignore yaw).
     pub fn sphere(center: Vec3, radius: f32, material: u32, cut: bool) -> Self {
+        Self::of(
+            CSG_KIND_SPHERE_ADD,
+            center,
+            Vec3::splat(radius),
+            material,
+            cut,
+        )
+    }
+
+    /// The shared body of the three constructors. `add` is the ADD kind;
+    /// every cut kind is its successor, which is also what `apply` and the
+    /// WGSL twin rely on when they test `kind & 1`.
+    fn of(add: u32, center: Vec3, half: Vec3, material: u32, cut: bool) -> Self {
         Self {
             center: center.to_array(),
-            kind: if cut {
-                CSG_KIND_SPHERE_CUT
-            } else {
-                CSG_KIND_SPHERE_ADD
-            },
-            half: [radius; 3],
+            kind: add + u32::from(cut),
+            half: half.to_array(),
             material,
             yaw: 0.0,
             blend: 0.0,
             _pad: [0; 2],
         }
+    }
+
+    fn yaw(mut self, yaw: f32) -> Self {
+        self.yaw = yaw;
+        self
     }
 
     /// Signed distance to this op's primitive (mirrors the WGSL `op_sdf`).

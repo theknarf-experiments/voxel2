@@ -333,33 +333,7 @@ pub fn resident_clamped(config: &LodConfig, anchor: DVec3, key: ChunkKey) -> boo
 /// The count barely moves with the anchor (the field is radial and the
 /// top ring recentres), so one sample is representative.
 pub fn resident_count(config: &LodConfig, anchor: DVec3) -> usize {
-    fn descend(config: &LodConfig, anchor: DVec3, key: ChunkKey, out: &mut usize) {
-        if key.level > 0 && split_clamped(config, anchor, key) {
-            for child in key.children() {
-                descend(config, anchor, child, out);
-            }
-        } else {
-            *out += 1;
-        }
-    }
-    let top_edge = ChunkKey::new(config.max_level, IVec3::ZERO).edge_m();
-    let cx = (anchor.x / top_edge).floor() as i32;
-    let cz = (anchor.z / top_edge).floor() as i32;
-    let mut count = 0;
-    for dz in -config.top_radius..=config.top_radius {
-        for dx in -config.top_radius..=config.top_radius {
-            for y in config.top_y.0..=config.top_y.1 {
-                let cell = IVec3::new(cx + dx, y, cz + dz);
-                descend(
-                    config,
-                    anchor,
-                    ChunkKey::new(config.max_level, cell),
-                    &mut count,
-                );
-            }
-        }
-    }
-    count
+    count_leaves(config, anchor, &|_| true)
 }
 
 /// How many resident chunks could actually hold a mesh.
@@ -377,18 +351,29 @@ pub fn meshable_count(
     generator: &voxel_worldgen::Generator,
     anchor: DVec3,
 ) -> usize {
+    count_leaves(config, anchor, &|key| can_hold_surface(generator, key))
+}
+
+/// The resident leaf set, counted by descending the field, keeping the
+/// leaves `keep` accepts.
+///
+/// One walk rather than two: residency and meshability differ only in
+/// what they do at a leaf, and both claim to be the set the LOD graph
+/// will ask for. Two copies of the descent are two chances for one of
+/// them to stop being that.
+fn count_leaves(config: &LodConfig, anchor: DVec3, keep: &dyn Fn(ChunkKey) -> bool) -> usize {
     fn descend(
         config: &LodConfig,
-        generator: &voxel_worldgen::Generator,
         anchor: DVec3,
         key: ChunkKey,
+        keep: &dyn Fn(ChunkKey) -> bool,
         out: &mut usize,
     ) {
         if key.level > 0 && split_clamped(config, anchor, key) {
             for child in key.children() {
-                descend(config, generator, anchor, child, out);
+                descend(config, anchor, child, keep, out);
             }
-        } else if can_hold_surface(generator, key) {
+        } else if keep(key) {
             *out += 1;
         }
     }
@@ -402,9 +387,9 @@ pub fn meshable_count(
                 let cell = IVec3::new(cx + dx, y, cz + dz);
                 descend(
                     config,
-                    generator,
                     anchor,
                     ChunkKey::new(config.max_level, cell),
+                    keep,
                     &mut count,
                 );
             }
@@ -784,22 +769,8 @@ mod residency_shape {
         if level == config.max_level {
             return top_ring(config, anchor);
         }
-        let edge = ChunkKey::new(level, IVec3::ZERO).edge_m();
         let reach = resident_reach(config, level);
-        let lo = ((anchor - DVec3::splat(reach)) / edge).floor();
-        let hi = ((anchor + DVec3::splat(reach)) / edge).ceil();
-        let mut out = HashSet::new();
-        for z in lo.z as i32..hi.z as i32 {
-            for y in lo.y as i32..hi.y as i32 {
-                for x in lo.x as i32..hi.x as i32 {
-                    let key = ChunkKey::new(level, IVec3::new(x, y, z));
-                    if resident_at(config, anchor, key) {
-                        out.insert(key);
-                    }
-                }
-            }
-        }
-        out
+        keys_within(anchor, level, reach, |key| resident_at(config, anchor, key))
     }
 
     /// The field predicate WITHOUT the clamp, kept only to measure what
@@ -824,22 +795,10 @@ mod residency_shape {
     /// One predicate covers every level, the top one included: outside the
     /// ring there is no world.
     fn resident_level_clamped(config: &LodConfig, anchor: DVec3, level: u8) -> HashSet<ChunkKey> {
-        let edge = ChunkKey::new(level, IVec3::ZERO).edge_m();
         let reach = resident_reach(config, level);
-        let lo = ((anchor - DVec3::splat(reach)) / edge).floor();
-        let hi = ((anchor + DVec3::splat(reach)) / edge).ceil();
-        let mut out = HashSet::new();
-        for z in lo.z as i32..hi.z as i32 {
-            for y in lo.y as i32..hi.y as i32 {
-                for x in lo.x as i32..hi.x as i32 {
-                    let key = ChunkKey::new(level, IVec3::new(x, y, z));
-                    if resident_clamped(config, anchor, key) {
-                        out.insert(key);
-                    }
-                }
-            }
-        }
-        out
+        keys_within(anchor, level, reach, |key| {
+            resident_clamped(config, anchor, key)
+        })
     }
 
     /// Chunks a box-with-hole top dependency would hold, the sizing the
@@ -854,19 +813,33 @@ mod residency_shape {
         } else {
             config.split_k * edge
         };
-        let outer = 2.0 * config.merge_k * edge;
-        let lo = ((anchor - DVec3::splat(outer)) / edge).floor();
-        let hi = ((anchor + DVec3::splat(outer)) / edge).ceil();
+        keys_within(anchor, level, 2.0 * config.merge_k * edge, |key| {
+            let min = key.min_corner_m();
+            let max = min + DVec3::splat(edge);
+            let in_hole = min.cmpge(anchor - DVec3::splat(hole)).all()
+                && max.cmple(anchor + DVec3::splat(hole)).all();
+            !in_hole
+        })
+    }
+
+    /// Every key of one level within `reach` metres of the anchor that
+    /// `keep` accepts. The three shapes above differ only in `keep`; the
+    /// box they scan is the same arithmetic three times over.
+    fn keys_within(
+        anchor: DVec3,
+        level: u8,
+        reach: f64,
+        keep: impl Fn(ChunkKey) -> bool,
+    ) -> HashSet<ChunkKey> {
+        let edge = ChunkKey::new(level, IVec3::ZERO).edge_m();
+        let lo = ((anchor - DVec3::splat(reach)) / edge).floor();
+        let hi = ((anchor + DVec3::splat(reach)) / edge).ceil();
         let mut out = HashSet::new();
         for z in lo.z as i32..hi.z as i32 {
             for y in lo.y as i32..hi.y as i32 {
                 for x in lo.x as i32..hi.x as i32 {
                     let key = ChunkKey::new(level, IVec3::new(x, y, z));
-                    let min = key.min_corner_m();
-                    let max = min + DVec3::splat(edge);
-                    let in_hole = min.cmpge(anchor - DVec3::splat(hole)).all()
-                        && max.cmple(anchor + DVec3::splat(hole)).all();
-                    if !in_hole {
+                    if keep(key) {
                         out.insert(key);
                     }
                 }

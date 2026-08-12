@@ -52,6 +52,40 @@ impl Node for Region {
     }
 }
 
+/// One op node: its kind name, the op it compiles to, and how its fields
+/// pack into that op's parameter words. Eighteen of these were the same
+/// thirteen lines of `impl` around a single expression.
+///
+/// The destructure is exhaustive ON PURPOSE, and stays a pattern rather
+/// than becoming `self.field` accesses: a field added to the struct and
+/// not named here fails to compile, instead of quietly becoming a level
+/// parameter the world ignores.
+///
+/// `field_slot` is always in scope and always discarded first, so the
+/// ops that need it (`field`) and the ops that do not read the same.
+macro_rules! op_node {
+    // The op does not care which field slot it was assigned — all but one.
+    ($name:ident, $kind:literal, $op:ident, { $($pat:tt)* } => $build:expr) => {
+        op_node!($name, $kind, $op, _slot, { $($pat)* } => $build);
+    };
+    // The op packs the slot, so the caller names it (macro hygiene: a
+    // binding this macro introduced would not be visible in `$build`).
+    ($name:ident, $kind:literal, $op:ident, $slot:ident, { $($pat:tt)* } => $build:expr) => {
+        impl Node for $name {
+            fn kind(&self) -> &'static str {
+                $kind
+            }
+            fn ports(&self) -> Ports {
+                opgen::ports($op).unwrap_or((&[], &[]))
+            }
+            fn op(&self, $slot: u32) -> Option<WorldOp> {
+                let Self { $($pat)* } = *self;
+                Some($build)
+            }
+        }
+    };
+}
+
 /// An origin: the register file's initial state, which emits no op.
 ///
 /// They exist so "every input is named" has no exception at the start of a
@@ -112,29 +146,10 @@ pub struct HeightFbm {
     pub mode: NoiseModeDef,
 }
 
-impl Node for HeightFbm {
-    fn kind(&self) -> &'static str {
-        "height_fbm"
-    }
-    fn ports(&self) -> Ports {
-        opgen::ports(WOP_HEIGHT_FBM).unwrap_or((&[], &[]))
-    }
-    fn op(&self, field_slot: u32) -> Option<WorldOp> {
-        let _ = field_slot;
-        let Self {
-            offset,
-            scale,
-            amp,
-            octaves,
-            mode,
-        } = *self;
-        Some(
-            WorldOp::new(WOP_HEIGHT_FBM)
-                .p0([offset[0], offset[1], scale, amp])
-                .p1([octaves as f32, mode as u32 as f32, 0.0, 0.0]),
-        )
-    }
-}
+op_node!(HeightFbm, "height_fbm", WOP_HEIGHT_FBM, { offset, scale, amp, octaves, mode } =>
+    WorldOp::new(WOP_HEIGHT_FBM)
+        .p0([offset[0], offset[1], scale, amp])
+        .p1([octaves as f32, mode as u32 as f32, 0.0, 0.0]));
 
 /// Domain-warp the XZ coordinate later height ops sample (swirled
 /// coastlines, eroded-looking ridges).
@@ -149,28 +164,10 @@ pub struct WarpXz {
     pub octaves: u32,
 }
 
-impl Node for WarpXz {
-    fn kind(&self) -> &'static str {
-        "warp_xz"
-    }
-    fn ports(&self) -> Ports {
-        opgen::ports(WOP_WARP_XZ).unwrap_or((&[], &[]))
-    }
-    fn op(&self, field_slot: u32) -> Option<WorldOp> {
-        let _ = field_slot;
-        let Self {
-            offset,
-            scale,
-            amp,
-            octaves,
-        } = *self;
-        Some(
-            WorldOp::new(WOP_WARP_XZ)
-                .p0([scale, amp, offset[0], offset[1]])
-                .p1([octaves as f32, 0.0, 0.0, 0.0]),
-        )
-    }
-}
+op_node!(WarpXz, "warp_xz", WOP_WARP_XZ, { offset, scale, amp, octaves } =>
+    WorldOp::new(WOP_WARP_XZ)
+        .p0([scale, amp, offset[0], offset[1]])
+        .p1([octaves as f32, 0.0, 0.0, 0.0]));
 
 /// Anisotropic 3D noise solid: union it in (floating islands, mesas)
 /// or carve it out (caves, overhangs).
@@ -196,39 +193,18 @@ pub struct Fbm3 {
     pub material: u32,
 }
 
-impl Node for Fbm3 {
-    fn kind(&self) -> &'static str {
-        "fbm3"
-    }
-    fn ports(&self) -> Ports {
-        opgen::ports(WOP_FBM3).unwrap_or((&[], &[]))
-    }
-    fn op(&self, field_slot: u32) -> Option<WorldOp> {
-        let _ = field_slot;
-        let Self {
-            scale,
-            y_ratio,
-            octaves,
-            threshold,
-            width,
-            offset,
-            carve,
-            material,
-        } = *self;
-        Some(
-            WorldOp::new(WOP_FBM3)
-                .material(material)
-                .p0([scale, scale * y_ratio, threshold, width])
-                .p1([
-                    offset[0],
-                    offset[1],
-                    offset[2],
-                    if carve { 1.0 } else { 0.0 },
-                ])
-                .p2([octaves as f32, 0.0, 0.0, 0.0]),
-        )
-    }
-}
+op_node!(Fbm3, "fbm3", WOP_FBM3,
+    { scale, y_ratio, octaves, threshold, width, offset, carve, material } =>
+    WorldOp::new(WOP_FBM3)
+        .material(material)
+        .p0([scale, scale * y_ratio, threshold, width])
+        .p1([
+    offset[0],
+    offset[1],
+    offset[2],
+    if carve { 1.0 } else { 0.0 },
+    ])
+        .p2([octaves as f32, 0.0, 0.0, 0.0]));
 
 /// Constant meters added to the height register.
 #[derive(Reflect, Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
@@ -237,19 +213,8 @@ pub struct HeightOffset {
     value: f32,
 }
 
-impl Node for HeightOffset {
-    fn kind(&self) -> &'static str {
-        "height_offset"
-    }
-    fn ports(&self) -> Ports {
-        opgen::ports(WOP_HEIGHT_OFFSET).unwrap_or((&[], &[]))
-    }
-    fn op(&self, field_slot: u32) -> Option<WorldOp> {
-        let _ = field_slot;
-        let Self { value } = *self;
-        Some(WorldOp::new(WOP_HEIGHT_OFFSET).p0([value, 0.0, 0.0, 0.0]))
-    }
-}
+op_node!(HeightOffset, "height_offset", WOP_HEIGHT_OFFSET, { value } =>
+    WorldOp::new(WOP_HEIGHT_OFFSET).p0([value, 0.0, 0.0, 0.0]));
 
 /// Cliff step: terrain crossing the `[start, end]` altitude band grows
 /// an `amp`-meter wall (iq's Rainforest cliff term).
@@ -261,19 +226,8 @@ pub struct HeightStep {
     amp: f32,
 }
 
-impl Node for HeightStep {
-    fn kind(&self) -> &'static str {
-        "height_step"
-    }
-    fn ports(&self) -> Ports {
-        opgen::ports(WOP_HEIGHT_STEP).unwrap_or((&[], &[]))
-    }
-    fn op(&self, field_slot: u32) -> Option<WorldOp> {
-        let _ = field_slot;
-        let Self { start, end, amp } = *self;
-        Some(WorldOp::new(WOP_HEIGHT_STEP).p0([start, end, amp, 0.0]))
-    }
-}
+op_node!(HeightStep, "height_step", WOP_HEIGHT_STEP, { start, end, amp } =>
+    WorldOp::new(WOP_HEIGHT_STEP).p0([start, end, amp, 0.0]));
 
 /// Accumulate an FBM band into a field register: named world data for
 /// spawner densities and gameplay queries (never the SDF itself).
@@ -291,29 +245,10 @@ pub struct Field {
     pub bias: f32,
 }
 
-impl Node for Field {
-    fn kind(&self) -> &'static str {
-        "field"
-    }
-    fn ports(&self) -> Ports {
-        opgen::ports(WOP_FIELD).unwrap_or((&[], &[]))
-    }
-    fn op(&self, field_slot: u32) -> Option<WorldOp> {
-        let Self {
-            offset,
-            scale,
-            amp,
-            octaves,
-            mode,
-            bias,
-        } = *self;
-        Some(
-            WorldOp::new(WOP_FIELD)
-                .p0([offset[0], offset[1], scale, amp])
-                .p1([octaves as f32, mode as u32 as f32, field_slot as f32, bias]),
-        )
-    }
-}
+op_node!(Field, "field", WOP_FIELD, field_slot, { offset, scale, amp, octaves, mode, bias } =>
+    WorldOp::new(WOP_FIELD)
+        .p0([offset[0], offset[1], scale, amp])
+        .p1([octaves as f32, mode as u32 as f32, field_slot as f32, bias]));
 
 /// Sample the two region axes every band op in this program tests.
 /// Must come before them; in practice, first.
@@ -329,27 +264,10 @@ pub struct RegionAxes {
     pub octaves: u32,
 }
 
-impl Node for RegionAxes {
-    fn kind(&self) -> &'static str {
-        "region_axes"
-    }
-    fn ports(&self) -> Ports {
-        opgen::ports(WOP_REGION_AXES).unwrap_or((&[], &[]))
-    }
-    fn op(&self, field_slot: u32) -> Option<WorldOp> {
-        let _ = field_slot;
-        let Self {
-            scale,
-            offset,
-            octaves,
-        } = *self;
-        Some(
-            WorldOp::new(WOP_REGION_AXES)
-                .p0([offset[0], offset[1], scale[0], scale[1]])
-                .p1([offset[2], offset[3], octaves as f32, 0.0]),
-        )
-    }
-}
+op_node!(RegionAxes, "region_axes", WOP_REGION_AXES, { scale, offset, octaves } =>
+    WorldOp::new(WOP_REGION_AXES)
+        .p0([offset[0], offset[1], scale[0], scale[1]])
+        .p1([offset[2], offset[3], octaves as f32, 0.0]));
 
 /// Add terrain shaped by a region: dunes in one, ridges in another.
 ///
@@ -384,39 +302,17 @@ pub struct HeightBandFbm {
     pub feather: Option<f32>,
 }
 
-impl Node for HeightBandFbm {
-    fn kind(&self) -> &'static str {
-        "height_band_fbm"
-    }
-    fn ports(&self) -> Ports {
-        opgen::ports(WOP_HEIGHT_BAND_FBM).unwrap_or((&[], &[]))
-    }
-    fn op(&self, field_slot: u32) -> Option<WorldOp> {
-        let _ = field_slot;
-        let Self {
-            a,
-            b,
-            offset,
-            scale,
-            amp,
-            octaves,
-            mode,
-            lift,
-            feather,
-        } = *self;
-        Some(
-            WorldOp::new(WOP_HEIGHT_BAND_FBM)
-                .p0([offset[0], offset[1], scale, amp])
-                .p1([
-                    octaves as f32,
-                    mode as u32 as f32,
-                    feather.unwrap_or_else(|| voxel_worldgen::program::band_feather(a)),
-                    lift,
-                ])
-                .p2([a[0], a[1], b[0], b[1]]),
-        )
-    }
-}
+op_node!(HeightBandFbm, "height_band_fbm", WOP_HEIGHT_BAND_FBM,
+    { a, b, offset, scale, amp, octaves, mode, lift, feather } =>
+    WorldOp::new(WOP_HEIGHT_BAND_FBM)
+        .p0([offset[0], offset[1], scale, amp])
+        .p1([
+    octaves as f32,
+    mode as u32 as f32,
+    feather.unwrap_or_else(|| voxel_worldgen::program::band_feather(a)),
+    lift,
+    ])
+        .p2([a[0], a[1], b[0], b[1]]));
 
 /// Repaint the surface material inside a band of two noise axes.
 ///
@@ -440,29 +336,11 @@ pub struct MaterialBand {
     pub b: [f32; 2],
 }
 
-impl Node for MaterialBand {
-    fn kind(&self) -> &'static str {
-        "material_band"
-    }
-    fn ports(&self) -> Ports {
-        opgen::ports(WOP_MATERIAL_BAND).unwrap_or((&[], &[]))
-    }
-    fn op(&self, field_slot: u32) -> Option<WorldOp> {
-        let _ = field_slot;
-        let Self {
-            from,
-            material,
-            a,
-            b,
-        } = *self;
-        Some(
-            WorldOp::new(WOP_MATERIAL_BAND)
-                .material(material)
-                .p0([a[0], a[1], b[0], b[1]])
-                .p1([0.0, 0.0, from as f32, 0.0]),
-        )
-    }
-}
+op_node!(MaterialBand, "material_band", WOP_MATERIAL_BAND, { from, material, a, b } =>
+    WorldOp::new(WOP_MATERIAL_BAND)
+        .material(material)
+        .p0([a[0], a[1], b[0], b[1]])
+        .p1([0.0, 0.0, from as f32, 0.0]));
 
 /// Turn the accumulated height into ground.
 #[derive(Reflect, Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
@@ -473,19 +351,8 @@ pub struct HeightSurface {
     pub material: u32,
 }
 
-impl Node for HeightSurface {
-    fn kind(&self) -> &'static str {
-        "height_surface"
-    }
-    fn ports(&self) -> Ports {
-        opgen::ports(WOP_HEIGHT_SURFACE).unwrap_or((&[], &[]))
-    }
-    fn op(&self, field_slot: u32) -> Option<WorldOp> {
-        let _ = field_slot;
-        let Self { material } = *self;
-        Some(WorldOp::new(WOP_HEIGHT_SURFACE).material(material))
-    }
-}
+op_node!(HeightSurface, "height_surface", WOP_HEIGHT_SURFACE, { material } =>
+    WorldOp::new(WOP_HEIGHT_SURFACE).material(material));
 
 /// Solid mass at coarse LODs (the structure reads as filled from afar).
 #[derive(Reflect, Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
@@ -496,23 +363,10 @@ pub struct CoarseSolid {
     pub material: u32,
 }
 
-impl Node for CoarseSolid {
-    fn kind(&self) -> &'static str {
-        "coarse_solid"
-    }
-    fn ports(&self) -> Ports {
-        opgen::ports(WOP_COARSE_SOLID).unwrap_or((&[], &[]))
-    }
-    fn op(&self, field_slot: u32) -> Option<WorldOp> {
-        let _ = field_slot;
-        let Self { material } = *self;
-        Some(
-            WorldOp::new(WOP_COARSE_SOLID)
-                .flags(WOP_FLAG_COARSE_ONLY)
-                .material(material),
-        )
-    }
-}
+op_node!(CoarseSolid, "coarse_solid", WOP_COARSE_SOLID, { material } =>
+    WorldOp::new(WOP_COARSE_SOLID)
+        .flags(WOP_FLAG_COARSE_ONLY)
+        .material(material));
 
 /// Establish the structural Y lattice used by slabs/holes/walls/beams.
 ///
@@ -529,23 +383,10 @@ pub struct LatticeY {
     pub lod: LodGateDef,
 }
 
-impl Node for LatticeY {
-    fn kind(&self) -> &'static str {
-        "lattice_y"
-    }
-    fn ports(&self) -> Ports {
-        opgen::ports(WOP_LATTICE_Y).unwrap_or((&[], &[]))
-    }
-    fn op(&self, field_slot: u32) -> Option<WorldOp> {
-        let _ = field_slot;
-        let Self { spacing, lod } = *self;
-        Some(
-            WorldOp::new(WOP_LATTICE_Y)
-                .flags(gate_flags(lod, WOP_FLAG_FINE_ONLY))
-                .p0([spacing, 0.0, 0.0, 0.0]),
-        )
-    }
-}
+op_node!(LatticeY, "lattice_y", WOP_LATTICE_Y, { spacing, lod } =>
+    WorldOp::new(WOP_LATTICE_Y)
+        .flags(gate_flags(lod, WOP_FLAG_FINE_ONLY))
+        .p0([spacing, 0.0, 0.0, 0.0]));
 
 /// Floor slabs on the lattice.
 #[derive(Reflect, Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
@@ -559,28 +400,11 @@ pub struct SlabsY {
     pub lod: LodGateDef,
 }
 
-impl Node for SlabsY {
-    fn kind(&self) -> &'static str {
-        "slabs_y"
-    }
-    fn ports(&self) -> Ports {
-        opgen::ports(WOP_SLABS_Y).unwrap_or((&[], &[]))
-    }
-    fn op(&self, field_slot: u32) -> Option<WorldOp> {
-        let _ = field_slot;
-        let Self {
-            half_thickness,
-            material,
-            lod,
-        } = *self;
-        Some(
-            WorldOp::new(WOP_SLABS_Y)
-                .flags(gate_flags(lod, WOP_FLAG_FINE_ONLY))
-                .material(material)
-                .p0([half_thickness, 0.0, 0.0, 0.0]),
-        )
-    }
-}
+op_node!(SlabsY, "slabs_y", WOP_SLABS_Y, { half_thickness, material, lod } =>
+    WorldOp::new(WOP_SLABS_Y)
+        .flags(gate_flags(lod, WOP_FLAG_FINE_ONLY))
+        .material(material)
+        .p0([half_thickness, 0.0, 0.0, 0.0]));
 
 /// Hash-gated holes cut through the slabs on an XZ grid.
 #[derive(Reflect, Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
@@ -593,29 +417,11 @@ pub struct GridHoles {
     pub lod: LodGateDef,
 }
 
-impl Node for GridHoles {
-    fn kind(&self) -> &'static str {
-        "grid_holes"
-    }
-    fn ports(&self) -> Ports {
-        opgen::ports(WOP_GRID_HOLES).unwrap_or((&[], &[]))
-    }
-    fn op(&self, field_slot: u32) -> Option<WorldOp> {
-        let _ = field_slot;
-        let Self {
-            cell,
-            chance,
-            half,
-            lod,
-        } = *self;
-        Some(
-            WorldOp::new(WOP_GRID_HOLES)
-                .flags(gate_flags(lod, WOP_FLAG_FINE_ONLY))
-                .p0([cell, chance, 0.0, 0.0])
-                .p1([half[0], half[1], half[2], 0.0]),
-        )
-    }
-}
+op_node!(GridHoles, "grid_holes", WOP_GRID_HOLES, { cell, chance, half, lod } =>
+    WorldOp::new(WOP_GRID_HOLES)
+        .flags(gate_flags(lod, WOP_FLAG_FINE_ONLY))
+        .p0([cell, chance, 0.0, 0.0])
+        .p1([half[0], half[1], half[2], 0.0]));
 
 /// Square columns on a jittered XZ grid.
 #[derive(Reflect, Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
@@ -632,30 +438,11 @@ pub struct PillarsXz {
     pub lod: LodGateDef,
 }
 
-impl Node for PillarsXz {
-    fn kind(&self) -> &'static str {
-        "pillars_xz"
-    }
-    fn ports(&self) -> Ports {
-        opgen::ports(WOP_PILLARS_XZ).unwrap_or((&[], &[]))
-    }
-    fn op(&self, field_slot: u32) -> Option<WorldOp> {
-        let _ = field_slot;
-        let Self {
-            spacing,
-            jitter,
-            girth,
-            material,
-            lod,
-        } = *self;
-        Some(
-            WorldOp::new(WOP_PILLARS_XZ)
-                .flags(gate_flags(lod, WOP_FLAG_FINE_ONLY))
-                .material(material)
-                .p0([spacing, jitter, girth[0], girth[1]]),
-        )
-    }
-}
+op_node!(PillarsXz, "pillars_xz", WOP_PILLARS_XZ, { spacing, jitter, girth, material, lod } =>
+    WorldOp::new(WOP_PILLARS_XZ)
+        .flags(gate_flags(lod, WOP_FLAG_FINE_ONLY))
+        .material(material)
+        .p0([spacing, jitter, girth[0], girth[1]]));
 
 /// Hash-gated axis-aligned walls with optional doorways.
 #[derive(Reflect, Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
@@ -678,43 +465,23 @@ pub struct Walls {
     pub lod: LodGateDef,
 }
 
-impl Node for Walls {
-    fn kind(&self) -> &'static str {
-        "walls"
+op_node!(Walls, "walls", WOP_WALLS,
+    { ref axis, spacing, half_thickness, chance, salt, ref door, material, lod } => {
+    let axis_flag = if axis == "z" { 1.0 } else { 0.0 };
+    let mut op = WorldOp::new(WOP_WALLS)
+        .flags(gate_flags(lod, WOP_FLAG_FINE_ONLY))
+        .material(material)
+        .p0([spacing, half_thickness, chance, axis_flag]);
+    if let Some(d) = door {
+        op = op
+            .p1([salt as f32, d.cell, d.chance, d.salt as f32])
+            .p2([d.half[0], d.half[1], d.half[2], d.y]);
+    } else {
+        // No doorways: chance 0 never passes the hash gate.
+        op = op.p1([salt as f32, 1.0, 0.0, 0.0]);
     }
-    fn ports(&self) -> Ports {
-        opgen::ports(WOP_WALLS).unwrap_or((&[], &[]))
-    }
-    fn op(&self, field_slot: u32) -> Option<WorldOp> {
-        let _ = field_slot;
-        let Self {
-            ref axis,
-            spacing,
-            half_thickness,
-            chance,
-            salt,
-            ref door,
-            material,
-            lod,
-        } = *self;
-        Some({
-            let axis_flag = if axis == "z" { 1.0 } else { 0.0 };
-            let mut op = WorldOp::new(WOP_WALLS)
-                .flags(gate_flags(lod, WOP_FLAG_FINE_ONLY))
-                .material(material)
-                .p0([spacing, half_thickness, chance, axis_flag]);
-            if let Some(d) = door {
-                op = op
-                    .p1([salt as f32, d.cell, d.chance, d.salt as f32])
-                    .p2([d.half[0], d.half[1], d.half[2], d.y]);
-            } else {
-                // No doorways: chance 0 never passes the hash gate.
-                op = op.p1([salt as f32, 1.0, 0.0, 0.0]);
-            }
-            op
-        })
-    }
-}
+    op
+});
 
 /// Vertical shaft registers on a jittered XZ grid (cut them with
 /// `shafts_cut`; catwalks with `beams`).
@@ -727,23 +494,8 @@ pub struct ShaftsXz {
     pub radius: [f32; 2],
 }
 
-impl Node for ShaftsXz {
-    fn kind(&self) -> &'static str {
-        "shafts_xz"
-    }
-    fn ports(&self) -> Ports {
-        opgen::ports(WOP_SHAFTS_XZ).unwrap_or((&[], &[]))
-    }
-    fn op(&self, field_slot: u32) -> Option<WorldOp> {
-        let _ = field_slot;
-        let Self {
-            spacing,
-            jitter,
-            radius,
-        } = *self;
-        Some(WorldOp::new(WOP_SHAFTS_XZ).p0([spacing, jitter, radius[0], radius[1]]))
-    }
-}
+op_node!(ShaftsXz, "shafts_xz", WOP_SHAFTS_XZ, { spacing, jitter, radius } =>
+    WorldOp::new(WOP_SHAFTS_XZ).p0([spacing, jitter, radius[0], radius[1]]));
 
 /// Carve the shafts out of everything merged so far.
 #[derive(Reflect, Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
@@ -782,33 +534,12 @@ pub struct Beams {
     pub lod: LodGateDef,
 }
 
-impl Node for Beams {
-    fn kind(&self) -> &'static str {
-        "beams"
-    }
-    fn ports(&self) -> Ports {
-        opgen::ports(WOP_BEAMS).unwrap_or((&[], &[]))
-    }
-    fn op(&self, field_slot: u32) -> Option<WorldOp> {
-        let _ = field_slot;
-        let Self {
-            every,
-            half_width,
-            y,
-            half_height,
-            reach,
-            material,
-            lod,
-        } = *self;
-        Some(
-            WorldOp::new(WOP_BEAMS)
-                .flags(gate_flags(lod, WOP_FLAG_FINE_ONLY))
-                .material(material)
-                .p0([every as f32, half_width, y, half_height])
-                .p1([reach, 0.0, 0.0, 0.0]),
-        )
-    }
-}
+op_node!(Beams, "beams", WOP_BEAMS, { every, half_width, y, half_height, reach, material, lod } =>
+    WorldOp::new(WOP_BEAMS)
+        .flags(gate_flags(lod, WOP_FLAG_FINE_ONLY))
+        .material(material)
+        .p0([every as f32, half_width, y, half_height])
+        .p1([reach, 0.0, 0.0, 0.0]));
 
 /// Put every kind this crate ships in the registry.
 ///

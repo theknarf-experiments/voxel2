@@ -405,21 +405,22 @@ impl RegionPlanner {
         min: bevy::math::Vec2,
         max: bevy::math::Vec2,
     ) -> Vec<[bevy::math::Vec2; 2]> {
-        let (min3, max3) = (
-            Vec3::new(min.x, -FACADE_Y_M, min.y),
-            Vec3::new(max.x, FACADE_Y_M, max.y),
-        );
-        let mut out = Vec::new();
-        if let Some(rt) = &self.graph {
-            let mgr = rt.graph();
-            for e in self.emitters.iter().filter(|e| e.clearance) {
-                out.extend(layers::patches_in(mgr, &e.name, min3, max3).clearance);
-            }
-        }
-        out
+        self.gather(min, max, |e| e.clearance, |p| p.clearance)
     }
 
     pub fn ribbons_in(&self, min: bevy::math::Vec2, max: bevy::math::Vec2) -> Vec<RibbonSeg> {
+        self.gather(min, max, |e| e.ribbons, |p| p.ribbons)
+    }
+
+    /// Collect one kind of patch output from every emitter that produces
+    /// it, over an XZ box taken to the facade's full height.
+    fn gather<T>(
+        &self,
+        min: bevy::math::Vec2,
+        max: bevy::math::Vec2,
+        produces: impl Fn(&Emitter) -> bool,
+        take: impl Fn(voxel_engine::PatchSet) -> Vec<T>,
+    ) -> Vec<T> {
         let (min3, max3) = (
             Vec3::new(min.x, -FACADE_Y_M, min.y),
             Vec3::new(max.x, FACADE_Y_M, max.y),
@@ -427,8 +428,8 @@ impl RegionPlanner {
         let mut out = Vec::new();
         if let Some(rt) = &self.graph {
             let mgr = rt.graph();
-            for e in self.emitters.iter().filter(|e| e.ribbons) {
-                out.extend(layers::patches_in(mgr, &e.name, min3, max3).ribbons);
+            for e in self.emitters.iter().filter(|e| produces(e)) {
+                out.extend(take(layers::patches_in(mgr, &e.name, min3, max3)));
             }
         }
         out
