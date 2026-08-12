@@ -83,9 +83,25 @@ const VERTEX_BYTES: u64 = 12;
 // and drained it before refilling: extra slots only sat empty for longer.
 // Once the LOD pass stopped waiting per level and kept the queue full,
 // the same doubling started paying (`gen_starved` 35 -> 15). The cost is
-// GPU memory — the density and cell arenas are sized from ARENA_SLOTS, so
-// this is ~96 MB more.
-const ARENA_SLOTS: u32 = 512;
+// GPU memory — the density and cell arenas are sized from ARENA_SLOTS.
+//
+// 1024 since the loading budget went to 256. A slot is held from dispatch
+// until the counts come back and the mesh is emitted, and `map_async` may
+// not run until the frame AFTER its copy submits, so the round trip is
+// three frames at best and the arena has to be about three times the
+// budget or generation starves on its own slots. It did: at 512 with a
+// budget of 256, `arena free` hits 0 partway through a load. Planet, 3
+// samples: 512 -> 1.75 s, 1024 -> 1.56, 2048 -> 1.58.
+//
+// It is 368 MB at 1024 against 184 at 512 (density 214 + cells 154). That
+// is the price of the number, and it is the reason to lower the loading
+// budget rather than raise this further if it ever needs to come down.
+static ARENA_SLOTS: std::sync::LazyLock<u32> = std::sync::LazyLock::new(|| {
+    std::env::var("VOXEL_ARENA_SLOTS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(1024)
+});
 const COUNTS_SLOTS: u32 = 512;
 // Per frame, keeping each frame's GPU batch small enough not to blow a
 // ~8 ms vsync slot (spiky batches read as missed-vsync 17 ms frames even
@@ -164,16 +180,25 @@ static MESH_BUDGET: std::sync::LazyLock<usize> =
 /// to be worth protecting for that to be a cost at all. Until the first
 /// chunk is revealed there is no picture: the budget stops being a
 /// question about frames and becomes one about how fast the machine can
-/// be fed. Measured at 96, past which settle stops improving because the
-/// arena and the counts ring are 512 and other things start to bind.
+/// be fed. Planet, 3 samples: 96 -> 1.93 s, 192 -> 1.81, 256 -> 1.68,
+/// 320 -> 1.66, 384 -> 1.70, 448 -> 1.82. Re-measure it after anything
+/// that changes how many chunks a load generates — deepening the prune
+/// cut that by 46% and moved this knee from 96 to 256.
 ///
 /// This is deliberately NOT keyed on `settled`, which is false every time
 /// the camera moves — including the flight the table above was measured
 /// on, which is exactly when 12 is right.
+/// Both are capped at half the counts ring, and that cap is load-bearing
+/// rather than tidy: meshing draws from what generation leaves of it
+/// (`MESH_BUDGET.min(COUNTS_SLOTS - GEN_BUDGET)`), so a generation budget
+/// of `COUNTS_SLOTS` leaves meshing exactly zero and nothing ever
+/// finishes. Measured, by walking into it: 512 settles in 13.5 s against
+/// 1.7 s at 384.
+const LOAD_BUDGET_MAX: usize = COUNTS_SLOTS as usize / 2;
 static LOAD_GEN_BUDGET: std::sync::LazyLock<usize> =
-    std::sync::LazyLock::new(|| env_budget("VOXEL_LOAD_GEN_BUDGET", 96));
+    std::sync::LazyLock::new(|| env_budget("VOXEL_LOAD_GEN_BUDGET", 256).min(LOAD_BUDGET_MAX));
 static LOAD_MESH_BUDGET: std::sync::LazyLock<usize> =
-    std::sync::LazyLock::new(|| env_budget("VOXEL_LOAD_MESH_BUDGET", 96));
+    std::sync::LazyLock::new(|| env_budget("VOXEL_LOAD_MESH_BUDGET", 256).min(LOAD_BUDGET_MAX));
 const STAGING_BUFFERS: usize = 3;
 
 // --- main-world <-> render-world plumbing ------------------------------------
@@ -1316,13 +1341,13 @@ fn init_chunk_resources(
     commands.insert_resource(ChunkGpuResources {
         density_arena: buffer(
             "voxel_density_arena",
-            ARENA_SLOTS as u64 * (SAMPLES as u64).pow(3) * 4,
+            *ARENA_SLOTS as u64 * (SAMPLES as u64).pow(3) * 4,
             BufferUsages::STORAGE,
         ),
         cell_scratch: buffer(
             "voxel_cell_scratch",
             // Cells -1..=32 per axis (seam-free overlap meshing).
-            ARENA_SLOTS as u64 * (CELLS as u64 + 2).pow(3) * 4,
+            *ARENA_SLOTS as u64 * (CELLS as u64 + 2).pow(3) * 4,
             BufferUsages::STORAGE,
         ),
         vertex_slab: buffer(
@@ -1354,7 +1379,7 @@ fn init_chunk_resources(
             usage: BufferUsages::STORAGE,
         }),
         staging,
-        arena_free: (0..ARENA_SLOTS).rev().collect(),
+        arena_free: (0..*ARENA_SLOTS).rev().collect(),
         slab: SlabAllocator::new(*slab_config),
         gen_uniforms: DynamicUniformBuffer::default(),
         program_buffer: StorageBuffer::default(),
