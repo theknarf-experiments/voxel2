@@ -1,5 +1,5 @@
-//! Instanced tree impostors: one draw call over a crossed-quad mesh with
-//! a per-instance buffer (world position + hash).
+//! Tree impostors: the far-forest [`Prop`] population, a crossed
+//! silhouette drawn once per scatter point.
 //!
 //! This is how a forest gets to millions. A prop entity costs three
 //! entities and a transform hierarchy, which tops out in the low
@@ -7,50 +7,20 @@
 //! population is bounded by how many placements the scatter layer cares
 //! to generate rather than by the renderer.
 //!
-//! Deliberately the same shape as `grass`: same bind group layout, same
-//! specializer, same marker-per-world and `ItemQuery` dispatch. When a
-//! third instanced population appears these two should be one pipeline
-//! with a table of (class, mesh, style) — two is not yet enough evidence
-//! to say what that table wants.
+//! Everything shared with grass — buffers, pipeline, bind group, extract,
+//! prepare, draw, marker sync — is `instanced::PropPlugin`. What is left
+//! here is what only impostors have: the silhouette, and the palette and
+//! reach they take from their neighbours.
 
 use bevy::{
     asset::{embedded_asset, load_embedded_asset},
-    camera::{
-        primitives::Aabb,
-        visibility::{self, VisibilityClass},
-    },
-    core_pipeline::core_3d::Opaque3d,
-    ecs::{
-        query::ROQueryItem,
-        system::{lifetimeless::SRes, SystemParamItem},
-    },
-    pbr::{MeshPipelineViewLayouts, SetMeshViewBindGroup, SetMeshViewBindingArrayBindGroup},
+    camera::visibility::{self, VisibilityClass},
     prelude::*,
-    render::{
-        extract_component::{ExtractComponent, ExtractComponentPlugin},
-        render_phase::{
-            AddRenderCommand, PhaseItem, RenderCommand, RenderCommandResult, SetItemPipeline,
-            TrackedRenderPass,
-        },
-        render_resource::{
-            BindGroup, BindGroupEntries, BindGroupLayoutDescriptor, Buffer, IndexFormat,
-            PipelineCache, RenderPipeline, Variants,
-        },
-        renderer::RenderDevice,
-        Extract, Render, RenderApp, RenderStartup, RenderSystems,
-    },
+    render::{extract_component::ExtractComponent, render_resource::ShaderType, Extract},
 };
 use bytemuck::{Pod, Zeroable};
-use voxel_render::ScatterPoints;
 
-/// Marker entity anchoring one world's grass draw.
-///
-/// One per loaded world, each on its world's render layer, so Bevy's
-/// visible-entity filtering picks the right one per view and the draw
-/// command binds that world's instance buffer. Grass is world content:
-/// it is seated on a heightfield, and worlds share coordinates, so the
-/// wrong world's blades do not merely look out of place — they stand in
-/// mid-air or bury themselves in rock.
+/// Marker entity anchoring one world's impostor draw. See [`Prop`].
 #[derive(Clone, Copy, Component, ExtractComponent)]
 #[require(VisibilityClass)]
 #[component(on_add = visibility::add_visibility_class::<ImpostorMarker>)]
@@ -72,46 +42,54 @@ pub const IMPOSTOR_CLASS: &str = "treecover";
 /// forest behind them.
 pub const IMPOSTOR_STANDS_IN_FOR: &str = "tree";
 
+impl crate::instanced::Prop for ImpostorMarker {
+    type Env = ImpostorEnv;
+    type Vertex = ImpostorVertex;
+    type Style = ImpostorStyle;
+
+    const CLASS: &'static str = IMPOSTOR_CLASS;
+    const NAME: &'static str = "impostor";
+    const LAYOUT_LABEL: &'static str = "impostor_layout";
+    const DRAW_LABEL: &'static str = "impostor_draw";
+
+    fn anchor(world: voxel_engine::WorldId) -> Self {
+        Self { world }
+    }
+
+    fn world(&self) -> voxel_engine::WorldId {
+        self.world
+    }
+
+    fn shader(assets: &AssetServer) -> Handle<Shader> {
+        load_embedded_asset!(assets, "voxel_impostor.wgsl")
+    }
+
+    fn mesh() -> (Vec<ImpostorVertex>, Vec<u32>) {
+        build_impostor()
+    }
+
+    fn env(flags: Vec4, style: &ImpostorStyle) -> ImpostorEnv {
+        ImpostorEnv {
+            flags,
+            canopy_a: style.canopy_a,
+            canopy_b: style.canopy_b,
+            base: style.base,
+            size: style.size,
+        }
+    }
+}
+
 pub struct ImpostorPlugin;
 
 impl Plugin for ImpostorPlugin {
     fn build(&self, app: &mut App) {
         embedded_asset!(app, "voxel_impostor.wgsl");
-        app.init_resource::<ScatterPoints>()
-            .add_plugins(ExtractComponentPlugin::<ImpostorMarker>::default())
-            .add_systems(Update, sync_impostor_markers);
+        app.add_plugins(crate::instanced::PropPlugin::<ImpostorMarker>::default());
 
-        let Some(render_app) = app.get_sub_app_mut(RenderApp) else {
+        let Some(render_app) = app.get_sub_app_mut(bevy::render::RenderApp) else {
             return;
         };
-        render_app
-            .init_resource::<ImpostorBuffers>()
-            .init_resource::<crate::instanced::PendingPropQueues<ImpostorMarker>>()
-            .init_resource::<ImpostorBindGroupRes>()
-            .init_resource::<ImpostorEnvUniform>()
-            .init_resource::<ImpostorStyle>()
-            .add_render_command::<Opaque3d, DrawImpostorCommands>()
-            .add_systems(
-                RenderStartup,
-                init_impostor_pipeline.after(bevy::pbr::init_mesh_pipeline_view_layouts),
-            )
-            .add_systems(
-                ExtractSchedule,
-                (extract_impostor_instances, sync_impostor_style),
-            )
-            .add_systems(
-                Render,
-                prepare_impostor_bind_group.in_set(RenderSystems::PrepareBindGroups),
-            )
-            .add_systems(
-                Render,
-                crate::instanced::queue_props::<
-                    ImpostorMarker,
-                    ImpostorPipeline,
-                    DrawImpostorCommands,
-                >
-                    .in_set(RenderSystems::Queue),
-            );
+        render_app.add_systems(ExtractSchedule, sync_impostor_style);
     }
 }
 
@@ -184,42 +162,12 @@ fn sync_impostor_style(
     }
 }
 
-/// Give every loaded world a grass anchor. Not a `Startup` one-shot: a
-/// world can arrive at any time, because opening a portal loads one.
-fn sync_impostor_markers(
-    mut commands: Commands,
-    worlds: Res<voxel_engine::Worlds>,
-    // Bookkeeping, not a query: a spawn is not visible to a query until
-    // commands apply, so two changes to `Worlds` before the flush would
-    // give one world two markers and draw its grass twice.
-    mut spawned: Local<std::collections::HashSet<voxel_engine::WorldId>>,
-) {
-    if !worlds.is_changed() {
-        return;
-    }
-    for world in worlds.iter() {
-        if !spawned.insert(world.id) {
-            continue;
-        }
-        commands.spawn((
-            ImpostorMarker { world: world.id },
-            crate::OfWorld::scene(world.id),
-            Visibility::default(),
-            Transform::default(),
-            Aabb {
-                center: Vec3A::ZERO,
-                half_extents: Vec3A::splat(1.0e9),
-            },
-        ));
-    }
-}
-
-// --- tuft mesh ---------------------------------------------------------------
+// --- silhouette mesh ---------------------------------------------------------
 
 /// Impostor vertex: unit-quad position + a 0..1 base-to-crown factor.
 #[derive(Clone, Copy, Pod, Zeroable)]
 #[repr(C)]
-struct ImpostorVertex {
+pub struct ImpostorVertex {
     pos: [f32; 3],
     tip: f32,
 }
@@ -263,26 +211,7 @@ fn build_impostor() -> (Vec<ImpostorVertex>, Vec<u32>) {
     (verts, indices)
 }
 
-// --- render-world resources --------------------------------------------------
-
-#[derive(Resource, Default)]
-struct ImpostorBuffers {
-    mesh_vertices: Option<Buffer>,
-    mesh_indices: Option<Buffer>,
-    mesh_index_count: u32,
-    /// One instance buffer per world. The tuft geometry is shared; where
-    /// the tufts stand is not.
-    instances: crate::instancing::InstanceBuffers,
-}
-
-#[derive(Resource)]
-struct ImpostorPipeline {
-    layout: BindGroupLayoutDescriptor,
-    variants: Variants<RenderPipeline, crate::instanced::PropSpecializer>,
-}
-
-#[derive(Resource, Default)]
-struct ImpostorBindGroupRes(Option<BindGroup>);
+// --- look --------------------------------------------------------------------
 
 /// Impostor look and reach. Art direction plus the two distances that
 /// decide where the real props hand over to these.
@@ -317,153 +246,12 @@ impl Default for ImpostorStyle {
 }
 
 /// Uniform slice for the impostor shader (twin of `ImpostorEnv` in WGSL).
-#[derive(bevy::render::render_resource::ShaderType, Clone, Copy, Default)]
-struct ImpostorEnv {
+#[derive(ShaderType, Clone, Copy, Default)]
+pub struct ImpostorEnv {
     /// x = coverage-eval flag; lighting comes from Bevy.
     flags: Vec4,
     canopy_a: Vec4,
     canopy_b: Vec4,
     base: Vec4,
     size: Vec4,
-}
-
-#[derive(Resource, Default)]
-struct ImpostorEnvUniform(bevy::render::render_resource::UniformBuffer<ImpostorEnv>);
-
-fn init_impostor_pipeline(
-    mut commands: Commands,
-    view_layouts: Res<MeshPipelineViewLayouts>,
-    render_device: Res<RenderDevice>,
-    asset_server: Res<AssetServer>,
-    mut buffers: ResMut<ImpostorBuffers>,
-) {
-    let (verts, indices) = build_impostor();
-    let mesh = crate::instanced::upload_mesh(&render_device, "impostor", &verts, &indices);
-    buffers.mesh_vertices = Some(mesh.vertices);
-    buffers.mesh_indices = Some(mesh.indices);
-    buffers.mesh_index_count = mesh.index_count;
-
-    let shader: Handle<Shader> = load_embedded_asset!(asset_server.as_ref(), "voxel_impostor.wgsl");
-    let (layout, base_descriptor) = crate::instanced::prop_pipeline::<ImpostorEnv>(
-        "impostor_layout",
-        "impostor_draw",
-        shader,
-        std::mem::size_of::<ImpostorVertex>() as u64,
-    );
-    commands.insert_resource(ImpostorPipeline {
-        layout,
-        variants: Variants::new(
-            crate::instanced::PropSpecializer {
-                view_layouts: view_layouts.clone(),
-            },
-            base_descriptor,
-        ),
-    });
-}
-
-fn extract_impostor_instances(
-    instances: Extract<Res<ScatterPoints>>,
-    mut buffers: ResMut<ImpostorBuffers>,
-    render_device: Res<RenderDevice>,
-    render_queue: Res<bevy::render::renderer::RenderQueue>,
-) {
-    let Some(per_world) = instances.take_class_if_dirty(IMPOSTOR_CLASS) else {
-        return;
-    };
-    buffers.instances.publish(
-        "impostor_instances",
-        per_world,
-        &render_device,
-        &render_queue,
-    );
-}
-
-// --- drawing -----------------------------------------------------------------
-
-#[allow(clippy::too_many_arguments)]
-fn prepare_impostor_bind_group(
-    pipeline: Option<Res<ImpostorPipeline>>,
-    pipeline_cache: Res<PipelineCache>,
-    render_device: Res<RenderDevice>,
-    render_queue: Res<bevy::render::renderer::RenderQueue>,
-    env: Res<voxel_render::EnvParams>,
-    style: Res<ImpostorStyle>,
-    mut env_uniform: ResMut<ImpostorEnvUniform>,
-    mut bind_group: ResMut<ImpostorBindGroupRes>,
-) {
-    let Some(pipeline) = pipeline else {
-        return;
-    };
-    env_uniform.0.set(ImpostorEnv {
-        flags: env.flags,
-        canopy_a: style.canopy_a,
-        canopy_b: style.canopy_b,
-        base: style.base,
-        size: style.size,
-    });
-    env_uniform.0.write_buffer(&render_device, &render_queue);
-    let Some(env_binding) = env_uniform.0.binding() else {
-        return;
-    };
-    bind_group.0 = Some(render_device.create_bind_group(
-        "impostor_bg",
-        &pipeline_cache.get_bind_group_layout(&pipeline.layout),
-        &BindGroupEntries::sequential((env_binding,)),
-    ));
-}
-
-type DrawImpostorCommands = (
-    SetItemPipeline,
-    SetMeshViewBindGroup<0>,
-    SetMeshViewBindingArrayBindGroup<1>,
-    DrawImpostor,
-);
-
-struct DrawImpostor;
-
-impl<P> RenderCommand<P> for DrawImpostor
-where
-    P: PhaseItem,
-{
-    type Param = (SRes<ImpostorBuffers>, SRes<ImpostorBindGroupRes>);
-    type ViewQuery = ();
-    /// The marker says which world this draw is for. Which markers a view
-    /// sees is already decided — they are ordinary entities filtered by
-    /// render layer — so this only has to bind what that one asked for.
-    type ItemQuery = bevy::ecs::system::lifetimeless::Read<ImpostorMarker>;
-
-    fn render<'w>(
-        _: &P,
-        _: ROQueryItem<'w, '_, Self::ViewQuery>,
-        marker: Option<ROQueryItem<'w, '_, Self::ItemQuery>>,
-        (buffers, bind_group): SystemParamItem<'w, '_, Self::Param>,
-        pass: &mut TrackedRenderPass<'w>,
-    ) -> RenderCommandResult {
-        let buffers = buffers.into_inner();
-        let Some(marker) = marker else {
-            return RenderCommandResult::Skip;
-        };
-        let Some(bg) = &bind_group.into_inner().0 else {
-            return RenderCommandResult::Skip;
-        };
-        let (Some(vb), Some(ib), Some(slot)) = (
-            &buffers.mesh_vertices,
-            &buffers.mesh_indices,
-            buffers.instances.get(marker.world),
-        ) else {
-            return RenderCommandResult::Success;
-        };
-        pass.set_bind_group(2, bg, &[]);
-        pass.set_vertex_buffer(0, vb.slice(..));
-        pass.set_vertex_buffer(1, slot.buffer.slice(..));
-        pass.set_index_buffer(ib.slice(..), IndexFormat::Uint32);
-        pass.draw_indexed(0..buffers.mesh_index_count, 0, 0..slot.count);
-        RenderCommandResult::Success
-    }
-}
-
-impl crate::instanced::PropPipeline for ImpostorPipeline {
-    fn variants_mut(&mut self) -> &mut Variants<RenderPipeline, crate::instanced::PropSpecializer> {
-        &mut self.variants
-    }
 }

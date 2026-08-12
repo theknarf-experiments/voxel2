@@ -65,9 +65,8 @@ use bevy::{
             binding_types::{storage_buffer_read_only_sized, uniform_buffer},
             BindGroup, BindGroupEntries, BindGroupLayoutDescriptor, BindGroupLayoutEntries, Buffer,
             BufferInitDescriptor, BufferUsages, ColorTargetState, ColorWrites, CompareFunction,
-            DepthStencilState, FragmentState, PipelineCache, RenderPipeline,
-            RenderPipelineDescriptor, ShaderStages, ShaderType, TextureFormat, UniformBuffer,
-            Variants, VertexState,
+            DepthStencilState, FragmentState, PipelineCache, RenderPipelineDescriptor,
+            ShaderStages, ShaderType, TextureFormat, UniformBuffer, VertexState,
         },
         renderer::{RenderDevice, RenderQueue},
         Extract, Render, RenderApp, RenderStartup, RenderSystems,
@@ -197,16 +196,10 @@ impl Plugin for WaterPlugin {
             )
             .add_systems(
                 Render,
-                crate::instanced::queue_props::<WaterMarker, WaterPipeline, DrawWaterCommands>
+                crate::instanced::queue_props::<WaterMarker, DrawWaterCommands>
                     .in_set(RenderSystems::Queue),
             );
     }
-}
-
-#[derive(Resource)]
-struct WaterPipeline {
-    layout: BindGroupLayoutDescriptor,
-    variants: Variants<RenderPipeline, crate::instanced::PropSpecializer>,
 }
 
 /// What one world's water draw binds.
@@ -283,20 +276,16 @@ fn init_water_pipeline(
         }),
         ..default()
     };
-    commands.insert_resource(WaterPipeline {
+    commands.insert_resource(crate::instanced::PropPipelineRes::<WaterMarker>::new(
+        &view_layouts,
         layout,
-        variants: Variants::new(
-            crate::instanced::PropSpecializer {
-                view_layouts: view_layouts.clone(),
-            },
-            base_descriptor,
-        ),
-    });
+        base_descriptor,
+    ));
 }
 
 #[allow(clippy::too_many_arguments)]
 fn prepare_water_bind_group(
-    pipeline: Option<Res<WaterPipeline>>,
+    pipeline: Option<Res<crate::instanced::PropPipelineRes<WaterMarker>>>,
     camera: Res<ExtractedWaterCamera>,
     markers: Query<&WaterMarker>,
     rivers: Res<RiverWater>,
@@ -411,12 +400,6 @@ where
         let river_indices = world.river_buffer.as_ref().map_or(0, |(_, _, n)| *n * 6);
         pass.draw(0..(cells * cells * 6 + river_indices), 0..1);
         RenderCommandResult::Success
-    }
-}
-
-impl crate::instanced::PropPipeline for WaterPipeline {
-    fn variants_mut(&mut self) -> &mut Variants<RenderPipeline, crate::instanced::PropSpecializer> {
-        &mut self.variants
     }
 }
 

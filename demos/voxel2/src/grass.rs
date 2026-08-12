@@ -1,46 +1,20 @@
-//! Instanced grass rendering: one draw call over a procedural blade-tuft
-//! mesh with a per-instance buffer (world position + hash). Instances are
-//! produced by the main world (vegetation streaming) and re-uploaded only
-//! when the tile set changes.
+//! Grass: the ground-cover [`Prop`] population. A procedural blade tuft
+//! drawn once per scatter point, re-uploaded only when the tile set
+//! changes.
+//!
+//! Everything a prop renderer needs beyond this file — buffers, pipeline,
+//! bind group, extract, prepare, draw, marker sync — is
+//! `instanced::PropPlugin`.
 
 use bevy::{
     asset::{embedded_asset, load_embedded_asset},
-    camera::{
-        primitives::Aabb,
-        visibility::{self, VisibilityClass},
-    },
-    core_pipeline::core_3d::Opaque3d,
-    ecs::{
-        query::ROQueryItem,
-        system::{lifetimeless::SRes, SystemParamItem},
-    },
-    pbr::{MeshPipelineViewLayouts, SetMeshViewBindGroup, SetMeshViewBindingArrayBindGroup},
+    camera::visibility::{self, VisibilityClass},
     prelude::*,
-    render::{
-        extract_component::{ExtractComponent, ExtractComponentPlugin},
-        render_phase::{
-            AddRenderCommand, PhaseItem, RenderCommand, RenderCommandResult, SetItemPipeline,
-            TrackedRenderPass,
-        },
-        render_resource::{
-            BindGroup, BindGroupEntries, BindGroupLayoutDescriptor, Buffer, IndexFormat,
-            PipelineCache, RenderPipeline, Variants,
-        },
-        renderer::RenderDevice,
-        Extract, Render, RenderApp, RenderStartup, RenderSystems,
-    },
+    render::{extract_component::ExtractComponent, render_resource::ShaderType},
 };
 use bytemuck::{Pod, Zeroable};
-use voxel_render::ScatterPoints;
 
-/// Marker entity anchoring one world's grass draw.
-///
-/// One per loaded world, each on its world's render layer, so Bevy's
-/// visible-entity filtering picks the right one per view and the draw
-/// command binds that world's instance buffer. Grass is world content:
-/// it is seated on a heightfield, and worlds share coordinates, so the
-/// wrong world's blades do not merely look out of place — they stand in
-/// mid-air or bury themselves in rock.
+/// Marker entity anchoring one world's grass draw. See [`Prop`].
 #[derive(Clone, Copy, Component, ExtractComponent)]
 #[require(VisibilityClass)]
 #[component(on_add = visibility::add_visibility_class::<GrassMarker>)]
@@ -52,69 +26,50 @@ pub struct GrassMarker {
 /// level and the demo agree on — the engine never sees it.
 pub const GROUND_COVER_CLASS: &str = "groundcover";
 
+impl crate::instanced::Prop for GrassMarker {
+    type Env = GrassEnv;
+    type Vertex = BladeVertex;
+    type Style = GrassStyle;
+
+    const CLASS: &'static str = GROUND_COVER_CLASS;
+    const NAME: &'static str = "grass";
+    const LAYOUT_LABEL: &'static str = "grass_layout";
+    const DRAW_LABEL: &'static str = "grass_draw";
+
+    fn anchor(world: voxel_engine::WorldId) -> Self {
+        Self { world }
+    }
+
+    fn world(&self) -> voxel_engine::WorldId {
+        self.world
+    }
+
+    fn shader(assets: &AssetServer) -> Handle<Shader> {
+        load_embedded_asset!(assets, "voxel_grass.wgsl")
+    }
+
+    fn mesh() -> (Vec<BladeVertex>, Vec<u32>) {
+        build_tuft()
+    }
+
+    fn env(flags: Vec4, style: &GrassStyle) -> GrassEnv {
+        GrassEnv {
+            flags,
+            base_a: style.base_a,
+            base_b: style.base_b,
+            tip_a: style.tip_a,
+            tip_b: style.tip_b,
+            fade: style.fade,
+        }
+    }
+}
+
 pub struct GrassPlugin;
 
 impl Plugin for GrassPlugin {
     fn build(&self, app: &mut App) {
         embedded_asset!(app, "voxel_grass.wgsl");
-        app.init_resource::<ScatterPoints>()
-            .add_plugins(ExtractComponentPlugin::<GrassMarker>::default())
-            .add_systems(Update, sync_grass_markers);
-
-        let Some(render_app) = app.get_sub_app_mut(RenderApp) else {
-            return;
-        };
-        render_app
-            .init_resource::<GrassBuffers>()
-            .init_resource::<crate::instanced::PendingPropQueues<GrassMarker>>()
-            .init_resource::<GrassBindGroupRes>()
-            .init_resource::<GrassEnvUniform>()
-            .init_resource::<GrassStyle>()
-            .add_render_command::<Opaque3d, DrawGrassCommands>()
-            .add_systems(
-                RenderStartup,
-                init_grass_pipeline.after(bevy::pbr::init_mesh_pipeline_view_layouts),
-            )
-            .add_systems(ExtractSchedule, extract_grass_instances)
-            .add_systems(
-                Render,
-                prepare_grass_bind_group.in_set(RenderSystems::PrepareBindGroups),
-            )
-            .add_systems(
-                Render,
-                crate::instanced::queue_props::<GrassMarker, GrassPipeline, DrawGrassCommands>
-                    .in_set(RenderSystems::Queue),
-            );
-    }
-}
-
-/// Give every loaded world a grass anchor. Not a `Startup` one-shot: a
-/// world can arrive at any time, because opening a portal loads one.
-fn sync_grass_markers(
-    mut commands: Commands,
-    worlds: Res<voxel_engine::Worlds>,
-    // Bookkeeping, not a query: a spawn is not visible to a query until
-    // commands apply, so two changes to `Worlds` before the flush would
-    // give one world two markers and draw its grass twice.
-    mut spawned: Local<std::collections::HashSet<voxel_engine::WorldId>>,
-) {
-    if !worlds.is_changed() {
-        return;
-    }
-    for world in worlds.iter() {
-        if !spawned.insert(world.id) {
-            continue;
-        }
-        commands.spawn((
-            GrassMarker { world: world.id },
-            crate::OfWorld::scene(world.id),
-            Visibility::default(),
-            Transform::default(),
-            Aabb {
-                center: Vec3A::ZERO,
-                half_extents: Vec3A::splat(1.0e9),
-            },
-        ));
+        app.add_plugins(crate::instanced::PropPlugin::<GrassMarker>::default());
     }
 }
 
@@ -123,7 +78,7 @@ fn sync_grass_markers(
 /// Blade vertex: position + tip factor.
 #[derive(Clone, Copy, Pod, Zeroable)]
 #[repr(C)]
-struct BladeVertex {
+pub struct BladeVertex {
     pos: [f32; 3],
     tip: f32,
 }
@@ -159,26 +114,7 @@ fn build_tuft() -> (Vec<BladeVertex>, Vec<u32>) {
     (verts, indices)
 }
 
-// --- render-world resources --------------------------------------------------
-
-#[derive(Resource, Default)]
-struct GrassBuffers {
-    tuft_vertices: Option<Buffer>,
-    tuft_indices: Option<Buffer>,
-    tuft_index_count: u32,
-    /// One instance buffer per world. The tuft geometry is shared; where
-    /// the tufts stand is not.
-    instances: crate::instancing::InstanceBuffers,
-}
-
-#[derive(Resource)]
-struct GrassPipeline {
-    layout: BindGroupLayoutDescriptor,
-    variants: Variants<RenderPipeline, crate::instanced::PropSpecializer>,
-}
-
-#[derive(Resource, Default)]
-struct GrassBindGroupRes(Option<BindGroup>);
+// --- look --------------------------------------------------------------------
 
 /// Blade look: two base hues and two tip hues mixed per point, plus the
 /// view-distance fade. Art direction, so the values are albedo (the sun
@@ -206,8 +142,8 @@ impl Default for GrassStyle {
 }
 
 /// Level environment slice for the grass shader (sun + haze + style).
-#[derive(bevy::render::render_resource::ShaderType, Clone, Copy, Default)]
-struct GrassEnv {
+#[derive(ShaderType, Clone, Copy, Default)]
+pub struct GrassEnv {
     /// w = coverage-eval flag; lighting comes from Bevy.
     flags: Vec4,
     base_a: Vec4,
@@ -215,143 +151,4 @@ struct GrassEnv {
     tip_a: Vec4,
     tip_b: Vec4,
     fade: Vec4,
-}
-
-#[derive(Resource, Default)]
-struct GrassEnvUniform(bevy::render::render_resource::UniformBuffer<GrassEnv>);
-
-fn init_grass_pipeline(
-    mut commands: Commands,
-    view_layouts: Res<MeshPipelineViewLayouts>,
-    render_device: Res<RenderDevice>,
-    asset_server: Res<AssetServer>,
-    mut buffers: ResMut<GrassBuffers>,
-) {
-    let (verts, indices) = build_tuft();
-    let mesh = crate::instanced::upload_mesh(&render_device, "grass", &verts, &indices);
-    buffers.tuft_vertices = Some(mesh.vertices);
-    buffers.tuft_indices = Some(mesh.indices);
-    buffers.tuft_index_count = mesh.index_count;
-
-    let shader: Handle<Shader> = load_embedded_asset!(asset_server.as_ref(), "voxel_grass.wgsl");
-    let (layout, base_descriptor) = crate::instanced::prop_pipeline::<GrassEnv>(
-        "grass_layout",
-        "grass_draw",
-        shader,
-        std::mem::size_of::<BladeVertex>() as u64,
-    );
-    commands.insert_resource(GrassPipeline {
-        layout,
-        variants: Variants::new(
-            crate::instanced::PropSpecializer {
-                view_layouts: view_layouts.clone(),
-            },
-            base_descriptor,
-        ),
-    });
-}
-
-fn extract_grass_instances(
-    instances: Extract<Res<ScatterPoints>>,
-    mut buffers: ResMut<GrassBuffers>,
-    render_device: Res<RenderDevice>,
-    render_queue: Res<bevy::render::renderer::RenderQueue>,
-) {
-    let Some(per_world) = instances.take_class_if_dirty(GROUND_COVER_CLASS) else {
-        return;
-    };
-    buffers
-        .instances
-        .publish("grass_instances", per_world, &render_device, &render_queue);
-}
-
-// --- drawing -----------------------------------------------------------------
-
-#[allow(clippy::too_many_arguments)]
-fn prepare_grass_bind_group(
-    pipeline: Option<Res<GrassPipeline>>,
-    pipeline_cache: Res<PipelineCache>,
-    render_device: Res<RenderDevice>,
-    render_queue: Res<bevy::render::renderer::RenderQueue>,
-    env: Res<voxel_render::EnvParams>,
-    style: Res<GrassStyle>,
-    mut env_uniform: ResMut<GrassEnvUniform>,
-    mut bind_group: ResMut<GrassBindGroupRes>,
-) {
-    let Some(pipeline) = pipeline else {
-        return;
-    };
-    env_uniform.0.set(GrassEnv {
-        flags: env.flags,
-        base_a: style.base_a,
-        base_b: style.base_b,
-        tip_a: style.tip_a,
-        tip_b: style.tip_b,
-        fade: style.fade,
-    });
-    env_uniform.0.write_buffer(&render_device, &render_queue);
-    let Some(env_binding) = env_uniform.0.binding() else {
-        return;
-    };
-    bind_group.0 = Some(render_device.create_bind_group(
-        "grass_bg",
-        &pipeline_cache.get_bind_group_layout(&pipeline.layout),
-        &BindGroupEntries::sequential((env_binding,)),
-    ));
-}
-
-type DrawGrassCommands = (
-    SetItemPipeline,
-    SetMeshViewBindGroup<0>,
-    SetMeshViewBindingArrayBindGroup<1>,
-    DrawGrass,
-);
-
-struct DrawGrass;
-
-impl<P> RenderCommand<P> for DrawGrass
-where
-    P: PhaseItem,
-{
-    type Param = (SRes<GrassBuffers>, SRes<GrassBindGroupRes>);
-    type ViewQuery = ();
-    /// The marker says which world this draw is for. Which markers a view
-    /// sees is already decided — they are ordinary entities filtered by
-    /// render layer — so this only has to bind what that one asked for.
-    type ItemQuery = bevy::ecs::system::lifetimeless::Read<GrassMarker>;
-
-    fn render<'w>(
-        _: &P,
-        _: ROQueryItem<'w, '_, Self::ViewQuery>,
-        marker: Option<ROQueryItem<'w, '_, Self::ItemQuery>>,
-        (buffers, bind_group): SystemParamItem<'w, '_, Self::Param>,
-        pass: &mut TrackedRenderPass<'w>,
-    ) -> RenderCommandResult {
-        let buffers = buffers.into_inner();
-        let Some(marker) = marker else {
-            return RenderCommandResult::Skip;
-        };
-        let Some(bg) = &bind_group.into_inner().0 else {
-            return RenderCommandResult::Skip;
-        };
-        let (Some(vb), Some(ib), Some(slot)) = (
-            &buffers.tuft_vertices,
-            &buffers.tuft_indices,
-            buffers.instances.get(marker.world),
-        ) else {
-            return RenderCommandResult::Success;
-        };
-        pass.set_bind_group(2, bg, &[]);
-        pass.set_vertex_buffer(0, vb.slice(..));
-        pass.set_vertex_buffer(1, slot.buffer.slice(..));
-        pass.set_index_buffer(ib.slice(..), IndexFormat::Uint32);
-        pass.draw_indexed(0..buffers.tuft_index_count, 0, 0..slot.count);
-        RenderCommandResult::Success
-    }
-}
-
-impl crate::instanced::PropPipeline for GrassPipeline {
-    fn variants_mut(&mut self) -> &mut Variants<RenderPipeline, crate::instanced::PropSpecializer> {
-        &mut self.variants
-    }
 }

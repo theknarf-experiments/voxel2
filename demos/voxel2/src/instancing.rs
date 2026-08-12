@@ -46,7 +46,7 @@ impl InstanceBuffers {
     /// allocation is worth keeping for when it has points again.
     pub fn publish(
         &mut self,
-        label: &'static str,
+        label: &str,
         per_world: impl IntoIterator<Item = (voxel_engine::WorldId, Vec<ScatterPoint>)>,
         device: &RenderDevice,
         queue: &RenderQueue,
