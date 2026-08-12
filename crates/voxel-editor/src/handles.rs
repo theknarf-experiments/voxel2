@@ -49,11 +49,20 @@ pub struct ShapeTool {
     /// Levels other than the open one whose `prefabs` name the same file.
     /// Read-only; recomputed when the selection changes.
     pub shared_with: Vec<String>,
-    /// The drag in flight. Not reflected: it is a pointer gesture, and a
-    /// half-applied one restored from a snapshot would be a drag nobody
-    /// is making.
+    /// The drag in flight, and the value it has reached. Not reflected:
+    /// a pointer gesture half-restored from a snapshot would be a drag
+    /// nobody is making.
+    ///
+    /// The value is held HERE rather than written to the document,
+    /// because a placement edit restreams the world — 4.7 s on the
+    /// planet — and doing that once a frame makes a drag impossible. The
+    /// wireframe follows the pointer off this; the document learns about
+    /// it once, on release. Which is what `CommitOnRelease` does for the
+    /// rows, for the same reason.
     #[reflect(ignore)]
     drag: Option<Drag>,
+    #[reflect(ignore)]
+    preview: Option<[f32; 3]>,
 }
 
 /// Faint for context, bright for the one you are working on.
@@ -73,7 +82,11 @@ const AXIS: [Color; 3] = [
 /// handles next to the shape rather than on it.
 /// World 0, always: [`LevelDef`] IS world 0's document, and a portal
 /// world is a different level this resource says nothing about.
-fn placed(level: &LevelDef, worlds: &voxel_engine::Worlds) -> Vec<(usize, Vec<CsgOp>)> {
+fn placed(
+    level: &LevelDef,
+    worlds: &voxel_engine::Worlds,
+    live: Option<(usize, usize, Handle, [f32; 3])>,
+) -> Vec<(usize, Vec<CsgOp>)> {
     let Some(query) = worlds.query(0) else {
         return Vec::new();
     };
@@ -91,9 +104,58 @@ fn placed(level: &LevelDef, worlds: &voxel_engine::Worlds) -> Vec<(usize, Vec<Cs
                 .prefabs
                 .iter()
                 .position(|f| Some(&f.name) == p.prefab.as_ref())?;
-            Some((prefab, voxel_engine::level::place(p, local, ground)))
+            // A drag in flight is applied HERE, to a copy, so the shape
+            // follows the pointer without the document — and therefore
+            // the streamed world — hearing about every frame of it.
+            match live {
+                Some((f, op, handle, value)) if f == prefab => {
+                    let mut local = local.to_vec();
+                    if let Some(def) = local.get_mut(op) {
+                        apply_local(def, handle, value);
+                    }
+                    Some((prefab, voxel_engine::level::place(p, &local, ground)))
+                }
+                _ => Some((prefab, voxel_engine::level::place(p, local, ground))),
+            }
         })
         .collect()
+}
+
+/// Which field of a shape a handle writes.
+///
+/// One decision, read twice: [`apply_local`] uses it to preview a drag and
+/// [`write`] to commit one. Two copies of it would let the shape jump on
+/// release, which is the one moment the two must agree.
+enum Target {
+    Center(usize),
+    Half(usize),
+    Radius,
+    HalfHeight,
+}
+
+fn target(def: &voxel_engine::level::CsgOpDef, handle: Handle) -> Target {
+    let axis = handle.axis();
+    if !handle.is_size() {
+        return Target::Center(axis);
+    }
+    if def.shape != "cylinder" {
+        return Target::Half(axis);
+    }
+    // A cylinder is round: either horizontal handle is its radius.
+    match axis {
+        1 => Target::HalfHeight,
+        _ => Target::Radius,
+    }
+}
+
+/// The drag applied to a copy of the shape, for drawing it.
+fn apply_local(def: &mut voxel_engine::level::CsgOpDef, handle: Handle, value: [f32; 3]) {
+    match target(def, handle) {
+        Target::Center(a) => def.center[a] = value[a],
+        Target::Half(a) => def.half[a] = value[a],
+        Target::Radius => def.radius = value[handle.axis()],
+        Target::HalfHeight => def.half_height = value[1],
+    }
 }
 
 /// Wireframes for every authored shape, and handles on the selected one.
@@ -116,7 +178,12 @@ pub fn draw(
     };
     let eye = eye.translation();
 
-    for (prefab, ops) in placed(&level, &worlds) {
+    let live = tool
+        .drag
+        .zip(tool.preview)
+        .zip(tool.selected)
+        .map(|((drag, value), [f, i])| (f, i, drag.handle, value));
+    for (prefab, ops) in placed(&level, &worlds, live) {
         for (i, op) in ops.iter().enumerate() {
             let live = tool.selected == Some([prefab, i]);
             outline(&mut gizmos, op, if live { LIVE } else { IDLE });
@@ -135,7 +202,7 @@ pub fn draw(
 fn outline(gizmos: &mut Gizmos<ShapeGizmos>, op: &CsgOp, color: Color) {
     let centre = Vec3::from(op.center);
     let half = Vec3::from(op.half);
-    let turn = Quat::from_rotation_y(op.yaw);
+    let turn = shapes::rotation(op.yaw);
     if !matches!(op.kind, CSG_KIND_CYLINDER_ADD | CSG_KIND_CYLINDER_CUT) {
         gizmos.cube(
             Transform::from_translation(centre)
@@ -244,7 +311,7 @@ pub fn on_click(
     let Some(ray) = pointer_ray(&cameras, &windows, state.width) else {
         return;
     };
-    let all = placed(&level, &worlds);
+    let all = placed(&level, &worlds, None);
 
     // A handle on the CURRENT selection wins over selecting something
     // else: the handles stand outside the shape, and reaching for one
@@ -317,20 +384,40 @@ pub fn on_drag(
     windows: Query<&Window>,
     mut pending: ResMut<Pending>,
 ) {
-    if !mouse.pressed(MouseButton::Left) {
+    let released = mouse.just_released(MouseButton::Left);
+    if !mouse.pressed(MouseButton::Left) && !released {
         tool.drag = None;
+        tool.preview = None;
         return;
     }
     let (Some(drag), Some([prefab, i])) = (tool.drag, tool.selected) else {
         return;
     };
+    // Let go: the document hears about the whole drag, once, and pays for
+    // one restream instead of one per frame.
+    if released {
+        if let (Some(value), Some(level)) = (tool.preview, level.as_ref()) {
+            write(
+                &mut pending,
+                level,
+                state.root,
+                prefab,
+                i,
+                drag.handle,
+                value,
+            );
+        }
+        tool.drag = None;
+        tool.preview = None;
+        return;
+    }
     let (Some(level), Some(worlds)) = (level, worlds) else {
         return;
     };
     let Some(ray) = pointer_ray(&cameras, &windows, state.width) else {
         return;
     };
-    let all = placed(&level, &worlds);
+    let all = placed(&level, &worlds, None);
     let Some(op) = all
         .iter()
         .find(|(p, _)| *p == prefab)
@@ -410,27 +497,17 @@ fn write(
         return;
     };
     let base = shapes::op_path(prefab, op);
-    let axis = handle.axis();
-    let mut push = |path: String, v: f32| {
-        pending.0.push(Edit {
-            root,
-            path,
-            value: Value::Num(v as f64, Num::F32),
-        });
+    let (path, v) = match target(def, handle) {
+        Target::Center(a) => (format!("{base}.center[{a}]"), value[a]),
+        Target::Half(a) => (format!("{base}.half[{a}]"), value[a]),
+        Target::Radius => (format!("{base}.radius"), value[handle.axis()]),
+        Target::HalfHeight => (format!("{base}.half_height"), value[1]),
     };
-    if !handle.is_size() {
-        push(format!("{base}.center[{axis}]"), value[axis]);
-        return;
-    }
-    if def.shape == "cylinder" {
-        match axis {
-            1 => push(format!("{base}.half_height"), value[1]),
-            // A cylinder is round: either horizontal handle is its radius.
-            _ => push(format!("{base}.radius"), value[axis]),
-        }
-    } else {
-        push(format!("{base}.half[{axis}]"), value[axis]);
-    }
+    pending.0.push(Edit {
+        root,
+        path,
+        value: Value::Num(v as f64, Num::F32),
+    });
 }
 
 /// Which other levels use the selected prefab's file.

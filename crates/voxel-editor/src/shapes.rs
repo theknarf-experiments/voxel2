@@ -11,7 +11,7 @@
 //! space because that is where you can see them; what an edit writes is
 //! the local value, which is why every drag ends in [`to_local`].
 
-use bevy::math::{Vec2, Vec3};
+use bevy::math::{Mat3, Quat, Vec2, Vec3};
 use bevy::prelude::Reflect;
 use voxel_core::csg::CsgOp;
 
@@ -73,9 +73,24 @@ impl Handle {
 
 /// The shape's own axes in world space: yaw about Y, so X and Z turn and
 /// Y does not.
+///
+/// The sense is `CsgOp::sdf`'s, which turns the QUERY POINT by `-yaw` and
+/// so places the shape at `x' = x cos - z sin`. Getting that backwards
+/// draws every yawed box mirrored, which is what it did.
 pub fn axes(yaw: f32) -> [Vec3; 3] {
     let (sin, cos) = yaw.sin_cos();
     [Vec3::new(cos, 0.0, sin), Vec3::Y, Vec3::new(-sin, 0.0, cos)]
+}
+
+/// The shape's frame as a rotation, for drawing it.
+///
+/// Built FROM [`axes`] rather than from `Quat::from_rotation_y`, whose
+/// sense is the opposite of the one the SDF uses. One convention in one
+/// place, or the outline is mirrored and the handles point along axes the
+/// shape has not got.
+pub fn rotation(yaw: f32) -> Quat {
+    let [x, y, z] = axes(yaw);
+    Quat::from_mat3(&Mat3::from_cols(x, y, z))
 }
 
 /// Where a handle's grab point sits, in world space.
@@ -286,6 +301,52 @@ mod tests {
         let past_the_end = down_x(Vec3::new(10.0, 0.0, 2.0));
         assert_eq!(pick_op(&straight, past_the_end), None, "0.5 m deep in z");
         assert_eq!(pick_op(&turned, past_the_end), Some(0), "3 m long in z");
+    }
+
+    /// The rotation the outline is drawn with must put the box's corners
+    /// where the SDF says solid is.
+    ///
+    /// Against `CsgOp::sdf` rather than against another formula, because
+    /// the bug this pins WAS a second formula: drawing used
+    /// `Quat::from_rotation_y(yaw)`, whose sense is the opposite of the
+    /// one the SDF turns its query point by, so every yawed box was drawn
+    /// mirrored about its own axis. Reverting `rotation` to that spelling
+    /// fails this at turn 0.3.
+    #[test]
+    fn the_drawn_rotation_is_the_one_the_sdf_uses() {
+        for turn in [0.3f32, 0.9, -1.2, std::f32::consts::FRAC_PI_4] {
+            let half = Vec3::new(3.0, 1.0, 0.5);
+            let op = boxy([0.0, 0.0, 0.0], half.to_array(), turn);
+            let r = rotation(turn);
+            // Well inside the drawn box, along each of its own axes.
+            for corner in [
+                Vec3::new(0.9, 0.0, 0.0),
+                Vec3::new(0.0, 0.0, 0.9),
+                Vec3::new(0.9, 0.0, 0.9),
+                Vec3::new(-0.9, 0.0, 0.9),
+            ] {
+                let at = r * (corner * half);
+                assert!(
+                    op.sdf(at) < 0.0,
+                    "turn {turn}: {at:?} drawn inside, sdf says out"
+                );
+            }
+            // And just past the long face is outside.
+            let out = r * Vec3::new(half.x * 1.2, 0.0, 0.0);
+            assert!(op.sdf(out) > 0.0, "turn {turn}: {out:?}");
+        }
+    }
+
+    /// The drawn frame and the picked frame are one frame.
+    #[test]
+    fn the_rotation_agrees_with_the_axes() {
+        for turn in [0.0f32, 0.7, -2.1] {
+            let ax = axes(turn);
+            let r = rotation(turn);
+            for (i, unit) in [Vec3::X, Vec3::Y, Vec3::Z].into_iter().enumerate() {
+                assert!((r * unit - ax[i]).length() < 1e-5, "turn {turn} axis {i}");
+            }
+        }
     }
 
     #[test]
