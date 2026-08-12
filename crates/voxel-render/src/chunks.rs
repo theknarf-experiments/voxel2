@@ -2428,38 +2428,23 @@ fn plan_frame_inner(
         gpu.surface_map = Some((buffer, generation));
     }
 
-    // 7. HUD stats.
+    // 7. HUD stats, in ONE pass.
+    //
+    // Six walks of the chunk table per frame — drawn masks, meshed,
+    // awaiting, the state histogram, and the two op tallies — for
+    // consumers that are almost always idle: `drawn_masks` is read only
+    // behind F8, and `state_counts` only when something calls `status`.
+    // The counters have to be exact and the table is thousands of chunks,
+    // so a pass stays; being six of them did not.
     if let Ok(mut s) = stats.0.lock() {
         s.reported_ready += readies;
         s.drawn_masks.clear();
-        for (key, c) in &table.chunks {
-            if c.visible && matches!(c.state, ChunkState::Meshed { .. }) {
-                s.drawn_masks.push((*key, c.drawn_mask));
-            }
-        }
-        s.tracked = table.chunks.len();
-        s.meshed = table
-            .chunks
-            .values()
-            .filter(|c| matches!(c.state, ChunkState::Meshed { .. }))
-            .count();
-        s.empty_classified = table.empty_classified;
-        s.awaiting = table
-            .chunks
-            .values()
-            .filter(|c| !matches!(c.state, ChunkState::Meshed { .. } | ChunkState::Empty))
-            .count();
-        s.arena_free = gpu.arena_free.len() as u32;
-        s.slab_used_pages = gpu.slab.used_pages();
-        s.slab_total_pages = gpu.slab.config().total_pages;
-        s.slab_peak_pages = gpu.slab.peak_used_pages();
-        s.slab_longest_free_run = gpu.slab.longest_free_run();
-        s.slab_runs = gpu.slab.run_histogram().to_vec();
-        s.slab_peak_runs = gpu.slab.peak_run_histogram().to_vec();
-        s.slab_capacity_chunks = gpu.slab.capacity_chunks();
-        s.slab_pressure = gpu.slab.pressure();
+        let mut meshed = 0usize;
+        let mut awaiting = 0usize;
+        let mut with_ops = 0usize;
+        let mut total_ops = 0usize;
         let mut counts: std::collections::HashMap<&'static str, usize> = Default::default();
-        for (key, c) in table.chunks.iter() {
+        for (key, c) in &table.chunks {
             let state = match c.state {
                 ChunkState::QueuedGen => "queued_gen",
                 ChunkState::CountsInFlight { .. } => "counts_in_flight",
@@ -2470,7 +2455,7 @@ fn plan_frame_inner(
                 ChunkState::Meshed { .. } => "meshed",
             };
             *counts.entry(state).or_default() += 1;
-            let pending = match c.pending {
+            if let Some(p) = match c.pending {
                 None => None,
                 Some(Pending::Queued) => Some("p_queued"),
                 Some(Pending::CountsInFlight { .. }) => Some("p_counts_in_flight"),
@@ -2478,29 +2463,44 @@ fn plan_frame_inner(
                 Some(Pending::Deferred { .. }) => Some("p_deferred"),
                 Some(Pending::Held { .. }) => Some("p_held"),
                 Some(Pending::HeldEmpty) => Some("p_held_empty"),
-            };
-            if let Some(p) = pending {
+            } {
                 *counts.entry(p).or_default() += 1;
             }
             // Per level, so a loose emptiness bound can be attributed to a
             // scale rather than guessed at. A chunk the GPU generated only
             // to classify empty cost a full density pass for nothing.
             let level = key.level.min(15) as usize;
-            let bucket: &'static str = match c.state {
-                ChunkState::Empty => EMPTY_BY_LEVEL[level],
-                ChunkState::Meshed { .. } => MESHED_BY_LEVEL[level],
-                _ => continue,
-            };
-            *counts.entry(bucket).or_default() += 1;
+            match c.state {
+                ChunkState::Meshed { .. } => {
+                    meshed += 1;
+                    if c.visible {
+                        s.drawn_masks.push((*key, c.drawn_mask));
+                    }
+                    *counts.entry(MESHED_BY_LEVEL[level]).or_default() += 1;
+                }
+                ChunkState::Empty => *counts.entry(EMPTY_BY_LEVEL[level]).or_default() += 1,
+                _ => awaiting += 1,
+            }
+            if let Some(ops) = &c.ops {
+                with_ops += 1;
+                total_ops += ops.len();
+            }
         }
-        let with_ops = table.chunks.values().filter(|c| c.ops.is_some()).count();
-        let total_ops: usize = table
-            .chunks
-            .values()
-            .filter_map(|c| c.ops.as_ref().map(|o| o.len()))
-            .sum();
         counts.insert("with_ops", with_ops);
         counts.insert("total_ops", total_ops);
+        s.tracked = table.chunks.len();
+        s.meshed = meshed;
+        s.awaiting = awaiting;
+        s.empty_classified = table.empty_classified;
+        s.arena_free = gpu.arena_free.len() as u32;
+        s.slab_used_pages = gpu.slab.used_pages();
+        s.slab_total_pages = gpu.slab.config().total_pages;
+        s.slab_peak_pages = gpu.slab.peak_used_pages();
+        s.slab_longest_free_run = gpu.slab.longest_free_run();
+        s.slab_runs = gpu.slab.run_histogram().to_vec();
+        s.slab_peak_runs = gpu.slab.peak_run_histogram().to_vec();
+        s.slab_capacity_chunks = gpu.slab.capacity_chunks();
+        s.slab_pressure = gpu.slab.pressure();
         s.state_counts = counts.into_iter().collect();
         s.drawn = draw_lists.total();
         s.drawn_per_world = draw_lists.0.iter().map(Vec::len).collect();
