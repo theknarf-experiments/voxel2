@@ -14,6 +14,8 @@
 //! fixpoint now lives in this file's tests, as the specification these
 //! functions are pinned to.
 
+use std::sync::atomic::Ordering;
+
 use bevy::math::DVec3;
 use bevy::prelude::*;
 use voxel_core::ChunkKey;
@@ -361,12 +363,23 @@ pub fn meshable_count(
 /// what they do at a leaf, and both claim to be the set the LOD graph
 /// will ask for. Two copies of the descent are two chances for one of
 /// them to stop being that.
-fn count_leaves(config: &LodConfig, anchor: DVec3, keep: &dyn Fn(ChunkKey) -> bool) -> usize {
+///
+/// PARALLEL over the top ring, because this is admission control and it
+/// runs before a world can stream: on the shipped planet it was 736 ms of
+/// a 1.57 s load, all of it one thread evaluating an interval bound per
+/// candidate chunk. The cells of the ring are independent — `keep` is a
+/// pure function of a key — so they split with no coordination beyond the
+/// counter.
+fn count_leaves(
+    config: &LodConfig,
+    anchor: DVec3,
+    keep: &(dyn Fn(ChunkKey) -> bool + Sync),
+) -> usize {
     fn descend(
         config: &LodConfig,
         anchor: DVec3,
         key: ChunkKey,
-        keep: &dyn Fn(ChunkKey) -> bool,
+        keep: &(dyn Fn(ChunkKey) -> bool + Sync),
         out: &mut usize,
     ) {
         if key.level > 0 && split_clamped(config, anchor, key) {
@@ -380,22 +393,39 @@ fn count_leaves(config: &LodConfig, anchor: DVec3, keep: &dyn Fn(ChunkKey) -> bo
     let top_edge = ChunkKey::new(config.max_level, IVec3::ZERO).edge_m();
     let cx = (anchor.x / top_edge).floor() as i32;
     let cz = (anchor.z / top_edge).floor() as i32;
-    let mut count = 0;
+    let mut cells = Vec::new();
     for dz in -config.top_radius..=config.top_radius {
         for dx in -config.top_radius..=config.top_radius {
             for y in config.top_y.0..=config.top_y.1 {
-                let cell = IVec3::new(cx + dx, y, cz + dz);
-                descend(
-                    config,
-                    anchor,
-                    ChunkKey::new(config.max_level, cell),
-                    keep,
-                    &mut count,
-                );
+                cells.push(IVec3::new(cx + dx, y, cz + dz));
             }
         }
     }
-    count
+    let threads = std::thread::available_parallelism().map_or(1, std::num::NonZero::get);
+    let workers = threads.min(cells.len()).max(1);
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    let total = std::sync::atomic::AtomicUsize::new(0);
+    let cells = &cells;
+    let run = || {
+        let mut count = 0usize;
+        while let Some(cell) = cells.get(next.fetch_add(1, Ordering::Relaxed)) {
+            descend(
+                config,
+                anchor,
+                ChunkKey::new(config.max_level, *cell),
+                keep,
+                &mut count,
+            );
+        }
+        total.fetch_add(count, Ordering::Relaxed);
+    };
+    std::thread::scope(|scope| {
+        for _ in 1..workers {
+            scope.spawn(run);
+        }
+        run();
+    });
+    total.load(Ordering::Relaxed)
 }
 
 /// Cap a world's detail until the meshes it will ask for fit in the slab
@@ -417,14 +447,20 @@ pub fn fit_to_budget(
     anchor: DVec3,
     available: usize,
     min_level: u8,
+    // What `config` already measured at, if the caller has it. Admission
+    // control computes exactly this to divide the slab and then asked for
+    // it again here — a second full walk of the LOD tree, which on the
+    // planet is most of a second.
+    known: Option<usize>,
 ) -> (LodConfig, usize) {
     let mut fitted = config.clone();
+    let mut demand = known.unwrap_or_else(|| meshable_count(&fitted, generator, anchor));
     loop {
-        let demand = meshable_count(&fitted, generator, anchor);
         if demand <= available || fitted.max_level <= min_level {
             return (fitted, demand);
         }
         fitted.max_level -= 1;
+        demand = meshable_count(&fitted, generator, anchor);
     }
 }
 

@@ -388,7 +388,7 @@ fn admission_only_ever_reduces_detail_and_terminates() {
         let generator = std::sync::Arc::new(level.generator(0));
         let authored = LodConfig::from(&level.lod);
         for available in [0, 1, 64, 512, 100_000] {
-            let (fitted, demand) = fit_to_budget(&authored, &generator, anchor, available, 4);
+            let (fitted, demand) = fit_to_budget(&authored, &generator, anchor, available, 4, None);
             assert!(
                 fitted.max_level <= authored.max_level,
                 "{name}: admission raised detail from L{} to L{}",
@@ -408,7 +408,7 @@ fn admission_only_ever_reduces_detail_and_terminates() {
             );
         }
         // A budget that fits everything must not touch the config.
-        let (fitted, _) = fit_to_budget(&authored, &generator, anchor, usize::MAX, 4);
+        let (fitted, _) = fit_to_budget(&authored, &generator, anchor, usize::MAX, 4, None);
         assert_eq!(fitted.max_level, authored.max_level, "{name}");
     }
 }

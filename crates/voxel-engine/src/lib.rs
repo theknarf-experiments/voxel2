@@ -291,6 +291,8 @@ impl WorldLoader<'_, '_> {
                 anchor,
                 budget[i],
                 MIN_STREAMED_LEVEL,
+                // Measured just above, for the same config and anchor.
+                Some(full[i]),
             );
             let was = world.config.max_level;
             if world.slab_demand != 0 && fitted.max_level != was {
