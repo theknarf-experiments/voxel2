@@ -53,6 +53,58 @@ fn indented(content: &str, indent: &str) -> String {
         .collect()
 }
 
+/// The op kinds the generated arms for `ctx` actually have a `case` for.
+fn kinds_with_an_arm(ctx: Ctx) -> std::collections::BTreeSet<u32> {
+    wgsl_arms(ctx)
+        .lines()
+        .filter_map(|l| {
+            l.trim()
+                .strip_prefix("case ")?
+                .split('u')
+                .next()?
+                .parse()
+                .ok()
+        })
+        .collect()
+}
+
+/// The density shader skips an op on a flag bit; that bit must name
+/// EXACTLY the ops whose switch has a case for it.
+///
+/// Both loops used to walk the whole program and fall through the switch,
+/// which is slow but cannot be wrong. Skipping is faster and CAN be wrong:
+/// a kind whose bit is clear but whose arm exists is silently dropped from
+/// the world, and no test that counts chunks or hashes a frame with props
+/// in it would reliably catch a single missing op.
+///
+/// So this is the guard that licenses the skip. It compares the flag to
+/// the GENERATED arms rather than to a hand-written list, so adding an op
+/// to the table cannot desync them.
+#[test]
+fn the_derived_flags_name_exactly_the_arms_that_exist() {
+    use voxel_core::opgen::{axis, Axis, OPS};
+
+    let sample = kinds_with_an_arm(Ctx::Sample);
+    let column = kinds_with_an_arm(Ctx::Column);
+    assert!(!sample.is_empty() && !column.is_empty());
+
+    for op in OPS {
+        assert_eq!(
+            matches!(axis(op.kind), Axis::Sample),
+            sample.contains(&op.kind),
+            "{}: WOP_FLAG_PER_SAMPLE and the Ctx::Sample arms disagree",
+            op.name
+        );
+        assert_eq!(
+            matches!(axis(op.kind), Axis::Column),
+            column.contains(&op.kind),
+            "{}: the per-sample bit is the exact complement of the column \
+             arms, or one of the density loops drops an op",
+            op.name
+        );
+    }
+}
+
 #[test]
 fn spliced_shader_regions_match_the_op_table() {
     for (path, helpers, arms, column) in SHADERS {
