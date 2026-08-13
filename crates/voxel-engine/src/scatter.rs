@@ -194,12 +194,27 @@ pub fn tile_placements(
     let mut found = Vec::new();
     for _ in 0..attempts {
         let xz = origin + Vec2::new(rng.next_f32(), rng.next_f32()) * size;
+        let r = rng.next_f32();
         let gate = if gate_dead {
             0.0
         } else {
-            field_gate(generator, &def.density, xz) * (inputs.gate_weight)(xz)
+            let f = field_gate(generator, &def.density, xz);
+            if r > f {
+                f
+            } else {
+                let w = (inputs.gate_weight)(xz);
+                // The early-out above is only sound while this holds: a
+                // host weight over one could make the product EXCEED the
+                // bound we just rejected against, and the population would
+                // silently lose placements the level asked for.
+                debug_assert!(
+                    (0.0..=1.0).contains(&w),
+                    "gate_weight must be a weight in [0,1]; got {w}"
+                );
+                f * w
+            }
         };
-        if rng.next_f32() > gate {
+        if r > gate {
             continue;
         }
         if def.clearance && on_clearance(clearance, xz) {
