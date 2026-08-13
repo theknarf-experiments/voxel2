@@ -569,18 +569,22 @@ impl LayerGraph {
                 continue;
             }
             dep.changed = false;
-            let previous = dep.current.take();
-            if std::mem::take(&mut dep.replace) {
-                // Disjoint: release BEFORE building. Holding it would keep
-                // slab slots, arena slots and planning residency for
-                // chunks that cannot appear in the new box — on a
-                // teleport the graph was holding both regions at once.
-                if let Some(usage) = previous {
-                    self.release(usage);
-                }
-            } else {
-                old.extend(previous);
-            }
+            // ALWAYS after, never before. e7a6cb4 released first when the
+            // new region shared nothing with the old, on the grounds that
+            // a teleport cannot use what it is holding. Two problems, both
+            // measured: the finest LOD level's box is ~45 m across and a
+            // slow pass lets a 45 m/s camera land clear of it, so
+            // "disjoint" fires during ordinary FLIGHT — four times in 20 s
+            // on the planet — and the near ground visibly popped. And once
+            // the test was asked in tile indices (ccf5503) instead of
+            // metres it stopped firing on real teleports anyway: removing
+            // it costs planet 0.86 -> 0.90 s and MAKES megastructure
+            // faster, 3.0 -> 2.4, because a release it took back had to be
+            // rebuilt.
+            //
+            // Ready-before-swap is the whole point of the pass. It is not
+            // worth trading for a hold that measures free.
+            old.extend(dep.current.take());
             if dep.active && !self.aborting.load(Ordering::Relaxed) {
                 let mut usage = Usage::default();
                 self.ensure_shell(dep.key, dep.bounds(), dep.filter.as_ref(), &mut usage);
@@ -771,14 +775,6 @@ pub struct TopDep {
     current: Option<Usage>,
     changed: bool,
     active: bool,
-    /// The new box shares nothing with the one it replaces.
-    ///
-    /// Ensure-new-then-release-old exists so a chunk that is still needed
-    /// is never dropped while its replacement builds. When the boxes are
-    /// DISJOINT nothing resident can serve the new box, so the hold
-    /// protects nothing and only keeps slots and memory the new region is
-    /// about to ask for. Released first in that case.
-    replace: bool,
 }
 
 impl TopDep {
@@ -794,7 +790,6 @@ impl TopDep {
             current: None,
             changed: true,
             active: true,
-            replace: false,
         }
     }
 
@@ -827,22 +822,8 @@ impl TopDep {
         let extent = graph.entry(self.key).extent;
         let indices = range_of(extent, self.bounds());
         if self.indices != Some(indices) {
-            let was = self.indices.replace(indices);
+            self.indices = Some(indices);
             self.changed = true;
-            // A jump, not a step: nothing it HOLDS can serve where it now
-            // points, so release before building instead of holding both.
-            //
-            // Asked in TILE indices, not in metres. The box is a shape in
-            // the world but residency is a set of tiles, and the two
-            // disagree exactly where it matters: a planar layer's box is
-            // ONE tile tall, so `intersects` — which is half-open — calls
-            // a one-metre step in y disjoint while the tile row is
-            // unchanged. That released and rebuilt every prop layer on the
-            // planet on any downhill movement (441 replaces in 15 s across
-            // 26 draw layers), which is ready-before-swap thrown away for
-            // a set that never moved.
-            self.replace =
-                was.is_some_and(|(lo, hi)| indices.1.cmplt(lo).any() || indices.0.cmpgt(hi).any());
         }
         if moved && self.filter.is_some() {
             self.changed = true;
