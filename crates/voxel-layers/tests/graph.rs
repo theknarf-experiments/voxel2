@@ -218,6 +218,46 @@ fn residency_equals_dependency_closure() {
     assert_eq!(graph.resident_chunks(), 0, "nothing outlives its last user");
 }
 
+/// A step is not a jump, and the difference is asked in TILE indices.
+///
+/// `set_focus` releases before building when the new region shares nothing
+/// with the old, which is right for a teleport and catastrophic for a
+/// step: it is ready-before-swap given up. The question used to be asked
+/// of the METRE boxes, and a planar layer's box is one unit tall, so
+/// `IAabb::intersects` — half-open — called a one-metre descent disjoint
+/// while the tile row underneath was identical. On the planet that
+/// released and rebuilt every prop layer on any downhill movement, and
+/// the impostors visibly blinked.
+///
+/// Here: move a whole tile in x (so the index range really does change)
+/// while dropping one unit in y. The old box and the new share no volume;
+/// the TILES overlap almost entirely, and almost everything must survive.
+#[test]
+fn a_step_that_leaves_the_metre_box_but_not_the_tiles_keeps_its_chunks() {
+    let ledger = Arc::new(Ledger::default());
+    let graph = graph(ledger.clone(), "base:blended", 0, 4);
+
+    let mut top = TopDep::new("play", IVec3::new(CELL * 4, 0, CELL * 4));
+    top.set_focus(&graph, IVec3::ZERO);
+    graph.process_top(&mut top);
+    let resident = graph.resident_in("play");
+    let created = ledger.created_at("play");
+    assert!(resident >= 16, "want a set worth keeping, got {resident}");
+
+    // One tile across, one unit down. `Play` collapses y, so every tile
+    // this held is still wanted.
+    top.set_focus(&graph, IVec3::new(CELL, -1, 0));
+    graph.process_top(&mut top);
+
+    let fresh = ledger.created_at("play") - created;
+    assert_eq!(graph.resident_in("play"), resident);
+    assert!(
+        fresh < resident,
+        "a one-tile step rebuilt the whole set ({fresh} creates for {resident} \
+         chunks): the jump test is being asked in metres, not tile indices"
+    );
+}
+
 /// A chunk that owns a resource must get it back. Every create is paired
 /// with exactly one destroy, including across focus moves.
 #[test]

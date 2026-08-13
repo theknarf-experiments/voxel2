@@ -823,16 +823,26 @@ impl TopDep {
     /// chunk indices actually differ.
     pub fn set_focus(&mut self, graph: &LayerGraph, focus: IVec3) {
         let moved = self.focus != focus;
-        let was = self.bounds();
         self.focus = focus;
         let extent = graph.entry(self.key).extent;
         let indices = range_of(extent, self.bounds());
         if self.indices != Some(indices) {
-            self.indices = Some(indices);
+            let was = self.indices.replace(indices);
             self.changed = true;
-            // A jump, not a step: nothing it held can serve where it now
-            // points.
-            self.replace = !self.bounds().intersects(was);
+            // A jump, not a step: nothing it HOLDS can serve where it now
+            // points, so release before building instead of holding both.
+            //
+            // Asked in TILE indices, not in metres. The box is a shape in
+            // the world but residency is a set of tiles, and the two
+            // disagree exactly where it matters: a planar layer's box is
+            // ONE tile tall, so `intersects` — which is half-open — calls
+            // a one-metre step in y disjoint while the tile row is
+            // unchanged. That released and rebuilt every prop layer on the
+            // planet on any downhill movement (441 replaces in 15 s across
+            // 26 draw layers), which is ready-before-swap thrown away for
+            // a set that never moved.
+            self.replace =
+                was.is_some_and(|(lo, hi)| indices.1.cmplt(lo).any() || indices.0.cmpgt(hi).any());
         }
         if moved && self.filter.is_some() {
             self.changed = true;
