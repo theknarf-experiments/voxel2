@@ -354,13 +354,41 @@ impl Connect3Paths {
                 && p.z >= own.min.z as f32
                 && p.z < own.max.z as f32
         };
+        // A path is kept only when its MIDPOINT lands in this tile, and a
+        // midpoint is within reach/2 of either endpoint — so a site
+        // farther than that from the tile cannot contribute one whatever
+        // it pairs with. The read still has to cover the full reach (the
+        // NEAREST neighbour may be anywhere in it), but the outer loop
+        // does not: the same paths out of a fraction of the pairs, and
+        // the scan is quadratic.
+        let half = 0.5 * self.cfg.reach_m;
+        let can_reach_own = |p: Vec3| {
+            p.x >= own.min.x as f32 - half
+                && p.x <= own.max.x as f32 + half
+                && p.y >= own.min.y as f32 - half
+                && p.y <= own.max.y as f32 + half
+                && p.z >= own.min.z as f32 - half
+                && p.z <= own.max.z as f32 + half
+        };
         let mut paths = Vec::new();
         for &a in &sites {
-            let Some(&b) = sites
-                .iter()
-                .filter(|&&b| b != a && a.distance(b) < self.cfg.reach_m)
-                .min_by(|x, y| a.distance_squared(**x).total_cmp(&a.distance_squared(**y)))
-            else {
+            if !can_reach_own(a) {
+                continue;
+            }
+            // One pass rather than filter + min_by, which recomputed the
+            // distance for every comparison. Strictly-less keeps the
+            // FIRST of equals, which is what `min_by` returns.
+            let mut nearest: Option<(f32, Vec3)> = None;
+            for &c in &sites {
+                if c == a || a.distance(c) >= self.cfg.reach_m {
+                    continue;
+                }
+                let d2 = a.distance_squared(c);
+                if nearest.is_none_or(|(best, _)| d2 < best) {
+                    nearest = Some((d2, c));
+                }
+            }
+            let Some((_, b)) = nearest else {
                 continue;
             };
             let (lo, hi) = if (a.x, a.y, a.z) <= (b.x, b.y, b.z) {
