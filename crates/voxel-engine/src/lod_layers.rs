@@ -397,10 +397,24 @@ impl WorldLod {
         });
         let mut graph = LayerGraph::new(u64::from(world)).with_threads(LOD_WORKERS);
         let mut tops = Vec::new();
-        // Coarsest FIRST. Tops are ensured one after another, so whichever
-        // is processed first decides what the pipeline chews on while
-        // planning is still running — and the coarse levels are exactly
-        // the ones that need no planning at all.
+        // Coarsest FIRST, but only OUTSIDE the ops horizon. Tops are
+        // ensured one after another, so whichever is processed first
+        // decides what the pipeline chews on while planning is still
+        // running — and the coarse levels are exactly the ones that need
+        // no planning at all.
+        //
+        // Inside the horizon that rule is backwards. There every chunk
+        // waits on `chunk_covered`, and coverage is REGIONAL: a level's box
+        // shrinks with its edge, so the finest levels are covered first and
+        // the coarsest — largest box — last. Led with the coarsest, that
+        // one level parked EVERY worker in the gate's 1 ms sleep for
+        // 0.3-0.5 s (32-68 chunks reach the gate on a cold start, not the
+        // one this used to claim) while the finer levels, whose regions
+        // were already covered, had not been asked for yet. That wait is
+        // the only one in the pass that is genuinely idle rather than
+        // contended, which is why filling it works where overlapping the
+        // rest of the pass does not.
+        let mut gated: Vec<TopDep> = Vec::new();
         for level in (0..=config.max_level).rev() {
             graph.register_as(
                 &instance(level),
@@ -424,10 +438,18 @@ impl WorldLod {
                 (key.edge_m() as f32) <= crate::planning::OPS_HORIZON_EDGE_M
                     || can_hold_surface(&at.generator, key)
             });
-            tops.push(
-                TopDep::new(&instance(level), level_span(&config, level)).with_filter(filter),
-            );
+            let dep = TopDep::new(&instance(level), level_span(&config, level)).with_filter(filter);
+            if (ChunkKey::in_world(world, level, IVec3::ZERO).edge_m() as f32)
+                <= crate::planning::OPS_HORIZON_EDGE_M
+            {
+                gated.push(dep);
+            } else {
+                tops.push(dep);
+            }
         }
+        // Descending so far; the gated half wants the other order.
+        gated.reverse();
+        tops.extend(gated);
         // `before` freezes the focus this pass works from. `between` runs
         // after every ensure and before any release — the only moment when
         // the new configuration is resident and the old one is still there
