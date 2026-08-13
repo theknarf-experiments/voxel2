@@ -180,7 +180,9 @@ impl LayerRuntime {
     /// True when every top dependency is satisfied and nothing further
     /// has been requested.
     pub fn is_idle(&self) -> bool {
-        self.shared.idle.load(Ordering::Acquire)
+        // Both, so the answer cannot be a stale flag from before the pass
+        // that is running right now.
+        self.shared.idle.load(Ordering::Acquire) && !self.is_generating()
     }
 
     /// Block until every top dependency is satisfied. For tests and
@@ -244,6 +246,15 @@ fn run(
         let forced = shared.forced.swap(false, Ordering::AcqRel);
         let worked = forced || tops.iter().any(TopDep::changed);
         if worked {
+            // Before the pass, not after. `idle` is published at the END
+            // of an iteration, so an iteration that found nothing to do
+            // leaves it TRUE — and it stays true for the whole of the
+            // next pass, which is the one that does the work. A cold
+            // megastructure reported settled 0.34 s before its
+            // populations were created at all and kept growing for a
+            // second after, because the flag was describing the previous
+            // iteration.
+            shared.idle.store(false, Ordering::Release);
             shared.generating.store(true, Ordering::Relaxed);
             graph.process_tops_with(&mut tops, |g| {
                 if let Some(between) = &between {
