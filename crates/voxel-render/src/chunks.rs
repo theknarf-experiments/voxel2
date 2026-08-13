@@ -770,6 +770,17 @@ pub fn material_slot_index(world: voxel_core::WorldId, id: u32) -> usize {
     usize::from(world) * MATERIAL_SLOTS + (id as usize).min(MATERIAL_SLOTS - 1)
 }
 
+/// [`WOP_FLAG_PER_SAMPLE`] for ops that read the sample position's y.
+///
+/// Derived here rather than stored on the op, so the flag cannot be
+/// authored wrong and the CPU interpreter never sees it.
+fn per_sample_bit(kind: u32) -> u32 {
+    match voxel_core::opgen::axis(kind) {
+        voxel_core::opgen::Axis::Sample => voxel_core::worldop::WOP_FLAG_PER_SAMPLE,
+        voxel_core::opgen::Axis::Column => 0,
+    }
+}
+
 /// GPU layout twin of `voxel_core::worldop::WorldOp` (64 B).
 #[derive(ShaderType, Clone, Copy, Default)]
 pub(crate) struct GpuWorldOp {
@@ -826,7 +837,12 @@ impl GpuWorldProgram {
             let offset = gpu_ops.len() as u32;
             let height_ops = program.ops.iter().filter(|op| op.is_height_op()).count() as u32;
             gpu_ops.extend(program.ops.iter().map(|op| GpuWorldOp {
-                meta: UVec4::new(op.kind, op.flags, op.material, op.region),
+                meta: UVec4::new(
+                    op.kind,
+                    op.flags | per_sample_bit(op.kind),
+                    op.material,
+                    op.region,
+                ),
                 p0: Vec4::from_array(op.p0),
                 p1: Vec4::from_array(op.p1),
                 p2: Vec4::from_array(op.p2),
@@ -3215,7 +3231,11 @@ mod multi_world_tests {
         let gpu = GpuWorldProgram::from_worlds(&worlds);
         let packed = gpu.ops[0];
         assert_eq!(packed.meta.x, op.kind);
-        assert_eq!(packed.meta.y, op.flags);
+        assert_eq!(
+            packed.meta.y,
+            op.flags | voxel_core::worldop::WOP_FLAG_PER_SAMPLE,
+            "flags carry the DERIVED per-sample bit; kind 3 reads the sample y"
+        );
         assert_eq!(packed.meta.z, op.material);
         assert_eq!(
             packed.meta.w, op.region,

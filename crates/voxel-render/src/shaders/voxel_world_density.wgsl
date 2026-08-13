@@ -275,14 +275,20 @@ fn eval_column(pxz: vec2<f32>, vs: f32) -> Column {
     var shaft = BIG;
     let w = world_header();
     for (var i = 0u; i < w.count.y; i++) {
-        let op = prog.ops[w.count.x + i];
+        // Head first, body only if the op actually runs. An op this loop
+        // skips costs 16 bytes instead of 64, and the arms below have no
+        // case for a per-sample op anyway -- both loops used to walk the
+        // whole program and fall through the switch.
+        let head = prog.ops[w.count.x + i].head;
+        if ((head.y & 4u) != 0u) { continue; }
         // The same LOD gating the sample pass applies: a column op can
         // be fine- or coarse-only too, and the two passes must agree
         // about which ops exist or the column is not the column.
-        if (coarse && (op.head.y & 1u) != 0u) { continue; }
-        if (!coarse && (op.head.y & 2u) != 0u) { continue; }
-        if (!region_gate(op.head.w, ta, tb)) { continue; }
-        switch op.head.x {
+        if (coarse && (head.y & 1u) != 0u) { continue; }
+        if (!coarse && (head.y & 2u) != 0u) { continue; }
+        if (!region_gate(head.w, ta, tb)) { continue; }
+        let op = prog.ops[w.count.x + i];
+        switch head.x {
 // GENOPS COLUMN ARMS BEGIN (generated from voxel-core::opgen — run `mise run genops` after editing the op table)
             case 0u: { // WOP_HEIGHT_FBM
                 h += fbm(pxz + warp + op.p0.xy, op.p0.z, to_i(op.p1.x), vs, to_u(op.p1.y)) * op.p0.w;
@@ -344,11 +350,17 @@ fn eval_program(p: vec3<f32>, vs: f32, col: Column) -> WorldSample {
 
     let w = world_header();
     for (var i = 0u; i < w.count.y; i++) {
+        // Column ops are already folded into `col`; this loop's arms have
+        // no case for them. Skipping on the head is what makes the axis
+        // split pay -- hoisting an op alone never did, because both loops
+        // still iterated it and ate the 64-byte read.
+        let head = prog.ops[w.count.x + i].head;
+        if ((head.y & 4u) == 0u) { continue; }
+        if (coarse && (head.y & 1u) != 0u) { continue; }
+        if (!coarse && (head.y & 2u) != 0u) { continue; }
+        if (!region_gate(head.w, ta, tb)) { continue; }
         let op = prog.ops[w.count.x + i];
-        if (coarse && (op.head.y & 1u) != 0u) { continue; }
-        if (!coarse && (op.head.y & 2u) != 0u) { continue; }
-        if (!region_gate(op.head.w, ta, tb)) { continue; }
-        switch op.head.x {
+        switch head.x {
 // GENOPS ARMS BEGIN (generated from voxel-core::opgen — run `mise run genops` after editing the op table)
             case 15u: { // WOP_FBM3
                 let q = p + op.p1.xyz;

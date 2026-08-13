@@ -126,6 +126,19 @@ pub const WOP_FBM3: u32 = 15;
 pub const WOP_FLAG_FINE_ONLY: u32 = 1;
 /// Skip this op at fine LODs.
 pub const WOP_FLAG_COARSE_ONLY: u32 = 2;
+/// This op varies down the column, so only the density shader's PER-SAMPLE
+/// loop runs it; the per-column loop skips it, and vice versa.
+///
+/// DERIVED, never authored: `opgen::axis` already works out which ops read
+/// the sample position's y, and this only carries that answer to the GPU.
+/// Set when packing, so a `WorldOp` in memory never has it and the CPU
+/// interpreter — one linear loop with every arm — is untouched.
+///
+/// Worth carrying because the two loops used to walk the WHOLE program and
+/// let the switch fall through: planet has 18 ops of which 6 are
+/// per-sample, purgatory 4 of 17, and the sample loop runs ~189M times on
+/// a cold planet.
+pub const WOP_FLAG_PER_SAMPLE: u32 = 4;
 
 /// Voxel size (meters) at and above which structural detail ops are dropped
 /// and `COARSE_ONLY` ops apply. Must match the WGSL interpreter.
