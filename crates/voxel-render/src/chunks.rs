@@ -1152,10 +1152,16 @@ struct ChunkTable {
     /// situation as a first load, and it gets the same budgets until the
     /// pipeline drains.
     reloading: bool,
-    /// Whether the jump has actually produced work yet. The LOD thread
-    /// issues its requests asynchronously, so `awaiting` is still 0 on
-    /// the frame the camera moves — without this the flag is set and
-    /// cleared in the same frame and never buys anything.
+    /// Whether the jump has REVEALED anything yet.
+    ///
+    /// Keyed on the commit rather than on the queue, because the queue
+    /// empties twice. A jump drains the old work, then the LOD spends up
+    /// to a second building planning before it can ask for a single new
+    /// chunk, and `awaiting` reads 0 that whole time. Clearing on that
+    /// put the teleport back on the flight budget for its entire refill:
+    /// 1445 chunks/s against the 2300 a cold start manages, and a planet
+    /// teleport at 5.8 s instead of 1.8. A commit only happens when a
+    /// pass reveals, which is exactly "the jump has landed".
     reload_saw_work: bool,
     last_camera: DVec3,
 }
@@ -1950,6 +1956,7 @@ fn plan_frame_inner(
                 if let Some(chunk) = table.chunks.get_mut(&key) {
                     chunk.visible = true;
                     table.revealed = true;
+                    table.reload_saw_work = true;
                     match chunk.pending.take() {
                         Some(Pending::Held { alloc, index_count }) => {
                             if let ChunkState::Meshed { alloc: old, .. } = chunk.state {
@@ -2569,11 +2576,8 @@ fn plan_frame_inner(
         }
         counts.insert("with_ops", with_ops);
         counts.insert("total_ops", total_ops);
-        // Drained: whatever the jump asked for is on screen now. Only
-        // once it has asked — see `reload_saw_work`.
-        if awaiting > 0 {
-            table.reload_saw_work = true;
-        } else if table.reload_saw_work {
+        // Drained AND revealed: the jump has landed.
+        if awaiting == 0 && table.reload_saw_work {
             table.reloading = false;
         }
         s.tracked = table.chunks.len();
