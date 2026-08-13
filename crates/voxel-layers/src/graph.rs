@@ -114,6 +114,11 @@ pub struct LayerStats {
     pub destroyed: usize,
     /// Total time inside this layer's `create`.
     pub create_time: std::time::Duration,
+    /// Bounding box of the resident tile COORDS. Says WHERE a layer is
+    /// holding, which "how many" cannot: a set centred on the camera and
+    /// a set that is two regions at once have the same count when they
+    /// happen to be the same size.
+    pub bbox: Option<(IVec3, IVec3)>,
 }
 
 impl LayerGraph {
@@ -706,6 +711,12 @@ impl LayerGraph {
                 create_time: std::time::Duration::from_nanos(
                     entry.create_nanos.load(Ordering::Relaxed),
                 ),
+                bbox: {
+                    let grid = entry.grid.read().unwrap();
+                    grid.keys().fold(None, |acc: Option<(IVec3, IVec3)>, c| {
+                        Some(acc.map_or((*c, *c), |(lo, hi)| (lo.min(*c), hi.max(*c))))
+                    })
+                },
             })
             .collect();
         out.sort_by_key(|s| std::cmp::Reverse(s.create_time));

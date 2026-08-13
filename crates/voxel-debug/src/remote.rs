@@ -165,6 +165,7 @@ fn status(
                     "created": l.created,
                     "destroyed": l.destroyed,
                     "create_ms": l.create_time.as_secs_f64() * 1000.0,
+                    "bbox": l.bbox.map(|(lo, hi)| [lo.x, lo.y, lo.z, hi.x, hi.y, hi.z]),
                 }))
                 .collect::<Vec<_>>(),
         });
