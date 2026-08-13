@@ -42,6 +42,11 @@ pub struct LodDef {
     /// without restreaming.
     pub split_k: f64,
     pub merge_k: f64,
+    /// Ensure the levels inside the ops horizon finest-first. MEASURE
+    /// before setting it — see [`LodConfig::gated_finest_first`]; the two
+    /// shipped extremes want opposite answers.
+    #[serde(default)]
+    pub gated_finest_first: bool,
 }
 
 impl From<&LodDef> for LodConfig {
@@ -52,6 +57,7 @@ impl From<&LodDef> for LodConfig {
             top_y: d.top_y,
             split_k: d.split_k,
             merge_k: d.merge_k,
+            gated_finest_first: d.gated_finest_first,
         }
     }
 }

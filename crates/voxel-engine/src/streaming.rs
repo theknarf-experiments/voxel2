@@ -46,6 +46,26 @@ pub struct LodConfig {
     /// splitting, and the hysteresis is the sticky anchor, not a second
     /// constant. Kept because it is still level data, and because the
     /// residency measurement uses it to reproduce the sizing it rejected.
+    /// Ensure the levels INSIDE the ops horizon finest-first.
+    ///
+    /// Only these levels wait on `chunk_covered`, and coverage is regional
+    /// — a level's box shrinks with its edge, so the finest is covered
+    /// soonest and the coarsest last. Whichever gated level a pass reaches
+    /// first is the one it blocks on, so leading with the finest blocks
+    /// for the shortest time and the coarser levels then find their own
+    /// coverage already arrived.
+    ///
+    /// NOT a free win, which is why it is level data and not a rule:
+    /// leading with thousands of small chunks also puts the coarse levels'
+    /// GPU work behind them. Which effect dominates is a property of the
+    /// level, and the two shipped extremes disagree by 0.3 s in OPPOSITE
+    /// directions (6 runs each): megastructure 1.47 coarse / 1.18 fine,
+    /// planet 1.52 coarse / 1.66 fine.
+    ///
+    /// Default false — plain coarsest-first, which is also what the levels
+    /// OUTSIDE the horizon always use, since those need no planning at all
+    /// and are what the pipeline should chew on while the planners run.
+    pub gated_finest_first: bool,
     pub merge_k: f64,
 }
 
@@ -58,6 +78,7 @@ impl Default for LodConfig {
             top_y: (-1, 0),
             split_k: 2.5,
             merge_k: 3.0,
+            gated_finest_first: false,
         }
     }
 }
@@ -790,6 +811,7 @@ mod residency_shape {
             top_y: (-1, 0),
             split_k: 2.5,
             merge_k: 3.0,
+            gated_finest_first: false,
         }
     }
 
@@ -800,6 +822,7 @@ mod residency_shape {
             top_y: (-3, 3),
             split_k: 1.6,
             merge_k: 2.1,
+            gated_finest_first: false,
         }
     }
 

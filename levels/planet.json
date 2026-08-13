@@ -1,1492 +1,1492 @@
 {
-  "lod": {
-    "max_level": 14,
-    "top_radius": 3,
-    "top_y": [
-      -1,
-      0
-    ],
-    "split_k": 2.5,
-    "merge_k": 3.0
-  },
-  "environment": {
-    "sun_direction": [
-      0.55,
-      0.5,
-      0.32
-    ]
-  },
-  "nodes": [
-    {
-      "kind": "height_zero",
-      "name": "sea"
-    },
-    {
-      "kind": "sdf_void",
-      "name": "void"
-    },
-    {
-      "kind": "warp_none",
-      "name": "unwarped"
-    },
-    {
-      "kind": "region_axes",
-      "name": "regions.1",
-      "scale": [
-        8e-05,
-        0.00011
-      ],
-      "offset": [
-        -31000.0,
-        12000.0,
-        47000.0,
-        -19000.0
-      ],
-      "octaves": 5
-    },
-    {
-      "kind": "height_fbm",
-      "name": "height.1",
-      "in": {
-        "height": "sea",
-        "warp": "unwarped"
-      },
-      "scale": 5e-05,
-      "amp": 800.0,
-      "octaves": 3
-    },
-    {
-      "kind": "height_fbm",
-      "name": "height.2",
-      "in": {
-        "height": "height.1",
-        "warp": "unwarped"
-      },
-      "offset": [
-        510.0,
-        -770.0
-      ],
-      "scale": 0.0008,
-      "amp": 420.0,
-      "octaves": 5
-    },
-    {
-      "kind": "height_fbm",
-      "name": "height.3",
-      "in": {
-        "height": "height.2",
-        "warp": "unwarped"
-      },
-      "offset": [
-        1337.0,
-        55.0
-      ],
-      "scale": 0.01,
-      "amp": 36.0,
-      "octaves": 5
-    },
-    {
-      "kind": "height_step",
-      "name": "height.4",
-      "in": {
-        "height": "height.3"
-      },
-      "start": 180.0,
-      "end": 230.0,
-      "amp": 90.0
-    },
-    {
-      "kind": "height_fbm",
-      "name": "height.5",
-      "in": {
-        "height": "height.4",
-        "warp": "unwarped"
-      },
-      "offset": [
-        37.0,
-        91.0
-      ],
-      "scale": 0.06,
-      "amp": 5.0,
-      "octaves": 4
-    },
-    {
-      "kind": "height_offset",
-      "name": "height.6",
-      "in": {
-        "height": "height.5"
-      },
-      "value": -8.0
-    },
-    {
-      "kind": "field",
-      "name": "field.1",
-      "in": {
-        "warp": "unwarped"
-      },
-      "offset": [
-        -4200.0,
-        8800.0
-      ],
-      "scale": 0.004,
-      "amp": 1.6,
-      "octaves": 3,
-      "bias": 0.15
-    },
-    {
-      "kind": "height_band_fbm",
-      "name": "height.7",
-      "in": {
-        "height": "height.6",
-        "warp": "unwarped",
-        "regions": "regions.1"
-      },
-      "a": [
-        0.56,
-        1.0
-      ],
-      "b": [
-        0.0,
-        0.47
-      ],
-      "offset": [
-        820.0,
-        -410.0
-      ],
-      "scale": 0.011,
-      "amp": 21.0,
-      "octaves": 3,
-      "mode": "billow"
-    },
-    {
-      "kind": "height_band_fbm",
-      "name": "height.8",
-      "in": {
-        "height": "height.7",
-        "warp": "unwarped",
-        "regions": "regions.1"
-      },
-      "a": [
-        0.0,
-        0.44
-      ],
-      "b": [
-        0.0,
-        1.0
-      ],
-      "offset": [
-        -2600.0,
-        1750.0
-      ],
-      "scale": 0.0035,
-      "amp": 165.0,
-      "octaves": 5,
-      "mode": "ridged",
-      "lift": 60.0
-    },
-    {
-      "kind": "height_band_fbm",
-      "name": "height.9",
-      "in": {
-        "height": "height.8",
-        "warp": "unwarped",
-        "regions": "regions.1"
-      },
-      "a": [
-        0.0,
-        1.0
-      ],
-      "b": [
-        0.56,
-        1.0
-      ],
-      "offset": [
-        4400.0,
-        900.0
-      ],
-      "scale": 0.0025,
-      "amp": 34.0,
-      "octaves": 3,
-      "lift": -26.0
-    },
-    {
-      "kind": "height_band_fbm",
-      "name": "height.10",
-      "in": {
-        "height": "height.9",
-        "warp": "unwarped",
-        "regions": "regions.1"
-      },
-      "a": [
-        0.47,
-        0.53
-      ],
-      "b": [
-        0.0,
-        1.0
-      ],
-      "offset": [
-        15200.0,
-        -6400.0
-      ],
-      "scale": 0.00022,
-      "amp": 2350.0,
-      "octaves": 4,
-      "mode": "ridged",
-      "lift": 1150.0
-    },
-    {
-      "kind": "height_band_fbm",
-      "name": "height.11",
-      "in": {
-        "height": "height.10",
-        "warp": "unwarped",
-        "regions": "regions.1"
-      },
-      "a": [
-        0.47,
-        0.53
-      ],
-      "b": [
-        0.0,
-        1.0
-      ],
-      "offset": [
-        -3300.0,
-        7100.0
-      ],
-      "scale": 0.0016,
-      "amp": 430.0,
-      "octaves": 5,
-      "mode": "ridged"
-    },
-    {
-      "kind": "height_surface",
-      "name": "sdf.1",
-      "in": {
-        "height": "height.11",
-        "sdf": "void"
-      },
-      "material": 1
-    },
-    {
-      "kind": "material_band",
-      "name": "sdf.2",
-      "in": {
-        "sdf": "sdf.1",
-        "regions": "regions.1"
-      },
-      "from": 1,
-      "material": 7,
-      "a": [
-        0.47,
-        0.53
-      ],
-      "b": [
-        0.0,
-        1.0
-      ],
-      "feather": 0.018
-    },
-    {
-      "kind": "material_band",
-      "name": "sdf.3",
-      "in": {
-        "sdf": "sdf.2",
-        "regions": "regions.1"
-      },
-      "from": 1,
-      "material": 5,
-      "a": [
-        0.0,
-        0.44
-      ],
-      "b": [
-        0.0,
-        1.0
-      ]
-    },
-    {
-      "kind": "material_band",
-      "name": "sdf.4",
-      "in": {
-        "sdf": "sdf.3",
-        "regions": "regions.1"
-      },
-      "from": 1,
-      "material": 2,
-      "a": [
-        0.56,
-        1.0
-      ],
-      "b": [
-        0.0,
-        0.47
-      ]
-    },
-    {
-      "kind": "material_band",
-      "in": {
-        "sdf": "sdf.4",
-        "regions": "regions.1"
-      },
-      "from": 1,
-      "material": 6,
-      "a": [
-        0.0,
-        1.0
-      ],
-      "b": [
-        0.56,
-        1.0
-      ]
-    },
-    {
-      "kind": "structure",
-      "name": "ruin",
-      "size": [
-        8.0,
-        17.0
-      ],
-      "variants": [
-        {
-          "weight": 1.0,
-          "parts": [
-            {
-              "arrange": {
-                "type": "ring",
-                "count": [
-                  6,
-                  10
-                ]
-              },
-              "shape": {
-                "type": "boxy",
-                "half": [
-                  "arc",
-                  [
-                    1.2,
-                    2.6
-                  ],
-                  [
-                    0.55,
-                    0.55
-                  ]
-                ]
-              },
-              "material": 3,
-              "skip": 0.28,
-              "yaw": "tangent",
-              "anchor": "base",
-              "y_offset": [
-                -0.6,
-                -0.6
-              ]
-            },
-            {
-              "arrange": {
-                "type": "scatter",
-                "count": [
-                  1,
-                  3
-                ],
-                "radius_frac": [
-                  1.0,
-                  1.0
-                ]
-              },
-              "shape": {
-                "type": "cylinder",
-                "radius": [
-                  1.8,
-                  3.2
-                ],
-                "half_height": [
-                  2.5,
-                  7.0
-                ]
-              },
-              "material": 3,
-              "hollow": 0.8,
-              "anchor": "base",
-              "y_offset": [
-                -1.0,
-                -1.0
-              ]
-            },
-            {
-              "arrange": {
-                "type": "scatter",
-                "count": [
-                  2,
-                  5
-                ],
-                "radius_frac": [
-                  0.0,
-                  0.8
-                ]
-              },
-              "shape": {
-                "type": "boxy",
-                "half": [
-                  [
-                    0.5,
-                    1.4
-                  ],
-                  [
-                    0.5,
-                    1.4
-                  ],
-                  [
-                    0.5,
-                    1.4
-                  ]
-                ]
-              },
-              "material": 3,
-              "yaw": "random",
-              "anchor": "base",
-              "y_offset": [
-                -0.4,
-                -0.4
-              ]
-            }
-          ]
-        }
-      ]
-    },
-    {
-      "kind": "structure",
-      "name": "dungeon",
-      "size": [
-        40.0,
-        40.0
-      ],
-      "variants": [
-        {
-          "weight": 1.0,
-          "parts": [
-            {
-              "arrange": {
-                "type": "chain",
-                "count": [
-                  4,
-                  6
-                ],
-                "step": [
-                  12.0,
-                  20.0
-                ],
-                "turn_deg": 52.0,
-                "descend": [
-                  3.0,
-                  7.0
-                ],
-                "radius_frac": [
-                  0.0,
-                  1.0
-                ],
-                "from_surface": true
-              },
-              "shape": {
-                "type": "boxy",
-                "half": [
-                  [
-                    3.5,
-                    6.5
-                  ],
-                  [
-                    2.2,
-                    3.2
-                  ],
-                  [
-                    3.5,
-                    6.5
-                  ]
-                ]
-              },
-              "cut": true,
-              "material": 0,
-              "yaw": "random",
-              "anchor": "center",
-              "y_offset": [
-                -9.0,
-                -9.0
-              ],
-              "link": {
-                "half_w": 1.7,
-                "half_h": 1.9,
-                "step_m": 3.0
-              }
-            }
-          ]
-        }
-      ]
-    },
-    {
-      "kind": "biomes",
-      "name": "biomes",
-      "table": [
-        [
-          "forest",
-          1
-        ],
-        [
-          "desert",
-          2
-        ],
-        [
-          "tundra",
-          5
-        ],
-        [
-          "wetland",
-          6
-        ],
-        [
-          "mountains",
-          7
-        ]
-      ]
-    },
-    {
-      "kind": "scatter",
-      "name": "sites:ruins",
-      "chance": 0.32,
-      "altitude": [
-        8.0,
-        280.0
-      ],
-      "up": [
-        0.88,
-        1.0
-      ]
-    },
-    {
-      "kind": "emit",
-      "name": "ruins",
-      "in": {
-        "source": "sites:ruins",
-        "structure": "ruin"
-      },
-      "pad_m": 0.0,
-      "emit": {
-        "type": "site_structure",
-        "marker": "ruin"
-      }
-    },
-    {
-      "kind": "connect",
-      "name": "paths:roads",
-      "in": {
-        "source": "sites:ruins"
-      }
-    },
-    {
-      "kind": "emit",
-      "name": "roads",
-      "in": {
-        "source": "paths:roads"
-      },
-      "pad_m": 606.0,
-      "emit": {
-        "type": "path_slabs"
-      }
-    },
-    {
-      "kind": "emit",
-      "name": "road-surface",
-      "in": {
-        "source": "paths:roads"
-      },
-      "pad_m": 606.0,
-      "emit": {
-        "type": "path_ribbon",
-        "material": 3,
-        "width": [
-          5.0,
-          5.0
-        ]
-      }
-    },
-    {
-      "kind": "scatter",
-      "name": "sites:regions",
-      "cell_m": 4096,
-      "chance": 0.7,
-      "altitude": [
-        8.0,
-        280.0
-      ],
-      "up": [
-        0.8,
-        1.0
-      ]
-    },
-    {
-      "kind": "connect",
-      "name": "paths:highways",
-      "in": {
-        "source": "sites:regions"
-      },
-      "cell_m": 4096,
-      "reach_m": 8192.0,
-      "corridor_m": 1024.0,
-      "step_m": 128.0
-    },
-    {
-      "kind": "emit",
-      "name": "highway-surface",
-      "in": {
-        "source": "paths:highways"
-      },
-      "cell_m": 4096,
-      "pad_m": 9216.0,
-      "keep_m": 44000.0,
-      "emit": {
-        "type": "path_ribbon",
-        "material": 3,
-        "width": [
-          26.0,
-          26.0
-        ]
-      }
-    },
-    {
-      "kind": "scatter",
-      "name": "sites:springs",
-      "cell_m": 512,
-      "chance": 0.5,
-      "altitude": [
-        60.0,
-        400.0
-      ]
-    },
-    {
-      "kind": "flow",
-      "name": "flow:rivers",
-      "in": {
-        "source": "sites:springs"
-      }
-    },
-    {
-      "kind": "emit",
-      "name": "rivers",
-      "in": {
-        "source": "flow:rivers"
-      },
-      "cell_m": 512,
-      "pad_m": 3264.0,
-      "max_chunk_edge_m": 140.0,
-      "emit": {
-        "type": "ribbon",
-        "material": 4
-      },
-      "keep_m": 12000.0
-    },
-    {
-      "kind": "scatter",
-      "name": "sites:caves",
-      "chance": 0.45,
-      "altitude": [
-        6.0,
-        500.0
-      ]
-    },
-    {
-      "kind": "worm",
-      "name": "worm:caves",
-      "in": {
-        "source": "sites:caves"
-      }
-    },
-    {
-      "kind": "emit",
-      "name": "caves",
-      "in": {
-        "source": "worm:caves"
-      },
-      "pad_m": 340.0,
-      "max_chunk_edge_m": 140.0,
-      "emit": {
-        "type": "worm_cuts"
-      }
-    },
-    {
-      "kind": "scatter",
-      "name": "sites:dungeons",
-      "chance": 0.22,
-      "altitude": [
-        12.0,
-        260.0
-      ],
-      "up": [
-        0.85,
-        1.0
-      ]
-    },
-    {
-      "kind": "emit",
-      "name": "dungeons",
-      "in": {
-        "source": "sites:dungeons",
-        "structure": "dungeon"
-      },
-      "pad_m": 0.0,
-      "max_chunk_edge_m": 140.0,
-      "emit": {
-        "type": "site_structure",
-        "marker": "dungeon"
-      }
-    },
-    {
-      "kind": "population",
-      "name": "tree",
-      "in": {
-        "density": "field.1",
-        "gate": "biomes"
-      },
-      "per_tile": 200,
-      "altitude": [
-        3.0,
-        340.0
-      ],
-      "min_up": 0.86,
-      "density": {},
-      "placement": {
-        "tilt_deg": 4.0,
-        "altitude_falloff": 25.0
-      },
-      "sink_m": 0.45,
-      "variants": [
-        {
-          "weight": 0.42,
-          "altitude": [
-            3.0,
-            140.0
-          ],
-          "scale": [
-            0.8,
-            1.7
-          ]
-        },
-        {
-          "weight": 0.4,
-          "altitude": [
-            3.0,
-            340.0
-          ],
-          "scale": [
-            0.8,
-            1.7
-          ]
-        },
-        {
-          "weight": 0.18,
-          "altitude": [
-            3.0,
-            180.0
-          ],
-          "scale": [
-            0.7,
-            1.2
-          ]
-        }
-      ],
-      "region": "forest"
-    },
-    {
-      "kind": "population",
-      "name": "boulder",
-      "in": {
-        "gate": "biomes"
-      },
-      "per_tile": 4,
-      "chance": 0.45,
-      "altitude": [
-        2.0,
-        800.0
-      ],
-      "min_up": 0.55,
-      "placement": {
-        "align": "normal",
-        "tilt_deg": 8.0
-      },
-      "sink_scaled": 0.2,
-      "scale_bias": 2.0,
-      "variants": [
-        {
-          "scale": [
-            0.4,
-            2.6
-          ]
-        }
-      ],
-      "region": "tundra"
-    },
-    {
-      "kind": "population",
-      "name": "groundcover",
-      "output": "points",
-      "tile_m": 16.0,
-      "radius_tiles": 7,
-      "per_tile": 550,
-      "altitude": [
-        2.5,
-        300.0
-      ],
-      "min_up": 0.8,
-      "detail_vs": 1.0
-    },
-    {
-      "kind": "population",
-      "name": "bush",
-      "in": {
-        "density": "field.1",
-        "gate": "biomes"
-      },
-      "per_tile": 26,
-      "placement": {
-        "align": "normal",
-        "tilt_deg": 6.0
-      },
-      "chance": 0.7,
-      "altitude": [
-        3.0,
-        300.0
-      ],
-      "min_up": 0.82,
-      "density": {},
-      "sink_scaled": 0.15,
-      "variants": [
-        {
-          "scale": [
-            0.6,
-            1.5
-          ]
-        }
-      ],
-      "region": "forest"
-    },
-    {
-      "kind": "population",
-      "name": "fern",
-      "in": {
-        "density": "field.1",
-        "gate": "biomes"
-      },
-      "per_tile": 34,
-      "placement": {
-        "align": "normal",
-        "tilt_deg": 6.0
-      },
-      "chance": 0.6,
-      "altitude": [
-        3.0,
-        240.0
-      ],
-      "min_up": 0.86,
-      "density": {},
-      "sink_scaled": 0.1,
-      "variants": [
-        {
-          "scale": [
-            0.5,
-            1.1
-          ]
-        }
-      ],
-      "region": "forest"
-    },
-    {
-      "kind": "population",
-      "name": "mushroom",
-      "in": {
-        "density": "field.1",
-        "gate": "biomes"
-      },
-      "per_tile": 14,
-      "placement": {
-        "align": "normal",
-        "tilt_deg": 6.0
-      },
-      "chance": 0.35,
-      "altitude": [
-        3.0,
-        200.0
-      ],
-      "min_up": 0.9,
-      "density": {},
-      "sink_scaled": 0.05,
-      "variants": [
-        {
-          "scale": [
-            0.7,
-            1.8
-          ]
-        }
-      ],
-      "region": "forest"
-    },
-    {
-      "kind": "population",
-      "name": "deadwood",
-      "in": {
-        "density": "field.1",
-        "gate": "biomes"
-      },
-      "per_tile": 5,
-      "placement": {
-        "align": "normal",
-        "tilt_deg": 6.0
-      },
-      "chance": 0.3,
-      "altitude": [
-        3.0,
-        260.0
-      ],
-      "min_up": 0.88,
-      "density": {},
-      "sink_scaled": 0.3,
-      "variants": [
-        {
-          "scale": [
-            0.7,
-            1.6
-          ]
-        }
-      ],
-      "region": "forest"
-    },
-    {
-      "kind": "population",
-      "name": "cactus",
-      "in": {
-        "gate": "biomes"
-      },
-      "per_tile": 7,
-      "placement": {
-        "align": "normal",
-        "tilt_deg": 6.0
-      },
-      "chance": 0.4,
-      "altitude": [
-        4.0,
-        420.0
-      ],
-      "min_up": 0.88,
-      "sink_scaled": 0.12,
-      "variants": [
-        {
-          "scale": [
-            0.7,
-            1.9
-          ]
-        }
-      ],
-      "region": "desert"
-    },
-    {
-      "kind": "population",
-      "name": "drybrush",
-      "in": {
-        "gate": "biomes"
-      },
-      "per_tile": 20,
-      "placement": {
-        "align": "normal",
-        "tilt_deg": 6.0
-      },
-      "chance": 0.55,
-      "altitude": [
-        3.0,
-        500.0
-      ],
-      "min_up": 0.78,
-      "sink_scaled": 0.15,
-      "variants": [
-        {
-          "scale": [
-            0.5,
-            1.3
-          ]
-        }
-      ],
-      "region": "desert"
-    },
-    {
-      "kind": "population",
-      "name": "reed",
-      "in": {
-        "gate": "biomes"
-      },
-      "per_tile": 44,
-      "placement": {
-        "align": "normal",
-        "tilt_deg": 6.0
-      },
-      "chance": 0.75,
-      "altitude": [
-        0.5,
-        60.0
-      ],
-      "min_up": 0.9,
-      "sink_scaled": 0.08,
-      "variants": [
-        {
-          "scale": [
-            0.7,
-            1.6
-          ]
-        }
-      ],
-      "region": "wetland"
-    },
-    {
-      "kind": "population",
-      "name": "marshcap",
-      "in": {
-        "gate": "biomes"
-      },
-      "per_tile": 10,
-      "placement": {
-        "align": "normal",
-        "tilt_deg": 6.0
-      },
-      "chance": 0.4,
-      "altitude": [
-        1.0,
-        80.0
-      ],
-      "min_up": 0.9,
-      "sink_scaled": 0.05,
-      "variants": [
-        {
-          "scale": [
-            0.9,
-            2.2
-          ]
-        }
-      ],
-      "region": "wetland"
-    },
-    {
-      "kind": "population",
-      "name": "alpinebush",
-      "in": {
-        "gate": "biomes"
-      },
-      "per_tile": 16,
-      "placement": {
-        "align": "normal",
-        "tilt_deg": 6.0
-      },
-      "chance": 0.45,
-      "altitude": [
-        40.0,
-        700.0
-      ],
-      "min_up": 0.8,
-      "sink_scaled": 0.2,
-      "variants": [
-        {
-          "scale": [
-            0.5,
-            1.2
-          ]
-        }
-      ],
-      "region": "tundra"
-    },
-    {
-      "kind": "population",
-      "name": "scree",
-      "in": {
-        "gate": "biomes"
-      },
-      "per_tile": 30,
-      "placement": {
-        "align": "normal",
-        "tilt_deg": 6.0
-      },
-      "chance": 0.6,
-      "altitude": [
-        100.0,
-        1900.0
-      ],
-      "min_up": 0.5,
-      "sink_scaled": 0.35,
-      "scale_bias": 1.6,
-      "variants": [
-        {
-          "scale": [
-            0.3,
-            1.4
-          ]
-        }
-      ],
-      "region": "mountains"
-    },
-    {
-      "kind": "population",
-      "name": "screebush",
-      "in": {
-        "gate": "biomes"
-      },
-      "per_tile": 8,
-      "placement": {
-        "align": "normal",
-        "tilt_deg": 6.0
-      },
-      "chance": 0.3,
-      "altitude": [
-        150.0,
-        900.0
-      ],
-      "min_up": 0.82,
-      "sink_scaled": 0.2,
-      "variants": [
-        {
-          "scale": [
-            0.4,
-            0.9
-          ]
-        }
-      ],
-      "region": "mountains"
-    },
-    {
-      "kind": "population",
-      "name": "treecover",
-      "in": {
-        "density": "field.1",
-        "gate": "biomes"
-      },
-      "output": "points",
-      "tile_m": 64.0,
-      "radius_tiles": 80,
-      "per_tile": 900,
-      "altitude": [
-        3.0,
-        340.0
-      ],
-      "min_up": 0.86,
-      "detail_vs": 8.0,
-      "density": {},
-      "cover": {
-        "material": 8,
-        "from_m": 3300.0,
-        "full_at": 0.02
-      },
-      "region": "forest"
-    }
+ "lod": {
+  "max_level": 14,
+  "top_radius": 3,
+  "top_y": [
+   -1,
+   0
   ],
-  "materials": [
-    {
-      "type": "canopy",
-      "id": 1,
-      "low": [
-        0.112,
-        0.1027,
-        0.0784
-      ],
-      "canopy": [
-        [
-          0.014,
-          0.0261,
-          0.0084
-        ],
-        [
-          0.0747,
-          0.0933,
-          0.0261
-        ]
-      ],
-      "rock": [
-        0.0635,
-        0.0541,
-        0.0467
-      ],
-      "patch": [
-        0.0597,
-        0.0448,
-        0.0205
-      ],
-      "zones": {
-        "canopy": [
-          1.5,
-          3.0
-        ],
-        "rock": [
-          340.0,
-          140.0
-        ],
-        "border": 60.0
-      },
-      "crowns": [
-        0.35,
-        0.9
-      ],
-      "strata": [
-        0.15,
-        1.2
-      ],
-      "steep": [
-        0.72,
-        0.45
-      ],
-      "patch_amount": 0.55,
-      "detail_fade": 0.0015
-    },
-    {
-      "type": "zoned",
-      "id": 2,
-      "low": [
-        0.295,
-        0.235,
-        0.14
-      ],
-      "mid": [
-        [
-          0.445,
-          0.36,
-          0.205
-        ],
-        [
-          0.505,
-          0.425,
-          0.26
-        ]
-      ],
-      "high": [
-        [
-          0.47,
-          0.405,
-          0.285
-        ],
-        [
-          0.41,
-          0.345,
-          0.24
-        ]
-      ],
-      "peak": [
-        0.53,
-        0.47,
-        0.345
-      ],
-      "zones": {
-        "mid": [
-          40.0,
-          35.0
-        ],
-        "high": [
-          200.0,
-          110.0
-        ],
-        "peak": [
-          430.0,
-          140.0
-        ],
-        "border": 45.0
-      },
-      "steep": [
-        0.7,
-        0.38
-      ],
-      "detail_fade": 0.0022
-    },
-    {
-      "type": "surface",
-      "id": 3,
-      "base": [
-        0.0971,
-        0.0933,
-        0.0859
-      ],
-      "grain": 0.4,
-      "band": {
-        "freq": 0.55,
-        "amp": 0.18,
-        "lo": 0.08,
-        "hi": 0.25,
-        "warp": 0.7
-      },
-      "moss": {
-        "color": [
-          0.0504,
-          0.0709,
-          0.0261
-        ],
-        "amount": 0.5
-      },
-      "detail_fade": 0.002
-    },
-    {
-      "type": "surface",
-      "id": 4,
-      "base": [
-        0.0299,
-        0.0635,
-        0.0821
-      ],
-      "grain": 0.06,
-      "detail_fade": 0.004
-    },
-    {
-      "type": "zoned",
-      "id": 5,
-      "low": [
-        0.105,
-        0.115,
-        0.128
-      ],
-      "mid": [
-        [
-          0.165,
-          0.18,
-          0.2
-        ],
-        [
-          0.24,
-          0.26,
-          0.285
-        ]
-      ],
-      "high": [
-        [
-          0.43,
-          0.46,
-          0.51
-        ],
-        [
-          0.64,
-          0.68,
-          0.735
-        ]
-      ],
-      "peak": [
-        0.82,
-        0.86,
-        0.915
-      ],
-      "zones": {
-        "mid": [
-          40.0,
-          35.0
-        ],
-        "high": [
-          200.0,
-          110.0
-        ],
-        "peak": [
-          430.0,
-          140.0
-        ],
-        "border": 45.0
-      },
-      "steep": [
-        0.74,
-        0.36
-      ],
-      "detail_fade": 0.002
-    },
-    {
-      "type": "surface",
-      "id": 6,
-      "base": [
-        0.062,
-        0.076,
-        0.045
-      ],
-      "detail_fade": 0.0025
-    },
-    {
-      "type": "zoned",
-      "id": 7,
-      "low": [
-        0.088,
-        0.082,
-        0.078
-      ],
-      "mid": [
-        [
-          0.126,
-          0.118,
-          0.11
-        ],
-        [
-          0.168,
-          0.158,
-          0.148
-        ]
-      ],
-      "high": [
-        [
-          0.235,
-          0.232,
-          0.238
-        ],
-        [
-          0.4,
-          0.405,
-          0.42
-        ]
-      ],
-      "peak": [
-        0.88,
-        0.905,
-        0.945
-      ],
-      "zones": {
-        "mid": [
-          120.0,
-          90.0
-        ],
-        "high": [
-          430.0,
-          220.0
-        ],
-        "peak": [
-          780.0,
-          200.0
-        ],
-        "border": 70.0
-      },
-      "steep": [
-        0.62,
-        0.3
-      ],
-      "detail_fade": 0.0018
-    },
-    {
-      "type": "surface",
-      "id": 8,
-      "base": [
-        0.021,
-        0.032,
-        0.0087
-      ],
-      "grain": 0.0,
-      "detail_fade": 0.0015
-    }
-  ],
-  "prefabs": [
-    {
-      "use": "prefabs/monolith_circle.json"
-    }
-  ],
-  "placements": [
-    {
-      "prefab": "monolith_circle",
-      "position": [
-        -27560.0,
-        0.0,
-        -36690.0
-      ],
-      "yaw_deg": 30.0,
-      "snap_to_terrain": true,
-      "priority": 0
-    }
+  "split_k": 2.5,
+  "merge_k": 3.0
+ },
+ "environment": {
+  "sun_direction": [
+   0.55,
+   0.5,
+   0.32
   ]
+ },
+ "nodes": [
+  {
+   "kind": "height_zero",
+   "name": "sea"
+  },
+  {
+   "kind": "sdf_void",
+   "name": "void"
+  },
+  {
+   "kind": "warp_none",
+   "name": "unwarped"
+  },
+  {
+   "kind": "region_axes",
+   "name": "regions.1",
+   "scale": [
+    8e-05,
+    0.00011
+   ],
+   "offset": [
+    -31000.0,
+    12000.0,
+    47000.0,
+    -19000.0
+   ],
+   "octaves": 5
+  },
+  {
+   "kind": "height_fbm",
+   "name": "height.1",
+   "in": {
+    "height": "sea",
+    "warp": "unwarped"
+   },
+   "scale": 5e-05,
+   "amp": 800.0,
+   "octaves": 3
+  },
+  {
+   "kind": "height_fbm",
+   "name": "height.2",
+   "in": {
+    "height": "height.1",
+    "warp": "unwarped"
+   },
+   "offset": [
+    510.0,
+    -770.0
+   ],
+   "scale": 0.0008,
+   "amp": 420.0,
+   "octaves": 5
+  },
+  {
+   "kind": "height_fbm",
+   "name": "height.3",
+   "in": {
+    "height": "height.2",
+    "warp": "unwarped"
+   },
+   "offset": [
+    1337.0,
+    55.0
+   ],
+   "scale": 0.01,
+   "amp": 36.0,
+   "octaves": 5
+  },
+  {
+   "kind": "height_step",
+   "name": "height.4",
+   "in": {
+    "height": "height.3"
+   },
+   "start": 180.0,
+   "end": 230.0,
+   "amp": 90.0
+  },
+  {
+   "kind": "height_fbm",
+   "name": "height.5",
+   "in": {
+    "height": "height.4",
+    "warp": "unwarped"
+   },
+   "offset": [
+    37.0,
+    91.0
+   ],
+   "scale": 0.06,
+   "amp": 5.0,
+   "octaves": 4
+  },
+  {
+   "kind": "height_offset",
+   "name": "height.6",
+   "in": {
+    "height": "height.5"
+   },
+   "value": -8.0
+  },
+  {
+   "kind": "field",
+   "name": "field.1",
+   "in": {
+    "warp": "unwarped"
+   },
+   "offset": [
+    -4200.0,
+    8800.0
+   ],
+   "scale": 0.004,
+   "amp": 1.6,
+   "octaves": 3,
+   "bias": 0.15
+  },
+  {
+   "kind": "height_band_fbm",
+   "name": "height.7",
+   "in": {
+    "height": "height.6",
+    "warp": "unwarped",
+    "regions": "regions.1"
+   },
+   "a": [
+    0.56,
+    1.0
+   ],
+   "b": [
+    0.0,
+    0.47
+   ],
+   "offset": [
+    820.0,
+    -410.0
+   ],
+   "scale": 0.011,
+   "amp": 21.0,
+   "octaves": 3,
+   "mode": "billow"
+  },
+  {
+   "kind": "height_band_fbm",
+   "name": "height.8",
+   "in": {
+    "height": "height.7",
+    "warp": "unwarped",
+    "regions": "regions.1"
+   },
+   "a": [
+    0.0,
+    0.44
+   ],
+   "b": [
+    0.0,
+    1.0
+   ],
+   "offset": [
+    -2600.0,
+    1750.0
+   ],
+   "scale": 0.0035,
+   "amp": 165.0,
+   "octaves": 5,
+   "mode": "ridged",
+   "lift": 60.0
+  },
+  {
+   "kind": "height_band_fbm",
+   "name": "height.9",
+   "in": {
+    "height": "height.8",
+    "warp": "unwarped",
+    "regions": "regions.1"
+   },
+   "a": [
+    0.0,
+    1.0
+   ],
+   "b": [
+    0.56,
+    1.0
+   ],
+   "offset": [
+    4400.0,
+    900.0
+   ],
+   "scale": 0.0025,
+   "amp": 34.0,
+   "octaves": 3,
+   "lift": -26.0
+  },
+  {
+   "kind": "height_band_fbm",
+   "name": "height.10",
+   "in": {
+    "height": "height.9",
+    "warp": "unwarped",
+    "regions": "regions.1"
+   },
+   "a": [
+    0.47,
+    0.53
+   ],
+   "b": [
+    0.0,
+    1.0
+   ],
+   "offset": [
+    15200.0,
+    -6400.0
+   ],
+   "scale": 0.00022,
+   "amp": 2350.0,
+   "octaves": 4,
+   "mode": "ridged",
+   "lift": 1150.0
+  },
+  {
+   "kind": "height_band_fbm",
+   "name": "height.11",
+   "in": {
+    "height": "height.10",
+    "warp": "unwarped",
+    "regions": "regions.1"
+   },
+   "a": [
+    0.47,
+    0.53
+   ],
+   "b": [
+    0.0,
+    1.0
+   ],
+   "offset": [
+    -3300.0,
+    7100.0
+   ],
+   "scale": 0.0016,
+   "amp": 430.0,
+   "octaves": 5,
+   "mode": "ridged"
+  },
+  {
+   "kind": "height_surface",
+   "name": "sdf.1",
+   "in": {
+    "height": "height.11",
+    "sdf": "void"
+   },
+   "material": 1
+  },
+  {
+   "kind": "material_band",
+   "name": "sdf.2",
+   "in": {
+    "sdf": "sdf.1",
+    "regions": "regions.1"
+   },
+   "from": 1,
+   "material": 7,
+   "a": [
+    0.47,
+    0.53
+   ],
+   "b": [
+    0.0,
+    1.0
+   ],
+   "feather": 0.018
+  },
+  {
+   "kind": "material_band",
+   "name": "sdf.3",
+   "in": {
+    "sdf": "sdf.2",
+    "regions": "regions.1"
+   },
+   "from": 1,
+   "material": 5,
+   "a": [
+    0.0,
+    0.44
+   ],
+   "b": [
+    0.0,
+    1.0
+   ]
+  },
+  {
+   "kind": "material_band",
+   "name": "sdf.4",
+   "in": {
+    "sdf": "sdf.3",
+    "regions": "regions.1"
+   },
+   "from": 1,
+   "material": 2,
+   "a": [
+    0.56,
+    1.0
+   ],
+   "b": [
+    0.0,
+    0.47
+   ]
+  },
+  {
+   "kind": "material_band",
+   "in": {
+    "sdf": "sdf.4",
+    "regions": "regions.1"
+   },
+   "from": 1,
+   "material": 6,
+   "a": [
+    0.0,
+    1.0
+   ],
+   "b": [
+    0.56,
+    1.0
+   ]
+  },
+  {
+   "kind": "structure",
+   "name": "ruin",
+   "size": [
+    8.0,
+    17.0
+   ],
+   "variants": [
+    {
+     "weight": 1.0,
+     "parts": [
+      {
+       "arrange": {
+        "type": "ring",
+        "count": [
+         6,
+         10
+        ]
+       },
+       "shape": {
+        "type": "boxy",
+        "half": [
+         "arc",
+         [
+          1.2,
+          2.6
+         ],
+         [
+          0.55,
+          0.55
+         ]
+        ]
+       },
+       "material": 3,
+       "skip": 0.28,
+       "yaw": "tangent",
+       "anchor": "base",
+       "y_offset": [
+        -0.6,
+        -0.6
+       ]
+      },
+      {
+       "arrange": {
+        "type": "scatter",
+        "count": [
+         1,
+         3
+        ],
+        "radius_frac": [
+         1.0,
+         1.0
+        ]
+       },
+       "shape": {
+        "type": "cylinder",
+        "radius": [
+         1.8,
+         3.2
+        ],
+        "half_height": [
+         2.5,
+         7.0
+        ]
+       },
+       "material": 3,
+       "hollow": 0.8,
+       "anchor": "base",
+       "y_offset": [
+        -1.0,
+        -1.0
+       ]
+      },
+      {
+       "arrange": {
+        "type": "scatter",
+        "count": [
+         2,
+         5
+        ],
+        "radius_frac": [
+         0.0,
+         0.8
+        ]
+       },
+       "shape": {
+        "type": "boxy",
+        "half": [
+         [
+          0.5,
+          1.4
+         ],
+         [
+          0.5,
+          1.4
+         ],
+         [
+          0.5,
+          1.4
+         ]
+        ]
+       },
+       "material": 3,
+       "yaw": "random",
+       "anchor": "base",
+       "y_offset": [
+        -0.4,
+        -0.4
+       ]
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "kind": "structure",
+   "name": "dungeon",
+   "size": [
+    40.0,
+    40.0
+   ],
+   "variants": [
+    {
+     "weight": 1.0,
+     "parts": [
+      {
+       "arrange": {
+        "type": "chain",
+        "count": [
+         4,
+         6
+        ],
+        "step": [
+         12.0,
+         20.0
+        ],
+        "turn_deg": 52.0,
+        "descend": [
+         3.0,
+         7.0
+        ],
+        "radius_frac": [
+         0.0,
+         1.0
+        ],
+        "from_surface": true
+       },
+       "shape": {
+        "type": "boxy",
+        "half": [
+         [
+          3.5,
+          6.5
+         ],
+         [
+          2.2,
+          3.2
+         ],
+         [
+          3.5,
+          6.5
+         ]
+        ]
+       },
+       "cut": true,
+       "material": 0,
+       "yaw": "random",
+       "anchor": "center",
+       "y_offset": [
+        -9.0,
+        -9.0
+       ],
+       "link": {
+        "half_w": 1.7,
+        "half_h": 1.9,
+        "step_m": 3.0
+       }
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "kind": "biomes",
+   "name": "biomes",
+   "table": [
+    [
+     "forest",
+     1
+    ],
+    [
+     "desert",
+     2
+    ],
+    [
+     "tundra",
+     5
+    ],
+    [
+     "wetland",
+     6
+    ],
+    [
+     "mountains",
+     7
+    ]
+   ]
+  },
+  {
+   "kind": "scatter",
+   "name": "sites:ruins",
+   "chance": 0.32,
+   "altitude": [
+    8.0,
+    280.0
+   ],
+   "up": [
+    0.88,
+    1.0
+   ]
+  },
+  {
+   "kind": "emit",
+   "name": "ruins",
+   "in": {
+    "source": "sites:ruins",
+    "structure": "ruin"
+   },
+   "pad_m": 0.0,
+   "emit": {
+    "type": "site_structure",
+    "marker": "ruin"
+   }
+  },
+  {
+   "kind": "connect",
+   "name": "paths:roads",
+   "in": {
+    "source": "sites:ruins"
+   }
+  },
+  {
+   "kind": "emit",
+   "name": "roads",
+   "in": {
+    "source": "paths:roads"
+   },
+   "pad_m": 606.0,
+   "emit": {
+    "type": "path_slabs"
+   }
+  },
+  {
+   "kind": "emit",
+   "name": "road-surface",
+   "in": {
+    "source": "paths:roads"
+   },
+   "pad_m": 606.0,
+   "emit": {
+    "type": "path_ribbon",
+    "material": 3,
+    "width": [
+     5.0,
+     5.0
+    ]
+   }
+  },
+  {
+   "kind": "scatter",
+   "name": "sites:regions",
+   "cell_m": 4096,
+   "chance": 0.7,
+   "altitude": [
+    8.0,
+    280.0
+   ],
+   "up": [
+    0.8,
+    1.0
+   ]
+  },
+  {
+   "kind": "connect",
+   "name": "paths:highways",
+   "in": {
+    "source": "sites:regions"
+   },
+   "cell_m": 4096,
+   "reach_m": 8192.0,
+   "corridor_m": 1024.0,
+   "step_m": 128.0
+  },
+  {
+   "kind": "emit",
+   "name": "highway-surface",
+   "in": {
+    "source": "paths:highways"
+   },
+   "cell_m": 4096,
+   "pad_m": 9216.0,
+   "keep_m": 44000.0,
+   "emit": {
+    "type": "path_ribbon",
+    "material": 3,
+    "width": [
+     26.0,
+     26.0
+    ]
+   }
+  },
+  {
+   "kind": "scatter",
+   "name": "sites:springs",
+   "cell_m": 512,
+   "chance": 0.5,
+   "altitude": [
+    60.0,
+    400.0
+   ]
+  },
+  {
+   "kind": "flow",
+   "name": "flow:rivers",
+   "in": {
+    "source": "sites:springs"
+   }
+  },
+  {
+   "kind": "emit",
+   "name": "rivers",
+   "in": {
+    "source": "flow:rivers"
+   },
+   "cell_m": 512,
+   "pad_m": 3264.0,
+   "max_chunk_edge_m": 140.0,
+   "emit": {
+    "type": "ribbon",
+    "material": 4
+   },
+   "keep_m": 12000.0
+  },
+  {
+   "kind": "scatter",
+   "name": "sites:caves",
+   "chance": 0.45,
+   "altitude": [
+    6.0,
+    500.0
+   ]
+  },
+  {
+   "kind": "worm",
+   "name": "worm:caves",
+   "in": {
+    "source": "sites:caves"
+   }
+  },
+  {
+   "kind": "emit",
+   "name": "caves",
+   "in": {
+    "source": "worm:caves"
+   },
+   "pad_m": 340.0,
+   "max_chunk_edge_m": 140.0,
+   "emit": {
+    "type": "worm_cuts"
+   }
+  },
+  {
+   "kind": "scatter",
+   "name": "sites:dungeons",
+   "chance": 0.22,
+   "altitude": [
+    12.0,
+    260.0
+   ],
+   "up": [
+    0.85,
+    1.0
+   ]
+  },
+  {
+   "kind": "emit",
+   "name": "dungeons",
+   "in": {
+    "source": "sites:dungeons",
+    "structure": "dungeon"
+   },
+   "pad_m": 0.0,
+   "max_chunk_edge_m": 140.0,
+   "emit": {
+    "type": "site_structure",
+    "marker": "dungeon"
+   }
+  },
+  {
+   "kind": "population",
+   "name": "tree",
+   "in": {
+    "density": "field.1",
+    "gate": "biomes"
+   },
+   "per_tile": 200,
+   "altitude": [
+    3.0,
+    340.0
+   ],
+   "min_up": 0.86,
+   "density": {},
+   "placement": {
+    "tilt_deg": 4.0,
+    "altitude_falloff": 25.0
+   },
+   "sink_m": 0.45,
+   "variants": [
+    {
+     "weight": 0.42,
+     "altitude": [
+      3.0,
+      140.0
+     ],
+     "scale": [
+      0.8,
+      1.7
+     ]
+    },
+    {
+     "weight": 0.4,
+     "altitude": [
+      3.0,
+      340.0
+     ],
+     "scale": [
+      0.8,
+      1.7
+     ]
+    },
+    {
+     "weight": 0.18,
+     "altitude": [
+      3.0,
+      180.0
+     ],
+     "scale": [
+      0.7,
+      1.2
+     ]
+    }
+   ],
+   "region": "forest"
+  },
+  {
+   "kind": "population",
+   "name": "boulder",
+   "in": {
+    "gate": "biomes"
+   },
+   "per_tile": 4,
+   "chance": 0.45,
+   "altitude": [
+    2.0,
+    800.0
+   ],
+   "min_up": 0.55,
+   "placement": {
+    "align": "normal",
+    "tilt_deg": 8.0
+   },
+   "sink_scaled": 0.2,
+   "scale_bias": 2.0,
+   "variants": [
+    {
+     "scale": [
+      0.4,
+      2.6
+     ]
+    }
+   ],
+   "region": "tundra"
+  },
+  {
+   "kind": "population",
+   "name": "groundcover",
+   "output": "points",
+   "tile_m": 16.0,
+   "radius_tiles": 7,
+   "per_tile": 550,
+   "altitude": [
+    2.5,
+    300.0
+   ],
+   "min_up": 0.8,
+   "detail_vs": 1.0
+  },
+  {
+   "kind": "population",
+   "name": "bush",
+   "in": {
+    "density": "field.1",
+    "gate": "biomes"
+   },
+   "per_tile": 26,
+   "placement": {
+    "align": "normal",
+    "tilt_deg": 6.0
+   },
+   "chance": 0.7,
+   "altitude": [
+    3.0,
+    300.0
+   ],
+   "min_up": 0.82,
+   "density": {},
+   "sink_scaled": 0.15,
+   "variants": [
+    {
+     "scale": [
+      0.6,
+      1.5
+     ]
+    }
+   ],
+   "region": "forest"
+  },
+  {
+   "kind": "population",
+   "name": "fern",
+   "in": {
+    "density": "field.1",
+    "gate": "biomes"
+   },
+   "per_tile": 34,
+   "placement": {
+    "align": "normal",
+    "tilt_deg": 6.0
+   },
+   "chance": 0.6,
+   "altitude": [
+    3.0,
+    240.0
+   ],
+   "min_up": 0.86,
+   "density": {},
+   "sink_scaled": 0.1,
+   "variants": [
+    {
+     "scale": [
+      0.5,
+      1.1
+     ]
+    }
+   ],
+   "region": "forest"
+  },
+  {
+   "kind": "population",
+   "name": "mushroom",
+   "in": {
+    "density": "field.1",
+    "gate": "biomes"
+   },
+   "per_tile": 14,
+   "placement": {
+    "align": "normal",
+    "tilt_deg": 6.0
+   },
+   "chance": 0.35,
+   "altitude": [
+    3.0,
+    200.0
+   ],
+   "min_up": 0.9,
+   "density": {},
+   "sink_scaled": 0.05,
+   "variants": [
+    {
+     "scale": [
+      0.7,
+      1.8
+     ]
+    }
+   ],
+   "region": "forest"
+  },
+  {
+   "kind": "population",
+   "name": "deadwood",
+   "in": {
+    "density": "field.1",
+    "gate": "biomes"
+   },
+   "per_tile": 5,
+   "placement": {
+    "align": "normal",
+    "tilt_deg": 6.0
+   },
+   "chance": 0.3,
+   "altitude": [
+    3.0,
+    260.0
+   ],
+   "min_up": 0.88,
+   "density": {},
+   "sink_scaled": 0.3,
+   "variants": [
+    {
+     "scale": [
+      0.7,
+      1.6
+     ]
+    }
+   ],
+   "region": "forest"
+  },
+  {
+   "kind": "population",
+   "name": "cactus",
+   "in": {
+    "gate": "biomes"
+   },
+   "per_tile": 7,
+   "placement": {
+    "align": "normal",
+    "tilt_deg": 6.0
+   },
+   "chance": 0.4,
+   "altitude": [
+    4.0,
+    420.0
+   ],
+   "min_up": 0.88,
+   "sink_scaled": 0.12,
+   "variants": [
+    {
+     "scale": [
+      0.7,
+      1.9
+     ]
+    }
+   ],
+   "region": "desert"
+  },
+  {
+   "kind": "population",
+   "name": "drybrush",
+   "in": {
+    "gate": "biomes"
+   },
+   "per_tile": 20,
+   "placement": {
+    "align": "normal",
+    "tilt_deg": 6.0
+   },
+   "chance": 0.55,
+   "altitude": [
+    3.0,
+    500.0
+   ],
+   "min_up": 0.78,
+   "sink_scaled": 0.15,
+   "variants": [
+    {
+     "scale": [
+      0.5,
+      1.3
+     ]
+    }
+   ],
+   "region": "desert"
+  },
+  {
+   "kind": "population",
+   "name": "reed",
+   "in": {
+    "gate": "biomes"
+   },
+   "per_tile": 44,
+   "placement": {
+    "align": "normal",
+    "tilt_deg": 6.0
+   },
+   "chance": 0.75,
+   "altitude": [
+    0.5,
+    60.0
+   ],
+   "min_up": 0.9,
+   "sink_scaled": 0.08,
+   "variants": [
+    {
+     "scale": [
+      0.7,
+      1.6
+     ]
+    }
+   ],
+   "region": "wetland"
+  },
+  {
+   "kind": "population",
+   "name": "marshcap",
+   "in": {
+    "gate": "biomes"
+   },
+   "per_tile": 10,
+   "placement": {
+    "align": "normal",
+    "tilt_deg": 6.0
+   },
+   "chance": 0.4,
+   "altitude": [
+    1.0,
+    80.0
+   ],
+   "min_up": 0.9,
+   "sink_scaled": 0.05,
+   "variants": [
+    {
+     "scale": [
+      0.9,
+      2.2
+     ]
+    }
+   ],
+   "region": "wetland"
+  },
+  {
+   "kind": "population",
+   "name": "alpinebush",
+   "in": {
+    "gate": "biomes"
+   },
+   "per_tile": 16,
+   "placement": {
+    "align": "normal",
+    "tilt_deg": 6.0
+   },
+   "chance": 0.45,
+   "altitude": [
+    40.0,
+    700.0
+   ],
+   "min_up": 0.8,
+   "sink_scaled": 0.2,
+   "variants": [
+    {
+     "scale": [
+      0.5,
+      1.2
+     ]
+    }
+   ],
+   "region": "tundra"
+  },
+  {
+   "kind": "population",
+   "name": "scree",
+   "in": {
+    "gate": "biomes"
+   },
+   "per_tile": 30,
+   "placement": {
+    "align": "normal",
+    "tilt_deg": 6.0
+   },
+   "chance": 0.6,
+   "altitude": [
+    100.0,
+    1900.0
+   ],
+   "min_up": 0.5,
+   "sink_scaled": 0.35,
+   "scale_bias": 1.6,
+   "variants": [
+    {
+     "scale": [
+      0.3,
+      1.4
+     ]
+    }
+   ],
+   "region": "mountains"
+  },
+  {
+   "kind": "population",
+   "name": "screebush",
+   "in": {
+    "gate": "biomes"
+   },
+   "per_tile": 8,
+   "placement": {
+    "align": "normal",
+    "tilt_deg": 6.0
+   },
+   "chance": 0.3,
+   "altitude": [
+    150.0,
+    900.0
+   ],
+   "min_up": 0.82,
+   "sink_scaled": 0.2,
+   "variants": [
+    {
+     "scale": [
+      0.4,
+      0.9
+     ]
+    }
+   ],
+   "region": "mountains"
+  },
+  {
+   "kind": "population",
+   "name": "treecover",
+   "in": {
+    "density": "field.1",
+    "gate": "biomes"
+   },
+   "output": "points",
+   "tile_m": 64.0,
+   "radius_tiles": 80,
+   "per_tile": 900,
+   "altitude": [
+    3.0,
+    340.0
+   ],
+   "min_up": 0.86,
+   "detail_vs": 8.0,
+   "density": {},
+   "cover": {
+    "material": 8,
+    "from_m": 3300.0,
+    "full_at": 0.02
+   },
+   "region": "forest"
+  }
+ ],
+ "materials": [
+  {
+   "type": "canopy",
+   "id": 1,
+   "low": [
+    0.112,
+    0.1027,
+    0.0784
+   ],
+   "canopy": [
+    [
+     0.014,
+     0.0261,
+     0.0084
+    ],
+    [
+     0.0747,
+     0.0933,
+     0.0261
+    ]
+   ],
+   "rock": [
+    0.0635,
+    0.0541,
+    0.0467
+   ],
+   "patch": [
+    0.0597,
+    0.0448,
+    0.0205
+   ],
+   "zones": {
+    "canopy": [
+     1.5,
+     3.0
+    ],
+    "rock": [
+     340.0,
+     140.0
+    ],
+    "border": 60.0
+   },
+   "crowns": [
+    0.35,
+    0.9
+   ],
+   "strata": [
+    0.15,
+    1.2
+   ],
+   "steep": [
+    0.72,
+    0.45
+   ],
+   "patch_amount": 0.55,
+   "detail_fade": 0.0015
+  },
+  {
+   "type": "zoned",
+   "id": 2,
+   "low": [
+    0.295,
+    0.235,
+    0.14
+   ],
+   "mid": [
+    [
+     0.445,
+     0.36,
+     0.205
+    ],
+    [
+     0.505,
+     0.425,
+     0.26
+    ]
+   ],
+   "high": [
+    [
+     0.47,
+     0.405,
+     0.285
+    ],
+    [
+     0.41,
+     0.345,
+     0.24
+    ]
+   ],
+   "peak": [
+    0.53,
+    0.47,
+    0.345
+   ],
+   "zones": {
+    "mid": [
+     40.0,
+     35.0
+    ],
+    "high": [
+     200.0,
+     110.0
+    ],
+    "peak": [
+     430.0,
+     140.0
+    ],
+    "border": 45.0
+   },
+   "steep": [
+    0.7,
+    0.38
+   ],
+   "detail_fade": 0.0022
+  },
+  {
+   "type": "surface",
+   "id": 3,
+   "base": [
+    0.0971,
+    0.0933,
+    0.0859
+   ],
+   "grain": 0.4,
+   "band": {
+    "freq": 0.55,
+    "amp": 0.18,
+    "lo": 0.08,
+    "hi": 0.25,
+    "warp": 0.7
+   },
+   "moss": {
+    "color": [
+     0.0504,
+     0.0709,
+     0.0261
+    ],
+    "amount": 0.5
+   },
+   "detail_fade": 0.002
+  },
+  {
+   "type": "surface",
+   "id": 4,
+   "base": [
+    0.0299,
+    0.0635,
+    0.0821
+   ],
+   "grain": 0.06,
+   "detail_fade": 0.004
+  },
+  {
+   "type": "zoned",
+   "id": 5,
+   "low": [
+    0.105,
+    0.115,
+    0.128
+   ],
+   "mid": [
+    [
+     0.165,
+     0.18,
+     0.2
+    ],
+    [
+     0.24,
+     0.26,
+     0.285
+    ]
+   ],
+   "high": [
+    [
+     0.43,
+     0.46,
+     0.51
+    ],
+    [
+     0.64,
+     0.68,
+     0.735
+    ]
+   ],
+   "peak": [
+    0.82,
+    0.86,
+    0.915
+   ],
+   "zones": {
+    "mid": [
+     40.0,
+     35.0
+    ],
+    "high": [
+     200.0,
+     110.0
+    ],
+    "peak": [
+     430.0,
+     140.0
+    ],
+    "border": 45.0
+   },
+   "steep": [
+    0.74,
+    0.36
+   ],
+   "detail_fade": 0.002
+  },
+  {
+   "type": "surface",
+   "id": 6,
+   "base": [
+    0.062,
+    0.076,
+    0.045
+   ],
+   "detail_fade": 0.0025
+  },
+  {
+   "type": "zoned",
+   "id": 7,
+   "low": [
+    0.088,
+    0.082,
+    0.078
+   ],
+   "mid": [
+    [
+     0.126,
+     0.118,
+     0.11
+    ],
+    [
+     0.168,
+     0.158,
+     0.148
+    ]
+   ],
+   "high": [
+    [
+     0.235,
+     0.232,
+     0.238
+    ],
+    [
+     0.4,
+     0.405,
+     0.42
+    ]
+   ],
+   "peak": [
+    0.88,
+    0.905,
+    0.945
+   ],
+   "zones": {
+    "mid": [
+     120.0,
+     90.0
+    ],
+    "high": [
+     430.0,
+     220.0
+    ],
+    "peak": [
+     780.0,
+     200.0
+    ],
+    "border": 70.0
+   },
+   "steep": [
+    0.62,
+    0.3
+   ],
+   "detail_fade": 0.0018
+  },
+  {
+   "type": "surface",
+   "id": 8,
+   "base": [
+    0.021,
+    0.032,
+    0.0087
+   ],
+   "grain": 0.0,
+   "detail_fade": 0.0015
+  }
+ ],
+ "prefabs": [
+  {
+   "use": "prefabs/monolith_circle.json"
+  }
+ ],
+ "placements": [
+  {
+   "prefab": "monolith_circle",
+   "position": [
+    -27560.0,
+    0.0,
+    -36690.0
+   ],
+   "yaw_deg": 30.0,
+   "snap_to_terrain": true,
+   "priority": 0
+  }
+ ]
 }

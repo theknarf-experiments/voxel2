@@ -447,8 +447,11 @@ impl WorldLod {
                 tops.push(dep);
             }
         }
-        // Descending so far; the gated half wants the other order.
-        gated.reverse();
+        // Descending so far; the level decides whether the gated half
+        // wants the other order.
+        if config.gated_finest_first {
+            gated.reverse();
+        }
         tops.extend(gated);
         // `before` freezes the focus this pass works from. `between` runs
         // after every ensure and before any release — the only moment when

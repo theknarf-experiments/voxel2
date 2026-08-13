@@ -1,732 +1,733 @@
 {
-  "lod": {
-    "max_level": 14,
-    "top_radius": 3,
-    "top_y": [
-      -1,
-      0
+ "lod": {
+  "max_level": 14,
+  "top_radius": 3,
+  "top_y": [
+   -1,
+   0
+  ],
+  "split_k": 2.5,
+  "merge_k": 3.0,
+  "gated_finest_first": true
+ },
+ "environment": {
+  "sun_direction": [
+   0.21,
+   0.13,
+   -0.62
+  ]
+ },
+ "nodes": [
+  {
+   "kind": "height_zero",
+   "name": "sea"
+  },
+  {
+   "kind": "sdf_void",
+   "name": "void"
+  },
+  {
+   "kind": "warp_none",
+   "name": "unwarped"
+  },
+  {
+   "kind": "region_axes",
+   "name": "regions.1",
+   "scale": [
+    9e-05,
+    0.00012
+   ],
+   "offset": [
+    6100.0,
+    -2400.0,
+    -15500.0,
+    9800.0
+   ],
+   "octaves": 5
+  },
+  {
+   "kind": "height_fbm",
+   "name": "height.1",
+   "in": {
+    "height": "sea",
+    "warp": "unwarped"
+   },
+   "scale": 3e-05,
+   "amp": 620.0,
+   "octaves": 3
+  },
+  {
+   "kind": "warp_xz",
+   "name": "warp.1",
+   "in": {
+    "warp": "unwarped"
+   },
+   "offset": [
+    211.0,
+    -87.0
+   ],
+   "scale": 0.00035,
+   "amp": 260.0,
+   "octaves": 3
+  },
+  {
+   "kind": "height_fbm",
+   "name": "height.2",
+   "in": {
+    "height": "height.1",
+    "warp": "warp.1"
+   },
+   "offset": [
+    -4100.0,
+    2600.0
+   ],
+   "scale": 0.00055,
+   "amp": -405.0,
+   "octaves": 2,
+   "mode": "billow"
+  },
+  {
+   "kind": "height_fbm",
+   "name": "height.3",
+   "in": {
+    "height": "height.2",
+    "warp": "warp.1"
+   },
+   "offset": [
+    980.0,
+    4400.0
+   ],
+   "scale": 0.0016,
+   "amp": -202.5,
+   "octaves": 2,
+   "mode": "billow"
+  },
+  {
+   "kind": "height_fbm",
+   "name": "height.4",
+   "in": {
+    "height": "height.3",
+    "warp": "warp.1"
+   },
+   "offset": [
+    -660.0,
+    -230.0
+   ],
+   "scale": 0.0017,
+   "amp": 78.0,
+   "octaves": 3,
+   "mode": "ridged"
+  },
+  {
+   "kind": "height_fbm",
+   "name": "height.5",
+   "in": {
+    "height": "height.4",
+    "warp": "warp.1"
+   },
+   "offset": [
+    3300.0,
+    1700.0
+   ],
+   "scale": 0.0052,
+   "amp": -45.900000000000006,
+   "octaves": 2,
+   "mode": "billow"
+  },
+  {
+   "kind": "height_fbm",
+   "name": "height.6",
+   "in": {
+    "height": "height.5",
+    "warp": "warp.1"
+   },
+   "offset": [
+    120.0,
+    -900.0
+   ],
+   "scale": 0.0061,
+   "amp": 19.0,
+   "octaves": 3,
+   "mode": "ridged"
+  },
+  {
+   "kind": "height_step",
+   "name": "height.7",
+   "in": {
+    "height": "height.6"
+   },
+   "start": 120.0,
+   "end": 156.0,
+   "amp": 44.0
+  },
+  {
+   "kind": "height_step",
+   "name": "height.8",
+   "in": {
+    "height": "height.7"
+   },
+   "start": 320.0,
+   "end": 352.0,
+   "amp": 30.0
+  },
+  {
+   "kind": "height_fbm",
+   "name": "height.9",
+   "in": {
+    "height": "height.8",
+    "warp": "warp.1"
+   },
+   "offset": [
+    61.0,
+    17.0
+   ],
+   "scale": 0.035,
+   "amp": 3.4,
+   "octaves": 4
+  },
+  {
+   "kind": "height_fbm",
+   "name": "height.10",
+   "in": {
+    "height": "height.9",
+    "warp": "warp.1"
+   },
+   "offset": [
+    -311.0,
+    508.0
+   ],
+   "scale": 0.19,
+   "amp": 0.5,
+   "octaves": 2
+  },
+  {
+   "kind": "height_offset",
+   "name": "height.11",
+   "in": {
+    "height": "height.10"
+   },
+   "value": 26.0
+  },
+  {
+   "kind": "field",
+   "name": "field.1",
+   "in": {
+    "warp": "warp.1"
+   },
+   "scale": 0.00042,
+   "amp": 1.0,
+   "octaves": 3,
+   "bias": 0.12
+  },
+  {
+   "kind": "field",
+   "name": "field.2",
+   "in": {
+    "warp": "warp.1"
+   },
+   "offset": [
+    770.0,
+    -140.0
+   ],
+   "scale": 0.0009,
+   "amp": 1.0,
+   "octaves": 3,
+   "bias": -0.05
+  },
+  {
+   "kind": "height_surface",
+   "name": "sdf.1",
+   "in": {
+    "height": "height.11",
+    "sdf": "void"
+   },
+   "material": 1
+  },
+  {
+   "kind": "material_band",
+   "in": {
+    "sdf": "sdf.1",
+    "regions": "regions.1"
+   },
+   "from": 1,
+   "material": 3,
+   "a": [
+    0.54,
+    1.0
+   ],
+   "b": [
+    0.0,
+    1.0
+   ]
+  },
+  {
+   "kind": "structure",
+   "name": "ossuary",
+   "size": [
+    10.0,
+    22.0
+   ],
+   "variants": [
+    {
+     "weight": 1.0,
+     "parts": [
+      {
+       "arrange": {
+        "type": "ring",
+        "count": [
+         7,
+         13
+        ]
+       },
+       "shape": {
+        "type": "boxy",
+        "half": [
+         "arc",
+         [
+          1.6,
+          3.4
+         ],
+         [
+          0.35,
+          0.5
+         ]
+        ]
+       },
+       "material": 3,
+       "skip": 0.34,
+       "yaw": "tangent",
+       "anchor": "base",
+       "y_offset": [
+        -0.8,
+        -0.4
+       ]
+      },
+      {
+       "arrange": {
+        "type": "scatter",
+        "count": [
+         2,
+         4
+        ],
+        "radius_frac": [
+         0.0,
+         0.55
+        ]
+       },
+       "shape": {
+        "type": "cylinder",
+        "radius": [
+         0.5,
+         1.1
+        ],
+        "half_height": [
+         2.2,
+         6.5
+        ]
+       },
+       "material": 3,
+       "anchor": "base",
+       "y_offset": [
+        -1.2,
+        -0.6
+       ]
+      },
+      {
+       "arrange": {
+        "type": "scatter",
+        "count": [
+         3,
+         7
+        ],
+        "radius_frac": [
+         0.0,
+         0.9
+        ]
+       },
+       "shape": {
+        "type": "boxy",
+        "half": [
+         [
+          1.0,
+          2.6
+         ],
+         [
+          0.4,
+          0.9
+         ],
+         [
+          1.0,
+          2.6
+         ]
+        ]
+       },
+       "material": 3,
+       "anchor": "base",
+       "y_offset": [
+        -0.9,
+        -0.5
+       ]
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "kind": "biomes",
+   "name": "biomes",
+   "table": [
+    [
+     "ashfield",
+     1
     ],
-    "split_k": 2.5,
-    "merge_k": 3.0
-  },
-  "environment": {
-    "sun_direction": [
-      0.21,
-      0.13,
-      -0.62
+    [
+     "boneyard",
+     3
     ]
+   ]
   },
-  "nodes": [
+  {
+   "kind": "scatter",
+   "name": "sites:vents",
+   "cell_m": 640,
+   "chance": 0.62,
+   "altitude": [
+    180.0,
+    620.0
+   ],
+   "relax": {
+    "strength": 0.4,
+    "iterations": 2
+   }
+  },
+  {
+   "kind": "flow",
+   "name": "flow:lava",
+   "in": {
+    "source": "sites:vents"
+   }
+  },
+  {
+   "kind": "emit",
+   "name": "lava-flows",
+   "in": {
+    "source": "flow:lava"
+   },
+   "cell_m": 640,
+   "pad_m": 3264.0,
+   "max_chunk_edge_m": 140.0,
+   "keep_m": 12000.0,
+   "emit": {
+    "type": "ribbon",
+    "material": 2
+   }
+  },
+  {
+   "kind": "scatter",
+   "name": "sites:ossuaries",
+   "chance": 0.3,
+   "altitude": [
+    14.0,
+    300.0
+   ],
+   "up": [
+    0.88,
+    1.0
+   ],
+   "relax": {
+    "strength": 0.35
+   }
+  },
+  {
+   "kind": "emit",
+   "name": "ossuaries",
+   "in": {
+    "source": "sites:ossuaries",
+    "structure": "ossuary"
+   },
+   "pad_m": 0.0,
+   "emit": {
+    "type": "site_structure",
+    "marker": "ossuary"
+   }
+  },
+  {
+   "kind": "connect",
+   "name": "paths:processions",
+   "in": {
+    "source": "sites:ossuaries"
+   }
+  },
+  {
+   "kind": "emit",
+   "name": "procession-beds",
+   "in": {
+    "source": "paths:processions"
+   },
+   "pad_m": 606.0,
+   "emit": {
+    "type": "path_slabs"
+   }
+  },
+  {
+   "kind": "emit",
+   "name": "procession-surface",
+   "in": {
+    "source": "paths:processions"
+   },
+   "pad_m": 606.0,
+   "emit": {
+    "type": "path_ribbon",
+    "material": 3,
+    "width": [
+     4.0,
+     4.0
+    ]
+   }
+  },
+  {
+   "kind": "scatter",
+   "name": "sites:hollows",
+   "cell_m": 1024,
+   "chance": 0.5,
+   "altitude": [
+    40.0,
+    480.0
+   ]
+  },
+  {
+   "kind": "worm",
+   "name": "worm:hollows",
+   "in": {
+    "source": "sites:hollows"
+   }
+  },
+  {
+   "kind": "emit",
+   "name": "hollows",
+   "in": {
+    "source": "worm:hollows"
+   },
+   "pad_m": 340.0,
+   "max_chunk_edge_m": 140.0,
+   "emit": {
+    "type": "worm_cuts"
+   }
+  },
+  {
+   "kind": "population",
+   "name": "bones",
+   "in": {
+    "density": "field.1",
+    "gate": "biomes"
+   },
+   "per_tile": 6,
+   "chance": 0.5,
+   "altitude": [
+    8.0,
+    520.0
+   ],
+   "min_up": 0.8,
+   "density": {},
+   "placement": {
+    "align": "normal",
+    "tilt_deg": 11.0
+   },
+   "sink_scaled": 0.25,
+   "scale_bias": 1.6,
+   "variants": [
     {
-      "kind": "height_zero",
-      "name": "sea"
+     "weight": 0.6,
+     "scale": [
+      0.5,
+      1.9
+     ]
     },
     {
-      "kind": "sdf_void",
-      "name": "void"
-    },
-    {
-      "kind": "warp_none",
-      "name": "unwarped"
-    },
-    {
-      "kind": "region_axes",
-      "name": "regions.1",
-      "scale": [
-        9e-05,
-        0.00012
-      ],
-      "offset": [
-        6100.0,
-        -2400.0,
-        -15500.0,
-        9800.0
-      ],
-      "octaves": 5
-    },
-    {
-      "kind": "height_fbm",
-      "name": "height.1",
-      "in": {
-        "height": "sea",
-        "warp": "unwarped"
-      },
-      "scale": 3e-05,
-      "amp": 620.0,
-      "octaves": 3
-    },
-    {
-      "kind": "warp_xz",
-      "name": "warp.1",
-      "in": {
-        "warp": "unwarped"
-      },
-      "offset": [
-        211.0,
-        -87.0
-      ],
-      "scale": 0.00035,
-      "amp": 260.0,
-      "octaves": 3
-    },
-    {
-      "kind": "height_fbm",
-      "name": "height.2",
-      "in": {
-        "height": "height.1",
-        "warp": "warp.1"
-      },
-      "offset": [
-        -4100.0,
-        2600.0
-      ],
-      "scale": 0.00055,
-      "amp": -405.0,
-      "octaves": 2,
-      "mode": "billow"
-    },
-    {
-      "kind": "height_fbm",
-      "name": "height.3",
-      "in": {
-        "height": "height.2",
-        "warp": "warp.1"
-      },
-      "offset": [
-        980.0,
-        4400.0
-      ],
-      "scale": 0.0016,
-      "amp": -202.5,
-      "octaves": 2,
-      "mode": "billow"
-    },
-    {
-      "kind": "height_fbm",
-      "name": "height.4",
-      "in": {
-        "height": "height.3",
-        "warp": "warp.1"
-      },
-      "offset": [
-        -660.0,
-        -230.0
-      ],
-      "scale": 0.0017,
-      "amp": 78.0,
-      "octaves": 3,
-      "mode": "ridged"
-    },
-    {
-      "kind": "height_fbm",
-      "name": "height.5",
-      "in": {
-        "height": "height.4",
-        "warp": "warp.1"
-      },
-      "offset": [
-        3300.0,
-        1700.0
-      ],
-      "scale": 0.0052,
-      "amp": -45.900000000000006,
-      "octaves": 2,
-      "mode": "billow"
-    },
-    {
-      "kind": "height_fbm",
-      "name": "height.6",
-      "in": {
-        "height": "height.5",
-        "warp": "warp.1"
-      },
-      "offset": [
-        120.0,
-        -900.0
-      ],
-      "scale": 0.0061,
-      "amp": 19.0,
-      "octaves": 3,
-      "mode": "ridged"
-    },
-    {
-      "kind": "height_step",
-      "name": "height.7",
-      "in": {
-        "height": "height.6"
-      },
-      "start": 120.0,
-      "end": 156.0,
-      "amp": 44.0
-    },
-    {
-      "kind": "height_step",
-      "name": "height.8",
-      "in": {
-        "height": "height.7"
-      },
-      "start": 320.0,
-      "end": 352.0,
-      "amp": 30.0
-    },
-    {
-      "kind": "height_fbm",
-      "name": "height.9",
-      "in": {
-        "height": "height.8",
-        "warp": "warp.1"
-      },
-      "offset": [
-        61.0,
-        17.0
-      ],
-      "scale": 0.035,
-      "amp": 3.4,
-      "octaves": 4
-    },
-    {
-      "kind": "height_fbm",
-      "name": "height.10",
-      "in": {
-        "height": "height.9",
-        "warp": "warp.1"
-      },
-      "offset": [
-        -311.0,
-        508.0
-      ],
-      "scale": 0.19,
-      "amp": 0.5,
-      "octaves": 2
-    },
-    {
-      "kind": "height_offset",
-      "name": "height.11",
-      "in": {
-        "height": "height.10"
-      },
-      "value": 26.0
-    },
-    {
-      "kind": "field",
-      "name": "field.1",
-      "in": {
-        "warp": "warp.1"
-      },
-      "scale": 0.00042,
-      "amp": 1.0,
-      "octaves": 3,
-      "bias": 0.12
-    },
-    {
-      "kind": "field",
-      "name": "field.2",
-      "in": {
-        "warp": "warp.1"
-      },
-      "offset": [
-        770.0,
-        -140.0
-      ],
-      "scale": 0.0009,
-      "amp": 1.0,
-      "octaves": 3,
-      "bias": -0.05
-    },
-    {
-      "kind": "height_surface",
-      "name": "sdf.1",
-      "in": {
-        "height": "height.11",
-        "sdf": "void"
-      },
-      "material": 1
-    },
-    {
-      "kind": "material_band",
-      "in": {
-        "sdf": "sdf.1",
-        "regions": "regions.1"
-      },
-      "from": 1,
-      "material": 3,
-      "a": [
-        0.54,
-        1.0
-      ],
-      "b": [
-        0.0,
-        1.0
-      ]
-    },
-    {
-      "kind": "structure",
-      "name": "ossuary",
-      "size": [
-        10.0,
-        22.0
-      ],
-      "variants": [
-        {
-          "weight": 1.0,
-          "parts": [
-            {
-              "arrange": {
-                "type": "ring",
-                "count": [
-                  7,
-                  13
-                ]
-              },
-              "shape": {
-                "type": "boxy",
-                "half": [
-                  "arc",
-                  [
-                    1.6,
-                    3.4
-                  ],
-                  [
-                    0.35,
-                    0.5
-                  ]
-                ]
-              },
-              "material": 3,
-              "skip": 0.34,
-              "yaw": "tangent",
-              "anchor": "base",
-              "y_offset": [
-                -0.8,
-                -0.4
-              ]
-            },
-            {
-              "arrange": {
-                "type": "scatter",
-                "count": [
-                  2,
-                  4
-                ],
-                "radius_frac": [
-                  0.0,
-                  0.55
-                ]
-              },
-              "shape": {
-                "type": "cylinder",
-                "radius": [
-                  0.5,
-                  1.1
-                ],
-                "half_height": [
-                  2.2,
-                  6.5
-                ]
-              },
-              "material": 3,
-              "anchor": "base",
-              "y_offset": [
-                -1.2,
-                -0.6
-              ]
-            },
-            {
-              "arrange": {
-                "type": "scatter",
-                "count": [
-                  3,
-                  7
-                ],
-                "radius_frac": [
-                  0.0,
-                  0.9
-                ]
-              },
-              "shape": {
-                "type": "boxy",
-                "half": [
-                  [
-                    1.0,
-                    2.6
-                  ],
-                  [
-                    0.4,
-                    0.9
-                  ],
-                  [
-                    1.0,
-                    2.6
-                  ]
-                ]
-              },
-              "material": 3,
-              "anchor": "base",
-              "y_offset": [
-                -0.9,
-                -0.5
-              ]
-            }
-          ]
-        }
-      ]
-    },
-    {
-      "kind": "biomes",
-      "name": "biomes",
-      "table": [
-        [
-          "ashfield",
-          1
-        ],
-        [
-          "boneyard",
-          3
-        ]
-      ]
-    },
-    {
-      "kind": "scatter",
-      "name": "sites:vents",
-      "cell_m": 640,
-      "chance": 0.62,
-      "altitude": [
-        180.0,
-        620.0
-      ],
-      "relax": {
-        "strength": 0.4,
-        "iterations": 2
-      }
-    },
-    {
-      "kind": "flow",
-      "name": "flow:lava",
-      "in": {
-        "source": "sites:vents"
-      }
-    },
-    {
-      "kind": "emit",
-      "name": "lava-flows",
-      "in": {
-        "source": "flow:lava"
-      },
-      "cell_m": 640,
-      "pad_m": 3264.0,
-      "max_chunk_edge_m": 140.0,
-      "keep_m": 12000.0,
-      "emit": {
-        "type": "ribbon",
-        "material": 2
-      }
-    },
-    {
-      "kind": "scatter",
-      "name": "sites:ossuaries",
-      "chance": 0.3,
-      "altitude": [
-        14.0,
-        300.0
-      ],
-      "up": [
-        0.88,
-        1.0
-      ],
-      "relax": {
-        "strength": 0.35
-      }
-    },
-    {
-      "kind": "emit",
-      "name": "ossuaries",
-      "in": {
-        "source": "sites:ossuaries",
-        "structure": "ossuary"
-      },
-      "pad_m": 0.0,
-      "emit": {
-        "type": "site_structure",
-        "marker": "ossuary"
-      }
-    },
-    {
-      "kind": "connect",
-      "name": "paths:processions",
-      "in": {
-        "source": "sites:ossuaries"
-      }
-    },
-    {
-      "kind": "emit",
-      "name": "procession-beds",
-      "in": {
-        "source": "paths:processions"
-      },
-      "pad_m": 606.0,
-      "emit": {
-        "type": "path_slabs"
-      }
-    },
-    {
-      "kind": "emit",
-      "name": "procession-surface",
-      "in": {
-        "source": "paths:processions"
-      },
-      "pad_m": 606.0,
-      "emit": {
-        "type": "path_ribbon",
-        "material": 3,
-        "width": [
-          4.0,
-          4.0
-        ]
-      }
-    },
-    {
-      "kind": "scatter",
-      "name": "sites:hollows",
-      "cell_m": 1024,
-      "chance": 0.5,
-      "altitude": [
-        40.0,
-        480.0
-      ]
-    },
-    {
-      "kind": "worm",
-      "name": "worm:hollows",
-      "in": {
-        "source": "sites:hollows"
-      }
-    },
-    {
-      "kind": "emit",
-      "name": "hollows",
-      "in": {
-        "source": "worm:hollows"
-      },
-      "pad_m": 340.0,
-      "max_chunk_edge_m": 140.0,
-      "emit": {
-        "type": "worm_cuts"
-      }
-    },
-    {
-      "kind": "population",
-      "name": "bones",
-      "in": {
-        "density": "field.1",
-        "gate": "biomes"
-      },
-      "per_tile": 6,
-      "chance": 0.5,
-      "altitude": [
-        8.0,
-        520.0
-      ],
-      "min_up": 0.8,
-      "density": {},
-      "placement": {
-        "align": "normal",
-        "tilt_deg": 11.0
-      },
-      "sink_scaled": 0.25,
-      "scale_bias": 1.6,
-      "variants": [
-        {
-          "weight": 0.6,
-          "scale": [
-            0.5,
-            1.9
-          ]
-        },
-        {
-          "weight": 0.4,
-          "scale": [
-            0.9,
-            2.8
-          ]
-        }
-      ],
-      "region": "boneyard"
-    },
-    {
-      "kind": "population",
-      "name": "boulder",
-      "in": {
-        "gate": "biomes"
-      },
-      "per_tile": 4,
-      "chance": 0.42,
-      "altitude": [
-        4.0,
-        700.0
-      ],
-      "min_up": 0.55,
-      "placement": {
-        "align": "normal",
-        "tilt_deg": 8.0
-      },
-      "sink_scaled": 0.2,
-      "scale_bias": 2.0,
-      "variants": [
-        {
-          "scale": [
-            0.4,
-            3.0
-          ]
-        }
-      ],
-      "region": "ashfield"
-    },
-    {
-      "kind": "population",
-      "name": "cinder",
-      "in": {
-        "density": "field.2"
-      },
-      "output": "points",
-      "tile_m": 16.0,
-      "radius_tiles": 7,
-      "per_tile": 420,
-      "altitude": [
-        2.0,
-        420.0
-      ],
-      "min_up": 0.86,
-      "detail_vs": 1.0,
-      "density": {}
+     "weight": 0.4,
+     "scale": [
+      0.9,
+      2.8
+     ]
     }
-  ],
-  "materials": [
+   ],
+   "region": "boneyard"
+  },
+  {
+   "kind": "population",
+   "name": "boulder",
+   "in": {
+    "gate": "biomes"
+   },
+   "per_tile": 4,
+   "chance": 0.42,
+   "altitude": [
+    4.0,
+    700.0
+   ],
+   "min_up": 0.55,
+   "placement": {
+    "align": "normal",
+    "tilt_deg": 8.0
+   },
+   "sink_scaled": 0.2,
+   "scale_bias": 2.0,
+   "variants": [
     {
-      "type": "zoned",
-      "id": 1,
-      "low": [
-        0.098,
-        0.064,
-        0.05
-      ],
-      "mid": [
-        [
-          0.142,
-          0.124,
-          0.109
-        ],
-        [
-          0.198,
-          0.181,
-          0.162
-        ]
-      ],
-      "high": [
-        [
-          0.113,
-          0.105,
-          0.101
-        ],
-        [
-          0.079,
-          0.073,
-          0.071
-        ]
-      ],
-      "peak": [
-        0.26,
-        0.252,
-        0.242
-      ],
-      "zones": {
-        "mid": [
-          64.0,
-          46.0
-        ],
-        "high": [
-          286.0,
-          120.0
-        ],
-        "peak": [
-          560.0,
-          150.0
-        ],
-        "border": 38.0
-      },
-      "steep": [
-        0.74,
-        0.42
-      ],
-      "detail_fade": 0.0018
-    },
-    {
-      "type": "surface",
-      "id": 2,
-      "base": [
-        0.26,
-        0.0362,
-        0.0068
-      ],
-      "grain": 0.55,
-      "band": {
-        "freq": 0.09,
-        "amp": 0.42,
-        "lo": 0.05,
-        "hi": 0.95,
-        "warp": 0.85
-      },
-      "emissive": {
-        "color": [
-          2.7,
-          0.62,
-          0.12
-        ],
-        "intensity": 1.0,
-        "spacing": 3.0,
-        "level_spacing": 3.0,
-        "chance": 0.92,
-        "glow": 0.3
-      },
-      "detail_fade": 0.004
-    },
-    {
-      "type": "surface",
-      "id": 3,
-      "base": [
-        0.34,
-        0.323,
-        0.282
-      ],
-      "grain": 0.3,
-      "band": {
-        "freq": 0.7,
-        "amp": 0.2,
-        "lo": 0.05,
-        "hi": 0.4,
-        "warp": 0.55
-      },
-      "grime": {
-        "tint": [
-          0.42,
-          0.36,
-          0.3
-        ],
-        "amount": 0.7
-      },
-      "detail_fade": 0.0025
-    },
-    {
-      "type": "surface",
-      "id": 4,
-      "base": [
-        0.118,
-        0.085,
-        0.077
-      ],
-      "grain": 0.65,
-      "streaks": 0.45,
-      "detail_fade": 0.003
+     "scale": [
+      0.4,
+      3.0
+     ]
     }
-  ],
-  "placements": []
+   ],
+   "region": "ashfield"
+  },
+  {
+   "kind": "population",
+   "name": "cinder",
+   "in": {
+    "density": "field.2"
+   },
+   "output": "points",
+   "tile_m": 16.0,
+   "radius_tiles": 7,
+   "per_tile": 420,
+   "altitude": [
+    2.0,
+    420.0
+   ],
+   "min_up": 0.86,
+   "detail_vs": 1.0,
+   "density": {}
+  }
+ ],
+ "materials": [
+  {
+   "type": "zoned",
+   "id": 1,
+   "low": [
+    0.098,
+    0.064,
+    0.05
+   ],
+   "mid": [
+    [
+     0.142,
+     0.124,
+     0.109
+    ],
+    [
+     0.198,
+     0.181,
+     0.162
+    ]
+   ],
+   "high": [
+    [
+     0.113,
+     0.105,
+     0.101
+    ],
+    [
+     0.079,
+     0.073,
+     0.071
+    ]
+   ],
+   "peak": [
+    0.26,
+    0.252,
+    0.242
+   ],
+   "zones": {
+    "mid": [
+     64.0,
+     46.0
+    ],
+    "high": [
+     286.0,
+     120.0
+    ],
+    "peak": [
+     560.0,
+     150.0
+    ],
+    "border": 38.0
+   },
+   "steep": [
+    0.74,
+    0.42
+   ],
+   "detail_fade": 0.0018
+  },
+  {
+   "type": "surface",
+   "id": 2,
+   "base": [
+    0.26,
+    0.0362,
+    0.0068
+   ],
+   "grain": 0.55,
+   "band": {
+    "freq": 0.09,
+    "amp": 0.42,
+    "lo": 0.05,
+    "hi": 0.95,
+    "warp": 0.85
+   },
+   "emissive": {
+    "color": [
+     2.7,
+     0.62,
+     0.12
+    ],
+    "intensity": 1.0,
+    "spacing": 3.0,
+    "level_spacing": 3.0,
+    "chance": 0.92,
+    "glow": 0.3
+   },
+   "detail_fade": 0.004
+  },
+  {
+   "type": "surface",
+   "id": 3,
+   "base": [
+    0.34,
+    0.323,
+    0.282
+   ],
+   "grain": 0.3,
+   "band": {
+    "freq": 0.7,
+    "amp": 0.2,
+    "lo": 0.05,
+    "hi": 0.4,
+    "warp": 0.55
+   },
+   "grime": {
+    "tint": [
+     0.42,
+     0.36,
+     0.3
+    ],
+    "amount": 0.7
+   },
+   "detail_fade": 0.0025
+  },
+  {
+   "type": "surface",
+   "id": 4,
+   "base": [
+    0.118,
+    0.085,
+    0.077
+   ],
+   "grain": 0.65,
+   "streaks": 0.45,
+   "detail_fade": 0.003
+  }
+ ],
+ "placements": []
 }
