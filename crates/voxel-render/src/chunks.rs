@@ -1164,6 +1164,9 @@ struct ChunkTable {
     /// pass reveals, which is exactly "the jump has landed".
     reload_saw_work: bool,
     last_camera: DVec3,
+    /// Worlds seen last frame. A world arriving is a FIRST load for that
+    /// world, whatever the others are showing.
+    worlds_seen: usize,
 }
 
 struct GenEntry {
@@ -2035,6 +2038,17 @@ fn plan_frame_inner(
         table.reload_saw_work = false;
     }
     table.last_camera = camera.0;
+    // A world that has just arrived has nothing on screen either, and
+    // `revealed` cannot say so — it is one flag for the whole table, set
+    // by the first commit of ANY world. So a level opened through a
+    // portal was loading its entire first pass at the flight budget,
+    // which is why it took 3.36 s where the same level takes 1.60 s as
+    // the first one up.
+    if worlds.len() > table.worlds_seen {
+        table.reloading = true;
+        table.reload_saw_work = false;
+    }
+    table.worlds_seen = worlds.len();
 
     // Budgets for THIS frame. Phase 1 has just applied the commands, so
     // a world that revealed its first chunk this frame is already out of
