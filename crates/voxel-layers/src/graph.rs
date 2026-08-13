@@ -564,7 +564,18 @@ impl LayerGraph {
                 continue;
             }
             dep.changed = false;
-            old.extend(dep.current.take());
+            let previous = dep.current.take();
+            if std::mem::take(&mut dep.replace) {
+                // Disjoint: release BEFORE building. Holding it would keep
+                // slab slots, arena slots and planning residency for
+                // chunks that cannot appear in the new box — on a
+                // teleport the graph was holding both regions at once.
+                if let Some(usage) = previous {
+                    self.release(usage);
+                }
+            } else {
+                old.extend(previous);
+            }
             if dep.active && !self.aborting.load(Ordering::Relaxed) {
                 let mut usage = Usage::default();
                 self.ensure_shell(dep.key, dep.bounds(), dep.filter.as_ref(), &mut usage);
@@ -708,6 +719,14 @@ pub struct TopDep {
     current: Option<Usage>,
     changed: bool,
     active: bool,
+    /// The new box shares nothing with the one it replaces.
+    ///
+    /// Ensure-new-then-release-old exists so a chunk that is still needed
+    /// is never dropped while its replacement builds. When the boxes are
+    /// DISJOINT nothing resident can serve the new box, so the hold
+    /// protects nothing and only keeps slots and memory the new region is
+    /// about to ask for. Released first in that case.
+    replace: bool,
 }
 
 impl TopDep {
@@ -723,6 +742,7 @@ impl TopDep {
             current: None,
             changed: true,
             active: true,
+            replace: false,
         }
     }
 
@@ -751,12 +771,16 @@ impl TopDep {
     /// chunk indices actually differ.
     pub fn set_focus(&mut self, graph: &LayerGraph, focus: IVec3) {
         let moved = self.focus != focus;
+        let was = self.bounds();
         self.focus = focus;
         let extent = graph.entry(self.key).extent;
         let indices = range_of(extent, self.bounds());
         if self.indices != Some(indices) {
             self.indices = Some(indices);
             self.changed = true;
+            // A jump, not a step: nothing it held can serve where it now
+            // points.
+            self.replace = !self.bounds().intersects(was);
         }
         if moved && self.filter.is_some() {
             self.changed = true;
