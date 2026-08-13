@@ -592,6 +592,33 @@ impl LayerGraph {
 
     /// Chunks of a named instance covering `bounds`, at its top level.
     /// Resident chunks only — this never generates.
+    /// Is every chunk of `instance` in `bounds` resident?
+    ///
+    /// The question [`view`](Self::view) answers as a side effect, without
+    /// paying for the answer it does not need: no `Vec`, no `Arc` clone
+    /// per slot, and it stops at the first absence. A coverage test runs
+    /// per consumer per chunk, so building the slot list to throw it away
+    /// showed up as most of a cold start's layer thread.
+    ///
+    /// PEEKED by the caller where a miss is the question rather than a
+    /// failure — this does not touch `reads_missed` either way.
+    pub fn covered(&self, instance: &str, bounds: IAabb) -> bool {
+        let entry = self.entry(layer_key(instance));
+        let (lo, hi) = range_of(entry.extent, bounds);
+        let grid = entry.grid.read().unwrap();
+        for z in lo.z..=hi.z {
+            for y in lo.y..=hi.y {
+                for x in lo.x..=hi.x {
+                    match grid.get(&IVec3::new(x, y, z)) {
+                        Some(slot) if slot.is_generated() => {}
+                        _ => return false,
+                    }
+                }
+            }
+        }
+        true
+    }
+
     pub fn view<L: Layer>(&self, instance: &str, bounds: IAabb) -> View<L> {
         self.view_at(layer_key(instance), bounds)
     }

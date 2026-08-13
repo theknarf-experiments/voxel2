@@ -1123,10 +1123,7 @@ fn patch_bounds(min: Vec3, max: Vec3) -> IAabb {
 /// consumer reading outside its working set, so it must not count against
 /// `reads_missed`.
 pub fn patches_cover(mgr: &LayerGraph, instance: &str, min: Vec3, max: Vec3) -> bool {
-    let _peek = voxel_layers::peek();
-    mgr.view::<EmitPatches>(instance, patch_bounds(min, max))
-        .missing()
-        == 0
+    mgr.covered(instance, patch_bounds(min, max))
 }
 
 /// Patches of one emit instance overlapping the world box `[min, max]`,
