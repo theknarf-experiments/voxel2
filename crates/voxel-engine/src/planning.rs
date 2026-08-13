@@ -152,6 +152,8 @@ pub struct PlanningStats {
     pub generating: bool,
     /// Per-layer residency and cost, dearest first.
     pub layers: Vec<voxel_layers::LayerStats>,
+    /// Every resident coord of the instance named by VOXEL_COORDS_OF.
+    pub coords: Vec<[i32; 3]>,
 }
 
 /// A source of ops for a world-space box, independent of any layer stack

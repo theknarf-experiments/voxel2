@@ -387,6 +387,15 @@ impl WorldPlanner for RegionPlanner {
                 reads_missed: rt.graph().reads_missed(),
                 generating: rt.is_generating(),
                 layers: rt.graph().layer_stats(),
+                coords: std::env::var("VOXEL_COORDS_OF")
+                    .ok()
+                    .map_or_else(Vec::new, |n| {
+                        rt.graph()
+                            .resident_coords(&n)
+                            .into_iter()
+                            .map(|c| [c.x, c.y, c.z])
+                            .collect()
+                    }),
             })
     }
 }

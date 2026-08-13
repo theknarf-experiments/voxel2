@@ -155,6 +155,7 @@ fn status(
         out["planning"] = json!({
             "resident_chunks": planning.resident_chunks,
             "reads_missed": planning.reads_missed,
+            "coords": planning.coords,
             "generating": planning.generating,
             "layers": planning
                 .layers

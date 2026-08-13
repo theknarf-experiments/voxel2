@@ -723,6 +723,20 @@ impl LayerGraph {
         out
     }
 
+    /// Every resident coord of one instance, for diffing two runs.
+    pub fn resident_coords(&self, instance: &str) -> Vec<IVec3> {
+        let mut v: Vec<IVec3> = self
+            .entry(layer_key(instance))
+            .grid
+            .read()
+            .unwrap()
+            .keys()
+            .copied()
+            .collect();
+        v.sort_by_key(|c| (c.x, c.y, c.z));
+        v
+    }
+
     /// Resident chunks of one instance.
     pub fn resident_in(&self, instance: &str) -> usize {
         self.entry(layer_key(instance)).grid.read().unwrap().len()
