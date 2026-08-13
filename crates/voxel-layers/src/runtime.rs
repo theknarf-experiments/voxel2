@@ -288,16 +288,26 @@ impl TopHandle {
     /// Publish where to look. The first call is also what starts this
     /// dependency generating.
     pub fn set_focus(&self, focus: IVec3) {
-        self.request();
-        TopSlot::store(&self.shared.tops[self.index].focus, focus);
-        self.shared.tops[self.index]
-            .active
-            .store(true, Ordering::Relaxed);
+        let slot = &self.shared.tops[self.index];
+        let first = !slot.active.swap(true, Ordering::Relaxed);
+        // Only a CHANGE is a request. The host publishes the focus every
+        // frame whether the camera moved or not, and counting each of
+        // those meant `quiet` — which is `!worked && no new requests` —
+        // was never true, so the runtime never reported idle even with
+        // nothing left to do. Anything waiting on that (`settled`) then
+        // flickered on and off forever at rest.
+        if first || TopSlot::load(&slot.focus) != focus {
+            TopSlot::store(&slot.focus, focus);
+            self.request();
+        }
     }
 
     pub fn set_size(&self, size: IVec3) {
-        self.request();
-        TopSlot::store(&self.shared.tops[self.index].size, size);
+        let slot = &self.shared.tops[self.index];
+        if TopSlot::load(&slot.size) != size {
+            TopSlot::store(&slot.size, size);
+            self.request();
+        }
     }
 
     pub fn set_active(&self, active: bool) {

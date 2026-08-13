@@ -774,10 +774,20 @@ fn follow_lod_focus(
     probe.reads_missed = worlds.iter().map(|w| w.query.reads_missed()).sum();
 
     // Settled: residency agrees with the focus AND the pipeline has
-    // drained. Either half alone lies — the graph is idle the moment it
-    // stops asking, while the chunks it asked for are still meshing.
+    // drained AND the planners have caught up. Any of the three alone
+    // lies — the graph is idle the moment it stops asking, while the
+    // chunks it asked for are still meshing.
+    //
+    // The planners are in here because a chunk only waits for the
+    // planning IT stands in, through the ops gate. Nothing waits for a
+    // population: no chunk depends on a prop, so scatter layers could
+    // still be generating when the terrain had drained, and `settled`
+    // said the world was ready with none of its props in it. The
+    // megastructure reported 1.22 s with `rubble` created ZERO times and
+    // kept building for another second.
     let awaiting = stats.0.lock().map_or(0, |s| s.awaiting);
-    let settled = layers.is_idle() && awaiting == 0 && !layers.is_generating();
+    let planned = worlds.iter().all(|w| w.query.is_idle());
+    let settled = layers.is_idle() && awaiting == 0 && !layers.is_generating() && planned;
     if settled {
         if *settling > 0.0 {
             probe.last_settle_s = *settling;
