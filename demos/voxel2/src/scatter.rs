@@ -33,6 +33,9 @@ const GATE_PAD_M: i32 = 64;
 /// How far above and below a population looks for carved ground. Cave
 /// mouths reach the surface from a long way down, and this layer is planar
 /// so it has to say how deep it cares.
+///
+/// Only for a population that names no altitude band. One that DOES is
+/// asking about a slab it already described — see [`ScatterPopulation::gate_pad`].
 const GATE_Y_M: i32 = 4096;
 
 /// One population. Registered once per class the level declares.
@@ -59,7 +62,7 @@ impl Layer for ScatterPopulation {
     }
 
     fn dependencies(&self) -> Vec<Dep> {
-        let pad = IVec3::new(GATE_PAD_M, GATE_Y_M, GATE_PAD_M);
+        let pad = self.gate_pad();
         let deps: Vec<Dep> = self
             .emit_sources
             .iter()
@@ -72,13 +75,36 @@ impl Layer for ScatterPopulation {
     }
 }
 
+impl ScatterPopulation {
+    /// How far outside its own tile this population reads its emit
+    /// sources. ONE definition, because `dependencies` declares it and
+    /// `create` reads with it, and a layer that reads past what it
+    /// declared is the framework's loudest assert.
+    ///
+    /// The vertical half is the interesting one, and it is LEVEL data
+    /// (`gate_y_m`) because nothing here can derive it: what a population
+    /// must see is how far the ops its sources emit REACH, which is a
+    /// fact about those structures. Deriving it from the population's own
+    /// `altitude` was tried and is wrong — the megastructure's rubble
+    /// lives in [-140, 140] and still needs more than 1024 m, because the
+    /// shafts that carve it are kilometres long.
+    ///
+    /// The default stays "as far as anything could reach". Overstating it
+    /// is expensive: the megastructure was pulling +/-31 tiles of a 132 m
+    /// layer per rubble tile, and every consumer of those followed.
+    fn gate_pad(&self) -> IVec3 {
+        let y = self.def.gate_y_m.map_or(GATE_Y_M, |m| m as i32);
+        IVec3::new(GATE_PAD_M, y, GATE_PAD_M)
+    }
+}
+
 impl LayerChunk for ScatterChunk {
     type Layer = ScatterPopulation;
 
     fn create(&mut self, ctx: &ChunkCtx<'_, ScatterPopulation>) {
         let layer = ctx.layer();
         let own = ctx.chunk_bounds();
-        let pad = IVec3::new(GATE_PAD_M, GATE_Y_M, GATE_PAD_M);
+        let pad = layer.gate_pad();
 
         // Everything the gates read, from declared dependencies only.
         let mut clearance = Vec::new();

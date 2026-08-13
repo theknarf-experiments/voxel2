@@ -1341,7 +1341,8 @@
      ]
     }
    ],
-   "region": "warrens"
+   "region": "warrens",
+   "gate_y_m": 2048.0
   },
   {
    "kind": "population",

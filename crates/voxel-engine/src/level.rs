@@ -149,6 +149,21 @@ pub struct ScatterDef {
     /// Streaming radius in tiles.
     #[serde(default = "d_scatter_radius")]
     pub radius_tiles: i32,
+    /// How far above and below this population reads the emit sources it
+    /// is gated on, in metres. `None` is "as far as anything could reach".
+    ///
+    /// A population is a PLANAR layer, so it cannot infer this: it has to
+    /// say how deep it cares, and the answer is a fact about the
+    /// STRUCTURES its sources emit, not about the population. The
+    /// megastructure's shafts and tubes are kilometres long and its
+    /// `rubble` needs more than 1024 m; a level whose sources are all
+    /// local can say so and stop paying for the rest.
+    ///
+    /// Costly to overstate: the read window is a slab of the source's
+    /// tiles per tile of this layer, so on the megastructure the default
+    /// pulled +/-31 tiles of a 132 m layer per rubble tile.
+    #[serde(default)]
+    pub gate_y_m: Option<f32>,
     /// Placement attempts per tile at full patch density.
     pub per_tile: u32,
     /// Chance each surviving candidate is kept.
