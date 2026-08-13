@@ -826,7 +826,7 @@ impl GpuWorldProgram {
             let offset = gpu_ops.len() as u32;
             let height_ops = program.ops.iter().filter(|op| op.is_height_op()).count() as u32;
             gpu_ops.extend(program.ops.iter().map(|op| GpuWorldOp {
-                meta: UVec4::new(op.kind, op.flags, op.material, 0),
+                meta: UVec4::new(op.kind, op.flags, op.material, op.region),
                 p0: Vec4::from_array(op.p0),
                 p1: Vec4::from_array(op.p1),
                 p2: Vec4::from_array(op.p2),
@@ -3180,6 +3180,52 @@ mod multi_world_tests {
         assert_eq!(gpu.ops[3].meta.x, 0, "world 1's ops start over at kind 0");
         // An unregistered world is empty, not a view of world 0.
         assert_eq!(gpu.worlds[2].count.y, 0);
+    }
+
+    /// Every field of a `WorldOp` has to REACH the shader.
+    ///
+    /// `region` did not, for eight commits. `bade585` added the field, the
+    /// CPU gate in `program::eval` and `region_gate` in the WGSL, but the
+    /// packing here predates it and passed a literal `0` — the value
+    /// `region_gate` reads as "applies everywhere". So every gated op ran
+    /// in every district on the GPU while the CPU mirror confined it, and
+    /// the two halves of the same program disagreed: `can_hold_surface`
+    /// promised surfaces the density pass then carved away (megastructure
+    /// meshed 1515 of 3255 chunks; gated, it meshes 2950).
+    ///
+    /// A field-by-field check rather than a spot check, so the next field
+    /// added to `WorldOp` fails here instead of rendering the wrong world.
+    #[test]
+    fn every_world_op_field_reaches_the_gpu() {
+        let mut worlds = RenderWorlds::default();
+        let op = WorldOp::new(3)
+            .flags(2)
+            .material(5)
+            .region([0.25, 0.5, 0.125, 0.75]);
+        worlds.register(RenderWorld {
+            program: WorldProgram {
+                ops: std::sync::Arc::new(vec![op]),
+                seed: 11,
+                sun_dir: Vec3::new(0.0, 1.0, 0.0),
+            },
+            materials: material_table([]),
+            ..Default::default()
+        });
+
+        let gpu = GpuWorldProgram::from_worlds(&worlds);
+        let packed = gpu.ops[0];
+        assert_eq!(packed.meta.x, op.kind);
+        assert_eq!(packed.meta.y, op.flags);
+        assert_eq!(packed.meta.z, op.material);
+        assert_eq!(
+            packed.meta.w, op.region,
+            "the region gate never reached the shader; `region_gate` reads meta.w \
+             and 0 means `applies everywhere`"
+        );
+        assert_ne!(op.region, 0, "the fixture must actually gate something");
+        assert_eq!(packed.p0.to_array(), op.p0);
+        assert_eq!(packed.p1.to_array(), op.p1);
+        assert_eq!(packed.p2.to_array(), op.p2);
     }
 
     /// A material id means whatever ITS level says. Planet's 1 and the
