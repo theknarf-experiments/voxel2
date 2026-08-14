@@ -517,22 +517,24 @@ fn redo_puts_back_what_undo_took_and_an_edit_forgets_it() {
 /// The case that matters is a click on a CHILD — a title bar, a port row
 /// — because a pointer event bubbles and this observer runs once per
 /// ancestor. Selecting on the way up is what makes any part of a box
-/// work; the viewport at the END of that chain used to clear what the box
+/// work; the surface at the END of that chain used to clear what the box
 /// had just set, so selection never worked by clicking at all.
+///
+/// The clearing surface is the BACKDROP inside the graph's texture, not
+/// the viewport node: the real pointer clicks the viewport on every
+/// click, box or not, so clearing there would race every selection.
 #[test]
 fn clicking_a_node_selects_it_even_through_its_children() {
     use bevy::picking::events::{Click, Pointer};
     use bevy::picking::pointer::{Location, PointerButton, PointerId};
-    use voxel_editor::{GraphViewport, SelectsNode};
+    use bevy_graph_view::GraphBackdrop;
+    use voxel_editor::SelectsNode;
 
     let mut app = app();
     app.add_observer(voxel_editor::on_select);
 
-    let viewport = app.world_mut().spawn(GraphViewport).id();
-    let boxed = app
-        .world_mut()
-        .spawn((SelectsNode(".nodes[3]".into()), ChildOf(viewport)))
-        .id();
+    let backdrop = app.world_mut().spawn(GraphBackdrop).id();
+    let boxed = app.world_mut().spawn(SelectsNode(".nodes[3]".into())).id();
     let title = app.world_mut().spawn(ChildOf(boxed)).id();
 
     let click = |app: &mut App, at: Entity| {
@@ -565,11 +567,11 @@ fn clicking_a_node_selects_it_even_through_its_children() {
         "a click on a node's title selects the node"
     );
 
-    click(&mut app, viewport);
+    click(&mut app, backdrop);
     assert_eq!(
         app.world().resource::<EditorState>().selected,
         None,
-        "and a click on the canvas behind them clears it"
+        "and a click on the backdrop behind them clears it"
     );
 }
 

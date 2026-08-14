@@ -21,7 +21,7 @@ use bevy::ui::{
     ScrollPosition, UiRect, UiTransform, Val2,
 };
 use bevy::window::SystemCursorIcon;
-use bevy_graph_view::{GraphCanvas, GraphStyle, GraphViewport, SelectsNode};
+use bevy_graph_view::{GraphBackdrop, GraphCanvas, GraphStyle, GraphViewport, SelectsNode};
 
 use crate::style::PanelStyle;
 use crate::{graph, row, walk};
@@ -282,18 +282,23 @@ pub fn save(
 pub fn on_select(
     click: On<Pointer<Click>>,
     boxes: Query<&SelectsNode>,
-    viewports: Query<(), With<GraphViewport>>,
+    backdrops: Query<(), With<GraphBackdrop>>,
     mut state: ResMut<EditorState>,
 ) {
     // A pointer event BUBBLES, so this observer runs once per ancestor: a
     // click on a node's title bar reaches the title, then the box, then
-    // the canvas, then the viewport. Selecting on the way up is right —
-    // that is how a click on any part of a box selects it — but clearing
-    // has to ask where the click STARTED, or the viewport at the end of
-    // the chain undoes what the box just did. It did exactly that.
+    // the canvas. Selecting on the way up is right — that is how a click
+    // on any part of a box selects it — but clearing has to ask where the
+    // click STARTED, or an ancestor at the end of the chain undoes what
+    // the box just did. It did exactly that.
+    //
+    // The backdrop, NOT the viewport node: the graph lives in a texture
+    // picked by the viewport's own pointer, and the REAL pointer clicks
+    // the viewport node on every click, box or not — clearing on it would
+    // race the selection. Only the in-texture backdrop means "no box".
     if let Ok(SelectsNode(path)) = boxes.get(click.event_target()) {
         state.selected = Some(path.clone());
-    } else if viewports.contains(click.original_event_target()) {
+    } else if backdrops.contains(click.original_event_target()) {
         state.selected = None;
     }
 }

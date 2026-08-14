@@ -15,6 +15,9 @@
 //!
 //! `GRAPH_SHOT=/path/out.png` takes a screenshot a second in and exits,
 //! so a change to the crate can be looked at without a hand on the mouse.
+//! `GRAPH_CAM=panx,pany,zoom` starts the camera somewhere other than the
+//! top-left at 100% — a gesture cannot be scripted, so this is how a
+//! zoomed or panned state gets in front of `GRAPH_SHOT` at all.
 
 use bevy::feathers::theme::{ThemeBackgroundColor, ThemedText, UiTheme};
 use bevy::feathers::{dark_theme::create_dark_theme, tokens, FeathersPlugins};
@@ -22,8 +25,8 @@ use bevy::prelude::*;
 use bevy::text::FontSize;
 use bevy::ui::{percent, px, FlexDirection, Node, UiRect, UiTransform, Val2};
 use bevy_graph_view::{
-    layout, scene, GraphCamera, GraphCanvas, GraphNode, GraphStyle, GraphViewPlugin, GraphViewport,
-    SelectsNode,
+    layout, scene, GraphBackdrop, GraphCamera, GraphCanvas, GraphNode, GraphStyle, GraphViewPlugin,
+    GraphViewport, SelectsNode,
 };
 
 fn main() {
@@ -48,6 +51,8 @@ fn main() {
                 on_wheel,
                 on_pinch,
                 rebuild,
+                bevy_graph_view::create_cameras,
+                bevy_graph_view::cleanup_cameras,
                 apply_camera,
                 bevy_graph_view::hover,
                 bevy_graph_view::zoom_label,
@@ -178,6 +183,19 @@ struct StatusLine;
 
 fn setup(world: &mut World) {
     world.spawn(Camera2d);
+    if let Ok(spec) = std::env::var("GRAPH_CAM") {
+        let mut parts = spec.split(',').map(|p| p.trim().parse::<f32>());
+        if let (Some(Ok(x)), Some(Ok(y)), Some(Ok(zoom))) =
+            (parts.next(), parts.next(), parts.next())
+        {
+            world.resource_mut::<ViewState>().camera = GraphCamera {
+                pan: Vec2::new(x, y),
+                zoom,
+            };
+        } else {
+            warn!("GRAPH_CAM wants panx,pany,zoom — got {spec:?}");
+        }
+    }
     let shell = world
         .spawn_scene(bsn! {
             Node {
@@ -248,12 +266,12 @@ fn rebuild(world: &mut World) {
 fn on_click(
     click: On<Pointer<Click>>,
     boxes: Query<&SelectsNode>,
-    viewports: Query<(), With<GraphViewport>>,
+    backdrops: Query<(), With<GraphBackdrop>>,
     mut state: ResMut<ViewState>,
 ) {
     if let Ok(SelectsNode(id)) = boxes.get(click.event_target()) {
         state.selected = Some(id.clone());
-    } else if viewports.contains(click.original_event_target()) {
+    } else if backdrops.contains(click.original_event_target()) {
         state.selected = None;
     }
 }

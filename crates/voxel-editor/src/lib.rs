@@ -319,6 +319,12 @@ impl Plugin for EditorPlugin {
                         edit::apply,
                         edit::undo,
                         panel::rebuild,
+                        // Wire a graph canvas to its camera the frame the
+                        // rebuild spawns it — and bury both the frame the
+                        // panel despawns, taking the canvas that stopped
+                        // being the panel's descendant with it.
+                        bevy_graph_view::create_cameras,
+                        bevy_graph_view::cleanup_cameras,
                         panel::apply_camera,
                         // After the rebuild, so a panel respawned this
                         // frame gets the dragged width and not the one it

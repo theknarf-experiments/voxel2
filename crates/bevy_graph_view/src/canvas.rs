@@ -9,15 +9,37 @@
 //! Pan and zoom are one `UiTransform` on the canvas. Bevy's picking
 //! backend inverse-transforms the cursor, so a box under a zoomed canvas
 //! is still hit where it is drawn — nothing here does that arithmetic.
+//!
+//! The graph is drawn through its own camera into a TEXTURE, shown by a
+//! `ViewportNode` — Bevy's widget for exactly this — rather than clipped
+//! with `Overflow::clip`. The overflow path adjusts quad corners in
+//! screen pixels while the fill and glyph coordinates move in unscaled
+//! ones (its own source says it "won't work with rotation/scaling"), so
+//! on a zoomed canvas any element straddling the clip edge rendered
+//! wrong — a box clipped on the right lost its whole background. A
+//! texture has no such arithmetic: whatever falls outside is not in the
+//! image, exact at any zoom. The camera targets an image and not the
+//! window, which is also what keeps it out of Bevy's default-UI-camera
+//! resolution — that fallback is "the highest-order camera on the
+//! PRIMARY WINDOW", and a window-target graph camera would win it and
+//! adopt the host's entire untargeted UI. [`create_cameras`] does the
+//! wiring when a canvas spawns; [`cleanup_cameras`] buries everything
+//! when its viewport node dies.
 
+use bevy::camera::RenderTarget;
 use bevy::feathers::cursor::EntityCursor;
 use bevy::feathers::font_styles::InheritableFont;
 use bevy::feathers::theme::{InheritableThemeTextColor, ThemeBackgroundColor, ThemedText};
 use bevy::feathers::{constants::fonts, tokens};
 use bevy::picking::hover::Hovered;
 use bevy::prelude::*;
+use bevy::render::render_resource::TextureFormat;
 use bevy::text::{FontSize, FontWeight, LineBreak, TextLayout};
-use bevy::ui::{px, Display, FlexDirection, Node, PositionType, UiRect, UiTransform, Val2};
+use bevy::ui::widget::ViewportNode;
+use bevy::ui::{
+    px, Display, FlexDirection, GlobalZIndex, Node, PositionType, UiRect, UiTargetCamera,
+    UiTransform, Val2,
+};
 
 use crate::layout::{Frame, GraphStyle, Layout, Placed, Seg};
 
@@ -31,9 +53,33 @@ pub struct GraphCanvas;
 #[derive(Component, Clone, Debug, Default)]
 pub struct SelectsNode(pub String);
 
-/// The clipping window the canvas moves inside.
+/// The window the canvas is seen through.
+///
+/// [`create_cameras`] turns it into a `ViewportNode`: the graph renders
+/// into a texture this node displays, sized to it by Bevy whenever layout
+/// moves it. The texture edge is the clip.
 #[derive(Component, Clone, Default)]
 pub struct GraphViewport;
+
+/// The camera that draws one viewport's canvas, made by [`create_cameras`].
+#[derive(Component)]
+pub struct GraphViewCamera {
+    /// The [`GraphViewport`] node this camera draws for. When it despawns
+    /// — a host rebuilding its UI despawns the whole panel — the camera
+    /// and everything it draws go too.
+    pub viewport: Entity,
+}
+
+/// The click-catcher behind a canvas's boxes.
+///
+/// The graph's content is picked by the viewport's own POINTER, which
+/// `viewport_picking` mirrors the real one into; the real pointer only
+/// ever hits the `ViewportNode` itself, on every click, box or not. So
+/// "the click landed on empty canvas" must be asked INSIDE the texture:
+/// this full-viewport surface is what such a click hits, and a host
+/// clears its selection when [`SelectsNode`]-less clicks land here.
+#[derive(Component, Clone, Default)]
+pub struct GraphBackdrop;
 
 /// The zoom readout in the viewport's lower corner.
 ///
@@ -146,8 +192,6 @@ pub fn scene(
         Node {
             flex_grow: 1.0,
             min_height: px(0),
-            // Clipped, not scrolled: the canvas moves under this window.
-            overflow: bevy::ui::Overflow::clip(),
         }
         Children [
             (
@@ -193,6 +237,105 @@ fn percent(scale: f32) -> String {
     format!("{:.0}%", scale * 100.0)
 }
 
+/// Give every newly spawned canvas a camera and a texture of its own.
+///
+/// [`scene`] spawns the canvas as a CHILD of the viewport, because a
+/// scene cannot name an entity that does not exist yet; this system does
+/// the wiring on the frame the canvas appears. The viewport node becomes
+/// a `ViewportNode` showing the camera's texture — Bevy keeps the texture
+/// sized to the node from here on — and the canvas moves under the
+/// camera, along with a fresh [`GraphBackdrop`] for clicks that hit no
+/// box. Run it right after whatever spawns the scene: wired in the same
+/// schedule pass, a canvas is never drawn un-clipped.
+pub fn create_cameras(
+    mut commands: Commands,
+    mut images: ResMut<Assets<Image>>,
+    windows: Query<&Window, With<bevy::window::PrimaryWindow>>,
+    canvases: Query<(Entity, &ChildOf), Added<GraphCanvas>>,
+) {
+    // The texture is displayed at the node's PHYSICAL size, so the camera
+    // must lay its UI out at the window's scale factor or everything in
+    // the graph renders at half size on a hidpi display.
+    let scale_factor = windows.single().map(|w| w.scale_factor()).unwrap_or(1.0);
+    for (canvas, seat) in &canvases {
+        let viewport = seat.parent();
+        // 1x1 is a placeholder: `update_viewport_render_target_size`
+        // resizes it to the node the moment layout knows the node.
+        let target = images.add(Image::new_target_texture(
+            1,
+            1,
+            TextureFormat::Bgra8UnormSrgb,
+            None,
+        ));
+        let camera = commands
+            .spawn((
+                Camera2d,
+                Camera {
+                    // Before the host's cameras: the texture must be
+                    // drawn before the frame that samples it.
+                    order: -1,
+                    // A transparent texture, so the panel behind the
+                    // viewport node shows through as the graph's
+                    // background, whatever the host's theme says.
+                    clear_color: bevy::camera::ClearColorConfig::Custom(Color::NONE),
+                    ..Default::default()
+                },
+                RenderTarget::Image(bevy::camera::ImageRenderTarget {
+                    handle: target,
+                    scale_factor,
+                }),
+                bevy::render::view::Msaa::Off,
+                GraphViewCamera { viewport },
+            ))
+            .id();
+        commands.entity(viewport).insert(ViewportNode::new(camera));
+        commands
+            .entity(canvas)
+            .remove::<ChildOf>()
+            .insert(UiTargetCamera(camera));
+        commands.spawn((
+            GraphBackdrop,
+            Node {
+                position_type: PositionType::Absolute,
+                left: px(0),
+                top: px(0),
+                width: bevy::ui::percent(100),
+                height: bevy::ui::percent(100),
+                ..Default::default()
+            },
+            UiTargetCamera(camera),
+            // Behind the canvas, so a box always wins the pick.
+            GlobalZIndex(-1),
+        ));
+    }
+}
+
+/// Bury a canvas whose viewport node has died.
+///
+/// The canvas stopped being the viewport's descendant when
+/// [`create_cameras`] moved it under the camera, so a host despawning its
+/// panel no longer takes the graph with it — this does. The camera's
+/// texture goes when the camera does: the render target holds the only
+/// strong handle.
+pub fn cleanup_cameras(
+    mut commands: Commands,
+    cameras: Query<(Entity, &GraphViewCamera)>,
+    viewports: Query<(), With<GraphViewport>>,
+    drawn: Query<(Entity, &UiTargetCamera)>,
+) {
+    for (camera, of) in &cameras {
+        if viewports.contains(of.viewport) {
+            continue;
+        }
+        for (orphan, target) in &drawn {
+            if target.entity() == camera {
+                commands.entity(orphan).despawn();
+            }
+        }
+        commands.entity(camera).despawn();
+    }
+}
+
 /// Keep each [`ZoomLabel`] agreeing with its own canvas.
 ///
 /// It reads the canvas's `UiTransform` rather than any camera type,
@@ -201,21 +344,28 @@ fn percent(scale: f32) -> String {
 /// directly (the cheap way to pan) updates the label for nothing. Not
 /// scheduled by [`crate::GraphViewPlugin`], for the same reason [`hover`]
 /// is not: a gated host puts it under its own run condition.
+///
+/// The label stayed a child of the viewport when the canvas moved under
+/// the camera, so the pairing goes canvas → camera → viewport → label.
 pub fn zoom_label(
     canvases: Query<ZoomedCanvas, ZoomedCanvasFilter>,
+    cameras: Query<&GraphViewCamera>,
     mut labels: Query<(&mut Text, &ChildOf), With<ZoomLabel>>,
 ) {
-    for (transform, canvas_parent) in &canvases {
-        for (mut text, label_parent) in &mut labels {
-            if label_parent.parent() == canvas_parent.parent() {
+    for (transform, drawn_by) in &canvases {
+        let Ok(camera) = cameras.get(drawn_by.entity()) else {
+            continue;
+        };
+        for (mut text, seat) in &mut labels {
+            if seat.parent() == camera.viewport {
                 text.0 = percent(transform.scale.x);
             }
         }
     }
 }
 
-/// A canvas whose transform has just changed, with its viewport.
-type ZoomedCanvas = (&'static UiTransform, &'static ChildOf);
+/// A canvas whose transform has just changed, with the camera drawing it.
+type ZoomedCanvas = (&'static UiTransform, &'static UiTargetCamera);
 type ZoomedCanvasFilter = (With<GraphCanvas>, Changed<UiTransform>);
 
 /// The border a box wears when it is none of the interesting things, and
@@ -409,14 +559,15 @@ fn frame(frame: &Frame, style: &GraphStyle) -> impl Scene {
 mod tests {
     use super::*;
 
-    /// The label tracks the canvas it shares a viewport with, live, and
-    /// leaves another viewport's label alone.
+    /// The label tracks the canvas whose camera points at its viewport,
+    /// live, and leaves another viewport's label alone.
     #[test]
     fn the_label_follows_its_own_canvas() {
         let mut app = App::new();
         app.add_systems(Update, zoom_label);
         let world = app.world_mut();
         let viewport = world.spawn(GraphViewport).id();
+        let camera = world.spawn(GraphViewCamera { viewport }).id();
         let canvas = world
             .spawn((
                 GraphCanvas,
@@ -424,7 +575,7 @@ mod tests {
                     scale: Vec2::splat(1.4),
                     ..Default::default()
                 },
-                ChildOf(viewport),
+                UiTargetCamera(camera),
             ))
             .id();
         let label = world
@@ -451,5 +602,68 @@ mod tests {
             .scale = Vec2::splat(0.8);
         app.update();
         assert_eq!(app.world().get::<Text>(label).unwrap().0, "80%");
+    }
+
+    /// A canvas spawned under a viewport gets a camera and a texture, the
+    /// viewport becomes the node that shows it — and when the viewport
+    /// dies, the camera and everything it drew die with it, because the
+    /// canvas stopped being the viewport's descendant at the handover.
+    #[test]
+    fn a_canvas_moves_behind_glass_and_is_buried_with_its_viewport() {
+        let mut app = App::new();
+        app.insert_resource(Assets::<Image>::default());
+        app.add_systems(Update, (create_cameras, cleanup_cameras).chain());
+        let world = app.world_mut();
+        let viewport = world.spawn((GraphViewport, Node::default())).id();
+        let canvas = world
+            .spawn((GraphCanvas, Node::default(), ChildOf(viewport)))
+            .id();
+
+        app.update();
+        let world = app.world_mut();
+        let camera = world
+            .get::<UiTargetCamera>(canvas)
+            .expect("the canvas is drawn by the new camera")
+            .entity();
+        assert!(
+            world.get::<ChildOf>(canvas).is_none(),
+            "the canvas is a root now, not the viewport's child"
+        );
+        assert_eq!(
+            world.get::<ViewportNode>(viewport).and_then(|v| v.camera),
+            Some(camera),
+            "the viewport node shows what the camera draws"
+        );
+        assert_eq!(
+            world.get::<GraphViewCamera>(camera).map(|c| c.viewport),
+            Some(viewport),
+            "the camera knows whose viewport it draws for"
+        );
+        assert!(
+            matches!(
+                world.get::<RenderTarget>(camera),
+                Some(RenderTarget::Image(_))
+            ),
+            "the camera draws to a texture, not the window — a window\
+             camera would win Bevy's default-UI-camera fallback"
+        );
+        let backdrop = world
+            .query_filtered::<Entity, With<GraphBackdrop>>()
+            .single(world)
+            .expect("one backdrop per canvas");
+
+        world.entity_mut(viewport).despawn();
+        app.update();
+        let world = app.world_mut();
+        for (gone, name) in [
+            (canvas, "canvas"),
+            (backdrop, "backdrop"),
+            (camera, "camera"),
+        ] {
+            assert!(
+                world.get_entity(gone).is_err(),
+                "the {name} outlived its viewport"
+            );
+        }
     }
 }

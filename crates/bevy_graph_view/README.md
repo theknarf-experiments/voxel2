@@ -12,18 +12,23 @@ Two halves, split where testability splits:
   anything is spawned. Testable without a window.
 - **`canvas`** — the drawing. `scene()` turns a `Layout` into a `bsn!`
   scene: absolutely-positioned boxes under one pannable, zoomable
-  `GraphCanvas` inside a clipping `GraphViewport`, themed with Feathers
-  tokens. `GraphCamera` owns the zoom-about-a-point arithmetic; clicked
-  boxes report back through the `SelectsNode` component. A `ZoomLabel`
-  chip in the viewport's lower corner reads the zoom as a percentage,
-  kept current by the `zoom_label` system off the canvas transform.
+  `GraphCanvas`, themed with Feathers tokens. The canvas is drawn by its
+  own camera into a texture that the `GraphViewport` node displays via
+  Bevy's `ViewportNode` — the texture edge is the clip, exact at any
+  zoom, where `Overflow::clip` corrupts scaled content. `GraphCamera`
+  owns the zoom-about-a-point arithmetic; clicked boxes report back
+  through `SelectsNode`, and clicks that miss every box land on the
+  `GraphBackdrop`. A `ZoomLabel` chip in the viewport's lower corner
+  reads the zoom as a percentage, kept current by the `zoom_label`
+  system off the canvas transform.
 
 This crate has no opinion about what a node *is* or what selection
 *means* — the host converts its own document into `GraphNode`s and reads
 `SelectsNode` ids back out. Nothing is scheduled by `GraphViewPlugin`
 (it only registers `GraphStyle` and `GraphCamera` for reflection), so a
-host that gates its UI work can run the provided `hover` and `zoom_label`
-systems — and its own pan/zoom/select handling — under its own run
+host that gates its UI work can run the provided systems — 
+`create_cameras`/`cleanup_cameras` for the texture wiring, `hover`, and
+`zoom_label` — plus its own pan/zoom/select handling, under its own run
 conditions.
 
 `demos/graph_view_demo` in this workspace is the crate on its own: a
