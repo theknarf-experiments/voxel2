@@ -342,13 +342,19 @@ fn on_keys(keys: Res<ButtonInput<KeyCode>>, mut state: ResMut<ViewState>) {
 /// away every box in the graph to move the picture a pixel. A canvas
 /// respawned by [`rebuild`] already carries the camera — `scene` bakes it
 /// in — so this only has to chase the frames where a gesture moved it.
-fn apply_camera(state: Res<ViewState>, mut canvases: Query<&mut UiTransform, With<GraphCanvas>>) {
+fn apply_camera(
+    state: Res<ViewState>,
+    style: Res<GraphStyle>,
+    mut canvases: Query<&mut UiTransform, With<GraphCanvas>>,
+) {
     if !state.is_changed() {
         return;
     }
+    // Divided by the oversample: the geometry is drawn larger than the
+    // zoom the user works in, so full zoom lands on native pixels.
     for mut transform in &mut canvases {
         transform.translation = Val2::px(state.camera.pan.x, state.camera.pan.y);
-        transform.scale = Vec2::splat(state.camera.zoom);
+        transform.scale = Vec2::splat(state.camera.zoom / style.oversample);
     }
 }
 

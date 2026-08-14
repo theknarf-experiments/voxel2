@@ -47,6 +47,9 @@ pub struct GraphNode {
 /// A resource, and reflected, because the metrics of a view have no theme
 /// token to live in, and being able to widen a node box on a running app
 /// is the nearest thing to a stylesheet.
+///
+/// Metrics are authored at the size the graph LOOKS at 100%;
+/// [`GraphStyle::oversample`] is how much bigger it is actually drawn.
 #[derive(Resource, Reflect, Clone, Debug)]
 #[reflect(Resource)]
 pub struct GraphStyle {
@@ -63,6 +66,18 @@ pub struct GraphStyle {
     pub frame_header: f32,
     /// Body text size. Titles and port labels scale from it.
     pub font: f32,
+    /// A wire's thickness.
+    pub wire: f32,
+    /// How much larger than the authored metrics the geometry is actually
+    /// built and drawn, with the canvas transform dividing it back out.
+    ///
+    /// At the default 2, the graph the user calls 100% is a 2x picture
+    /// shown at half size, and zooming IN removes minification instead of
+    /// magnifying: the 200% stop is the native 1:1 rendering, where text
+    /// is rasterized crisp rather than scaled up soft. The zoom the label
+    /// reports and the host's camera works in stays the USER's zoom —
+    /// this factor is invisible outside the drawn geometry.
+    pub oversample: f32,
 }
 
 impl Default for GraphStyle {
@@ -75,6 +90,28 @@ impl Default for GraphStyle {
             frame_pad: 10.0,
             frame_header: 16.0,
             font: 10.0,
+            wire: 1.5,
+            oversample: 2.0,
+        }
+    }
+}
+
+impl GraphStyle {
+    /// The metrics as actually drawn: everything times
+    /// [`GraphStyle::oversample`], which is then 1 — applying this twice
+    /// changes nothing.
+    pub fn effective(&self) -> Self {
+        let s = self.oversample;
+        Self {
+            node_width: self.node_width * s,
+            header: self.header * s,
+            port: self.port * s,
+            gap: self.gap * s,
+            frame_pad: self.frame_pad * s,
+            frame_header: self.frame_header * s,
+            font: self.font * s,
+            wire: self.wire * s,
+            oversample: 1.0,
         }
     }
 }
@@ -157,8 +194,7 @@ impl Edge {
     /// The vertical run sits midway between the two boxes, so wires
     /// leaving one column share a lane instead of each cutting its own
     /// diagonal across everything between.
-    fn route(from: Vec2, to: Vec2, port: String) -> Self {
-        let thick = 1.5;
+    fn route(from: Vec2, to: Vec2, port: String, thick: f32) -> Self {
         let half = thick * 0.5;
         let mid = (from.x + to.x) * 0.5;
         let bar = |a: Vec2, b: Vec2| Seg {
@@ -197,6 +233,10 @@ pub struct Layout {
 /// picture agrees with the document rather than with a sort nobody asked
 /// for.
 pub fn layout(nodes: &[GraphNode], head: Option<&GraphNode>, style: &GraphStyle) -> Layout {
+    // Geometry is built at the DRAWN size — authored metrics times
+    // oversample — so everything downstream of here, anchors included,
+    // agrees with what ends up on screen.
+    let style = &style.effective();
     let mut out = Layout::default();
     let mut depths: HashMap<String, usize> = Default::default();
     place(nodes, style, &mut depths, &mut out);
@@ -252,6 +292,7 @@ pub fn layout(nodes: &[GraphNode], head: Option<&GraphNode>, style: &GraphStyle)
                     out.nodes[from].out_anchor(&produced, style),
                     out.nodes[to].in_anchor(port, style),
                     port.clone(),
+                    style.wire,
                 ));
             }
         }

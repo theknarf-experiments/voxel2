@@ -159,6 +159,15 @@ pub fn scene(
     selected: Option<&str>,
     blamed: Option<&str>,
 ) -> impl Scene {
+    // The boxes are drawn at the OVERSAMPLED size the layout was built
+    // at; the transform divides it back out, so the user's 100% shows the
+    // authored metrics and the user's 200% is the native 1:1 picture —
+    // crisp text instead of scaled-up text. The chip is NOT under the
+    // transform and keeps the authored font.
+    let oversample = style.oversample;
+    let chip_font = FontSize::Px(style.font);
+    let drawn = style.effective();
+    let style = &drawn;
     // Frames first, then edges, then boxes: a wire passes behind the node
     // it lands on, and a frame behind everything it gates.
     let frames: Vec<_> = layout.frames.iter().map(|f| frame(f, style)).collect();
@@ -184,7 +193,7 @@ pub fn scene(
         .collect();
     let font = FontSize::Px(style.font);
     let pan = camera.pan;
-    let scale = Vec2::splat(camera.zoom);
+    let scale = Vec2::splat(camera.zoom / oversample);
     let zoom = percent(camera.zoom);
 
     bsn! {
@@ -217,7 +226,7 @@ pub fn scene(
             (
                 ZoomLabel
                 Text({zoom})
-                TextFont { font_size: {font} }
+                TextFont { font_size: {chip_font} }
                 InheritableThemeTextColor(tokens::TEXT_DIM)
                 ThemedText
                 Node {
@@ -347,7 +356,10 @@ pub fn cleanup_cameras(
 ///
 /// The label stayed a child of the viewport when the canvas moved under
 /// the camera, so the pairing goes canvas → camera → viewport → label.
+/// The transform's scale carries the oversample division, so the USER's
+/// zoom — what the label owes them — is scale times oversample.
 pub fn zoom_label(
+    style: Res<GraphStyle>,
     canvases: Query<ZoomedCanvas, ZoomedCanvasFilter>,
     cameras: Query<&GraphViewCamera>,
     mut labels: Query<(&mut Text, &ChildOf), With<ZoomLabel>>,
@@ -358,7 +370,7 @@ pub fn zoom_label(
         };
         for (mut text, seat) in &mut labels {
             if seat.parent() == camera.viewport {
-                text.0 = percent(transform.scale.x);
+                text.0 = percent(transform.scale.x * style.oversample);
             }
         }
     }
@@ -560,10 +572,14 @@ mod tests {
     use super::*;
 
     /// The label tracks the canvas whose camera points at its viewport,
-    /// live, and leaves another viewport's label alone.
+    /// live, and leaves another viewport's label alone. It reports the
+    /// USER's zoom: the transform's scale times the style's oversample.
     #[test]
     fn the_label_follows_its_own_canvas() {
         let mut app = App::new();
+        // The default style's oversample of 2: a transform at 0.7 is the
+        // user's 140%.
+        app.init_resource::<GraphStyle>();
         app.add_systems(Update, zoom_label);
         let world = app.world_mut();
         let viewport = world.spawn(GraphViewport).id();
@@ -572,7 +588,7 @@ mod tests {
             .spawn((
                 GraphCanvas,
                 UiTransform {
-                    scale: Vec2::splat(1.4),
+                    scale: Vec2::splat(0.7),
                     ..Default::default()
                 },
                 UiTargetCamera(camera),
@@ -599,7 +615,7 @@ mod tests {
         app.world_mut()
             .get_mut::<UiTransform>(canvas)
             .unwrap()
-            .scale = Vec2::splat(0.8);
+            .scale = Vec2::splat(0.4);
         app.update();
         assert_eq!(app.world().get::<Text>(label).unwrap().0, "80%");
     }

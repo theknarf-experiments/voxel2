@@ -61,14 +61,17 @@ pub fn on_grip_drag(
 ///
 /// Directly, for the same reason the width is: a rebuild per drag frame
 /// would throw away every box in the graph to move the picture a pixel.
+/// The scale divides out the style's oversample: the geometry is drawn
+/// larger than the zoom the user is working in — see `GraphStyle`.
 pub fn apply_camera(
     state: Res<EditorState>,
+    style: Res<GraphStyle>,
     mut canvases: Query<&mut UiTransform, With<GraphCanvas>>,
 ) {
     if !state.is_changed() {
         return;
     }
-    let scale = Vec2::splat(state.camera.zoom);
+    let scale = Vec2::splat(state.camera.zoom / style.oversample);
     for mut transform in &mut canvases {
         transform.translation = Val2::px(state.camera.pan.x, state.camera.pan.y);
         transform.scale = scale;

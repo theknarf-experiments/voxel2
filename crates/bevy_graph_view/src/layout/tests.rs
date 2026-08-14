@@ -83,11 +83,13 @@ fn a_wire_lands_on_the_port_it_names() {
         .unwrap();
 
     // Every run is axis-aligned — a diagonal would have to be a rotated
-    // node, which Bevy draws in pieces.
+    // node, which Bevy draws in pieces. A run's thin axis is the wire's
+    // drawn thickness, which carries the oversample like everything else.
+    let thick = style.effective().wire;
     for edge in &out.edges {
         for seg in &edge.segments {
             assert!(
-                seg.size.x.min(seg.size.y) <= 2.0,
+                seg.size.x.min(seg.size.y) <= thick + 0.1,
                 "{:?} is not a line: {seg:?}",
                 edge.port
             );
@@ -205,6 +207,37 @@ fn zooming_holds_the_point_it_is_aimed_at() {
     // And it stays inside its range however hard you pinch.
     assert!(camera.zoomed(100.0, Some(at)).zoom <= 2.0);
     assert!(camera.zoomed(-100.0, Some(at)).zoom >= 0.2);
+}
+
+/// The oversample scales the whole picture linearly and invisibly: a
+/// layout at oversample 2 is the oversample-1 layout times two, so the
+/// canvas transform dividing two back out shows the authored metrics.
+#[test]
+fn the_oversample_scales_the_picture_linearly() {
+    let authored = GraphStyle {
+        oversample: 1.0,
+        ..Default::default()
+    };
+    let drawn = GraphStyle {
+        oversample: 2.0,
+        ..Default::default()
+    };
+    let flat = layout(&chain(), None, &authored);
+    let big = layout(&chain(), None, &drawn);
+    assert_eq!(flat.nodes.len(), big.nodes.len());
+    for (a, b) in flat.nodes.iter().zip(&big.nodes) {
+        assert!(
+            (b.at - a.at * 2.0).length() < 1e-3 && (b.size - a.size * 2.0).length() < 1e-3,
+            "{:?}: {:?}/{:?} is not twice {:?}/{:?}",
+            a.name,
+            b.at,
+            b.size,
+            a.at,
+            a.size
+        );
+    }
+    // And folding it twice changes nothing: effective() is idempotent.
+    assert_eq!(drawn.effective().effective().font, drawn.effective().font);
 }
 
 /// A pinch is a smooth gesture, so the zoom must follow it smoothly —
