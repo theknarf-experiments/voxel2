@@ -6,6 +6,7 @@ license.workspace = true
 
 [dependencies]
 bevy.workspace = true
+bevy_graph_view.workspace = true
 voxel-core.workspace = true
 voxel-engine.workspace = true
 

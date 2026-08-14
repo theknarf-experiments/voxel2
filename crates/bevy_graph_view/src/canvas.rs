@@ -1,6 +1,6 @@
 //! Drawing a [`Layout`] with Bevy UI, and moving the camera over it.
 //!
-//! Everything here is placed ABSOLUTELY from geometry `graph` already
+//! Everything here is placed ABSOLUTELY from geometry `layout` already
 //! decided, so no part of the picture depends on flexbox measuring
 //! anything: a node knows where its ports are before it is spawned, which
 //! is what makes an edge a straight line between two known points instead
@@ -19,14 +19,15 @@ use bevy::prelude::*;
 use bevy::text::{FontSize, FontWeight, LineBreak, TextLayout};
 use bevy::ui::{px, Display, FlexDirection, Node, PositionType, UiRect, UiTransform, Val2};
 
-use crate::graph::{Frame, GraphStyle, Layout, Placed, Seg};
-use crate::style::PanelStyle;
+use crate::layout::{Frame, GraphStyle, Layout, Placed, Seg};
 
 /// The pannable, zoomable layer every box sits on.
 #[derive(Component, Clone, Default)]
 pub struct GraphCanvas;
 
-/// Which node a box inspects when clicked.
+/// Which node a box inspects when clicked, by [`GraphNode::id`].
+///
+/// [`GraphNode::id`]: crate::layout::GraphNode::id
 #[derive(Component, Clone, Debug, Default)]
 pub struct SelectsNode(pub String);
 
@@ -34,12 +35,20 @@ pub struct SelectsNode(pub String);
 #[derive(Component, Clone, Default)]
 pub struct GraphViewport;
 
+/// The zoom readout in the viewport's lower corner.
+///
+/// A child of the VIEWPORT, not the canvas: the one thing a zoom label
+/// must not do is scale with the thing it describes. [`scene`] bakes the
+/// spawn-time value in; the [`zoom_label`] system keeps it current.
+#[derive(Component, Clone, Default)]
+pub struct ZoomLabel;
+
 /// Where the graph is looked at from.
 ///
-/// In [`crate::EditorState`] rather than on the canvas entity, for the
-/// same reason the panel's width is: the panel is respawned whenever the
-/// document changes, and a camera kept on the node would snap back to the
-/// start of the graph every time a value moved.
+/// A plain value rather than a component, so a host that respawns the
+/// graph whenever its document changes can keep the camera somewhere
+/// durable — kept on the canvas entity it would snap back to the start of
+/// the graph every time a value moved.
 #[derive(Clone, Copy, Debug, Reflect, PartialEq)]
 pub struct GraphCamera {
     pub pan: Vec2,
@@ -83,29 +92,27 @@ impl GraphCamera {
 
 /// The whole graph, as one scene under a clipping viewport.
 ///
-/// `blamed` names the node the compiler is complaining about, if any: a
-/// level that does not compile has one thing worth looking at, and it is
-/// not the one you happened to select.
+/// `selected` and `blamed` call out one box each: `selected` by
+/// [`GraphNode::id`], `blamed` by name — a document that does not compile
+/// has one thing worth looking at, and it is not the one you happened to
+/// select.
 ///
 /// The geometry is built once, at 1:1, and the camera scales what is
 /// DRAWN. Bevy's UI does not go through a camera projection — `bevy_ui`
 /// reads a camera's scale factor and viewport size and nothing else — so
 /// the transform on this canvas IS the camera.
+///
+/// [`GraphNode::id`]: crate::layout::GraphNode::id
 pub fn scene(
     layout: &Layout,
-    graph: &GraphStyle,
-    style: &PanelStyle,
+    style: &GraphStyle,
     camera: GraphCamera,
     selected: Option<&str>,
     blamed: Option<&str>,
 ) -> impl Scene {
     // Frames first, then edges, then boxes: a wire passes behind the node
     // it lands on, and a frame behind everything it gates.
-    let frames: Vec<_> = layout
-        .frames
-        .iter()
-        .map(|f| frame(f, graph, style))
-        .collect();
+    let frames: Vec<_> = layout.frames.iter().map(|f| frame(f, style)).collect();
     let edges: Vec<_> = layout
         .edges
         .iter()
@@ -118,17 +125,18 @@ pub fn scene(
         .map(|n| {
             let mark = if blamed.is_some() && blamed == n.name.as_deref() {
                 Mark::Blamed
-            } else if selected == Some(n.path.as_str()) {
+            } else if selected == Some(n.id.as_str()) {
                 Mark::Selected
             } else {
                 Mark::None
             };
-            node(n, graph, style, mark)
+            node(n, style, mark)
         })
         .collect();
     let font = FontSize::Px(style.font);
     let pan = camera.pan;
     let scale = Vec2::splat(camera.zoom);
+    let zoom = percent(camera.zoom);
 
     bsn! {
         GraphViewport
@@ -138,40 +146,110 @@ pub fn scene(
             // Clipped, not scrolled: the canvas moves under this window.
             overflow: bevy::ui::Overflow::clip(),
         }
-        Children [(
-            GraphCanvas
-            Node {
-                position_type: PositionType::Absolute,
-                left: px(0),
-                top: px(0),
-                width: px(0),
-                height: px(0),
-            }
-            UiTransform {
-                translation: Val2::px(pan.x, pan.y),
-                scale: {scale},
-            }
-            InheritableFont {
-                font: fonts::MONO,
-                font_size: {font},
-                weight: FontWeight::NORMAL,
-            }
-            Children [ {frames}, {edges}, {nodes} ]
-        )]
+        Children [
+            (
+                GraphCanvas
+                Node {
+                    position_type: PositionType::Absolute,
+                    left: px(0),
+                    top: px(0),
+                    width: px(0),
+                    height: px(0),
+                }
+                UiTransform {
+                    translation: Val2::px(pan.x, pan.y),
+                    scale: {scale},
+                }
+                InheritableFont {
+                    font: fonts::MONO,
+                    font_size: {font},
+                    weight: FontWeight::NORMAL,
+                }
+                Children [ {frames}, {edges}, {nodes} ]
+            ),
+            (
+                ZoomLabel
+                Text({zoom})
+                TextFont { font_size: {font} }
+                InheritableThemeTextColor(tokens::TEXT_DIM)
+                ThemedText
+                Node {
+                    position_type: PositionType::Absolute,
+                    right: px(6),
+                    bottom: px(6),
+                    padding: UiRect::axes(px(6), px(2)),
+                }
+                BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.5))
+            ),
+        ]
     }
 }
 
-/// One node: a title bar, then one row per port.
+/// What the label says at `scale`.
+fn percent(scale: f32) -> String {
+    format!("{:.0}%", scale * 100.0)
+}
+
+/// Keep each [`ZoomLabel`] agreeing with its own canvas.
+///
+/// It reads the canvas's `UiTransform` rather than any camera type,
+/// because the transform is the one place the zoom is true regardless of
+/// where the host keeps its camera — a host that writes the transform
+/// directly (the cheap way to pan) updates the label for nothing. Not
+/// scheduled by [`crate::GraphViewPlugin`], for the same reason [`hover`]
+/// is not: a gated host puts it under its own run condition.
+pub fn zoom_label(
+    canvases: Query<ZoomedCanvas, ZoomedCanvasFilter>,
+    mut labels: Query<(&mut Text, &ChildOf), With<ZoomLabel>>,
+) {
+    for (transform, canvas_parent) in &canvases {
+        for (mut text, label_parent) in &mut labels {
+            if label_parent.parent() == canvas_parent.parent() {
+                text.0 = percent(transform.scale.x);
+            }
+        }
+    }
+}
+
+/// A canvas whose transform has just changed, with its viewport.
+type ZoomedCanvas = (&'static UiTransform, &'static ChildOf);
+type ZoomedCanvasFilter = (With<GraphCanvas>, Changed<UiTransform>);
+
 /// The border a box wears when it is none of the interesting things, and
-/// what [`crate::panel::hover`] puts back.
+/// what [`hover`] puts back.
 pub const PLAIN_BORDER: Color = Color::srgba(0.0, 0.0, 0.0, 0.6);
+
+/// Bright enough to find, dim enough not to compete with a selection.
+const HOVER_BORDER: Color = Color::srgba(0.55, 0.60, 0.70, 0.9);
+
+/// Light a node box while the pointer is over it.
+///
+/// Written straight onto the border rather than by respawning: a host
+/// rebuilds the graph from its DOCUMENT, and moving a pointer changes no
+/// document. A box that is blamed or selected keeps the border it has —
+/// those say something a hover does not.
+pub fn hover(mut boxes: Query<HoveredBox, HoveredBoxFilter>) {
+    for (hovered, mut border) in &mut boxes {
+        let plain = border.left == PLAIN_BORDER;
+        let lit = border.left == HOVER_BORDER;
+        if hovered.get() && plain {
+            *border = BorderColor::all(HOVER_BORDER);
+        } else if !hovered.get() && lit {
+            *border = BorderColor::all(PLAIN_BORDER);
+        }
+    }
+}
+
+/// A node box whose hover state has just changed.
+type HoveredBox = (&'static Hovered, &'static mut BorderColor);
+type HoveredBoxFilter = (Changed<Hovered>, With<SelectsNode>);
 
 /// How a box is called out, if it is.
 #[derive(Clone, Copy, PartialEq)]
 enum Mark {
     None,
     Selected,
-    /// Named by the compiler's complaint. Beats selection: a level that
+    /// Named by the host's complaint. Beats selection: a document that
     /// does not compile has one thing worth looking at.
     Blamed,
 }
@@ -186,27 +264,28 @@ impl Mark {
     }
 }
 
-fn node(placed: &Placed, graph: &GraphStyle, style: &PanelStyle, mark: Mark) -> impl Scene {
+/// One node: a title bar, then one row per port.
+fn node(placed: &Placed, style: &GraphStyle, mark: Mark) -> impl Scene {
     let title = match &placed.name {
         Some(name) => format!("{name}  {}", placed.kind),
-        None => placed.kind.to_string(),
+        None => placed.kind.clone(),
     };
     let ports: Vec<_> = placed
         .ins
         .iter()
-        .map(|p| port(p, true, graph, style))
-        .chain(placed.outs.iter().map(|p| port(p, false, graph, style)))
+        .map(|p| port(p, true, style))
+        .chain(placed.outs.iter().map(|p| port(p, false, style)))
         .collect();
     let (at, size) = (placed.at, placed.size);
-    let header = px(graph.header);
+    let header = px(style.header);
     let font = FontSize::Px(style.font * 0.9);
-    let path = placed.path.clone();
+    let id = placed.id.clone();
     let border = mark.border();
 
     bsn! {
-        SelectsNode({path})
+        SelectsNode({id})
         // A box is a thing you click. The cursor says so before you try,
-        // and `Hovered` is what `panel::hover` reads to light the border.
+        // and `Hovered` is what [`hover`] reads to light the border.
         EntityCursor::System(bevy::window::SystemCursorIcon::Pointer)
         Hovered
         Node {
@@ -241,9 +320,9 @@ fn node(placed: &Placed, graph: &GraphStyle, style: &PanelStyle, mark: Mark) -> 
 }
 
 /// One port row, its name pushed to the edge the wire arrives at.
-fn port(name: &str, input: bool, graph: &GraphStyle, style: &PanelStyle) -> impl Scene {
+fn port(name: &str, input: bool, style: &GraphStyle) -> impl Scene {
     let label = name.to_string();
-    let height = px(graph.port);
+    let height = px(style.port);
     let font = FontSize::Px(style.font * 0.8);
     let justify = if input {
         bevy::ui::JustifyContent::FlexStart
@@ -273,7 +352,7 @@ fn port(name: &str, input: bool, graph: &GraphStyle, style: &PanelStyle) -> impl
 /// Not a rotated bar. Bevy has no line primitive, and a rotated node is
 /// clipped against an axis-aligned rect that does not follow the rotation,
 /// which broke every near-vertical wire into moving dashes — see
-/// [`crate::graph::Edge`].
+/// [`crate::layout::Edge`].
 fn wire(seg: Seg) -> impl Scene {
     bsn! {
         Node {
@@ -288,13 +367,13 @@ fn wire(seg: Seg) -> impl Scene {
 }
 
 /// A scope, as a titled box behind what it gates.
-fn frame(frame: &Frame, graph: &GraphStyle, style: &PanelStyle) -> impl Scene {
+fn frame(frame: &Frame, style: &GraphStyle) -> impl Scene {
     let title = match &frame.name {
         Some(name) => format!("{name}  {}", frame.kind),
-        None => frame.kind.to_string(),
+        None => frame.kind.clone(),
     };
     let (at, size) = (frame.at, frame.size);
-    let header = px(graph.frame_header);
+    let header = px(style.frame_header);
     let font = FontSize::Px(style.font * 0.9);
     bsn! {
         Node {
@@ -320,5 +399,54 @@ fn frame(frame: &Frame, graph: &GraphStyle, style: &PanelStyle) -> impl Scene {
                 ThemedText
             )]
         )]
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The label tracks the canvas it shares a viewport with, live, and
+    /// leaves another viewport's label alone.
+    #[test]
+    fn the_label_follows_its_own_canvas() {
+        let mut app = App::new();
+        app.add_systems(Update, zoom_label);
+        let world = app.world_mut();
+        let viewport = world.spawn(GraphViewport).id();
+        let canvas = world
+            .spawn((
+                GraphCanvas,
+                UiTransform {
+                    scale: Vec2::splat(1.4),
+                    ..Default::default()
+                },
+                ChildOf(viewport),
+            ))
+            .id();
+        let label = world
+            .spawn((ZoomLabel, Text("100%".to_string()), ChildOf(viewport)))
+            .id();
+        let other_viewport = world.spawn(GraphViewport).id();
+        let other = world
+            .spawn((ZoomLabel, Text("100%".to_string()), ChildOf(other_viewport)))
+            .id();
+
+        // A fresh spawn counts as changed, so the first frame settles it.
+        app.update();
+        assert_eq!(app.world().get::<Text>(label).unwrap().0, "140%");
+        assert_eq!(
+            app.world().get::<Text>(other).unwrap().0,
+            "100%",
+            "a label without a canvas keeps what it was spawned saying"
+        );
+
+        // And a live zoom moves it without a respawn.
+        app.world_mut()
+            .get_mut::<UiTransform>(canvas)
+            .unwrap()
+            .scale = Vec2::splat(0.8);
+        app.update();
+        assert_eq!(app.world().get::<Text>(label).unwrap().0, "80%");
     }
 }

@@ -1,0 +1,12 @@
+[package]
+name = "bevy_graph_view"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "A node-graph view for Bevy UI: pure layout, bsn! drawing, pan and zoom"
+
+# In this workspace the bevy dependency inherits the root feature list.
+# When extracted to its own repo this needs an explicit set: default
+# features plus "bevy_feathers" (theme tokens, cursors, inheritable fonts).
+[dependencies]
+bevy.workspace = true

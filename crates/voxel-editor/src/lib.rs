@@ -35,7 +35,6 @@ use bevy::feathers::{dark_theme::create_dark_theme, theme::UiTheme, FeathersPlug
 use bevy::platform::collections::HashSet;
 use bevy::prelude::*;
 
-pub mod canvas;
 pub mod edit;
 pub mod graph;
 pub mod handles;
@@ -46,10 +45,10 @@ pub mod shapes;
 mod style;
 mod walk;
 
-pub use canvas::{GraphViewport, SelectsNode, PLAIN_BORDER};
+pub use bevy_graph_view::{hover, GraphCamera, GraphViewport, SelectsNode, PLAIN_BORDER};
 pub use edit::{on_drag, on_drag_done, on_pick, on_typed, undo, History};
 pub use panel::on_tab;
-pub use panel::{hover, on_pinch, on_select, on_wheel, save};
+pub use panel::{on_pinch, on_select, on_wheel, save};
 pub use row::{DragsNum, FieldPath, PicksOption, SelectsRoot, WritesNum};
 pub use style::PanelStyle;
 pub use walk::{rows, rows_at, rows_in, Num, Row, RowKind};
@@ -149,7 +148,7 @@ pub struct EditorState {
     pub root: usize,
     pub expanded: HashSet<String>,
     /// Where the graph view is looked at from.
-    pub camera: canvas::GraphCamera,
+    pub camera: GraphCamera,
     /// Reflect path of the node the graph view is inspecting, if any.
     /// A path rather than an entity: the graph is respawned whenever the
     /// document changes, and the same node is the same path afterwards.
@@ -180,7 +179,7 @@ impl Default for EditorState {
             root: 0,
             // The root itself is always open, or the panel is one row.
             expanded: HashSet::from_iter([String::new()]),
-            camera: canvas::GraphCamera::default(),
+            camera: GraphCamera::default(),
             selected: None,
             save: false,
             undo: false,
@@ -268,6 +267,9 @@ impl Plugin for EditorPlugin {
             app.insert_resource(UiTheme(create_dark_theme()));
         }
 
+        if !app.is_plugin_added::<bevy_graph_view::GraphViewPlugin>() {
+            app.add_plugins(bevy_graph_view::GraphViewPlugin);
+        }
         app.add_message::<SaveRequested>()
             .insert_resource(EditorRoots(self.roots.clone()))
             .init_resource::<EditorState>()
@@ -275,11 +277,9 @@ impl Plugin for EditorPlugin {
             .init_resource::<panel::Dragging>()
             .init_resource::<edit::History>()
             .init_resource::<PanelStyle>()
-            .init_resource::<graph::GraphStyle>()
             .add_plugins(handles::plugin)
             .register_type::<EditorState>()
             .register_type::<PanelStyle>()
-            .register_type::<graph::GraphStyle>()
             .add_observer(panel::on_disclosure)
             .add_observer(panel::on_tab)
             .add_observer(panel::on_select)
@@ -324,7 +324,8 @@ impl Plugin for EditorPlugin {
                         // frame gets the dragged width and not the one it
                         // was authored with.
                         panel::apply_width,
-                        panel::hover,
+                        bevy_graph_view::hover,
+                        bevy_graph_view::zoom_label,
                         panel::on_wheel,
                         panel::on_pinch,
                         // Last: what it draws is the document as it is

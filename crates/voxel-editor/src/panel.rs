@@ -14,7 +14,6 @@ use bevy::feathers::cursor::EntityCursor;
 use bevy::feathers::font_styles::InheritableFont;
 use bevy::feathers::theme::{ThemeBackgroundColor, ThemedText};
 use bevy::feathers::tokens;
-use bevy::picking::hover::Hovered;
 use bevy::prelude::*;
 use bevy::text::FontWeight;
 use bevy::ui::{
@@ -22,9 +21,10 @@ use bevy::ui::{
     ScrollPosition, UiRect, UiTransform, Val2,
 };
 use bevy::window::SystemCursorIcon;
+use bevy_graph_view::{GraphCanvas, GraphStyle, GraphViewport, SelectsNode};
 
 use crate::style::PanelStyle;
-use crate::{canvas, graph, row, walk};
+use crate::{graph, row, walk};
 use crate::{EditorRoots, EditorState, View, TOGGLE_KEY};
 
 /// The panel's root entity. One at a time.
@@ -57,38 +57,13 @@ pub fn on_grip_drag(
     state.width = (state.width - drag.delta.x).clamp(style.width.start, style.width.end);
 }
 
-/// Light a node box while the pointer is over it.
-///
-/// Written straight onto the border rather than by respawning: the panel
-/// is rebuilt from the DOCUMENT, and moving a pointer changes no document.
-/// A box the compiler is complaining about, or one that is selected, keeps
-/// the border it has — those say something a hover does not.
-pub fn hover(mut boxes: Query<HoveredBox, HoveredBoxFilter>) {
-    for (hovered, mut border) in &mut boxes {
-        let plain = border.left == canvas::PLAIN_BORDER;
-        let lit = border.left == HOVER_BORDER;
-        if hovered.get() && plain {
-            *border = BorderColor::all(HOVER_BORDER);
-        } else if !hovered.get() && lit {
-            *border = BorderColor::all(canvas::PLAIN_BORDER);
-        }
-    }
-}
-
-/// Bright enough to find, dim enough not to compete with a selection.
-const HOVER_BORDER: Color = Color::srgba(0.55, 0.60, 0.70, 0.9);
-
-/// A node box whose hover state has just changed.
-type HoveredBox = (&'static Hovered, &'static mut BorderColor);
-type HoveredBoxFilter = (Changed<Hovered>, With<canvas::SelectsNode>);
-
 /// Apply the camera to the live canvas.
 ///
 /// Directly, for the same reason the width is: a rebuild per drag frame
 /// would throw away every box in the graph to move the picture a pixel.
 pub fn apply_camera(
     state: Res<EditorState>,
-    mut canvases: Query<&mut UiTransform, With<canvas::GraphCanvas>>,
+    mut canvases: Query<&mut UiTransform, With<GraphCanvas>>,
 ) {
     if !state.is_changed() {
         return;
@@ -177,7 +152,7 @@ pub fn on_wheel(
 pub fn on_pinch(
     mut pinch: MessageReader<bevy::input::gestures::PinchGesture>,
     windows: Query<&Window>,
-    viewports: Query<(&ComputedNode, &UiGlobalTransform), With<canvas::GraphViewport>>,
+    viewports: Query<(&ComputedNode, &UiGlobalTransform), With<GraphViewport>>,
     roots: Res<EditorRoots>,
     mut state: ResMut<EditorState>,
 ) {
@@ -306,8 +281,8 @@ pub fn save(
 /// click lands on the canvas behind them.
 pub fn on_select(
     click: On<Pointer<Click>>,
-    boxes: Query<&canvas::SelectsNode>,
-    viewports: Query<(), With<canvas::GraphViewport>>,
+    boxes: Query<&SelectsNode>,
+    viewports: Query<(), With<GraphViewport>>,
     mut state: ResMut<EditorState>,
 ) {
     // A pointer event BUBBLES, so this observer runs once per ancestor: a
@@ -316,7 +291,7 @@ pub fn on_select(
     // that is how a click on any part of a box selects it — but clearing
     // has to ask where the click STARTED, or the viewport at the end of
     // the chain undoes what the box just did. It did exactly that.
-    if let Ok(canvas::SelectsNode(path)) = boxes.get(click.event_target()) {
+    if let Ok(SelectsNode(path)) = boxes.get(click.event_target()) {
         state.selected = Some(path.clone());
     } else if viewports.contains(click.original_event_target()) {
         state.selected = None;
@@ -423,12 +398,11 @@ pub fn rebuild(world: &mut World) {
         Body::Graph(layout) => {
             let camera = world.resource::<EditorState>().camera;
             let selected = world.resource::<EditorState>().selected.clone();
-            let graph_style = world.resource::<graph::GraphStyle>().clone();
+            let graph_style = world.resource::<GraphStyle>().clone();
             let canvas = bsn_list! {(
-                {canvas::scene(
+                {bevy_graph_view::scene(
                     layout,
                     &graph_style,
-                    &style,
                     camera,
                     selected.as_deref(),
                     blamed.as_deref(),
@@ -543,7 +517,7 @@ struct Document {
 /// The two things a tab can be.
 enum Body {
     Rows(Vec<walk::Row>),
-    Graph(graph::Layout),
+    Graph(bevy_graph_view::Layout),
 }
 
 /// What the graph view is inspecting, if anything.
@@ -726,12 +700,18 @@ fn read_document(world: &mut World) -> Option<Document> {
         // panel asks what it is showing. A root that is not a level draws
         // an empty graph rather than pretending otherwise.
         View::Graph => {
-            let style = world.resource::<graph::GraphStyle>().clone();
+            let style = world.resource::<GraphStyle>().clone();
             Body::Graph(
                 value
                     .as_partial_reflect()
                     .try_downcast_ref::<voxel_engine::LevelDef>()
-                    .map(|level| graph::layout(&level.nodes, &style))
+                    .map(|level| {
+                        bevy_graph_view::layout(
+                            &graph::graph_of(&level.nodes),
+                            Some(&graph::head()),
+                            &style,
+                        )
+                    })
                     .unwrap_or_default(),
             )
         }

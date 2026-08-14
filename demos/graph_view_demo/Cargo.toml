@@ -1,0 +1,10 @@
+[package]
+name = "graph_view_demo"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "A window with nothing in it but a bevy_graph_view graph"
+
+[dependencies]
+bevy.workspace = true
+bevy_graph_view.workspace = true
