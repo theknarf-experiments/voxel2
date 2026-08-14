@@ -75,11 +75,14 @@ impl GraphCamera {
     /// whatever it was aimed at: the corner stays put and everything the
     /// gesture was about slides away.
     pub fn zoomed(self, notches: f32, at: Option<Vec2>) -> Self {
-        // Snapped to whole steps. Zoom changes the layout, so every
-        // distinct value respawns the graph; a continuous pinch would do
-        // that once a frame for three hundred boxes.
-        let step = (self.zoom.log(ZOOM_STEP) + notches).round();
-        let zoom = ZOOM_STEP.powf(step).clamp(ZOOM_RANGE.start, ZOOM_RANGE.end);
+        // Continuous, not snapped to steps. Zoom is one `UiTransform` and
+        // nothing respawns per value — the old comment claiming otherwise
+        // was wrong — so there is no cost to following a trackpad pinch
+        // smoothly, and snapping made it judder. Worse, the clamp lands
+        // OFF the step lattice (2.0 is not a power of 1.12), so at the
+        // stop the snap rounded the clamped value DOWN a step: zooming in
+        // at 200% read 197%.
+        let zoom = (self.zoom * ZOOM_STEP.powf(notches)).clamp(ZOOM_RANGE.start, ZOOM_RANGE.end);
         let Some(at) = at else {
             return Self { zoom, ..self };
         };

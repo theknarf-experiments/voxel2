@@ -206,3 +206,34 @@ fn zooming_holds_the_point_it_is_aimed_at() {
     assert!(camera.zoomed(100.0, Some(at)).zoom <= 2.0);
     assert!(camera.zoomed(-100.0, Some(at)).zoom >= 0.2);
 }
+
+/// A pinch is a smooth gesture, so the zoom must follow it smoothly —
+/// and hold still at the stops.
+#[test]
+fn zoom_is_continuous_and_steady_at_the_stops() {
+    use crate::canvas::GraphCamera;
+    let camera = GraphCamera {
+        pan: Vec2::ZERO,
+        zoom: 1.0,
+    };
+    // A small gesture moves the zoom a little: not nothing, and not a
+    // whole snapped step.
+    let nudged = camera.zoomed(0.1, None).zoom;
+    assert!(
+        nudged > 1.005 && nudged < 1.02,
+        "0.1 notches should move ~1%: {nudged}"
+    );
+    // Riding the gesture to a stop pins it there. Pushing PAST the stop
+    // stays there too: the stop is not on the step lattice, and snapping
+    // used to round the clamped 2.0 DOWN to 1.12^6 — zooming in at 200%
+    // read 197%.
+    let maxed = camera.zoomed(100.0, None);
+    assert_eq!(maxed.zoom, 2.0);
+    assert_eq!(maxed.zoomed(0.3, None).zoom, 2.0);
+    let minned = camera.zoomed(-100.0, None);
+    assert_eq!(minned.zoom, 0.2);
+    assert_eq!(minned.zoomed(-0.3, None).zoom, 0.2);
+    // And a small retreat from the stop is as smooth as anywhere else.
+    let back = maxed.zoomed(-0.1, None).zoom;
+    assert!(back > 1.97 && back < 2.0, "{back}");
+}
