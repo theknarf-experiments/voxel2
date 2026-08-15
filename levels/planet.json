@@ -746,7 +746,7 @@
     "density": "field.1",
     "gate": "biomes"
    },
-   "per_tile": 200,
+   "per_tile": 900,
    "altitude": [
     3.0,
     340.0
@@ -793,7 +793,20 @@
      ]
     }
    ],
-   "region": "forest"
+   "region": "forest",
+   "output": "points",
+   "tile_m": 64.0,
+   "radius_tiles": 80,
+   "detail_vs": 8.0,
+   "near": {
+    "per_tile": 200,
+    "radius_tiles": 6
+   },
+   "cover": {
+    "material": 8,
+    "from_m": 3300.0,
+    "full_at": 0.02
+   }
   },
   {
    "kind": "population",
@@ -1154,31 +1167,6 @@
     }
    ],
    "region": "mountains"
-  },
-  {
-   "kind": "population",
-   "name": "treecover",
-   "in": {
-    "density": "field.1",
-    "gate": "biomes"
-   },
-   "output": "points",
-   "tile_m": 64.0,
-   "radius_tiles": 80,
-   "per_tile": 900,
-   "altitude": [
-    3.0,
-    340.0
-   ],
-   "min_up": 0.86,
-   "detail_vs": 8.0,
-   "density": {},
-   "cover": {
-    "material": 8,
-    "from_m": 3300.0,
-    "full_at": 0.02
-   },
-   "region": "forest"
   }
  ],
  "materials": [

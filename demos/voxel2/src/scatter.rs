@@ -204,6 +204,76 @@ impl LayerChunk for ScatterDrawChunk {
     }
 }
 
+/// The promoted slice of a point population: the same placements the far
+/// draw publishes, elected by their own seed and re-seated finely, drawn
+/// as entities near the camera.
+///
+/// This is what makes the near trees and the far impostors AGREE: both
+/// read one data layer, so every entity stands exactly where a point
+/// stands, at the same variant. Election is per placement
+/// (`seed / 2^32 < near.per_tile / per_tile`), so which points get
+/// entities never depends on the camera, the tile's survivor count or
+/// each other — walking toward a wood promotes the same trees every time.
+pub struct ScatterNearDraw {
+    source: String,
+    def: ScatterDef,
+    sink: Sink<Placement>,
+}
+
+#[derive(Default)]
+pub struct ScatterNearDrawChunk;
+
+impl Layer for ScatterNearDraw {
+    type Chunk = ScatterNearDrawChunk;
+    const NAME: &'static str = "scatter-near";
+
+    fn chunk_extent(&self) -> DVec3 {
+        DVec3::new(self.def.tile_m as f64, 0.0, self.def.tile_m as f64)
+    }
+
+    fn dependencies(&self) -> Vec<Dep> {
+        vec![Dep::named(&self.source, IVec3::ZERO)]
+    }
+}
+
+impl LayerChunk for ScatterNearDrawChunk {
+    type Layer = ScatterNearDraw;
+
+    fn create(&mut self, ctx: &ChunkCtx<'_, ScatterNearDraw>) {
+        let layer = ctx.layer();
+        let Some(near) = &layer.def.near else {
+            return;
+        };
+        let world = ctx.context::<WorldCtx>();
+        let mut placements = Vec::new();
+        ctx.get_named::<ScatterPopulation>(&layer.source, ctx.chunk_bounds())
+            .for_each(|_, chunk| {
+                for p in &chunk.placements {
+                    let elected = (p.seed as u32 as u64 * layer.def.per_tile as u64) >> 32
+                        < near.per_tile as u64;
+                    if !elected {
+                        continue;
+                    }
+                    // The population seated this point at its own coarse
+                    // `detail_vs`; an entity stands on finely meshed
+                    // ground, so refine the seat by the DELTA between the
+                    // two heights. The delta, not a fresh seat: sink and
+                    // altitude falloff are already in the stored y.
+                    let mut p = *p;
+                    let xz = Vec2::new(p.position.x, p.position.z);
+                    p.position.y += world.generator.height(xz, near.detail_vs)
+                        - world.generator.height(xz, layer.def.detail_vs);
+                    placements.push(p);
+                }
+            });
+        layer.sink.put(ctx.instance_key(), ctx.coord(), placements);
+    }
+
+    fn destroy(&mut self, ctx: &ChunkCtx<'_, ScatterNearDraw>) {
+        ctx.layer().sink.take(ctx.instance_key(), ctx.coord());
+    }
+}
+
 /// Registered populations, so the reconciling systems know what to draw.
 #[derive(Resource, Default)]
 pub struct Populations(pub Vec<PopulationHandle>);
@@ -214,6 +284,10 @@ pub struct PopulationHandle {
     /// trees, not this one's moved sideways.
     pub world: voxel_engine::WorldId,
     pub class: Arc<str>,
+    /// Where tooling reads this handle's live size. Distinct from the
+    /// class since a population with a near slice is TWO handles of one
+    /// class, and they must not overwrite each other's count.
+    count_key: String,
     pub output: ScatterOutput,
     pub sink: Sink<Placement>,
     /// Entities currently spawned per contributing chunk, for entity
@@ -280,11 +354,43 @@ pub fn register(
             // these does not know which world it belongs to.
             world: 0,
             class: Arc::from(def.class.as_str()),
+            count_key: def.class.clone(),
             output: def.output,
             sink,
             spawned: std::collections::HashMap::new(),
             seen_generation: u64::MAX,
         });
+
+        // The promoted near slice: a second draw over the SAME data
+        // layer, at its own radius, spawning entities. See
+        // [`ScatterNearDraw`] for why this is a subset and not a second
+        // population.
+        if let (Some(near), ScatterOutput::Points) = (&def.near, def.output) {
+            let near_sink = Sink::default();
+            let near_name = format!("{}:near", def.class);
+            graph.register_as(
+                &near_name,
+                ScatterNearDraw {
+                    source: def.class.clone(),
+                    def: def.clone(),
+                    sink: near_sink.clone(),
+                },
+            );
+            let reach = (near.radius_tiles as f32 + 0.5) * def.tile_m;
+            tops.push(TopDep::new(
+                &near_name,
+                IVec3::new((2.0 * reach) as i32, 0, (2.0 * reach) as i32),
+            ));
+            handles.push(PopulationHandle {
+                world: 0,
+                class: Arc::from(def.class.as_str()),
+                count_key: near_name,
+                output: ScatterOutput::Entities,
+                sink: near_sink,
+                spawned: std::collections::HashMap::new(),
+                seen_generation: u64::MAX,
+            });
+        }
     }
     (tops, Populations(handles))
 }
@@ -301,6 +407,7 @@ fn reconcile(
     points: Res<voxel_render::ScatterPoints>,
     mut populations: ResMut<Populations>,
     worlds: Res<voxel_engine::Worlds>,
+    props: Res<crate::WorldProps>,
 ) {
     for population in &mut populations.0 {
         let generation = population.sink.generation();
@@ -310,9 +417,34 @@ fn reconcile(
         population.seen_generation = generation;
         match population.output {
             ScatterOutput::Points => {
-                let merged = population.sink.collect_map(|p| voxel_render::ScatterPoint {
-                    pos: p.position.to_array(),
-                    hash: p.seed as u32,
+                // If the class has a prop table, each point's silhouette
+                // bit is written from its VARIANT's model, so an impostor
+                // and the entity it may be promoted to are the same
+                // species. Bit 23 is the top of the shader's shape byte —
+                // set means the waisted (broadleaf) silhouette.
+                let variant_models = props
+                    .0
+                    .get(&population.world)
+                    .and_then(|t| t.0.get(&*population.class))
+                    .map(|class| {
+                        class
+                            .variants
+                            .iter()
+                            .map(|v| v.model == crate::props::Model::Broadleaf)
+                            .collect::<Vec<bool>>()
+                    });
+                let merged = population.sink.collect_map(|p| {
+                    let mut hash = p.seed as u32;
+                    if let Some(wide) = variant_models
+                        .as_ref()
+                        .and_then(|models| models.get(p.variant as usize).copied())
+                    {
+                        hash = (hash & !(1 << 23)) | (u32::from(wide) << 23);
+                    }
+                    voxel_render::ScatterPoint {
+                        pos: p.position.to_array(),
+                        hash,
+                    }
                 });
                 let n = merged.len();
                 points.set_class(population.world, &population.class, merged);
@@ -376,7 +508,7 @@ fn record_count(worlds: &voxel_engine::Worlds, population: &PopulationHandle, n:
         ctx.placements
             .lock()
             .unwrap()
-            .insert(population.class.to_string(), n);
+            .insert(population.count_key.clone(), n);
     }
 }
 

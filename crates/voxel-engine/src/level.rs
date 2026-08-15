@@ -225,14 +225,46 @@ pub struct ScatterDef {
     #[serde(default = "default_one")]
     pub scale_bias: f32,
     /// Weighted variants — species, size tiers, whatever the host maps
-    /// them to. The engine only knows their index.
-    /// Entity-output variants. Point populations have none: a point is a
-    /// position and a hash, and the host decides what it draws there.
+    /// them to. The engine only knows their index. Used by entity output
+    /// and by [`ScatterDef::near`]; a pure point population may still
+    /// declare them so the host can shape each point by its variant.
     #[serde(default)]
     pub variants: Vec<ScatterVariantDef>,
+    /// The nearest slice of this population, drawn as entities.
+    ///
+    /// One population, one placement draw, three ranges: entities near
+    /// (this), the host's bulk rendering of the points to
+    /// [`ScatterDef::radius_tiles`], and [`ScatterDef::cover`] beyond.
+    /// Every entity therefore stands exactly where one of the points
+    /// stands — the near tier is a SUBSET of the population, not a second
+    /// population whose placements happen to be gated alike, which is
+    /// what made the near field and the far field of a forest disagree
+    /// about where its trees were.
+    #[serde(default)]
+    pub near: Option<NearDef>,
     /// What this population becomes once it is too far to draw one by one.
     #[serde(default)]
     pub cover: Option<CoverDef>,
+}
+
+/// The entity-drawn slice of a point population. See [`ScatterDef::near`].
+#[derive(Reflect, Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct NearDef {
+    /// Attempts' worth of placements promoted per tile, out of
+    /// [`ScatterDef::per_tile`]. Placements are elected by their own seed
+    /// at this fraction, so which of a tile's points get entities never
+    /// depends on the camera or on each other.
+    pub per_tile: u32,
+    /// Streaming radius of the entity draw, in tiles.
+    #[serde(default = "d_scatter_radius")]
+    pub radius_tiles: i32,
+    /// Voxel size the promoted placements are RE-seated at. The
+    /// population seats all its points at its own [`ScatterDef::detail_vs`]
+    /// — coarse, because seating hundreds of thousands finely is the
+    /// settle budget — but an entity stands next to the camera on finely
+    /// meshed ground, and a coarse seat leaves its feet in the air.
+    #[serde(default = "d_detail_vs")]
+    pub detail_vs: f32,
 }
 
 /// A population painted onto the ground instead of drawn.

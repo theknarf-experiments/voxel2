@@ -12,19 +12,19 @@ use bevy_impostors::{ImpostorStyle, Impostors, IMPOSTOR_FADE_FROM};
 
 use crate::prop_worlds::{WorldProp, WorldPropPlugin};
 
-/// The scatter population this demo draws as tree impostors. Just a name
-/// the level and the demo agree on — the engine never sees it.
-pub const IMPOSTOR_CLASS: &str = "treecover";
-
-/// The prop class these impostors stand in for.
+/// The scatter population this demo draws as tree impostors — the SAME
+/// class the near entity trees are promoted from, which is the point:
+/// one placement draw, so every real tree stands where an impostor
+/// stands, at the same variant. The impostors no longer stand in for a
+/// different population; they stand in for the far members of their own.
 ///
-/// Their canopy colours are TAKEN from its variants rather than authored
-/// again. They were authored twice, and the two drifted: the impostors
-/// carried hand-converted linear values that had lost a third of their
-/// green, so a stand handed over to real trees that were a different
-/// species of green. One palette, and retuning the props retunes the
-/// forest behind them.
-pub const IMPOSTOR_STANDS_IN_FOR: &str = "tree";
+/// Their canopy colours are TAKEN from this class's prop variants rather
+/// than authored again. They were authored twice, and the two drifted:
+/// the impostors carried hand-converted linear values that had lost a
+/// third of their green, so a stand handed over to real trees that were
+/// a different species of green. One palette, and retuning the props
+/// retunes the forest behind them.
+pub const IMPOSTOR_CLASS: &str = "tree";
 
 impl WorldProp for Impostors {
     const CLASS: &'static str = IMPOSTOR_CLASS;
@@ -58,7 +58,7 @@ impl Plugin for ImpostorPlugin {
 /// Both are the middle tier's whole job: it has a real forest on one side
 /// and a painted one on the other, and it is the only thing that can be
 /// wrong about either. Neither number is authored here, because both are
-/// really somebody else's — see [`IMPOSTOR_STANDS_IN_FOR`] for the palette.
+/// really somebody else's — see [`IMPOSTOR_CLASS`] for the palette.
 ///
 /// For the reach: the two tiers meet at one distance and it is the level's
 /// to choose, but only one of them can honour the number as written. Paint
@@ -78,7 +78,7 @@ fn sync_impostor_style(
     // reading it positionally would swap the two species the day someone
     // reorders them.
     for table in props.0.values() {
-        let Some(class) = table.0.get(IMPOSTOR_STANDS_IN_FOR) else {
+        let Some(class) = table.0.get(IMPOSTOR_CLASS) else {
             continue;
         };
         let foliage = |model| {
