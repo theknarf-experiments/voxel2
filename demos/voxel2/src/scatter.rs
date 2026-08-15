@@ -412,29 +412,21 @@ fn reconcile(
         population.seen_generation = generation;
         match population.output {
             ScatterOutput::Points => {
-                // If the class has a prop table, each point's silhouette
-                // bit is written from its VARIANT's model, so an impostor
-                // and the entity it may be promoted to are the same
-                // species. Bit 23 is the top of the shader's shape byte —
-                // set means the waisted (broadleaf) silhouette.
-                let variant_models = props
+                // If the class has a prop table, each point's variant
+                // byte (hash bits 16–23) is written from its placement,
+                // indexing the impostor style's variant table — so an
+                // impostor and the entity it becomes on approach are the
+                // same species. A class without a table keeps its raw
+                // hash; what that byte means is its own shader's business.
+                let has_table = props
                     .0
                     .get(&population.world)
                     .and_then(|t| t.0.get(&*population.class))
-                    .map(|class| {
-                        class
-                            .variants
-                            .iter()
-                            .map(|v| v.model == crate::props::Model::Broadleaf)
-                            .collect::<Vec<bool>>()
-                    });
+                    .is_some();
                 let merged = population.sink.collect_map(|p| {
                     let mut hash = p.seed as u32;
-                    if let Some(wide) = variant_models
-                        .as_ref()
-                        .and_then(|models| models.get(p.variant as usize).copied())
-                    {
-                        hash = (hash & !(1 << 23)) | (u32::from(wide) << 23);
+                    if has_table {
+                        hash = (hash & !0x00FF_0000) | (p.variant.min(255) << 16);
                     }
                     voxel_render::ScatterPoint {
                         pos: p.position.to_array(),

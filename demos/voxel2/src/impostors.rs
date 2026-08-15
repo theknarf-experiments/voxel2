@@ -1,38 +1,50 @@
 //! Tree impostors: what this demo feeds `bevy_impostors` and where it
 //! takes the look from.
 //!
-//! The renderer — silhouette mesh, shader, buffers, draw — is the crate's.
-//! What is left here is what only this game knows: which scatter class is
-//! the far forest, and that the impostors' palette and reach are really
-//! somebody else's numbers.
+//! The renderer — silhouette mesh, shader, buffers, draw — is the
+//! crate's. What is left here is what only this game knows: which
+//! scatter class is the far forest, what silhouette each prop MODEL
+//! reads as at a distance, and that the impostors' palette and reach are
+//! really somebody else's numbers.
 
 use bevy::prelude::*;
 use bevy::render::Extract;
-use bevy_impostors::{ImpostorStyle, Impostors, IMPOSTOR_FADE_FROM};
+use bevy_impostors::{
+    ImpostorSet, ImpostorStyle, ImpostorVariantStyle, Impostors, IMPOSTOR_FADE_FROM,
+    MAX_IMPOSTOR_VARIANTS,
+};
 
 use crate::prop_worlds::{WorldProp, WorldPropPlugin};
 
+/// The impostor population standing in for the far forest.
+pub struct Trees;
+
+impl ImpostorSet for Trees {
+    const NAME: &'static str = "tree_impostor";
+    const LAYOUT_LABEL: &'static str = "tree_impostor_layout";
+    const DRAW_LABEL: &'static str = "tree_impostor_draw";
+}
+
+pub type TreeImpostors = Impostors<Trees>;
+
 /// The scatter population this demo draws as tree impostors — the SAME
-/// class the near entity trees are promoted from, which is the point:
-/// one placement draw, so every real tree stands where an impostor
-/// stands, at the same variant. The impostors no longer stand in for a
-/// different population; they stand in for the far members of their own.
+/// class the near entity trees are drawn from, which is the point: one
+/// placement draw, so every real tree stands where an impostor stands,
+/// at the same variant.
 ///
-/// Their canopy colours are TAKEN from this class's prop variants rather
-/// than authored again. They were authored twice, and the two drifted:
-/// the impostors carried hand-converted linear values that had lost a
-/// third of their green, so a stand handed over to real trees that were
-/// a different species of green. One palette, and retuning the props
-/// retunes the forest behind them.
+/// Each variant's canopy colour is TAKEN from the class's prop table
+/// rather than authored again. They were authored twice, and the two
+/// drifted: the impostors carried hand-converted linear values that had
+/// lost a third of their green, so a stand handed over to real trees
+/// that were a different species of green. One palette, and retuning the
+/// props retunes the forest behind them.
 pub const IMPOSTOR_CLASS: &str = "tree";
 
-impl WorldProp for Impostors {
+impl WorldProp for TreeImpostors {
     const CLASS: &'static str = IMPOSTOR_CLASS;
 
     fn anchor(world: voxel_engine::WorldId) -> Self {
-        Self {
-            set: u32::from(world),
-        }
+        Impostors::new(u32::from(world))
     }
 }
 
@@ -41,8 +53,8 @@ pub struct ImpostorPlugin;
 impl Plugin for ImpostorPlugin {
     fn build(&self, app: &mut App) {
         app.add_plugins((
-            bevy_impostors::impostor::ImpostorPlugin,
-            WorldPropPlugin::<Impostors>::default(),
+            bevy_impostors::ImpostorPlugin::<Trees>::default(),
+            WorldPropPlugin::<TreeImpostors>::default(),
         ));
 
         let Some(render_app) = app.get_sub_app_mut(bevy::render::RenderApp) else {
@@ -52,8 +64,33 @@ impl Plugin for ImpostorPlugin {
     }
 }
 
-/// Take the impostors' colour from the trees they stand in for, and their
-/// reach from the ground that paints them.
+/// What each prop model reads as at impostor range.
+///
+/// This demo's half of the variant table: the CRATE knows silhouettes,
+/// the PROPS know models, and this is the one place the two vocabularies
+/// meet. A new model gets a row here and every impostor population picks
+/// it up; a model without one falls back to a plain diamond.
+fn silhouette(model: crate::props::Model, color: Vec4) -> ImpostorVariantStyle {
+    use crate::props::Model;
+    match model {
+        Model::Conifer => ImpostorVariantStyle::pointed(color),
+        Model::Broadleaf => ImpostorVariantStyle::waisted(color),
+        // Narrow and a little taller than the others, like its mesh.
+        Model::Birch => ImpostorVariantStyle {
+            color,
+            shape: Vec4::new(0.5, 0.18, 1.15, 0.0),
+        },
+        // Low clumps: squat diamonds, wider than tall.
+        Model::Bush | Model::Rock => ImpostorVariantStyle {
+            color,
+            shape: Vec4::new(0.5, 0.55, 0.30, 0.0),
+        },
+        _ => ImpostorVariantStyle::waisted(color),
+    }
+}
+
+/// Take the impostors' variant table from the props they stand in for,
+/// and their reach from the ground that paints them.
 ///
 /// Both are the middle tier's whole job: it has a real forest on one side
 /// and a painted one on the other, and it is the only thing that can be
@@ -70,29 +107,24 @@ impl Plugin for ImpostorPlugin {
 fn sync_impostor_style(
     worlds: Extract<Res<voxel_engine::Worlds>>,
     props: Extract<Res<crate::WorldProps>>,
-    mut style: ResMut<ImpostorStyle>,
+    mut style: ResMut<ImpostorStyle<Trees>>,
 ) {
-    // The cone silhouette is a conifer and the diamond is a broadleaf, so
-    // each takes that prop variant's foliage. Matched by MODEL rather than
-    // by index: which variant a level lists first is level dressing, and
-    // reading it positionally would swap the two species the day someone
-    // reorders them.
+    // Row i of the table IS variant i of the prop class: the placement's
+    // variant byte indexes both, which is what keeps an impostor and the
+    // tree it becomes the same species. By INDEX here, not by model —
+    // the alignment between the level's variants and the prop table's is
+    // already this demo's invariant for entity spawning.
     for table in props.0.values() {
         let Some(class) = table.0.get(IMPOSTOR_CLASS) else {
             continue;
         };
-        let foliage = |model| {
-            class
-                .variants
-                .iter()
-                .find(|v| v.model == model)
-                .map(|v| v.foliage.to_linear().to_vec4())
-        };
-        if let Some(c) = foliage(crate::props::Model::Conifer) {
-            style.color_a = c;
-        }
-        if let Some(c) = foliage(crate::props::Model::Broadleaf) {
-            style.color_b = c;
+        for (i, v) in class
+            .variants
+            .iter()
+            .take(MAX_IMPOSTOR_VARIANTS)
+            .enumerate()
+        {
+            style.variants[i] = silhouette(v.model, v.foliage.to_linear().to_vec4());
         }
     }
 

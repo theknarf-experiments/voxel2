@@ -1,6 +1,7 @@
 // Instanced crossed-silhouette impostors: one draw call over a point
 // population. Per-instance data is a world position plus a hash carrying
-// yaw, size, silhouette pick and a baked shade factor.
+// yaw (0-7), size (8-15), the VARIANT index into the style table (16-23)
+// and a baked shade factor (24-31).
 //
 // Crossed planes rather than billboards on purpose: a billboard has to be
 // rotated per frame and swims as the camera turns, while two fixed
@@ -16,13 +17,21 @@
     pbr_functions,
 }
 
+struct ImpostorVariant {
+    // Linear color of the silhouette.
+    color: vec4<f32>,
+    // x = waist height (0 = cone, 0.5 = diamond), y = half-width as a
+    // fraction of height, z = height factor, w = spare.
+    shape: vec4<f32>,
+}
+
 struct ImpostorEnv {
-    flags: vec4<f32>,   // x = draw-white debug flag
-    color_a: vec4<f32>, // pointed silhouette
-    color_b: vec4<f32>, // waisted silhouette
-    base: vec4<f32>,    // x = darkening at the base, y = normal lean
+    flags: vec4<f32>, // x = draw-white debug flag
+    base: vec4<f32>,  // x = darkening at the base, y = normal lean
     // x = fade-in start, y = fade-in end, z = cull distance, w = height
     size: vec4<f32>,
+    // Indexed by each instance's variant byte (hash bits 16-23).
+    variants: array<ImpostorVariant, 16u>,
 }
 @group(2) @binding(0) var<uniform> env: ImpostorEnv;
 
@@ -46,15 +55,16 @@ struct VsOut {
 fn vertex(in: VsIn) -> VsOut {
     let h01 = f32(in.inst_hash & 0xFFu) / 255.0;
     let h02 = f32((in.inst_hash >> 8u) & 0xFFu) / 255.0;
-    let h03 = f32((in.inst_hash >> 16u) & 0xFFu) / 255.0;
+    let vindex = min((in.inst_hash >> 16u) & 0xFFu, 15u);
     let shade = f32((in.inst_hash >> 24u) & 0xFFu) / 255.0;
+    let variant = env.variants[vindex];
 
-    // The silhouette IS the variant: a waist at half height, or dropped
-    // to the base to make a point. One mesh, no collapsed geometry — the
-    // version that carried both outlines shaded fourteen vertices per
-    // instance to draw six of them.
-    let is_waisted = step(0.5, h03);
-    let tip = select(select(0.0, in.tip, in.tip != 0.5), in.tip, is_waisted > 0.5);
+    // The silhouette is the VARIANT's: the mesh is one diamond, and its
+    // waist vertices land wherever the variant's shape says — dropped to
+    // the base for a cone, kept for a diamond. One mesh, no collapsed
+    // geometry: the version that carried two outlines shaded fourteen
+    // vertices per instance to draw six of them.
+    let tip = select(in.tip, variant.shape.x, in.tip == 0.5);
     var local = vec3<f32>(in.pos.x, tip, in.pos.z);
 
     let yaw = h01 * 6.2831853;
@@ -64,9 +74,9 @@ fn vertex(in: VsIn) -> VsOut {
 
     // Size from the hash: width scales with height so a big instance is
     // not a stretched small one.
-    let height = env.size.w * (0.72 + h02 * 0.62);
-    p.x *= height * 0.30;
-    p.z *= height * 0.30;
+    let height = env.size.w * variant.shape.z * (0.72 + h02 * 0.62);
+    p.x *= height * variant.shape.y;
+    p.z *= height * variant.shape.y;
     p.y *= height;
 
     let cam_rel_root = in.inst_pos - view.world_position;
@@ -78,22 +88,23 @@ fn vertex(in: VsIn) -> VsOut {
     p *= grow * cull;
 
     // A slow lean, so a stand of these is not a field of identical
-    // stamps.
+    // stamps. The random half of the phase rides the yaw byte: the two
+    // being correlated is invisible, and it keeps the variant byte free
+    // to be an index.
     let t = globals.time;
-    let phase = in.inst_pos.x * 0.05 + in.inst_pos.z * 0.037 + h03 * 6.28;
+    let phase = in.inst_pos.x * 0.05 + in.inst_pos.z * 0.037 + h01 * 6.28;
     p.x += sin(t * 0.5 + phase) * tip * tip * height * 0.02;
 
     let cam_rel = cam_rel_root + p;
     let view_space = (view.view_from_world * vec4<f32>(cam_rel, 0.0)).xyz;
 
-    // Two colors by silhouette, darker toward the base where a solid
-    // shape shades itself.
+    // The variant's color, darker toward the base where a solid shape
+    // shades itself.
     //
     // A SHADE of the color, not a second color: almost none of an
     // impostor's area is whatever its base would be made of, and a
     // second authored hue drags the whole population toward it.
-    let color_up = mix(env.color_a.rgb, env.color_b.rgb, is_waisted);
-    let color = color_up * mix(env.base.x, 1.0, tip) * (0.45 + 0.55 * shade);
+    let color = variant.color.rgb * mix(env.base.x, 1.0, tip) * (0.45 + 0.55 * shade);
 
     var out: VsOut;
     out.clip = view.clip_from_view * vec4<f32>(view_space, 1.0);

@@ -18,11 +18,17 @@
 //! placements come from.
 //!
 //! [`Impostors`] is the shipped population: a crossed silhouette per
-//! point, shaped and shaded per instance from a 32-bit hash. See
+//! point, shaped and colored by its VARIANT — one row of the style's
+//! table per species/kind, indexed by a byte of the instance hash — and
+//! instantiable per [`ImpostorSet`] tag, so trees and litter and
+//! anything else are separate pipelines with separate styles. See
 //! [`impostor`] for the contract.
 
 pub mod impostor;
 pub mod prop;
 
-pub use impostor::{ImpostorStyle, Impostors, IMPOSTOR_FADE_FROM};
+pub use impostor::{
+    ImpostorPlugin, ImpostorSet, ImpostorStyle, ImpostorVariantStyle, Impostors,
+    IMPOSTOR_FADE_FROM, MAX_IMPOSTOR_VARIANTS,
+};
 pub use prop::{Prop, PropFlags, PropInstance, PropPlugin, PropPoints};

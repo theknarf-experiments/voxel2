@@ -21,14 +21,19 @@ Two layers:
   allocations kept and grown but never shrunk.
 - **`impostor`** — the shipped population. Two fixed crossed planes
   (billboards swim as the camera turns; crossed planes read as a solid
-  from any angle), shaped per instance from the hash: bits 0–7 yaw, 8–15
-  size, 16–23 silhouette pick + sway phase, 24–31 a baked shade factor.
-  The fragment path is a tuned sun-and-ambient read off Bevy's own
-  lights buffer — measured: the pass costs what its fragment shader
-  costs, so that is where the shader spends nothing it can avoid.
-  `ImpostorStyle` holds the two silhouette colors and the fade-in /
-  cull distances; `IMPOSTOR_FADE_FROM` is where the far fade starts, for
-  hosts aligning it with whatever takes over beyond.
+  from any angle), shaped per instance from the hash: bits 0–7 yaw +
+  sway phase, 8–15 size, 16–23 the VARIANT index, 24–31 a baked shade
+  factor. `ImpostorStyle` is a variant TABLE — one row of color +
+  silhouette (waist height, width, height factor) per species or kind,
+  up to `MAX_IMPOSTOR_VARIANTS` — so a population with three species is
+  three rows, and adding a fourth is writing one. One impostor
+  population per `ImpostorSet` tag: `Impostors<Trees>` and
+  `Impostors<Litter>` are separate pipelines with separate styles. The
+  fragment path is a tuned sun-and-ambient read off Bevy's own lights
+  buffer — measured: the pass costs what its fragment shader costs, so
+  that is where the shader spends nothing it can avoid.
+  `IMPOSTOR_FADE_FROM` is where the far fade starts, for hosts aligning
+  it with whatever takes over beyond.
 
 The host's half is deliberately small: spawn one marker per set (with
 whatever visibility layers your views use), publish points, optionally
