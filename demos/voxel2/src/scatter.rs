@@ -204,16 +204,16 @@ impl LayerChunk for ScatterDrawChunk {
     }
 }
 
-/// The promoted slice of a point population: the same placements the far
-/// draw publishes, elected by their own seed and re-seated finely, drawn
-/// as entities near the camera.
+/// The near slice of a point population: EVERY placement the far draw
+/// publishes, re-seated finely and drawn as an entity while its tile is
+/// inside the near radius.
 ///
-/// This is what makes the near trees and the far impostors AGREE: both
-/// read one data layer, so every entity stands exactly where a point
-/// stands, at the same variant. Election is per placement
-/// (`seed / 2^32 < near.per_tile / per_tile`), so which points get
-/// entities never depends on the camera, the tile's survivor count or
-/// each other — walking toward a wood promotes the same trees every time.
+/// All of them, not a chosen few: the population is one set and the
+/// tiers are distance filters over it, so anything the far tier shows
+/// must be standing there when you arrive. A version of this that
+/// promoted a seed-elected fraction broke exactly that — four in five
+/// impostors faded out on approach with no tree in their place. The
+/// entity budget is the near RADIUS, not a thinning.
 pub struct ScatterNearDraw {
     source: String,
     def: ScatterDef,
@@ -249,11 +249,6 @@ impl LayerChunk for ScatterNearDrawChunk {
         ctx.get_named::<ScatterPopulation>(&layer.source, ctx.chunk_bounds())
             .for_each(|_, chunk| {
                 for p in &chunk.placements {
-                    let elected = (p.seed as u32 as u64 * layer.def.per_tile as u64) >> 32
-                        < near.per_tile as u64;
-                    if !elected {
-                        continue;
-                    }
                     // The population seated this point at its own coarse
                     // `detail_vs`; an entity stands on finely meshed
                     // ground, so refine the seat by the DELTA between the

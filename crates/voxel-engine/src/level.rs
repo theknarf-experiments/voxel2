@@ -235,11 +235,13 @@ pub struct ScatterDef {
     /// One population, one placement draw, three ranges: entities near
     /// (this), the host's bulk rendering of the points to
     /// [`ScatterDef::radius_tiles`], and [`ScatterDef::cover`] beyond.
-    /// Every entity therefore stands exactly where one of the points
-    /// stands — the near tier is a SUBSET of the population, not a second
-    /// population whose placements happen to be gated alike, which is
-    /// what made the near field and the far field of a forest disagree
-    /// about where its trees were.
+    /// The ranges are FILTERS over one set — every placement inside the
+    /// near radius becomes an entity, every one of them is also a point
+    /// — so walking up to any far instance finds the same instance
+    /// standing there as geometry. A near tier that was a second
+    /// population, and then one that promoted a lottery of the first,
+    /// both broke that promise: an instance the far tier drew would
+    /// vanish on approach with nothing in its place.
     #[serde(default)]
     pub near: Option<NearDef>,
     /// What this population becomes once it is too far to draw one by one.
@@ -248,13 +250,14 @@ pub struct ScatterDef {
 }
 
 /// The entity-drawn slice of a point population. See [`ScatterDef::near`].
+///
+/// Deliberately nothing here but a radius and a seating: which
+/// placements become entities is decided by DISTANCE alone, because any
+/// subtler rule leaves far instances with no entity to become.
+/// The entity budget is therefore this radius — the near field is as
+/// dense as the population, so the radius is what a level tunes.
 #[derive(Reflect, Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct NearDef {
-    /// Attempts' worth of placements promoted per tile, out of
-    /// [`ScatterDef::per_tile`]. Placements are elected by their own seed
-    /// at this fraction, so which of a tile's points get entities never
-    /// depends on the camera or on each other.
-    pub per_tile: u32,
     /// Streaming radius of the entity draw, in tiles.
     #[serde(default = "d_scatter_radius")]
     pub radius_tiles: i32,

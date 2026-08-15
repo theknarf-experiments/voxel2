@@ -799,8 +799,7 @@
    "radius_tiles": 80,
    "detail_vs": 8.0,
    "near": {
-    "per_tile": 200,
-    "radius_tiles": 6
+    "radius_tiles": 2
    },
    "cover": {
     "material": 8,
