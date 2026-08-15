@@ -3,8 +3,10 @@
 //! changes.
 //!
 //! Everything a prop renderer needs beyond this file — buffers, pipeline,
-//! bind group, extract, prepare, draw, marker sync — is
-//! `instanced::PropPlugin`.
+//! bind group, extract, prepare, draw — is `bevy_impostors::PropPlugin`;
+//! the anchors and the points bridge are [`WorldPropPlugin`].
+//!
+//! [`Prop`]: bevy_impostors::Prop
 
 use bevy::{
     asset::{embedded_asset, load_embedded_asset},
@@ -14,7 +16,9 @@ use bevy::{
 };
 use bytemuck::{Pod, Zeroable};
 
-/// Marker entity anchoring one world's grass draw. See [`Prop`].
+use crate::prop_worlds::{WorldProp, WorldPropPlugin};
+
+/// Marker entity anchoring one world's grass draw.
 #[derive(Clone, Copy, Component, ExtractComponent)]
 #[require(VisibilityClass)]
 #[component(on_add = visibility::add_visibility_class::<GrassMarker>)]
@@ -26,22 +30,17 @@ pub struct GrassMarker {
 /// level and the demo agree on — the engine never sees it.
 pub const GROUND_COVER_CLASS: &str = "groundcover";
 
-impl crate::instanced::Prop for GrassMarker {
+impl bevy_impostors::Prop for GrassMarker {
     type Env = GrassEnv;
     type Vertex = BladeVertex;
     type Style = GrassStyle;
 
-    const CLASS: &'static str = GROUND_COVER_CLASS;
     const NAME: &'static str = "grass";
     const LAYOUT_LABEL: &'static str = "grass_layout";
     const DRAW_LABEL: &'static str = "grass_draw";
 
-    fn anchor(world: voxel_engine::WorldId) -> Self {
-        Self { world }
-    }
-
-    fn world(&self) -> voxel_engine::WorldId {
-        self.world
+    fn set(&self) -> u32 {
+        u32::from(self.world)
     }
 
     fn shader(assets: &AssetServer) -> Handle<Shader> {
@@ -64,12 +63,23 @@ impl crate::instanced::Prop for GrassMarker {
     }
 }
 
+impl WorldProp for GrassMarker {
+    const CLASS: &'static str = GROUND_COVER_CLASS;
+
+    fn anchor(world: voxel_engine::WorldId) -> Self {
+        Self { world }
+    }
+}
+
 pub struct GrassPlugin;
 
 impl Plugin for GrassPlugin {
     fn build(&self, app: &mut App) {
         embedded_asset!(app, "voxel_grass.wgsl");
-        app.add_plugins(crate::instanced::PropPlugin::<GrassMarker>::default());
+        app.add_plugins((
+            bevy_impostors::PropPlugin::<GrassMarker>::default(),
+            WorldPropPlugin::<GrassMarker>::default(),
+        ));
     }
 }
 

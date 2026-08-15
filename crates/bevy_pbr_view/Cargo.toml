@@ -1,0 +1,12 @@
+[package]
+name = "bevy_pbr_view"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Draw custom pipelines through Bevy's PBR view bind groups: the view-key specializer, DrawPipeline<M>, and a per-marker queue"
+
+# In this workspace the bevy dependency inherits the root feature list.
+# When extracted to its own repo this needs an explicit set: bevy_pbr,
+# bevy_core_pipeline and bevy_render.
+[dependencies]
+bevy.workspace = true

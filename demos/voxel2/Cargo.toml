@@ -6,6 +6,7 @@ license.workspace = true
 
 [dependencies]
 bevy.workspace = true
+bevy_impostors.workspace = true
 voxel-debug.workspace = true
 voxel-editor.workspace = true
 voxel-engine.workspace = true

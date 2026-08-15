@@ -965,6 +965,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "bevy_impostors"
+version = "0.1.0"
+dependencies = [
+ "bevy",
+ "bevy_pbr_view",
+ "bytemuck",
+]
+
+[[package]]
 name = "bevy_input"
 version = "0.19.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1246,6 +1255,13 @@ dependencies = [
  "thiserror 2.0.19",
  "tracing",
  "wgpu-types",
+]
+
+[[package]]
+name = "bevy_pbr_view"
+version = "0.1.0"
+dependencies = [
+ "bevy",
 ]
 
 [[package]]
@@ -5338,6 +5354,7 @@ name = "voxel-render"
 version = "0.1.0"
 dependencies = [
  "bevy",
+ "bevy_pbr_view",
  "bytemuck",
  "crossbeam-channel",
  "naga",
@@ -5359,6 +5376,7 @@ name = "voxel2"
 version = "0.1.0"
 dependencies = [
  "bevy",
+ "bevy_impostors",
  "bytemuck",
  "glam",
  "serde",

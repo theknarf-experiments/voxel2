@@ -6,7 +6,12 @@ pub mod chunks;
 pub mod material;
 /// Shared plumbing so a HOST can build a pipeline that shades like the
 /// terrain does (Bevy's view bind group, matching keys and shader defs).
-pub mod pbr_view;
+/// Re-exported so everything that draws through Bevy's PBR views —
+/// terrain here, a host's own pipelines — names one copy of the
+/// machinery. The module moved to its own crate because nothing in it is
+/// voxel: it is how ANY hand-rolled pipeline borrows Bevy's view bind
+/// groups.
+pub use bevy_pbr_view as pbr_view;
 pub mod scatter_points;
 pub mod slab;
 

@@ -7,6 +7,7 @@ license.workspace = true
 [dependencies]
 voxel-core.workspace = true
 bevy.workspace = true
+bevy_pbr_view.workspace = true
 bytemuck.workspace = true
 crossbeam-channel.workspace = true
 

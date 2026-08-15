@@ -33,6 +33,8 @@ naga = { version = "29", features = ["wgsl-in"] }
 
 # Internal
 bevy_graph_view = { path = "crates/bevy_graph_view" }
+bevy_pbr_view = { path = "crates/bevy_pbr_view" }
+bevy_impostors = { path = "crates/bevy_impostors" }
 voxel-core = { path = "crates/voxel-core" }
 voxel-layers = { path = "crates/voxel-layers" }
 voxel-worldgen = { path = "crates/voxel-worldgen" }
