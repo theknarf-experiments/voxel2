@@ -452,6 +452,47 @@ fn runtime_follows_a_published_focus() {
     assert_eq!(graph.resident_in("play"), resident);
 }
 
+/// A pinned, filtered dependency re-evaluates only when told to: its
+/// filter reads state the runtime cannot see, so changing that state does
+/// nothing until `touch` announces it.
+#[test]
+fn touch_reasks_a_pinned_filter() {
+    use voxel_layers::{CoordFilter, LayerRuntime};
+
+    let ledger = Arc::new(Ledger::default());
+    let graph = Arc::new(graph(ledger.clone(), "base", 0, 2));
+    let gate = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let filter: CoordFilter = {
+        let gate = gate.clone();
+        Arc::new(move |_| gate.load(Ordering::Relaxed))
+    };
+    let top = TopDep::new("play", IVec3::new(CELL * 2, 0, CELL * 2)).with_filter(filter);
+    let runtime = LayerRuntime::start(graph.clone(), vec![top]);
+    let handle = runtime.top(0);
+    let pin = IVec3::new(CELL / 2, 0, CELL / 2);
+
+    handle.set_focus(pin);
+    runtime.wait_idle();
+    assert_eq!(graph.resident_in("play"), 0, "filter rejects everything");
+
+    // The state flips, the focus is republished unchanged: invisible.
+    gate.store(true, Ordering::Relaxed);
+    handle.set_focus(pin);
+    runtime.wait_idle();
+    assert_eq!(
+        graph.resident_in("play"),
+        0,
+        "an unannounced change re-ran the ensure"
+    );
+
+    handle.touch();
+    runtime.wait_idle();
+    assert!(
+        graph.resident_in("play") > 0,
+        "touch did not re-ask the filter"
+    );
+}
+
 /// Dropping a world runs every chunk's destroy. Without that, a layer that
 /// owned entities or GPU slots would leak them on teardown.
 #[test]

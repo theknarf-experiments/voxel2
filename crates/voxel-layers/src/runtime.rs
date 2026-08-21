@@ -26,6 +26,12 @@ struct TopSlot {
     focus: [AtomicI32; 3],
     size: [AtomicI32; 3],
     active: AtomicBool,
+    /// The app says this dependency's FILTER would answer differently now.
+    /// A filtered dependency re-evaluates when its focus moves; one whose
+    /// filter reads state beyond the focus — a pinned box whose predicate
+    /// follows the camera — has nothing that moves, so the change has to
+    /// be announced.
+    dirty: AtomicBool,
 }
 
 impl TopSlot {
@@ -42,6 +48,7 @@ impl TopSlot {
             // first published focus throws all of it away — which for the
             // shipped planet was half of everything ever generated.
             active: AtomicBool::new(false),
+            dirty: AtomicBool::new(false),
         }
     }
 
@@ -236,6 +243,9 @@ fn run(
             top.set_size(TopSlot::load(&slot.size));
             top.set_focus(&graph, TopSlot::load(&slot.focus));
             top.set_active(slot.active.load(Ordering::Relaxed));
+            if slot.dirty.swap(false, Ordering::AcqRel) {
+                top.touch();
+            }
         }
         // One pass over all of them, not one pass each: every ensure runs
         // before any release, so a region one dependency gives up and
@@ -315,6 +325,16 @@ impl TopHandle {
         self.shared.tops[self.index]
             .active
             .store(active, Ordering::Relaxed);
+    }
+
+    /// Announce that this dependency's filter would answer differently,
+    /// even though nothing it can see has moved. The next pass re-runs the
+    /// ensure as if the focus had changed.
+    pub fn touch(&self) {
+        self.shared.tops[self.index]
+            .dirty
+            .store(true, Ordering::Release);
+        self.request();
     }
 
     /// Announce a change before making it, so a pass already running

@@ -846,6 +846,12 @@ impl TopDep {
         }
     }
 
+    /// Re-evaluate on the next pass even though nothing moved — for a
+    /// dependency whose filter reads state beyond the focus.
+    pub fn touch(&mut self) {
+        self.changed = true;
+    }
+
     pub fn size(&self) -> IVec3 {
         self.size
     }

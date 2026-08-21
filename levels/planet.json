@@ -7,7 +7,22 @@
    0
   ],
   "split_k": 2.5,
-  "merge_k": 3.0
+  "merge_k": 3.0,
+  "detail": [
+   {
+    "min": [
+     -27585.0,
+     130.0,
+     -36715.0
+    ],
+    "max": [
+     -27535.0,
+     185.0,
+     -36665.0
+    ],
+    "levels": 4
+   }
+  ]
  },
  "environment": {
   "sun_direction": [

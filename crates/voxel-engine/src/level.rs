@@ -47,6 +47,26 @@ pub struct LodDef {
     /// shipped extremes want opposite answers.
     #[serde(default)]
     pub gated_finest_first: bool,
+    /// Regions kept finer than their distance asks — for a landmark that
+    /// would otherwise alias away between a distant chunk's voxels.
+    /// Restreams: which chunks exist is exactly what it changes.
+    #[serde(default)]
+    #[reflect(@schema::Rebuilds)]
+    pub detail: Vec<DetailDef>,
+}
+
+/// A [`crate::streaming::DetailVolume`], as level data: a box whose chunks
+/// refine `levels` octree levels beyond what camera distance alone asks,
+/// fading one level per chunk edge away from it.
+///
+/// Meters, world space. Each extra level doubles the sampling rate over
+/// the box and multiplies the refined chunk count — admission control
+/// counts the real cost, but author the box no larger than the feature.
+#[derive(Reflect, Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct DetailDef {
+    pub min: [f64; 3],
+    pub max: [f64; 3],
+    pub levels: u8,
 }
 
 impl From<&LodDef> for LodConfig {
@@ -58,6 +78,17 @@ impl From<&LodDef> for LodConfig {
             split_k: d.split_k,
             merge_k: d.merge_k,
             gated_finest_first: d.gated_finest_first,
+            detail: Arc::new(d.detail.iter().map(Into::into).collect()),
+        }
+    }
+}
+
+impl From<&DetailDef> for crate::streaming::DetailVolume {
+    fn from(d: &DetailDef) -> Self {
+        Self {
+            min: bevy::math::DVec3::from_array(d.min),
+            max: bevy::math::DVec3::from_array(d.max),
+            levels: d.levels,
         }
     }
 }
@@ -1506,7 +1537,8 @@ fn changed_by(new: &LevelDef, old: &LevelDef) -> Changed {
     let world = sun_dir(new) != sun_dir(old)
         || new.lod.max_level != old.lod.max_level
         || new.lod.top_radius != old.lod.top_radius
-        || new.lod.top_y != old.lod.top_y;
+        || new.lod.top_y != old.lod.top_y
+        || new.lod.detail != old.lod.detail;
     let nodes = crate::graph::changed(&new.nodes, &old.nodes);
     let authored = new.placements != old.placements || new.prefabs != old.prefabs;
     match (world, nodes, authored) {
@@ -1615,6 +1647,8 @@ fn apply_level_change(
                 world.config.max_level = new.lod.max_level;
                 world.config.top_radius = new.lod.top_radius;
                 world.config.top_y = new.lod.top_y;
+                world.config.detail =
+                    std::sync::Arc::new(new.lod.detail.iter().map(Into::into).collect());
                 world.generator = generator.clone();
                 rebuild.0 = true;
                 info!("level reload: the world is stale — rebuilding it");
@@ -1881,6 +1915,17 @@ mod tests {
             ("lod.top_y", |l| l.lod.top_y.1 += 1, true),
             ("lod.split_k", |l| l.lod.split_k += 1.0, false),
             ("lod.merge_k", |l| l.lod.merge_k += 1.0, false),
+            (
+                "lod.detail",
+                |l| {
+                    l.lod.detail.push(DetailDef {
+                        min: [0.0; 3],
+                        max: [10.0; 3],
+                        levels: 2,
+                    });
+                },
+                true,
+            ),
             // A node that SHAPES the world, chosen deliberately: what an
             // edit to `nodes` costs is per node now, and popping whatever
             // happens to be last would make this case's answer content.

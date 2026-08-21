@@ -15,6 +15,7 @@
 //! functions are pinned to.
 
 use std::sync::atomic::Ordering;
+use std::sync::Arc;
 
 use bevy::math::DVec3;
 use bevy::prelude::*;
@@ -24,9 +25,111 @@ use voxel_render::SharedRenderStats;
 use crate::chunkgen::ChunkGenPlugin;
 
 /// Does the field want this chunk refined? The one rule everything else
-/// here is built from: a chunk splits inside `split_k` of its own edge.
+/// here is built from: a chunk splits inside `split_k` of its own edge —
+/// scaled by `2^levels` where a detail volume overlaps it, so a feature
+/// thinner than a distant voxel is sampled finely enough to survive.
+///
+/// The scale keeps the property the descent rests on: a volume touching a
+/// chunk touches its parent, so the parent's bias is at least the child's,
+/// and a split wanted at the child is always wanted at the parent too.
 fn split_wanted(config: &LodConfig, anchor: DVec3, key: ChunkKey) -> bool {
-    key.level > 0 && aabb_distance(anchor, key) < config.split_k * key.edge_m()
+    key.level > 0
+        && aabb_distance(anchor, key)
+            < config.split_k * (1u64 << detail_bias(config, key).min(32)) as f64 * key.edge_m()
+}
+
+/// A region the field refines beyond what distance alone asks for: chunks
+/// overlapping the box act up to `levels` octree levels closer than they
+/// are. The bias fades twice over, and both fades are load-bearing.
+///
+/// ACROSS SPACE it fades one level per chunk edge of distance from the
+/// box. A cliff-edge bias puts field leaves `levels` apart across one
+/// face, and closing that gap needs forced splits that cascade through
+/// other forced splits — a fixpoint the closed-form clamp cannot see
+/// (measured: it strands 2-level jumps exactly one ring out). Faded, the
+/// field never jumps more than one level across a face, which is the same
+/// contract the plain distance field gives the clamp.
+///
+/// ACROSS SCALE it is full only for chunks no larger than the volume and
+/// loses one level per level above. One less per level is the most a
+/// parent may lag its child (thresholds double per level, so the descent
+/// stays monotone), and it is also what makes the volume LOCAL: rings are
+/// a chunk's own edges, so a flat bias let a 50 m volume re-level terrain
+/// `levels` coarse edges — tens of kilometers — away (measured: +1725
+/// resident chunks, most of them a vista the author never pointed at).
+/// Capped, the total influence is bounded near `2^(levels-1)` times the
+/// volume's own extent, and so is the range: past the distance where the
+/// plain leaf outgrows `levels` above the volume's scale, the volume is
+/// inert. Refining a landmark for a farther eye is a bigger `levels`, at
+/// a cost admission control counts like everything else.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct DetailVolume {
+    pub min: DVec3,
+    pub max: DVec3,
+    /// Extra refinement levels inside the volume, at the volume's scale.
+    pub levels: u8,
+}
+
+/// The bias `volume` can give a chunk of `level` before the spatial fade:
+/// full at the level whose edge first covers the volume and below, one
+/// less per level above, zero once the chunk outscales it by `levels`.
+fn scale_cap(volume: &DetailVolume, level: u8) -> u8 {
+    let extent = (volume.max - volume.min).max_element();
+    let mut fit = 0u8;
+    while ChunkKey::new(fit, IVec3::ZERO).edge_m() < extent && fit < 32 {
+        fit += 1;
+    }
+    volume.levels.saturating_sub(level.saturating_sub(fit))
+}
+
+/// How far, in Chebyshev meters, a volume's refinement can put a leaf of
+/// `level` from the volume's box — zero when it cannot put one there at
+/// all, which is what lets a dependency skip the level entirely. A leaf
+/// of level L is extra only if its PARENT carried bias, so it sits within
+/// the parent's fade reach — its scale-capped bias in parent edges — plus
+/// the parent's own edge and a ring of clamp grading. The volume-anchored
+/// dependency boxes are sized from this, and
+/// `a_volume_refines_at_distance_and_only_nearby` pins it — a leaf outside
+/// the reach is a chunk residency would silently clip.
+pub fn detail_reach_m(volume: &DetailVolume, level: u8) -> f64 {
+    let parent = scale_cap(volume, level + 1);
+    if parent == 0 {
+        return 0.0;
+    }
+    (2.0 * f64::from(parent) + 4.0) * ChunkKey::new(level, IVec3::ZERO).edge_m()
+}
+
+/// The largest faded bias of any volume near this chunk's box; zero almost
+/// everywhere, so the common case is one empty-slice check.
+///
+/// Distance is Chebyshev — the clamp's neighborhoods are 26-connected, so
+/// a touching pair of chunks is within one edge on EVERY axis, which is
+/// what bounds the bias step across any touching pair to one level.
+///
+/// Monotone up the tree, which the descent relies on: a parent's box is
+/// closer to the volume than its child's and its edge is twice as long, so
+/// its ring gap is no larger and its bias no smaller.
+fn detail_bias(config: &LodConfig, key: ChunkKey) -> u8 {
+    if config.detail.is_empty() {
+        return 0;
+    }
+    let min = key.min_corner_m();
+    let max = min + DVec3::splat(key.edge_m());
+    let edge = key.edge_m();
+    config
+        .detail
+        .iter()
+        .map(|v| {
+            let cap = scale_cap(v, key.level);
+            if cap == 0 {
+                return 0;
+            }
+            let gap = (v.min - max).max(min - v.max).max(DVec3::ZERO);
+            let rings = (gap.max_element() / edge).ceil() as u64;
+            u64::from(cap).saturating_sub(rings) as u8
+        })
+        .max()
+        .unwrap_or(0)
 }
 
 /// LOD configuration.
@@ -67,6 +170,10 @@ pub struct LodConfig {
     /// and are what the pipeline should chew on while the planners run.
     pub gated_finest_first: bool,
     pub merge_k: f64,
+    /// Regions refined beyond what distance alone asks for. Level data,
+    /// shared rather than copied because the config is cloned per world
+    /// and per admission-control probe.
+    pub detail: Arc<Vec<DetailVolume>>,
 }
 
 impl Default for LodConfig {
@@ -79,6 +186,7 @@ impl Default for LodConfig {
             split_k: 2.5,
             merge_k: 3.0,
             gated_finest_first: false,
+            detail: Arc::new(Vec::new()),
         }
     }
 }
@@ -615,6 +723,12 @@ fn uniform_sign(
 /// a hole that only appears at some camera positions. Too large costs
 /// predicate evaluations here and residency in every consumer that sizes
 /// itself from this.
+///
+/// Detail volumes are deliberately NOT in this bound: their refined sets
+/// are covered by pinned per-volume dependencies sized from
+/// [`detail_reach_m`], on the LOD side and in every planning consumer.
+/// Folding them in here would grow every camera-following box by
+/// `2^levels` per axis instead.
 pub fn resident_reach(config: &LodConfig, level: u8) -> f64 {
     const SQRT_3: f64 = 1.732_050_807_568_877_2;
     let edge = ChunkKey::new(level, IVec3::ZERO).edge_m();
@@ -811,7 +925,7 @@ mod residency_shape {
             top_y: (-1, 0),
             split_k: 2.5,
             merge_k: 3.0,
-            gated_finest_first: false,
+            ..Default::default()
         }
     }
 
@@ -822,7 +936,7 @@ mod residency_shape {
             top_y: (-3, 3),
             split_k: 1.6,
             merge_k: 2.1,
-            gated_finest_first: false,
+            ..Default::default()
         }
     }
 
@@ -1159,6 +1273,198 @@ mod residency_shape {
                 assert_consistent(&config, &leaves, &masks);
             }
         }
+    }
+
+    /// A configuration with a detail volume 1.5 km from the anchor —
+    /// far enough that distance alone leaves its chunks coarse. `levels`
+    /// must out-run the scale cap to matter from there: an 80 m volume
+    /// fits level 5, the plain leaf at 1.5 km is level 7, so anything
+    /// under 3 is inert at this range by design.
+    fn biased() -> (LodConfig, DetailVolume) {
+        let volume = DetailVolume {
+            min: DVec3::new(-26040.0, 60.0, -36810.0),
+            max: DVec3::new(-25960.0, 140.0, -36730.0),
+            levels: 4,
+        };
+        let mut config = planet();
+        config.detail = std::sync::Arc::new(vec![volume]);
+        (config, volume)
+    }
+
+    fn clamped_leaves(config: &LodConfig, anchor: DVec3) -> HashSet<ChunkKey> {
+        fn descend(config: &LodConfig, anchor: DVec3, k: ChunkKey, out: &mut HashSet<ChunkKey>) {
+            if split_clamped(config, anchor, k) {
+                for c in k.children() {
+                    descend(config, anchor, c, out);
+                }
+            } else {
+                out.insert(k);
+            }
+        }
+        let mut leaves = HashSet::new();
+        for top in top_ring(config, anchor) {
+            descend(config, anchor, top, &mut leaves);
+        }
+        leaves
+    }
+
+    /// With a volume, the field's face-adjacent leaves can differ by MORE
+    /// than the two levels a plain field allows at corners, so the clamp
+    /// has to close multi-level gaps it never used to see. The fixpoint is
+    /// the independent definition of "closed": the closed form must still
+    /// reproduce it exactly.
+    #[test]
+    fn the_closed_form_clamp_reproduces_the_fixpoint_with_detail() {
+        let (config, _) = biased();
+        let anchor = DVec3::new(-27570.0, 80.0, -36770.0);
+        let expect = converged_leaves(&config, anchor);
+        let got = clamped_leaves(&config, anchor);
+        let extra: Vec<&ChunkKey> = got.difference(&expect).take(3).collect();
+        let short: Vec<&ChunkKey> = expect.difference(&got).take(3).collect();
+        assert_eq!(
+            got, expect,
+            "detail: closed form disagrees with fixpoint — extra {extra:?}, missing {short:?}",
+        );
+    }
+
+    /// The biased configuration passes every crack-freedom assertion the
+    /// epoch machine made of a shown set, masks included.
+    #[test]
+    fn detail_volumes_stay_crack_free() {
+        let (config, _) = biased();
+        let anchor = DVec3::new(-27570.0, 80.0, -36770.0);
+        let leaves = clamped_leaves(&config, anchor);
+        let masks: HashMap<ChunkKey, u32> = leaves
+            .iter()
+            .map(|k| (*k, seam_mask_at(&config, anchor, *k)))
+            .collect();
+        assert_consistent(&config, &leaves, &masks);
+    }
+
+    /// What a volume buys and what it costs: the leaf over the volume is
+    /// `levels` finer than distance alone gives, and every leaf the volume
+    /// adds sits within [`detail_reach_m`] of the volume's box at its own
+    /// scale — the bound the volume-anchored dependency boxes are sized
+    /// from. A leaf outside that reach is refinement leaking to chunks the
+    /// volume does not touch.
+    #[test]
+    fn a_volume_refines_at_distance_and_only_nearby() {
+        let (config, volume) = biased();
+        let plain = planet();
+        let anchor = DVec3::new(-27570.0, 80.0, -36770.0);
+        let center = (volume.min + volume.max) * 0.5;
+        let leaf_covering = |config: &LodConfig, p: DVec3| -> ChunkKey {
+            let mut k = ChunkKey::containing(p, config.max_level);
+            while split_clamped(config, anchor, k) {
+                k = *k
+                    .children()
+                    .iter()
+                    .find(|c| ChunkKey::containing(p, c.level) == **c)
+                    .unwrap();
+            }
+            k
+        };
+        let with = leaf_covering(&config, center);
+        let without = leaf_covering(&plain, center);
+        assert_eq!(
+            u32::from(with.level) + u32::from(volume.levels),
+            u32::from(without.level),
+            "volume did not buy exactly {} levels: {with:?} vs {without:?}",
+            volume.levels,
+        );
+        let biased_leaves = clamped_leaves(&config, anchor);
+        let plain_leaves = clamped_leaves(&plain, anchor);
+        for leaf in biased_leaves.difference(&plain_leaves) {
+            let min = leaf.min_corner_m();
+            let max = min + DVec3::splat(leaf.edge_m());
+            let gap = (volume.min - max).max(min - volume.max).max(DVec3::ZERO);
+            assert!(
+                gap.max_element() <= detail_reach_m(&volume, leaf.level),
+                "leaf {leaf:?} refined {:.0} m from the volume",
+                gap.max_element(),
+            );
+        }
+        let extra = biased_leaves.len() - plain_leaves.len();
+        assert!(
+            extra > 0 && extra < 2000,
+            "one small volume changed residency by {extra} leaves"
+        );
+    }
+
+    /// Every leaf the clamped field wants sits inside some dependency's
+    /// box, under the EXACT runtime geometry: camera boxes from
+    /// [`level_span`] centred on the truncated anchor, volume boxes from
+    /// [`detail_reach_m`] centred on the truncated volume centre, both
+    /// rounded to chunk indices the way `chunk_range` rounds. An
+    /// uncovered leaf is a chunk residency silently clips — a hole that
+    /// only appears at some camera positions. Shipped-planet scale on
+    /// purpose: the fixpoint tests run at `max_level` 11, and a clipped
+    /// corner three levels up would never show there.
+    #[test]
+    fn every_wanted_leaf_is_inside_a_dependency_box() {
+        let volume = DetailVolume {
+            min: DVec3::new(-27585.0, 130.0, -36715.0),
+            max: DVec3::new(-27535.0, 185.0, -36665.0),
+            levels: 4,
+        };
+        let config = LodConfig {
+            max_level: 14,
+            top_radius: 3,
+            top_y: (-1, 0),
+            detail: std::sync::Arc::new(vec![volume]),
+            ..Default::default()
+        };
+        let camera = DVec3::new(-26100.0, 180.0, -36700.0);
+        let anchor = camera.as_ivec3().as_dvec3();
+        // Inclusive chunk-index range of a focus-centred box, exactly as
+        // `TopDep::bounds` + `chunk_range` compute it.
+        let indices = |focus: IVec3, size: IVec3, edge: f64| -> (IVec3, IVec3) {
+            let size = size.max(IVec3::ONE);
+            let min = focus - size / 2;
+            let max = min + size;
+            let axis = |lo: i32, hi: i32| {
+                (
+                    (f64::from(lo) / edge).floor() as i32,
+                    (f64::from(hi) / edge).ceil() as i32 - 1,
+                )
+            };
+            let (x0, x1) = axis(min.x, max.x);
+            let (y0, y1) = axis(min.y, max.y);
+            let (z0, z1) = axis(min.z, max.z);
+            (IVec3::new(x0, y0, z0), IVec3::new(x1, y1, z1))
+        };
+        let contains =
+            |(lo, hi): (IVec3, IVec3), pos: IVec3| lo.cmple(pos).all() && pos.cmple(hi).all();
+        let holes: Vec<ChunkKey> = clamped_leaves(&config, anchor)
+            .into_iter()
+            .filter(|key| {
+                let edge = key.edge_m();
+                if contains(
+                    indices(camera.as_ivec3(), level_span(&config, key.level), edge),
+                    key.pos,
+                ) {
+                    return false;
+                }
+                if key.level >= config.max_level {
+                    return true; // the ring box must have covered it
+                }
+                let reach = 2.0 * detail_reach_m(&volume, key.level);
+                if reach == 0.0 {
+                    return true;
+                }
+                let span = ((volume.max - volume.min) + DVec3::splat(reach))
+                    .ceil()
+                    .as_ivec3();
+                let center = ((volume.min + volume.max) * 0.5).as_ivec3();
+                !contains(indices(center, span, edge), key.pos)
+            })
+            .collect();
+        assert!(
+            holes.is_empty(),
+            "{} leaves outside every dependency box, e.g. {:?}",
+            holes.len(),
+            &holes[..holes.len().min(5)],
+        );
     }
 
     /// Residency under the clamped predicate covers every chunk the epoch

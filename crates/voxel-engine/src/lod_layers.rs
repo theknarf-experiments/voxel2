@@ -39,8 +39,8 @@ use voxel_layers::{ChunkCtx, CoordFilter, Layer, LayerChunk, LayerGraph, LayerRu
 
 use crate::chunkgen::ChunkGen;
 use crate::streaming::{
-    can_hold_surface, level_span, resident_clamped, seam_mask_at, LodConfig, StreamProbe,
-    StreamingRebuild,
+    can_hold_surface, detail_reach_m, level_span, resident_clamped, seam_mask_at, LodConfig,
+    StreamProbe, StreamingRebuild,
 };
 
 /// How long a `create` waits for its chunk to become drawable before
@@ -275,6 +275,13 @@ pub struct WorldLod {
     /// Sticky anchor: the field is only re-centred when the camera has
     /// moved this far. The quantization IS the hysteresis.
     published: Option<DVec3>,
+    /// How many leading top dependencies follow the camera; the rest are
+    /// pinned on detail volumes.
+    camera_tops: usize,
+    /// The pinned dependencies' focuses. Their boxes never move — only
+    /// their FILTER's answer does, so a re-centred anchor touches them
+    /// instead of moving them.
+    volume_tops: Vec<IVec3>,
 }
 
 /// Every world the engine is streaming.
@@ -415,6 +422,13 @@ impl WorldLod {
         // contended, which is why filling it works where overlapping the
         // rest of the pass does not.
         let mut gated: Vec<TopDep> = Vec::new();
+        // Volume-anchored dependencies, appended after every camera
+        // dependency: a detail volume keeps chunks resident far outside
+        // the camera-following boxes, and growing those to cover it would
+        // multiply their coordinate count by 8 per bias level. The
+        // volume's own box is small and static; only the filter's answer
+        // moves with the camera, which is what `touch` re-asks for.
+        let mut volumes: Vec<(TopDep, IVec3)> = Vec::new();
         for level in (0..=config.max_level).rev() {
             graph.register_as(
                 &instance(level),
@@ -438,7 +452,24 @@ impl WorldLod {
                 (key.edge_m() as f32) <= crate::planning::OPS_HORIZON_EDGE_M
                     || can_hold_surface(&at.generator, key)
             });
-            let dep = TopDep::new(&instance(level), level_span(&config, level)).with_filter(filter);
+            let dep = TopDep::new(&instance(level), level_span(&config, level))
+                .with_filter(filter.clone());
+            if level < config.max_level {
+                // The top ring is the world's own extent; a volume adds
+                // nothing there. Zero reach is a level the volume cannot
+                // refine at all — the scale cap makes that most of them.
+                for v in config.detail.iter() {
+                    let reach = 2.0 * detail_reach_m(v, level);
+                    if reach == 0.0 {
+                        continue;
+                    }
+                    let span = ((v.max - v.min) + DVec3::splat(reach)).ceil().as_ivec3();
+                    volumes.push((
+                        TopDep::new(&instance(level), span).with_filter(filter.clone()),
+                        ((v.min + v.max) * 0.5).as_ivec3(),
+                    ));
+                }
+            }
             if (ChunkKey::in_world(world, level, IVec3::ZERO).edge_m() as f32)
                 <= crate::planning::OPS_HORIZON_EDGE_M
             {
@@ -453,6 +484,9 @@ impl WorldLod {
             gated.reverse();
         }
         tops.extend(gated);
+        let camera_tops = tops.len();
+        let volume_tops: Vec<IVec3> = volumes.iter().map(|(_, center)| *center).collect();
+        tops.extend(volumes.into_iter().map(|(dep, _)| dep));
         // `before` freezes the focus this pass works from. `between` runs
         // after every ensure and before any release — the only moment when
         // the new configuration is resident and the old one is still there
@@ -483,6 +517,8 @@ impl WorldLod {
             runtime,
             shared,
             published: None,
+            camera_tops,
+            volume_tops,
         }
     }
 
@@ -505,8 +541,15 @@ impl WorldLod {
         // Published, not applied: the next pass snapshots it at its head,
         // and everything that pass does works from that one value.
         self.shared.requested.store(camera.as_ivec3());
-        for i in 0..self.runtime.tops() {
+        for i in 0..self.camera_tops {
             self.runtime.top(i).set_focus(camera.as_ivec3());
+        }
+        for (i, center) in self.volume_tops.iter().enumerate() {
+            let top = self.runtime.top(self.camera_tops + i);
+            // The first call activates the pinned dependency; after that
+            // it is a no-op, and `touch` is what carries the anchor move.
+            top.set_focus(*center);
+            top.touch();
         }
     }
 

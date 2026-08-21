@@ -660,6 +660,35 @@ impl RegionPlanner {
             }
             deps.push(TopDep::new(&e.name, size));
         }
+        // A detail volume keeps fine chunks resident far outside the
+        // camera-sized boxes above, and each of those chunks still asks
+        // every emitter its edge's gate admits for ops — planning that the
+        // camera boxes were never sized to hold. One pinned dependency per
+        // (emitter, volume), sized like the camera one but reaching from
+        // the volume instead of the anchor; no anchor slop, because the
+        // refined set's bound is a property of the volume, not the camera.
+        let mut pinned: Vec<(TopDep, bevy::math::IVec3)> = Vec::new();
+        for e in &emitters {
+            let leaf = largest_leaf_level(e.gate.unwrap_or(OPS_HORIZON_EDGE_M));
+            let edge = voxel_core::ChunkKey::new(leaf, bevy::math::IVec3::ZERO).edge_m() as f32;
+            for v in lod.detail.iter() {
+                // The widest reach of any level this emitter's gate
+                // admits: the finest levels have the fullest bias but the
+                // smallest edges, so neither end can be assumed.
+                let widest = (0..=leaf)
+                    .map(|l| voxel_engine::streaming::detail_reach_m(v, l))
+                    .fold(0.0, f64::max) as f32;
+                if widest == 0.0 {
+                    continue;
+                }
+                let reach = widest + edge + edge / 8.0 + layers::ELEM_PAD_M;
+                let size = (v.max - v.min).as_vec3() + Vec3::splat(2.0 * reach);
+                pinned.push((
+                    TopDep::new(&e.name, size.ceil().as_ivec3()),
+                    ((v.min + v.max) * 0.5).as_ivec3(),
+                ));
+            }
+        }
         // Presentation layers: this game's own, sitting on the emit
         // layers and turning what they plan into something it can draw.
         // Only LEVELLED ribbons become geometry. A seated ribbon is
@@ -695,8 +724,17 @@ impl RegionPlanner {
         deps.extend(scatter_tops);
         *ctx.populations.lock().unwrap() = Some(populations);
 
+        // Camera-following handles only: `set_focus` must not drag a
+        // pinned box to the camera. The pinned ones get their one focus —
+        // which also activates them — right here, and are never moved.
+        let camera_tops = deps.len();
+        let pinned_focus: Vec<bevy::math::IVec3> = pinned.iter().map(|(_, c)| *c).collect();
+        deps.extend(pinned.into_iter().map(|(dep, _)| dep));
         let runtime = Arc::new(LayerRuntime::start(Arc::new(graph), deps));
-        let tops = (0..runtime.tops()).map(|i| runtime.top(i)).collect();
+        for (i, center) in pinned_focus.iter().enumerate() {
+            runtime.top(camera_tops + i).set_focus(*center);
+        }
+        let tops = (0..camera_tops).map(|i| runtime.top(i)).collect();
         Some(Self {
             graph: Some(runtime),
             ctx: Some(ctx),

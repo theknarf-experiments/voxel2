@@ -123,6 +123,15 @@ architecture. Design plan: `~/.claude/plans/binary-twirling-brooks.md`.
   budgets.
 - Layer determinism: all randomness from `chunk_seed`; reads only within
   declared padded bounds (asserted, with the needed padding in the message).
+- **Detail volumes refine beyond distance, and their coverage is pinned
+  deps, not bigger boxes.** `lod.detail` biases the split rule; the bias
+  fades across space AND scale (both fades load-bearing — see
+  `DetailVolume`). Anything that covers residency near a volume — the
+  LOD side's pinned per-level deps and the demo's pinned planning deps —
+  sizes from `detail_reach_m`, never from `resident_reach`, which
+  deliberately excludes volumes. A consumer sized without it silently
+  clips the refined island, a hole that shows only from some camera
+  positions.
 - Planning generation is **dependency-driven**: consumers `ensure_loaded`
   the region they are about to query (the LOD planner does this per epoch,
   plus a streamer-radius pass), then read. `voxctl status` →
