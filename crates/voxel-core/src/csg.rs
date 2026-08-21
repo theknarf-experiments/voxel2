@@ -311,6 +311,111 @@ pub fn prune_dominated(ops: &[CsgOp], min: Vec3, max: Vec3) -> Vec<u32> {
     keep
 }
 
+/// Cells per axis a chunk's ops are indexed by.
+///
+/// MEASURED, on 200 limbs in a 12.8 m chunk — a forest chunk's real
+/// load — as ops kept per sample: 4 -> 36% (2.8x), 8 -> 14% (7.2x).
+/// Cell size is the whole lever, because what survives is whatever
+/// reaches within the terrain's own spread across the cell; halving the
+/// cell halves that reach.
+///
+/// 8 is not free: it is 512 interval evaluations per chunk instead of
+/// 64, and the index it writes is larger than the ops it indexes
+/// (~57 KB against 9.6 KB for a chunk this dense). Both land on a
+/// worker thread and a once-per-generation upload, against a saving
+/// paid back on every one of a chunk's ~55k density samples, which is
+/// why the lopsided trade is worth making twice.
+pub const CSG_CELLS: usize = 8;
+
+/// Fewer ops than this and the index is not built. Walking eight ops is
+/// cheaper than the indirection to find out you have to walk six.
+const INDEX_FROM: usize = 24;
+
+/// One chunk's ops, and a per-cell index into them.
+///
+/// `cells` is `[table][runs]`: `2 · CSG_CELLS³` u32 of `(offset, count)`
+/// addressed by cell, followed by the index runs they point at, all
+/// indices being into `ops`. Empty means "no index" — the reader walks
+/// every op, which is what a chunk with a handful of them should do.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ChunkOps {
+    pub ops: Vec<CsgOp>,
+    pub cells: Vec<u32>,
+}
+
+impl ChunkOps {
+    /// Index `ops` over `min..max`, pruning each cell against the field
+    /// the chain starts from.
+    ///
+    /// `terrain` bounds the generator over a box, or returns `None` where
+    /// it cannot — an unbounded answer keeps every op for that cell,
+    /// which is the safe direction. This is the whole reason indexing
+    /// lives on the engine side: without that bound only domination is
+    /// provable, and domination alone measured 2x where this measures
+    /// far better.
+    ///
+    /// `apron` widens every cell by what the density pass can sample
+    /// outside it. Understate it and a sample reads a list that was
+    /// pruned for somewhere it is not.
+    pub fn build(
+        ops: Vec<CsgOp>,
+        min: Vec3,
+        max: Vec3,
+        apron: f32,
+        terrain: impl Fn(Vec3, Vec3) -> Option<Interval>,
+    ) -> Self {
+        if ops.len() < INDEX_FROM {
+            return Self {
+                ops,
+                cells: Vec::new(),
+            };
+        }
+        const N: usize = CSG_CELLS;
+        let table_len = 2 * N * N * N;
+        let mut cells = vec![0u32; table_len];
+        let step = (max - min) / N as f32;
+        for z in 0..N {
+            for y in 0..N {
+                for x in 0..N {
+                    let c = Vec3::new(x as f32, y as f32, z as f32);
+                    let lo = min + step * c - Vec3::splat(apron);
+                    let hi = min + step * (c + Vec3::ONE) + Vec3::splat(apron);
+                    // No bound on the terrain means no bound on what the
+                    // chain starts from, so nothing is provably dead.
+                    let keep = match terrain(lo, hi) {
+                        Some(start) => prune_chain(&ops, start, lo, hi),
+                        None => (0..ops.len() as u32).collect(),
+                    };
+                    let cell = x + y * N + z * N * N;
+                    cells[cell * 2] = cells.len() as u32;
+                    cells[cell * 2 + 1] = keep.len() as u32;
+                    cells.extend_from_slice(&keep);
+                }
+            }
+        }
+        Self { ops, cells }
+    }
+
+    /// The ops a point in this chunk actually needs, as indices. `rel` is
+    /// the point's position in `0..1` across the chunk; out-of-range
+    /// clamps, which is what makes the apron sound — a sample in the
+    /// apron reads the border cell, and that cell was pruned with the
+    /// apron included.
+    pub fn cell_run(&self, rel: Vec3) -> (usize, usize) {
+        if self.cells.is_empty() {
+            return (0, self.ops.len());
+        }
+        let n = CSG_CELLS as f32;
+        let i = (rel * n).floor();
+        let idx = |v: f32| (v as isize).clamp(0, CSG_CELLS as isize - 1) as usize;
+        let cell = idx(i.x) + idx(i.y) * CSG_CELLS + idx(i.z) * CSG_CELLS * CSG_CELLS;
+        (
+            self.cells[cell * 2] as usize,
+            self.cells[cell * 2 + 1] as usize,
+        )
+    }
+}
+
 /// An axis-aligned box in world meters.
 ///
 /// One name for a question asked all over: does this thing reach that
@@ -375,7 +480,7 @@ mod tests {
     #[test]
     fn a_pruned_chain_answers_what_the_full_chain_answers() {
         use crate::seed::Rng;
-        let mut rng = Rng::new(0xC5_6A);
+        let mut rng = Rng::new(0x0000_C56A);
         let mut total_kept = 0usize;
         let mut total_ops = 0usize;
         for case in 0..200 {
@@ -449,7 +554,7 @@ mod tests {
     #[test]
     fn domination_pruning_holds_for_any_terrain() {
         use crate::seed::Rng;
-        let mut rng = Rng::new(0xD0_11);
+        let mut rng = Rng::new(0x0000_D011);
         let (mut kept, mut total) = (0usize, 0usize);
         for _ in 0..150 {
             let mut f = || rng.next_f32();
@@ -500,6 +605,77 @@ mod tests {
         }
         assert!(kept * 2 < total, "kept {kept} of {total} — not pruning");
         println!("domination kept {kept} of {total}");
+    }
+
+    /// The index a chunk hands the GPU has to answer what the flat op
+    /// list answers, at every point of the chunk INCLUDING the apron —
+    /// which is the part a per-cell scheme gets wrong, because a sample
+    /// in the apron is outside the cell grid entirely.
+    #[test]
+    fn a_cell_index_answers_what_the_flat_list_answers() {
+        use crate::seed::Rng;
+        let mut rng = Rng::new(0x0000_DE11);
+        let (mut kept, mut total) = (0usize, 0usize);
+        for _ in 0..40 {
+            let mut f = || rng.next_f32();
+            // A chunk-sized box with a forest's worth of limbs in it.
+            let min = Vec3::new(f() * 100.0, f() * 20.0, f() * 100.0);
+            let edge = 12.8;
+            let max = min + Vec3::splat(edge);
+            let apron = 0.4;
+            // Twenty trees of ten limbs, not a uniform scatter: limbs
+            // cluster into trunks and trunks stand apart, which is the
+            // structure the pruning exploits and the one it will meet.
+            let trunks: Vec<Vec3> = (0..20)
+                .map(|_| min + Vec3::new(f() * edge, f() * edge * 0.4, f() * edge))
+                .collect();
+            let ops: Vec<CsgOp> = (0..200)
+                .map(|i| {
+                    let t = trunks[i % trunks.len()];
+                    let c = t + Vec3::new(f() * 1.2 - 0.6, f() * 2.4, f() * 1.2 - 0.6);
+                    CsgOp::capsule(
+                        c,
+                        c + Vec3::new(f() * 1.6 - 0.8, f() * 1.6, f() * 1.6 - 0.8),
+                        0.05 + f() * 0.25,
+                        0.05 + f() * 0.25,
+                        3,
+                        false,
+                    )
+                })
+                .collect();
+            // A sloped plane as the terrain, bounded exactly.
+            let plane = min.y + edge * 0.5;
+            let terrain = |lo: Vec3, hi: Vec3| Some(Interval::new(lo.y - plane, hi.y - plane));
+            let indexed = ChunkOps::build(ops.clone(), min, max, apron, terrain);
+            let ncells = CSG_CELLS * CSG_CELLS * CSG_CELLS;
+            kept += indexed.cells.len().saturating_sub(2 * ncells);
+            total += ops.len() * ncells;
+
+            for _ in 0..300 {
+                // Sample the apron too: `-apron .. edge + apron`.
+                let p = min + Vec3::new(f(), f(), f()) * (edge + 2.0 * apron) - Vec3::splat(apron);
+                let d0 = p.y - plane;
+                let full = ops.iter().fold(d0, |d, op| op.apply(d, p));
+                let rel = (p - min) / edge;
+                let (off, count) = indexed.cell_run(rel);
+                let via = if indexed.cells.is_empty() {
+                    ops.iter().fold(d0, |d, op| op.apply(d, p))
+                } else {
+                    (0..count).fold(d0, |d, i| {
+                        indexed.ops[indexed.cells[off + i] as usize].apply(d, p)
+                    })
+                };
+                assert!(
+                    (full - via).abs() < 1.0e-4,
+                    "cell index disagrees at {p:?} (rel {rel:?}): {full} vs {via}"
+                );
+            }
+        }
+        println!("cell index kept {kept} of {total}");
+        // A floor, not the measured number: what it prunes depends on
+        // how clustered the scene is, and encoding one scene's ratio
+        // here would just be a number to update.
+        assert!(kept * 4 < total, "kept {kept} of {total} — not pruning");
     }
 
     /// A capsule is the one kind that points anywhere, so the thing to
