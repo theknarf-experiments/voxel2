@@ -270,6 +270,47 @@ pub fn prune_chain(ops: &[CsgOp], start: Interval, min: Vec3, max: Vec3) -> Vec<
         .collect()
 }
 
+/// Prune a chain without knowing what it starts from.
+///
+/// [`prune_chain`] needs a bound on the incoming distance — the
+/// generator's own field — and only the side that owns the generator has
+/// one. The renderer does not, and plumbing terrain intervals down to it
+/// would be three layers of new payload.
+///
+/// DOMINATION needs no such bound. If one add is always nearer than
+/// another over this box, the farther one cannot change `min` whatever
+/// else is in the chain, terrain included. That is the case that matters:
+/// a cell inside one tree is dominated by that tree's own limbs, and
+/// every other tree in the chunk falls out.
+///
+/// What it deliberately cannot do, and why:
+/// - No `Replaces`. Deciding an op overrides everything before it would
+///   override the TERRAIN, which is exactly the thing not known here.
+/// - Cuts are always kept. A cut is irrelevant when the terrain is
+///   already further out than it reaches, and how deep the terrain sits
+///   is the unknown. Cheap to keep: limbs are adds.
+pub fn prune_dominated(ops: &[CsgOp], min: Vec3, max: Vec3) -> Vec<u32> {
+    // The running minimum over ADDS ONLY. It over-estimates the true
+    // distance (the terrain can only pull it down), and over-estimating
+    // is the safe direction for a skip test: `od.lo > d.hi` still
+    // implies `od.lo` is above the true distance.
+    let mut d = Interval::point(f32::MAX);
+    let mut keep = Vec::with_capacity(ops.len());
+    for (i, op) in ops.iter().enumerate() {
+        if op.kind & 1 != 0 {
+            keep.push(i as u32);
+            continue;
+        }
+        let od = op.sdf_range(min, max);
+        if od.lo > d.hi {
+            continue; // another add is always nearer
+        }
+        d = d.min(od);
+        keep.push(i as u32);
+    }
+    keep
+}
+
 /// An axis-aligned box in world meters.
 ///
 /// One name for a question asked all over: does this thing reach that
@@ -398,6 +439,67 @@ mod tests {
             "pruning kept {total_kept} of {total_ops} — not pruning"
         );
         println!("pruned to {total_kept} of {total_ops}");
+    }
+
+    /// `prune_dominated` claims to be right for ANY terrain, since it is
+    /// used where the terrain is not known — so it is checked against
+    /// several, including ones that put the surface far above and far
+    /// below the ops. A pruning that only works for the terrain you
+    /// happened to test with is a hole that appears in one biome.
+    #[test]
+    fn domination_pruning_holds_for_any_terrain() {
+        use crate::seed::Rng;
+        let mut rng = Rng::new(0xD0_11);
+        let (mut kept, mut total) = (0usize, 0usize);
+        for _ in 0..150 {
+            let mut f = || rng.next_f32();
+            // Clustered, like limbs of a few trees: domination only has
+            // anything to prune when some ops are much nearer than others.
+            // Eight "trees" of ten limbs, spread over a chunk-sized area
+            // — the shape the pruning exists for.
+            let ops: Vec<CsgOp> = (0..80)
+                .map(|i| {
+                    let t = (i / 10) as f32;
+                    let cluster = Vec3::new(t * 9.0, (t * 1.7) % 4.0, ((t * 5.0) % 11.0) * 1.1);
+                    let c = cluster + Vec3::new(f() * 4.0, f() * 4.0, f() * 4.0);
+                    if i % 7 == 6 {
+                        CsgOp::sphere(c, 0.3 + f(), 1, true)
+                    } else {
+                        CsgOp::capsule(
+                            c,
+                            c + Vec3::new(f() * 2.0 - 1.0, f() * 2.0, f() * 2.0 - 1.0),
+                            0.1 + f() * 0.3,
+                            0.1 + f() * 0.3,
+                            1,
+                            false,
+                        )
+                    }
+                })
+                .collect();
+            // A sub-cell, not a whole chunk: this is what the shader
+            // will look ops up per, so it is what must prune well.
+            let lo = Vec3::new(f() * 70.0, f() * 6.0, f() * 12.0);
+            let hi = lo + Vec3::splat(0.4 + f() * 1.2);
+            let idx = prune_dominated(&ops, lo, hi);
+            kept += idx.len();
+            total += ops.len();
+
+            for _ in 0..25 {
+                let p = lo + (hi - lo) * Vec3::new(f(), f(), f());
+                // Every terrain from "far above everything" to "solid
+                // rock", including exactly grazing.
+                for d0 in [-1000.0, -5.0, -0.001, 0.0, 0.001, 5.0, 1000.0, f32::MAX] {
+                    let full = ops.iter().fold(d0, |d, op| op.apply(d, p));
+                    let pruned = idx.iter().fold(d0, |d, i| ops[*i as usize].apply(d, p));
+                    assert!(
+                        (full - pruned).abs() < 1.0e-4,
+                        "terrain {d0}: {full} vs {pruned} at {p:?}"
+                    );
+                }
+            }
+        }
+        assert!(kept * 2 < total, "kept {kept} of {total} — not pruning");
+        println!("domination kept {kept} of {total}");
     }
 
     /// A capsule is the one kind that points anywhere, so the thing to
