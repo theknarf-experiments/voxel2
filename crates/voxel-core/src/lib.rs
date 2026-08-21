@@ -3,6 +3,7 @@
 //!
 //! This crate deliberately has no Bevy dependency.
 
+pub mod branch;
 pub mod csg;
 pub mod interval;
 pub mod key;

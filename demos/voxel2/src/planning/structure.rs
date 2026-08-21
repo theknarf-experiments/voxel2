@@ -32,9 +32,29 @@ pub enum Extent {
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Shape {
-    Boxy { half: [Extent; 3] },
-    Cylinder { radius: Range, half_height: Range },
-    Sphere { radius: Range },
+    Boxy {
+        half: [Extent; 3],
+    },
+    Cylinder {
+        radius: Range,
+        half_height: Range,
+    },
+    Sphere {
+        radius: Range,
+    },
+    /// A grown skeleton, emitted as one capsule per limb. See
+    /// [`crate::planning::schema::ShapeDef::Branches`].
+    Branches {
+        trunk: Range,
+        crown: [f32; 3],
+        conical: bool,
+        inverted: bool,
+        spacing: f32,
+        step: f32,
+        tip_r: f32,
+        droop: f32,
+        max_limbs: u32,
+    },
 }
 
 /// Where a part's vertical anchor comes from.
@@ -158,6 +178,10 @@ impl Structure {
                         })
                         .fold(0.0f32, f32::max),
                     Shape::Cylinder { radius, .. } | Shape::Sphere { radius } => radius[1],
+                    // A crown reaches its own half-extent plus whatever
+                    // the wobble adds; the growth cannot leave the cloud
+                    // by more than a step.
+                    Shape::Branches { crown, step, .. } => crown[0].max(crown[2]) + step + 1.0,
                 };
                 let link = part.link.map_or(0.0, |l| l.half_w.max(l.half_h));
                 // Yawed boxes reach their diagonal.
@@ -359,7 +383,7 @@ fn emit_part(
         if rng.next_f32() < part.skip {
             continue;
         }
-        push_shape(part, center, half, yaw, out);
+        push_shape(part, center, half, yaw, rng, out);
     }
     if let Some(link) = part.link {
         for pair in placed.windows(2) {
@@ -384,6 +408,11 @@ fn shape_at(part: &Part, instance: &Instance, seat: f32, rng: &mut Rng) -> (Vec3
             Vec3::new(r, sample(rng, *half_height), r)
         }
         Shape::Sphere { radius } => Vec3::splat(sample(rng, *radius)),
+        // The crown's box. Growth reaches it from the seat, so the
+        // "half height" a seat/anchor needs is the trunk plus the crown.
+        Shape::Branches { trunk, crown, .. } => {
+            Vec3::new(crown[0], sample(rng, *trunk) + crown[1], crown[2])
+        }
     };
     let base = seat + instance.pos.y + sample(rng, part.y_offset);
     let y = match part.anchor {
@@ -400,7 +429,78 @@ fn extent(extent: Extent, instance: &Instance, rng: &mut Rng) -> f32 {
     }
 }
 
-fn push_shape(part: &Part, center: Vec3, half: Vec3, yaw: f32, out: &mut Vec<CsgOp>) {
+/// Grow a skeleton for one instance and push a capsule per limb.
+///
+/// `center` is the crown's centre as `shape_at` resolved it, so the
+/// growth starts at the base of the trunk directly below it — the same
+/// seat/anchor rules every other shape obeys.
+fn push_branches(part: &Part, center: Vec3, half: Vec3, rng: &mut Rng, out: &mut Vec<CsgOp>) {
+    let Shape::Branches {
+        crown,
+        conical,
+        inverted,
+        spacing,
+        step,
+        tip_r,
+        droop,
+        max_limbs,
+        ..
+    } = part.shape
+    else {
+        return;
+    };
+    let up = if inverted { -Vec3::Y } else { Vec3::Y };
+    // `half.y` is trunk + crown, so the root sits a full half below the
+    // resolved centre and the crown sits a crown-half above it.
+    let root = center - up * half.y;
+    let crown_c = center + up * (half.y - crown[1]);
+    let crown_r = Vec3::from(crown);
+
+    let mut cloud = voxel_core::branch::ellipsoid_cloud(crown_c, crown_r, spacing, 0.85, rng);
+    if conical {
+        let base = crown_c - up * crown[1];
+        cloud.retain(|p| {
+            let t = ((*p - base).dot(up) / (2.0 * crown[1])).clamp(0.0, 1.0);
+            let radial = (*p - base - up * (*p - base).dot(up)).length();
+            radial <= crown_r.x.max(crown_r.z) * (1.0 - t)
+        });
+    }
+    let growth = voxel_core::branch::Growth {
+        // Reach has to span root to crown or nothing is ever pulled and
+        // the structure is a stump.
+        attraction_m: half.y + crown_r.max_element(),
+        kill_m: spacing * 1.4,
+        step_m: step,
+        max_nodes: max_limbs as usize + 1,
+        tip_r_m: tip_r,
+        taper: 2.5,
+        droop: if inverted { -droop } else { droop },
+        wobble: 0.14,
+    };
+    for l in voxel_core::branch::colonize(root, up, &cloud, &growth, rng) {
+        out.push(CsgOp::capsule(
+            l.a,
+            l.b,
+            l.r_a,
+            l.r_b,
+            part.material,
+            part.cut,
+        ));
+    }
+}
+
+fn push_shape(
+    part: &Part,
+    center: Vec3,
+    half: Vec3,
+    yaw: f32,
+    rng: &mut Rng,
+    out: &mut Vec<CsgOp>,
+) {
+    if matches!(part.shape, Shape::Branches { .. }) {
+        push_branches(part, center, half, rng, out);
+        return;
+    }
     match part.shape {
         Shape::Boxy { .. } => {
             out.push(CsgOp::boxy(center, half, yaw, part.material, part.cut));
@@ -433,6 +533,9 @@ fn push_shape(part: &Part, center: Vec3, half: Vec3, yaw: f32, out: &mut Vec<Csg
                 out.push(CsgOp::sphere(center, (half.x - inset).max(0.05), 0, true));
             }
         }
+        // Handled above, before this match: growth needs the rng and
+        // emits many ops rather than one.
+        Shape::Branches { .. } => unreachable!("branches are pushed by push_branches"),
     }
 }
 

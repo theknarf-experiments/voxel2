@@ -114,6 +114,12 @@ fn hash_csg_op(op: &CsgOp, h: &mut impl Hasher) {
     }
     op.yaw.to_bits().hash(h);
     op.blend.to_bits().hash(h);
+    // `aux` was padding and is now a capsule's tip radius. Leaving it out
+    // would make two limbs that differ only in taper print identically,
+    // and a rebuild that should happen would not.
+    for v in op.aux {
+        v.to_bits().hash(h);
+    }
 }
 
 #[cfg(test)]

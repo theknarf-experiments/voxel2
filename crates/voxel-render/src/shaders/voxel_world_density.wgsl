@@ -55,13 +55,17 @@ struct ChunkParams {
 
 // Planning-layer CSG ops (48 B, layout mirrors voxel-core CsgOp).
 struct CsgOp {
+    // 0 box add, 1 box cut, 2 cylinder add, 3 cylinder cut,
+    // 4 sphere add, 5 sphere cut, 6 capsule add, 7 capsule cut.
+    // Capsules read `center` as the base, `half` as the AXIS to the tip,
+    // `yaw` as the base radius and `aux.x` as the tip radius.
     center: vec3<f32>,
-    kind: u32, // 0 box add, 1 box cut, 2 cylinder add, 3 cylinder cut
+    kind: u32,
     half: vec3<f32>,
     material: u32,
     yaw: f32,
     blend: f32,
-    _pad: vec2<u32>,
+    aux: vec2<f32>,
 }
 @group(0) @binding(2) var<storage, read_write> csg_ops: array<CsgOp>;
 
@@ -91,6 +95,15 @@ fn world_header() -> WorldHeader {
 @group(0) @binding(3) var<storage, read> prog: WorldProgram;
 
 fn op_sdf(op: CsgOp, p: vec3<f32>) -> f32 {
+    // BEFORE the yaw rotation: a capsule has no yaw — that field is its
+    // base radius, and rotating by it would bend every limb. Twin of
+    // `CsgOp::sdf`.
+    if (op.kind >= 6u) {
+        let pa = p - op.center;
+        let ba = op.half;
+        let t = clamp(dot(pa, ba) / max(dot(ba, ba), 1e-8), 0.0, 1.0);
+        return length(pa - ba * t) - mix(op.yaw, op.aux.x, t);
+    }
     var q = p - op.center;
     let c = cos(-op.yaw);
     let s = sin(-op.yaw);

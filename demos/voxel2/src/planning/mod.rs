@@ -259,6 +259,55 @@ impl WorldPlanner for RegionPlanner {
                     .collect();
                 json!({"count": segs.len(), "segments": segs})
             }
+            // Ground height under a point, and a camera height that is
+            // safely above it.
+            //
+            // Exists because "put the camera at y=171" is a guess, and a
+            // guess that lands inside the terrain wastes a whole test:
+            // the shot comes back looking like grass seen from below and
+            // reads as a rendering bug rather than a bad position.
+            // Terrain height is not interpolatable from a neighbour
+            // either — that is what a heightfield MEANS — so it has to be
+            // asked for at the exact xz.
+            Some("ground") => {
+                let Some(ctx) = self.ctx.as_ref() else {
+                    return json!({"error": "no world"});
+                };
+                let eye = query
+                    .get("eye")
+                    .and_then(serde_json::Value::as_f64)
+                    .unwrap_or(2.0) as f32;
+                let at: Vec<bevy::math::Vec2> = match query.get("points") {
+                    Some(serde_json::Value::Array(ps)) => ps
+                        .iter()
+                        .filter_map(|p| {
+                            let p = p.as_array()?;
+                            Some(bevy::math::Vec2::new(
+                                p.first()?.as_f64()? as f32,
+                                p.get(1)?.as_f64()? as f32,
+                            ))
+                        })
+                        .collect(),
+                    _ => vec![bevy::math::Vec2::new(
+                        query
+                            .get("x")
+                            .and_then(serde_json::Value::as_f64)
+                            .unwrap_or(0.0) as f32,
+                        query
+                            .get("z")
+                            .and_then(serde_json::Value::as_f64)
+                            .unwrap_or(0.0) as f32,
+                    )],
+                };
+                let found: Vec<_> = at
+                    .iter()
+                    .map(|p| {
+                        let h = ctx.generator.height(*p, 1.0);
+                        json!({"x": p.x, "z": p.y, "height": h, "eye": h + eye})
+                    })
+                    .collect();
+                json!({"count": found.len(), "points": found})
+            }
             Some("markers") => {
                 let kind = query.get("of").and_then(serde_json::Value::as_str);
                 let found: Vec<_> = self
@@ -1404,7 +1453,11 @@ mod output_is_unchanged {
                 "planet.json",
                 Vec3::new(-27000.0, 0.0, -38000.0),
                 4096.0,
-                (50200, 5809, 5809, 146),
+                // Was (50200, 5809, 5809, 146) before `deadtrees`: one
+                // more marker and 52 more ops in this box, which is one
+                // grown skeleton's worth of capsules. A DECISION, not a
+                // drift — the level gained a structure.
+                (50252, 5809, 5809, 147),
             ),
             // Was (18778, 0, 0, 772) before the interior had populations.
             // A population brings a top dependency of its own, so more of

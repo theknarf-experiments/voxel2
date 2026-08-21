@@ -592,6 +592,80 @@
    "importance": 3
   },
   {
+   "kind": "structure",
+   "name": "deadtree",
+   "size": [
+    3.0,
+    5.5
+   ],
+   "variants": [
+    {
+     "weight": 1.0,
+     "parts": [
+      {
+       "arrange": {
+        "type": "single"
+       },
+       "shape": {
+        "type": "branches",
+        "trunk": [
+         2.2,
+         3.4
+        ],
+        "crown": [
+         2.2,
+         1.9,
+         2.2
+        ],
+        "spacing": 0.85,
+        "step": 0.55,
+        "tip_r": 0.07,
+        "droop": 0.12,
+        "max_limbs": 52
+       },
+       "material": 3,
+       "anchor": "base",
+       "y_offset": [
+        -0.7,
+        -0.7
+       ]
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "kind": "scatter",
+   "name": "sites:deadtrees",
+   "in": {
+    "biome": "biomes"
+   },
+   "chance": 0.1,
+   "altitude": [
+    6.0,
+    240.0
+   ],
+   "up": [
+    0.9,
+    1.0
+   ],
+   "biome": "forest"
+  },
+  {
+   "kind": "emit",
+   "name": "deadtrees",
+   "in": {
+    "source": "sites:deadtrees",
+    "structure": "deadtree"
+   },
+   "pad_m": 6.0,
+   "max_chunk_edge_m": 25.6,
+   "emit": {
+    "type": "site_structure",
+    "marker": "deadtree"
+   }
+  },
+  {
    "kind": "connect",
    "name": "paths:roads",
    "in": {

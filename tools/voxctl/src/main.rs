@@ -177,6 +177,21 @@ fn main() {
                 json!({"center": [parse_f64(x), parse_f64(z)], "radius": radius, "step": step}),
             )
         }
+        // Terrain height at a point, and a camera height safely above it.
+        //
+        // Use this before EVERY `goto` that picks a new xz. A camera
+        // placed at a guessed y lands inside the ground about as often
+        // as not, and an underground shot does not look like a bad
+        // camera — it looks like a rendering bug, so the whole test is
+        // wasted twice. `scan` is a scenic-spot ranker and answers a
+        // different question.
+        ["ground", x, z, rest @ ..] => {
+            let eye = rest.first().map(|e| parse_f64(e)).unwrap_or(2.0);
+            call(
+                "voxel/inspect",
+                json!({"kind": "ground", "x": parse_f64(x), "z": parse_f64(z), "eye": eye}),
+            )
+        }
         ["shot", path] => call("voxel/screenshot", json!({"path": path})),
         // What the PLAYER sees, not the offscreen mirror — a different
         // render path, and black while the window is backgrounded.

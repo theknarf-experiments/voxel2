@@ -116,6 +116,54 @@ pub enum ShapeDef {
     Sphere {
         radius: [f32; 2],
     },
+    /// A grown branching skeleton, one capsule op per limb.
+    ///
+    /// The SHAPE is not authored — no trunk height, no fork angles, no
+    /// branch count. A crown is a volume, wood is whatever reaches it,
+    /// and the silhouette falls out of the growth. That is what makes a
+    /// dead tree, a root mat and a cave tendril the same part with
+    /// different numbers.
+    Branches {
+        /// Clear length before the crown, along the growth direction.
+        trunk: [f32; 2],
+        /// Crown half-extents. Growth fills this volume and stops.
+        crown: [f32; 3],
+        /// Taper the crown to a point rather than filling it.
+        #[serde(default)]
+        conical: bool,
+        /// Grow DOWN — roots, stalactites, things hanging off a ceiling.
+        #[serde(default)]
+        inverted: bool,
+        /// Attractor spacing: the crown's detail, and most of the cost.
+        #[serde(default = "d_branch_spacing")]
+        spacing: f32,
+        /// Internode length — the skeleton's resolution.
+        #[serde(default = "d_branch_step")]
+        step: f32,
+        /// Radius of a tip. Limbs thicken toward the root from here.
+        #[serde(default = "d_branch_tip_r")]
+        tip_r: f32,
+        /// Downward bias per step; negative lifts.
+        #[serde(default)]
+        droop: f32,
+        /// Hard cap on limbs emitted, because every limb is an op that
+        /// every density sample in reach has to evaluate.
+        #[serde(default = "d_branch_max_limbs")]
+        max_limbs: u32,
+    },
+}
+
+fn d_branch_spacing() -> f32 {
+    0.9
+}
+fn d_branch_step() -> f32 {
+    0.55
+}
+fn d_branch_tip_r() -> f32 {
+    0.06
+}
+fn d_branch_max_limbs() -> u32 {
+    60
 }
 
 #[derive(Reflect, Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Default)]
@@ -228,6 +276,27 @@ impl PartDef {
                     half_height: *half_height,
                 },
                 ShapeDef::Sphere { radius } => rt::Shape::Sphere { radius: *radius },
+                ShapeDef::Branches {
+                    trunk,
+                    crown,
+                    conical,
+                    inverted,
+                    spacing,
+                    step,
+                    tip_r,
+                    droop,
+                    max_limbs,
+                } => rt::Shape::Branches {
+                    trunk: *trunk,
+                    crown: *crown,
+                    conical: *conical,
+                    inverted: *inverted,
+                    spacing: *spacing,
+                    step: *step,
+                    tip_r: *tip_r,
+                    droop: *droop,
+                    max_limbs: *max_limbs,
+                },
             },
             material: self.material,
             cut: self.cut,

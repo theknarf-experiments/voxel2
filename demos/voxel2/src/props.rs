@@ -334,7 +334,7 @@ fn build_prop_assets(
         };
         for (class, def) in &table.0 {
             let mut variants = Vec::new();
-            for variant in &def.variants {
+            for (slot, variant) in def.variants.iter().enumerate() {
                 let trunk_mat = materials.add(mat(variant.trunk, 0.95));
                 let foliage_mat = materials.add(mat(variant.foliage, 0.9));
                 let mut parts = Vec::new();
@@ -387,28 +387,10 @@ fn build_prop_assets(
                         }
                         parts.push((meshes.add(r.build()), foliage_mat));
                     }
-                    Model::Birch => {
-                        parts.push((meshes.add(cylinder_mesh(0.10, 3.0, 7)), trunk_mat));
-                        let mut top = MeshBuilder::default();
-                        top.blob(Vec3::new(0.0, 3.9, 0.0), 1.05, 0.18, 71);
-                        top.blob(Vec3::new(0.34, 3.35, -0.2), 0.72, 0.20, 173);
-                        top.blob(Vec3::new(-0.28, 4.5, 0.25), 0.62, 0.22, 211);
-                        parts.push((meshes.add(top.build()), foliage_mat));
-                    }
-                    model => {
-                        parts.push((meshes.add(cylinder_mesh(0.14, 1.6, 8)), trunk_mat));
-                        let mut top = MeshBuilder::default();
-                        if model == Model::Broadleaf {
-                            top.blob(Vec3::new(0.0, 3.2, 0.0), 1.6, 0.12, 11);
-                            top.blob(Vec3::new(0.9, 2.7, 0.4), 1.1, 0.14, 23);
-                            top.blob(Vec3::new(-0.8, 2.8, -0.3), 1.0, 0.14, 47);
-                        } else {
-                            top.cone(Vec3::new(0.0, 1.0, 0.0), 1.5, 2.3, 9);
-                            top.cone(Vec3::new(0.0, 2.2, 0.0), 1.2, 2.0, 9);
-                            top.cone(Vec3::new(0.0, 3.3, 0.0), 0.85, 1.7, 8);
-                            top.cone(Vec3::new(0.0, 4.3, 0.0), 0.5, 1.2, 7);
-                        }
-                        parts.push((meshes.add(top.build()), foliage_mat));
+                    model @ (Model::Broadleaf | Model::Conifer | Model::Birch) => {
+                        let (wood, foliage) = grow_tree(&tree_shape(model), tree_seed(model, slot));
+                        parts.push((meshes.add(wood), trunk_mat));
+                        parts.push((meshes.add(foliage), foliage_mat));
                     }
                 }
                 variants.push(parts);
@@ -530,27 +512,6 @@ struct MeshBuilder {
 }
 
 impl MeshBuilder {
-    fn cone(&mut self, base: Vec3, radius: f32, height: f32, sides: u32) {
-        let apex = base + Vec3::Y * height;
-        let base_idx = self.positions.len() as u32;
-        // Flat-ish shading: one ring of base vertices + apex per side pair.
-        for i in 0..sides {
-            let a0 = std::f32::consts::TAU * i as f32 / sides as f32;
-            let a1 = std::f32::consts::TAU * (i + 1) as f32 / sides as f32;
-            let p0 = base + Vec3::new(a0.cos() * radius, 0.0, a0.sin() * radius);
-            let p1 = base + Vec3::new(a1.cos() * radius, 0.0, a1.sin() * radius);
-            let n = (p1 - p0).cross(apex - p0).normalize();
-            let n = [-n.x, -n.y, -n.z];
-            let s = self.positions.len() as u32;
-            self.positions
-                .extend([p0.to_array(), p1.to_array(), apex.to_array()]);
-            self.normals.extend([n, n, n]);
-            self.indices.extend([s, s + 2, s + 1]);
-        }
-        let _ = base_idx;
-    }
-
-    /// Low-poly UV-sphere blob with per-vertex radial jitter (flat facets).
     fn blob(&mut self, center: Vec3, radius: f32, jitter: f32, seed: u32) {
         let segs = 9u32;
         let rings = 6u32;
@@ -625,6 +586,31 @@ impl MeshBuilder {
         }
     }
 
+    /// A truncated cone between two points — what one limb of a grown
+    /// skeleton is drawn as. Unlike [`Self::limb`] both ends carry their
+    /// own radius, because a skeleton decides its own taper.
+    fn wood(&mut self, a: Vec3, b: Vec3, r_a: f32, r_b: f32, sides: u32) {
+        let dir = (b - a).normalize_or(Vec3::Y);
+        let side = dir.cross(Vec3::Y).try_normalize().unwrap_or(Vec3::X);
+        let up = side.cross(dir);
+        for i in 0..sides {
+            let a0 = std::f32::consts::TAU * i as f32 / sides as f32;
+            let a1 = std::f32::consts::TAU * (i + 1) as f32 / sides as f32;
+            let r0 = side * a0.cos() + up * a0.sin();
+            let r1 = side * a1.cos() + up * a1.sin();
+            let s = self.positions.len() as u32;
+            self.positions.extend([
+                (a + r0 * r_a).to_array(),
+                (a + r1 * r_a).to_array(),
+                (b + r0 * r_b).to_array(),
+                (b + r1 * r_b).to_array(),
+            ]);
+            self.normals
+                .extend([r0.to_array(), r1.to_array(), r0.to_array(), r1.to_array()]);
+            self.indices.extend([s, s + 2, s + 1, s + 1, s + 2, s + 3]);
+        }
+    }
+
     fn build(self) -> Mesh {
         let mut mesh = Mesh::new(
             PrimitiveTopology::TriangleList,
@@ -638,6 +624,164 @@ impl MeshBuilder {
         mesh.insert_indices(Indices::U32(self.indices));
         mesh
     }
+}
+
+/// What a grown tree looks like, as the few numbers that actually differ
+/// between an oak, a pine and a birch.
+///
+/// The SHAPE is not authored — no trunk height, no branch angles, no
+/// forks. A crown is a volume, the wood is whatever reaches it, and the
+/// silhouette falls out. That is the point of growing them: the old
+/// broadleaf was a cylinder and three blobs, and every one of them was
+/// the same cylinder and the same three blobs.
+struct TreeShape {
+    /// Clear trunk below the crown, and the crown's own half-extents.
+    trunk_m: f32,
+    crown: Vec3,
+    /// Taper the crown to a point (a conifer) rather than filling it.
+    conical: bool,
+    /// Attractor spacing — the crown's detail, and most of the cost.
+    spacing: f32,
+    growth: voxel_core::branch::Growth,
+    /// Foliage blob radius at a tip, and how deep a limb must be before
+    /// it carries one. Leaves near the trunk read as a bush.
+    leaf_r: f32,
+    leaf_from: u16,
+}
+
+/// The shape each tree model grows into.
+fn tree_shape(model: Model) -> TreeShape {
+    use voxel_core::branch::Growth;
+    // Reach has to span the gap from the root to the crown, or nothing
+    // is ever pulled and the tree is a single stump. It is what makes
+    // the trunk emerge: from the ground the whole crown averages to
+    // straight up, and only inside it do the pulls disagree enough to
+    // fork.
+    let base = Growth {
+        step_m: 0.42,
+        kill_m: 0.85,
+        max_nodes: 150,
+        taper: 2.5,
+        tip_r_m: 0.022,
+        wobble: 0.14,
+        ..Default::default()
+    };
+    match model {
+        Model::Conifer => TreeShape {
+            trunk_m: 1.1,
+            crown: Vec3::new(1.35, 2.2, 1.35),
+            conical: true,
+            spacing: 0.62,
+            growth: Growth {
+                attraction_m: 5.0,
+                droop: 0.22, // swept-down firs
+                ..base
+            },
+            leaf_r: 0.42,
+            leaf_from: 2,
+        },
+        Model::Birch => TreeShape {
+            trunk_m: 2.6,
+            crown: Vec3::new(1.0, 1.25, 1.0),
+            conical: false,
+            spacing: 0.5,
+            growth: Growth {
+                attraction_m: 6.5,
+                droop: 0.06,
+                tip_r_m: 0.016, // whippier than an oak
+                ..base
+            },
+            leaf_r: 0.4,
+            leaf_from: 3,
+        },
+        // Broadleaf: a wide, high crown on a short trunk.
+        _ => TreeShape {
+            trunk_m: 1.5,
+            crown: Vec3::new(1.75, 1.5, 1.75),
+            conical: false,
+            spacing: 0.6,
+            growth: Growth {
+                attraction_m: 6.0,
+                droop: 0.02,
+                ..base
+            },
+            leaf_r: 0.62,
+            leaf_from: 3,
+        },
+    }
+}
+
+/// A seed per (model, variant slot), so two levels asking for the same
+/// model get the same tree and two variants of one model do not.
+fn tree_seed(model: Model, variant: usize) -> u64 {
+    let kind = match model {
+        Model::Conifer => 1u64,
+        Model::Birch => 2,
+        _ => 0,
+    };
+    voxel_core::seed::splitmix64(0x7BEE_0000 ^ (kind << 32) ^ variant as u64)
+}
+
+/// Grow one tree and return (wood, foliage) meshes.
+///
+/// One mesh per VARIANT, not per instance: the forest draws a million
+/// trees by instancing a handful of meshes, so variety is bought by
+/// growing several variants from different seeds — never by growing one
+/// per tree.
+fn grow_tree(shape: &TreeShape, seed: u64) -> (Mesh, Mesh) {
+    use voxel_core::branch::{colonize, ellipsoid_cloud};
+
+    let mut rng = voxel_core::seed::Rng::new(seed);
+    let center = Vec3::new(0.0, shape.trunk_m + shape.crown.y, 0.0);
+    let mut cloud = ellipsoid_cloud(center, shape.crown, shape.spacing, 0.85, &mut rng);
+    // The kill radius MUST stay under the attractor spacing, or a single
+    // stem consumes the whole cloud as it passes and never forks: the
+    // conifer and the birch grew as bare poles with no branching at all
+    // because `kill_m` (0.85) was larger than their spacing (0.62, 0.5).
+    // Derived here rather than authored so the two cannot drift apart.
+    let growth = voxel_core::branch::Growth {
+        kill_m: shape.spacing * 0.7,
+        ..shape.growth
+    };
+    if shape.conical {
+        // Keep the cone inscribed in the same ellipsoid: full width at
+        // the crown's base, a point at its top.
+        let base = center.y - shape.crown.y;
+        cloud.retain(|p| {
+            let t = ((p.y - base) / (2.0 * shape.crown.y)).clamp(0.0, 1.0);
+            let r = Vec2::new(p.x - center.x, p.z - center.z).length();
+            r <= shape.crown.x.max(shape.crown.z) * (1.0 - t)
+        });
+    }
+    let limbs = colonize(Vec3::ZERO, Vec3::Y, &cloud, &growth, &mut rng);
+
+    let mut wood = MeshBuilder::default();
+    for l in &limbs {
+        // EVERY limb is drawn. Culling thin ones was a false economy: a
+        // skeleton is only a few dozen limbs, and the thin ones are
+        // exactly the twigs the foliage hangs on — cull them and the
+        // blobs float over bare ground with nothing holding them up.
+        // Cheap where it is cheap instead: four sides on a twig.
+        let sides = if l.r_a > 0.05 { 6 } else { 4 };
+        wood.wood(l.a, l.b, l.r_a, l.r_b, sides);
+    }
+
+    // Foliage hangs on tips: a limb no other limb grows out of.
+    let mut foliage = MeshBuilder::default();
+    for (i, l) in limbs.iter().enumerate() {
+        let is_tip = !limbs.iter().any(|o| o.a == l.b);
+        if !is_tip || l.depth < shape.leaf_from {
+            continue;
+        }
+        let jitter = 0.18 + 0.12 * ((i * 37 % 13) as f32 / 13.0);
+        foliage.blob(
+            l.b,
+            shape.leaf_r,
+            jitter,
+            (seed as u32).wrapping_add(i as u32),
+        );
+    }
+    (wood.build(), foliage.build())
 }
 
 fn cylinder_mesh(radius: f32, height: f32, sides: u32) -> Mesh {
