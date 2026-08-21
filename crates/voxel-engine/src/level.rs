@@ -265,49 +265,14 @@ pub struct ScatterDef {
     #[serde(default = "default_one")]
     pub scale_bias: f32,
     /// Weighted variants — species, size tiers, whatever the host maps
-    /// them to. The engine only knows their index. Used by entity output
-    /// and by [`ScatterDef::near`]; a pure point population may still
-    /// declare them so the host can shape each point by its variant.
+    /// them to. The engine only knows their index. A point population
+    /// still declares them: the index is what lets an impostor, a
+    /// painted cover and a structure emit all agree on the species.
     #[serde(default)]
     pub variants: Vec<ScatterVariantDef>,
-    /// The nearest slice of this population, drawn as entities.
-    ///
-    /// One population, one placement draw, three ranges: entities near
-    /// (this), the host's bulk rendering of the points to
-    /// [`ScatterDef::radius_tiles`], and [`ScatterDef::cover`] beyond.
-    /// The ranges are FILTERS over one set — every placement inside the
-    /// near radius becomes an entity, every one of them is also a point
-    /// — so walking up to any far instance finds the same instance
-    /// standing there as geometry. A near tier that was a second
-    /// population, and then one that promoted a lottery of the first,
-    /// both broke that promise: an instance the far tier drew would
-    /// vanish on approach with nothing in its place.
-    #[serde(default)]
-    pub near: Option<NearDef>,
     /// What this population becomes once it is too far to draw one by one.
     #[serde(default)]
     pub cover: Option<CoverDef>,
-}
-
-/// The entity-drawn slice of a point population. See [`ScatterDef::near`].
-///
-/// Deliberately nothing here but a radius and a seating: which
-/// placements become entities is decided by DISTANCE alone, because any
-/// subtler rule leaves far instances with no entity to become.
-/// The entity budget is therefore this radius — the near field is as
-/// dense as the population, so the radius is what a level tunes.
-#[derive(Reflect, Serialize, Deserialize, Clone, Debug, PartialEq)]
-pub struct NearDef {
-    /// Streaming radius of the entity draw, in tiles.
-    #[serde(default = "d_scatter_radius")]
-    pub radius_tiles: i32,
-    /// Voxel size the promoted placements are RE-seated at. The
-    /// population seats all its points at its own [`ScatterDef::detail_vs`]
-    /// — coarse, because seating hundreds of thousands finely is the
-    /// settle budget — but an entity stands next to the camera on finely
-    /// meshed ground, and a coarse seat leaves its feet in the air.
-    #[serde(default = "d_detail_vs")]
-    pub detail_vs: f32,
 }
 
 /// A population painted onto the ground instead of drawn.

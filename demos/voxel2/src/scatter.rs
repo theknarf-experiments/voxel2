@@ -192,71 +192,6 @@ impl LayerChunk for ScatterDrawChunk {
     }
 }
 
-/// The near slice of a point population: EVERY placement the far draw
-/// publishes, re-seated finely and drawn as an entity while its tile is
-/// inside the near radius.
-///
-/// All of them, not a chosen few: the population is one set and the
-/// tiers are distance filters over it, so anything the far tier shows
-/// must be standing there when you arrive. A version of this that
-/// promoted a seed-elected fraction broke exactly that — four in five
-/// impostors faded out on approach with no tree in their place. The
-/// entity budget is the near RADIUS, not a thinning.
-pub struct ScatterNearDraw {
-    source: String,
-    def: ScatterDef,
-    sink: Sink<Placement>,
-}
-
-#[derive(Default)]
-pub struct ScatterNearDrawChunk;
-
-impl Layer for ScatterNearDraw {
-    type Chunk = ScatterNearDrawChunk;
-    const NAME: &'static str = "scatter-near";
-
-    fn chunk_extent(&self) -> DVec3 {
-        DVec3::new(self.def.tile_m as f64, 0.0, self.def.tile_m as f64)
-    }
-
-    fn dependencies(&self) -> Vec<Dep> {
-        vec![Dep::named(&self.source, IVec3::ZERO)]
-    }
-}
-
-impl LayerChunk for ScatterNearDrawChunk {
-    type Layer = ScatterNearDraw;
-
-    fn create(&mut self, ctx: &ChunkCtx<'_, ScatterNearDraw>) {
-        let layer = ctx.layer();
-        let Some(near) = &layer.def.near else {
-            return;
-        };
-        let world = ctx.context::<WorldCtx>();
-        let mut placements = Vec::new();
-        ctx.get_named::<ScatterPopulation>(&layer.source, ctx.chunk_bounds())
-            .for_each(|_, chunk| {
-                for p in &chunk.placements {
-                    // The population seated this point at its own coarse
-                    // `detail_vs`; an entity stands on finely meshed
-                    // ground, so refine the seat by the DELTA between the
-                    // two heights. The delta, not a fresh seat: sink and
-                    // altitude falloff are already in the stored y.
-                    let mut p = *p;
-                    let xz = Vec2::new(p.position.x, p.position.z);
-                    p.position.y += world.generator.height(xz, near.detail_vs)
-                        - world.generator.height(xz, layer.def.detail_vs);
-                    placements.push(p);
-                }
-            });
-        layer.sink.put(ctx.instance_key(), ctx.coord(), placements);
-    }
-
-    fn destroy(&mut self, ctx: &ChunkCtx<'_, ScatterNearDraw>) {
-        ctx.layer().sink.take(ctx.instance_key(), ctx.coord());
-    }
-}
-
 /// Registered populations, so the reconciling systems know what to draw.
 #[derive(Resource, Default)]
 pub struct Populations(pub Vec<PopulationHandle>);
@@ -393,37 +328,6 @@ pub fn register(
             spawned: std::collections::HashMap::new(),
             seen_generation: u64::MAX,
         });
-
-        // The promoted near slice: a second draw over the SAME data
-        // layer, at its own radius, spawning entities. See
-        // [`ScatterNearDraw`] for why this is a subset and not a second
-        // population.
-        if let (Some(near), ScatterOutput::Points) = (&def.near, def.output) {
-            let near_sink = Sink::default();
-            let near_name = format!("{}:near", def.class);
-            graph.register_as(
-                &near_name,
-                ScatterNearDraw {
-                    source: def.class.clone(),
-                    def: def.clone(),
-                    sink: near_sink.clone(),
-                },
-            );
-            let reach = (near.radius_tiles as f32 + 0.5) * def.tile_m;
-            tops.push(TopDep::new(
-                &near_name,
-                IVec3::new((2.0 * reach) as i32, 0, (2.0 * reach) as i32),
-            ));
-            handles.push(PopulationHandle {
-                world: 0,
-                class: Arc::from(def.class.as_str()),
-                count_key: near_name,
-                output: ScatterOutput::Entities,
-                sink: near_sink,
-                spawned: std::collections::HashMap::new(),
-                seen_generation: u64::MAX,
-            });
-        }
     }
     (tops, Populations(handles))
 }

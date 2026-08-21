@@ -30,20 +30,38 @@ pub const BASE_VOXEL_M: f64 = 0.1;
 /// Stored SDF values are clamped to `±SDF_BAND`.
 pub const SDF_BAND: f32 = 4.0;
 
-/// Warn when a block of work overruns a frame budget, naming it.
+/// Is per-system cost attribution switched on? `VOXEL_COST=1`.
+///
+/// Read once. See [`timed`] for why it is off by default.
+pub fn cost_logging() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("VOXEL_COST").is_some())
+}
+
+/// Warn when a block of work overruns a frame budget, naming it —
+/// under `VOXEL_COST=1`.
 ///
 /// Attribution for a stutter has to be per-SYSTEM: a frame-time graph
 /// says a frame was slow and nothing about which of forty systems did it,
 /// and a chrome trace needs a dependency this workspace cannot fetch.
-/// Costs a `Instant::now()` pair on paths that already do far more.
+///
+/// OPT-IN, because a budget is a guess and a wrong guess is worse than no
+/// instrument at all: the one call site's 4 ms is under what its system
+/// costs in an ordinary frame, so it warned several times a second
+/// forever and buried the log it was supposed to help read. A number that
+/// fires every frame reports nothing. Left in rather than deleted because
+/// what it does when you ask for it is still the only per-system
+/// attribution this workspace has.
 #[macro_export]
 macro_rules! timed {
     ($name:literal, $budget_ms:expr, $body:expr) => {{
-        let __started = std::time::Instant::now();
+        let __started = $crate::cost_logging().then(std::time::Instant::now);
         let __out = $body;
-        let __ms = __started.elapsed().as_secs_f32() * 1000.0;
-        if __ms > $budget_ms {
-            bevy::log::warn!("COST {} {:.1}ms", $name, __ms);
+        if let Some(__started) = __started {
+            let __ms = __started.elapsed().as_secs_f32() * 1000.0;
+            if __ms > $budget_ms {
+                bevy::log::warn!("COST {} {:.1}ms", $name, __ms);
+            }
         }
         __out
     }};
