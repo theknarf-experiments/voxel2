@@ -136,9 +136,16 @@ architecture. Design plan: `~/.claude/plans/binary-twirling-brooks.md`.
   swapped at the pass head beside the anchor, and every consumer of
   `LodShared::config` reads one snapshot per pass. A mid-pass table is
   two neighbours with different masks, which is a crack nobody owns.
-  **Refined islands at range render as black weld faces** where the
-  hard cut meets steep relief — real and unfixed, which is why no
-  shipped level opts in yet.
+  Refined islands can render as **black weld faces** where the hard cut
+  meets steep relief — seen at the far EDGE of a volume's range, where
+  the island is finest against its coarsest surroundings; the band the
+  pool actually serves looks right. `planet.json` opts in (`ruins`,
+  `importance: 3`); drop that one key to turn it off.
+  **Pool overflow keeps the NEAREST landmarks.** Farthest-first is a
+  trap — a level scatters far more landmarks near the range edge than
+  close in (area grows with r²), so the pool fills with specks at the
+  limit and every prominent mid-range structure is starved. It measured
+  as the feature doing nothing at 390 m.
 - Planning generation is **dependency-driven**: consumers `ensure_loaded`
   the region they are about to query (the LOD planner does this per epoch,
   plus a streamer-radius pass), then read. `voxctl status` →

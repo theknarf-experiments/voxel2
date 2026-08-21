@@ -588,7 +588,8 @@
    "emit": {
     "type": "site_structure",
     "marker": "ruin"
-   }
+   },
+   "importance": 3
   },
   {
    "kind": "connect",

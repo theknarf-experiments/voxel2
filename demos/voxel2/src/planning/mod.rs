@@ -948,11 +948,10 @@ mod tests {
     /// the REAL ops the site emitted — a box a structure actually fills,
     /// not a nominal radius.
     ///
-    /// Importance is set here, in memory, not in the shipped JSON: on a
-    /// scatter as dense as ruins it refines a dozen islands at once, and
-    /// until the pre-existing black-seam rendering bug those islands
-    /// surface is fixed, shipping it would trade a readable vista for a
-    /// visible one.
+    /// Importance is FORCED here rather than read from the level, so
+    /// this covers the mechanism whether or not a level opts in.
+    /// `planet.json` currently does, but that is a look decision, and
+    /// turning it off must not take this test with it.
     #[test]
     fn important_emits_publish_detail_volumes() {
         let mut planet = shipped("planet.json");

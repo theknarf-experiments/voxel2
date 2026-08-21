@@ -616,21 +616,33 @@ impl WorldLod {
                 dist(v) < slack * range
             })
             .collect();
-        if wanted.len() > DETAIL_POOL {
-            // FARTHEST first: distance is what starves a landmark of
-            // detail, so the far ones are what the bias is for — and the
-            // near ones, which plain refinement already serves, are also
-            // the dearest to bias further.
-            wanted.sort_by(|a, b| dist(b).total_cmp(&dist(a)));
-            warn!(
-                "detail: {} landmarks in range, keeping the {DETAIL_POOL} farthest",
-                wanted.len()
-            );
+        let over = wanted.len().saturating_sub(DETAIL_POOL);
+        if over > 0 {
+            // NEAREST first. Screen size is what makes a refinement worth
+            // its chunks, and at equal world size that is distance — so
+            // the nearest landmark the plain field has already lost is
+            // the one worth a slot.
+            //
+            // Farthest-first was tried and is a TRAP: a level scatters
+            // far more landmarks near the range edge than close in (area
+            // grows with r²), so the pool fills with specks at the limit
+            // and every prominent mid-range structure is starved. It
+            // measured as the feature doing nothing at 390 m while a
+            // dozen invisible ruins at 1.4 km held every slot.
+            wanted.sort_by(|a, b| dist(a).total_cmp(&dist(b)));
             wanted.truncate(DETAIL_POOL);
         }
         if held.len() == wanted.len() && wanted.iter().all(|v| held.contains(v)) {
             return;
         }
+        // Only on a change, so this is a state log and not a per-frame
+        // one. Silent truncation reads as "refined everything" when it
+        // did not, so the drop count is part of the line.
+        info!(
+            "detail: {} volumes active out to {:.0} m ({over} landmarks dropped, pool {DETAIL_POOL})",
+            wanted.len(),
+            wanted.iter().map(dist).fold(0.0, f64::max),
+        );
         // Stable slots: keep survivors where they are — moving one would
         // release and rebuild every chunk it holds for nothing.
         for slot in 0..DETAIL_POOL {
