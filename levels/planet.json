@@ -816,9 +816,6 @@
    "tile_m": 64.0,
    "radius_tiles": 80,
    "detail_vs": 8.0,
-   "near": {
-    "radius_tiles": 2
-   },
    "cover": {
     "material": 8,
     "from_m": 3300.0,
@@ -1216,6 +1213,141 @@
    "region": [
     "mountains"
    ]
+  },
+  {
+   "kind": "structure",
+   "name": "treewood",
+   "size": [
+    1.0,
+    1.0
+   ],
+   "variants": [
+    {
+     "weight": 1.0,
+     "parts": [
+      {
+       "arrange": {
+        "type": "single"
+       },
+       "shape": {
+        "type": "branches",
+        "trunk": [
+         2.0,
+         2.4
+        ],
+        "crown": [
+         2.6,
+         2.0,
+         2.6
+        ],
+        "conical": false,
+        "spacing": 0.95,
+        "step": 0.6,
+        "tip_r": 0.125,
+        "droop": 0.02,
+        "max_limbs": 34,
+        "leaf": {
+         "radius": 0.85,
+         "material": 8,
+         "from": 4,
+         "blend": 0.15,
+         "jitter": 0.4
+        }
+       },
+       "material": 9,
+       "anchor": "base"
+      }
+     ]
+    },
+    {
+     "weight": 1.0,
+     "parts": [
+      {
+       "arrange": {
+        "type": "single"
+       },
+       "shape": {
+        "type": "branches",
+        "trunk": [
+         1.4,
+         1.7
+        ],
+        "crown": [
+         1.7,
+         3.2,
+         1.7
+        ],
+        "conical": true,
+        "spacing": 0.85,
+        "step": 0.55,
+        "tip_r": 0.115,
+        "droop": 0.22,
+        "max_limbs": 34,
+        "leaf": {
+         "radius": 0.62,
+         "material": 8,
+         "from": 3,
+         "blend": 0.12,
+         "jitter": 0.35
+        }
+       },
+       "material": 9,
+       "anchor": "base"
+      }
+     ]
+    },
+    {
+     "weight": 1.0,
+     "parts": [
+      {
+       "arrange": {
+        "type": "single"
+       },
+       "shape": {
+        "type": "branches",
+        "trunk": [
+         2.8,
+         3.2
+        ],
+        "crown": [
+         1.6,
+         1.7,
+         1.6
+        ],
+        "conical": false,
+        "spacing": 0.85,
+        "step": 0.55,
+        "tip_r": 0.095,
+        "droop": 0.05,
+        "max_limbs": 28,
+        "leaf": {
+         "radius": 0.6,
+         "material": 8,
+         "from": 4,
+         "blend": 0.12,
+         "jitter": 0.38
+        }
+       },
+       "material": 9,
+       "anchor": "base"
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "kind": "emit",
+   "name": "trees",
+   "in": {
+    "source": "tree",
+    "structure": "treewood"
+   },
+   "cell_m": 64,
+   "pad_m": 8.0,
+   "max_chunk_edge_m": 25.6,
+   "emit": {
+    "type": "population_structure"
+   }
   }
  ],
  "materials": [
@@ -1500,12 +1632,23 @@
    "type": "surface",
    "id": 8,
    "base": [
-    0.021,
-    0.032,
-    0.0087
+    0.024,
+    0.15,
+    0.016
    ],
-   "grain": 0.0,
+   "grain": 0.12,
    "detail_fade": 0.0015
+  },
+  {
+   "type": "surface",
+   "id": 9,
+   "base": [
+    0.107,
+    0.047,
+    0.019
+   ],
+   "grain": 0.15,
+   "detail_fade": 0.002
   }
  ],
  "prefabs": [

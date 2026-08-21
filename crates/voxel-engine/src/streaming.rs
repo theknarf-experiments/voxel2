@@ -99,6 +99,32 @@ pub fn detail_reach_m(volume: &DetailVolume, level: u8) -> f64 {
     (2.0 * f64::from(parent) + 4.0) * ChunkKey::new(level, IVec3::ZERO).edge_m()
 }
 
+/// How far from the CAMERA a volume can put a leaf of `level` — the
+/// residency an ops consumer gated at that level owes to landmarks.
+///
+/// Zero when the volume cannot bias a leaf of that level at all, and that
+/// zero is the point. A landmark four kilometres away refines its
+/// neighbourhood by a few levels and still leaves it far coarser than a
+/// 25 m gate admits, so an emitter behind that gate is never asked for ops
+/// out there and has no business generating any. Sizing every emitter from
+/// [`detail_range_m`] — the range at which a volume does ANYTHING, which
+/// is set by the COARSEST level it can bias — charged the planet's forest
+/// 72 km² of planning to serve 130 m of it.
+///
+/// The bound: a level-`level` leaf exists only if its parent split, and a
+/// parent carrying `b` levels of bias splits at the threshold of a parent
+/// `b` levels finer — so the leaf reaches exactly as far as an unbiased
+/// leaf `b` levels coarser, which is [`resident_reach`] of that level. The
+/// fade ring is added on top because the bias grades out over it.
+pub fn landmark_reach_m(config: &LodConfig, volume: &DetailVolume, level: u8) -> f64 {
+    let bias = scale_cap(volume, level + 1);
+    if bias == 0 {
+        return 0.0;
+    }
+    resident_reach(config, level.saturating_add(bias).min(config.max_level))
+        + detail_reach_m(volume, level)
+}
+
 /// The camera distance beyond which a volume is INERT — it changes no
 /// chunk's level, so nothing needs to be resident, covered, or watched
 /// for it. The coarsest level the scale cap can bias splits within
@@ -1360,6 +1386,53 @@ mod residency_shape {
             .map(|k| (*k, seam_mask_at(&config, anchor, *k)))
             .collect();
         assert_consistent(&config, &leaves, &masks);
+    }
+
+    /// A gate's landmark residency covers every leaf a landmark can push
+    /// out to it — and no more than it has to.
+    ///
+    /// The bound [`landmark_reach_m`] replaced sized every emitter from
+    /// [`detail_range_m`], which is set by the COARSEST level a volume can
+    /// bias and so charged a 25 m gate the range of an 800 m one. Both
+    /// halves are pinned here: undersize it and a refined landmark has a
+    /// hole where its ops should be, oversize it and a forest plans tens
+    /// of square kilometres to serve a hundred metres.
+    #[test]
+    fn a_gate_owes_landmarks_only_the_levels_it_admits() {
+        let (config, volume) = biased();
+        for level in 0..=10u8 {
+            let bias = scale_cap(&volume, level + 1);
+            let reach = landmark_reach_m(&config, &volume, level);
+            if bias == 0 {
+                assert_eq!(
+                    reach, 0.0,
+                    "level {level} cannot be biased, so it owes nothing"
+                );
+                continue;
+            }
+            // A level-`level` leaf needs its parent to split, and a parent
+            // carrying `bias` splits at `split_k · 2^bias · edge(parent)`.
+            // The residency has to hold every one of those.
+            let parent_edge = ChunkKey::new(level + 1, IVec3::ZERO).edge_m();
+            let split_at = config.split_k * f64::from(1u32 << bias) * parent_edge;
+            assert!(
+                reach >= split_at,
+                "level {level}: reach {reach:.0} clips leaves that split out to {split_at:.0}"
+            );
+        }
+        // The regression itself. What every emitter used to be sized
+        // from, level-blind: the range at which the volume does anything
+        // at all, plus the widest fade of ANY level. A fine gate must come
+        // in well under it, or the forest is planning square kilometres it
+        // will never be asked about.
+        let level_blind = detail_range_m(&volume, config.split_k)
+            + (0..=32u8)
+                .map(|l| detail_reach_m(&volume, l))
+                .fold(0.0, f64::max);
+        assert!(
+            landmark_reach_m(&config, &volume, 3) * 2.0 < level_blind,
+            "a 25 m gate is still paying most of the level-blind range"
+        );
     }
 
     /// What a volume buys and what it costs: the leaf over the volume is

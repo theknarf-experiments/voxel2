@@ -756,6 +756,16 @@ pub enum EmitKind {
         structure: std::sync::Arc<super::structure::Structure>,
         marker: Option<String>,
     },
+    /// A pooled structure at every placement of a POPULATION — the near
+    /// tier of a scatter class, as field geometry instead of as props.
+    ///
+    /// Carries only the pool: the structure itself has already been
+    /// ground down into grown ops (see
+    /// [`crate::planning::structure::Pool`]), and holding the definition
+    /// too would invite a second code path that grows per site.
+    PopulationStructure {
+        pool: std::sync::Arc<super::structure::Pool>,
+    },
     /// Shell tubes with bored interiors along a `connect3` source —
     /// walkway corridors. The bore extends past segment ends so tubes
     /// open into the rooms and shafts they meet. `lift_m` raises the
@@ -784,6 +794,12 @@ pub struct EmitCfg {
     /// Publish each site's bounds as a landmark worth this many extra
     /// LOD levels. 0 publishes nothing.
     pub importance: u8,
+    /// Voxel size of the finest ground these ops can be carved into,
+    /// where that is knowable — see `Emit::register`. A population
+    /// structure re-seats to it, because a population seats its points
+    /// coarsely on purpose and geometry cannot afford the gap the way a
+    /// prop with a sink under it can.
+    pub seat_vs: Option<f32>,
 }
 
 #[derive(Clone)]
@@ -997,6 +1013,38 @@ impl EmitPatches {
                                 tube_segment_ops(a, b, *material, *bore, &mut out.ops);
                             }
                         }
+                    }
+                }
+            }
+            EmitKind::PopulationStructure { pool } => {
+                // The population layer, read by the class name it was
+                // registered under. No rng, no growth and no terrain
+                // lookup in this loop: everything that decides what this
+                // tree IS was decided by the placer, and everything that
+                // decides what it LOOKS like was decided when the pool
+                // was grown. What is left is an affine transform per op,
+                // which is what makes a forest of them affordable.
+                for (_, c) in ctx
+                    .get_named::<crate::scatter::ScatterPopulation>(&self.cfg.source, padded)
+                    .iter()
+                {
+                    for p in &c.placements {
+                        let xz = Vec2::new(p.position.x, p.position.z);
+                        if !in_own(xz) {
+                            continue;
+                        }
+                        // The DELTA against the seat the placer recorded,
+                        // not a fresh seat: the sink and the altitude
+                        // falloff are already in the stored y, exactly as
+                        // the near entity tier reasoned when it did this
+                        // for a mesh standing on the ground. ONE walk of
+                        // the program — the coarse half is `seat_y`,
+                        // which the placer had in its hand.
+                        let mut p = *p;
+                        if let Some(vs) = self.cfg.seat_vs {
+                            p.position.y += generator.height(xz, vs) - p.seat_y;
+                        }
+                        pool.instance(&p, &mut out.ops);
                     }
                 }
             }
@@ -1765,6 +1813,7 @@ mod tests {
                         },
                         pad_m: 0.0,
                         importance: 0,
+                        seat_vs: None,
                     },
                     cell_m: 256,
                 },
@@ -1840,6 +1889,7 @@ mod tests {
                     // the pathfinding corridor.
                     pad_m: 700.0 * 0.5 + 192.0 + 64.0,
                     importance: 0,
+                    seat_vs: None,
                 },
                 cell_m: 256,
             },
@@ -1908,6 +1958,7 @@ mod tests {
                     // Courses run up to max_steps * step from their spring.
                     pad_m: 400.0 * 8.0 + 64.0,
                     importance: 0,
+                    seat_vs: None,
                 },
                 cell_m: 512,
             },
@@ -1941,6 +1992,7 @@ mod tests {
                     kind: EmitKind::WormCuts,
                     pad_m: 340.0,
                     importance: 0,
+                    seat_vs: None,
                 },
                 cell_m: 256,
             },
@@ -2009,6 +2061,7 @@ mod tests {
                     },
                     pad_m: 0.0,
                     importance: 0,
+                    seat_vs: None,
                 },
                 cell_m: 128,
             },
@@ -2026,6 +2079,7 @@ mod tests {
                     },
                     pad_m: 400.0 + 64.0,
                     importance: 0,
+                    seat_vs: None,
                 },
                 cell_m: 128,
             },
@@ -2219,6 +2273,7 @@ mod tests {
                     },
                     pad_m: 0.0,
                     importance: 0,
+                    seat_vs: None,
                 },
                 cell_m: 128,
             },
@@ -2236,6 +2291,7 @@ mod tests {
                     },
                     pad_m: 464.0,
                     importance: 0,
+                    seat_vs: None,
                 },
                 cell_m: 128,
             },

@@ -460,9 +460,22 @@ pub fn changed(new: &[NodeDef], old: &[NodeDef]) -> Option<node::Invalidates> {
     scan(new, "", &mut a);
     scan(old, "", &mut b);
 
+    // What a node invalidates is not a property of the node alone: it is
+    // a property of everything that reads it. See [`feeds_world`].
+    let mut world_feeders = feeds_world(&a);
+    world_feeders.extend(feeds_world(&b));
+
     let mut worst = None;
     let mut note = |node: &NodeDef| {
-        let effect = node.node.0.invalidates();
+        let mut effect = node.node.0.invalidates();
+        if effect < node::Invalidates::World
+            && node
+                .name
+                .as_deref()
+                .is_some_and(|n| world_feeders.contains(n))
+        {
+            effect = node::Invalidates::World;
+        }
         if worst.is_none_or(|w| effect > w) {
             worst = Some(effect);
         }
@@ -500,6 +513,45 @@ fn same(a: &NodeDef, b: &NodeDef) -> bool {
 
 /// Every node in the tree, keyed by name where it has one and by position
 /// where it does not.
+/// Every node name that some world-invalidating node reads, directly or
+/// through others.
+///
+/// [`node::Invalidates`] is a kind's answer about what IT produces, and
+/// that is only half the question. A `population` decides where props go
+/// and carves nothing — until an emit builds its near tier out of the
+/// density field, and then moving one moves voxels. Rather than have a
+/// kind guess who reads it, or downgrade every level to the worst case,
+/// the effect propagates BACKWARDS along the wires the compiler already
+/// resolves. A node feeding nothing that carves keeps its cheap answer.
+fn feeds_world(flat: &[(String, &NodeDef)]) -> HashSet<String> {
+    let by_name: HashMap<&str, usize> = flat
+        .iter()
+        .enumerate()
+        .filter_map(|(i, (_, n))| Some((n.name.as_deref()?, i)))
+        .collect();
+    let mut queue: Vec<usize> = flat
+        .iter()
+        .enumerate()
+        .filter(|(_, (_, n))| n.node.0.invalidates() == node::Invalidates::World)
+        .map(|(i, _)| i)
+        .collect();
+    let mut seen: HashSet<usize> = queue.iter().copied().collect();
+    let mut marked = HashSet::default();
+    while let Some(i) = queue.pop() {
+        for (_, wire) in flat[i].1.wires.iter() {
+            for name in wire.sources() {
+                marked.insert(name.clone());
+                if let Some(&j) = by_name.get(name.as_str()) {
+                    if seen.insert(j) {
+                        queue.push(j);
+                    }
+                }
+            }
+        }
+    }
+    marked
+}
+
 fn scan<'a>(nodes: &'a [NodeDef], path: &str, out: &mut Vec<(String, &'a NodeDef)>) {
     for (i, node) in nodes.iter().enumerate() {
         let key = match &node.name {

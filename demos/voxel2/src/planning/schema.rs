@@ -150,7 +150,50 @@ pub enum ShapeDef {
         /// every density sample in reach has to evaluate.
         #[serde(default = "d_branch_max_limbs")]
         max_limbs: u32,
+        /// Blobs hung on the outer tips: a canopy, a root nodule, a
+        /// clump of fungus. Absent grows bare wood.
+        #[serde(default)]
+        leaf: Option<LeafDef>,
     },
+}
+
+/// What hangs on a growth's tips. See [`crate::planning::structure::Leaf`].
+#[derive(Reflect, Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
+pub struct LeafDef {
+    pub radius: f32,
+    pub material: u32,
+    /// Limb depth a blob first appears at; near the trunk they read as a
+    /// bush that swallowed the tree.
+    #[serde(default = "d_leaf_from")]
+    pub from: u16,
+    /// Smooth-min radius between neighbours, so the blobs merge into one
+    /// canopy instead of reading as a bag of spheres.
+    #[serde(default = "d_leaf_blend")]
+    pub blend: f32,
+    #[serde(default = "d_leaf_jitter")]
+    pub jitter: f32,
+}
+
+impl Default for LeafDef {
+    fn default() -> Self {
+        Self {
+            radius: 0.5,
+            material: 0,
+            from: d_leaf_from(),
+            blend: d_leaf_blend(),
+            jitter: d_leaf_jitter(),
+        }
+    }
+}
+
+fn d_leaf_from() -> u16 {
+    3
+}
+fn d_leaf_blend() -> f32 {
+    0.35
+}
+fn d_leaf_jitter() -> f32 {
+    0.22
 }
 
 fn d_branch_spacing() -> f32 {
@@ -286,6 +329,7 @@ impl PartDef {
                     tip_r,
                     droop,
                     max_limbs,
+                    leaf,
                 } => rt::Shape::Branches {
                     trunk: *trunk,
                     crown: *crown,
@@ -296,6 +340,13 @@ impl PartDef {
                     tip_r: *tip_r,
                     droop: *droop,
                     max_limbs: *max_limbs,
+                    leaf: leaf.map(|l| rt::Leaf {
+                        radius: l.radius,
+                        from: l.from,
+                        material: l.material,
+                        blend: l.blend,
+                        jitter: l.jitter,
+                    }),
                 },
             },
             material: self.material,
@@ -391,6 +442,20 @@ pub enum EmitDef {
         #[serde(default)]
         marker: Option<String>,
     },
+    /// Build a named structure at every placement of a POPULATION.
+    ///
+    /// The one emit whose source is not a planning layer of its own: a
+    /// population already decided where its class grows, at what scale,
+    /// facing which way and as which variant, and every tier that draws
+    /// it reads that one decision. This makes the density field another
+    /// such reader, so the geometry a population's near tier is made of
+    /// is the world rather than something standing on it — while the
+    /// impostor ring and the painted cover carry on from the same
+    /// placements, unchanged and un-consulted.
+    ///
+    /// Variant `i` of the population is variant `i` of the structure,
+    /// the same alignment the impostor table already has.
+    PopulationStructure,
     /// Shell tubes with bored interiors along a `connect3` source.
     Tubes {
         #[serde(default = "d_tube_material")]
@@ -430,6 +495,9 @@ voxel_core::defaults! {
     pub d_tube_bore: f32 = 1.5;
     pub d_tube_lift: f32 = 3.0;
 }
+/// Seed every pooled structure is grown from.
+const POOL_SALT: u64 = 0x7BEE_0000;
+
 impl EmitDef {
     /// `structure` is whatever the emit's `structure` port is wired to.
     /// The compiler checked that port, so a miss here is a bug rather than
@@ -465,6 +533,15 @@ impl EmitDef {
             EmitDef::SiteStructure3 { marker } => EmitKind::SiteStructure3 {
                 structure: build(""),
                 marker,
+            },
+            // Grown HERE, once, as the level compiles — see
+            // [`crate::planning::structure::Pool`]. A constant salt
+            // because the pool is a property of the structure and
+            // nothing else: the same authored tree is the same tree in
+            // every level that declares it, which is what `tree_seed`
+            // promised when the trees were meshes.
+            EmitDef::PopulationStructure => EmitKind::PopulationStructure {
+                pool: std::sync::Arc::new(super::structure::Pool::grow(&build(""), POOL_SALT)),
             },
             EmitDef::Tubes {
                 material,

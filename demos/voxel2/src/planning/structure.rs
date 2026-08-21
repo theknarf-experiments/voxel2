@@ -16,6 +16,7 @@
 use glam::{Vec2, Vec3};
 use voxel_core::csg::CsgOp;
 use voxel_core::seed::Rng;
+use voxel_engine::scatter::Placement;
 
 use voxel_worldgen::Generator;
 
@@ -54,7 +55,29 @@ pub enum Shape {
         tip_r: f32,
         droop: f32,
         max_limbs: u32,
+        /// Blobs hung on the outer tips. `None` grows bare wood.
+        leaf: Option<Leaf>,
     },
+}
+
+/// What hangs on the tips of a growth: a canopy, a root nodule, a clump
+/// of fungus.
+///
+/// Blended rather than stacked. A bag of spheres in a distance field is a
+/// bag of spheres; a smooth minimum between them is one mass with the
+/// lumps still readable, which is the whole reason a canopy is worth
+/// putting in the field instead of hanging a mesh in front of it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Leaf {
+    pub radius: f32,
+    /// How deep a limb must be before it carries one — blobs near the
+    /// trunk read as a bush swallowing the tree.
+    pub from: u16,
+    pub material: u32,
+    /// Smooth-min radius between neighbouring blobs (meters).
+    pub blend: f32,
+    /// Fraction of `radius` the blobs vary by.
+    pub jitter: f32,
 }
 
 /// Where a part's vertical anchor comes from.
@@ -180,8 +203,16 @@ impl Structure {
                     Shape::Cylinder { radius, .. } | Shape::Sphere { radius } => radius[1],
                     // A crown reaches its own half-extent plus whatever
                     // the wobble adds; the growth cannot leave the cloud
-                    // by more than a step.
-                    Shape::Branches { crown, step, .. } => crown[0].max(crown[2]) + step + 1.0,
+                    // by more than a step. Blobs hang OUTSIDE the tips
+                    // they hang on, so they reach a blob further still.
+                    Shape::Branches {
+                        crown, step, leaf, ..
+                    } => {
+                        crown[0].max(crown[2])
+                            + step
+                            + 1.0
+                            + leaf.map_or(0.0, |l| l.radius * (1.0 + l.jitter) + l.blend)
+                    }
                 };
                 let link = part.link.map_or(0.0, |l| l.half_w.max(l.half_h));
                 // Yawed boxes reach their diagonal.
@@ -223,8 +254,101 @@ pub fn build(
     };
     let size = sample(rng, structure.size);
     for part in &variant.parts {
-        let instances = arrange(part, site, size, generator, rng);
-        emit_part(part, &instances, generator, rng, out);
+        let instances = arrange(part, site, size, Some(generator), rng);
+        emit_part(part, &instances, Some(generator), rng, out);
+    }
+}
+
+/// How many times each variant is grown for [`Pool`].
+///
+/// Variety per variant without variety per tree. Four is enough that a
+/// stand does not read as one tree stamped repeatedly, and small enough
+/// that the whole pool is grown in a few milliseconds at level load.
+const POOL_SLOTS: usize = 4;
+
+/// Every variant of a structure, grown a few times each in UNIT SPACE and
+/// kept.
+///
+/// The reason a forest can carry real geometry. Space colonization is
+/// O(nodes x attractors); growing one skeleton per tree would put a few
+/// hundred growths in every chunk of a forest, which is not a cost you
+/// pay per frame — it is a cost you pay per chunk, forever, on every
+/// worker. So the growth happens once when the level compiles, and a
+/// placement is [`CsgOp::transformed`]: scale, rotate, translate.
+///
+/// This is the same bargain the prop meshes struck — one grown mesh per
+/// variant instanced a million times — moved into the density field. What
+/// buys the variety back is the slot, picked from the placement's own
+/// seed, so neighbouring trees of one species are still different trees.
+#[derive(Clone, Debug)]
+pub struct Pool {
+    /// `[variant][slot]` — ops with the seat at the origin and +Y up.
+    slots: Vec<Vec<Vec<CsgOp>>>,
+}
+
+impl Pool {
+    /// Grow every variant `POOL_SLOTS` times. Deterministic in `seed`
+    /// alone: the pool is a property of the structure, not of where or
+    /// when it is asked for, and two chunks holding one tree must agree
+    /// about the field down to the bit.
+    pub fn grow(structure: &Structure, seed: u64) -> Self {
+        let slots = (0..structure.variants.len())
+            .map(|v| {
+                (0..POOL_SLOTS)
+                    .map(|s| {
+                        let mut rng = Rng::new(voxel_core::seed::splitmix64(
+                            seed ^ ((v as u64) << 32) ^ (s as u64).wrapping_mul(0x9E37_79B9),
+                        ));
+                        let mut ops = Vec::new();
+                        build_pooled(structure, v, &mut rng, &mut ops);
+                        ops
+                    })
+                    .collect()
+            })
+            .collect();
+        Self { slots }
+    }
+
+    /// The ops of one placement, already moved onto it.
+    ///
+    /// The variant is the PLACEMENT's, not a fresh roll: variant `i` of a
+    /// population is variant `i` of its structure and row `i` of the
+    /// impostor table, which is what keeps a tree the same species in all
+    /// three tiers. A placement whose variant this structure has no
+    /// entry for emits nothing rather than silently becoming another
+    /// species.
+    pub fn instance(&self, placement: &Placement, out: &mut Vec<CsgOp>) {
+        let Some(slots) = self.slots.get(placement.variant as usize) else {
+            return;
+        };
+        if slots.is_empty() {
+            return;
+        }
+        // High bits: the low ones already picked the variant and the
+        // scale upstream, and reusing them would tie slot to species.
+        let slot = (placement.seed >> 41) as usize % slots.len();
+        out.extend(
+            slots[slot]
+                .iter()
+                .map(|op| op.transformed(placement.position, placement.rotation, placement.scale)),
+        );
+    }
+}
+
+/// One variant grown at the origin, with no terrain under it.
+///
+/// `Seat::Terrain` resolves to zero here, which is exactly right: a
+/// pooled structure's ground is wherever its placement puts it, and the
+/// placement already resolved the height, the sink and the altitude
+/// falloff that decided it.
+fn build_pooled(structure: &Structure, variant: usize, rng: &mut Rng, out: &mut Vec<CsgOp>) {
+    let Some(variant) = structure.variants.get(variant) else {
+        return;
+    };
+    let size = sample(rng, structure.size);
+    for part in &variant.parts {
+        let instances = arrange(part, Vec3::ZERO, size, None, rng);
+        emit_part(part, &instances, None, rng, out);
     }
 }
 
@@ -243,9 +367,11 @@ fn pick_variant<'a>(structure: &'a Structure, rng: &mut Rng) -> Option<&'a Varia
     structure.variants.last()
 }
 
-fn seat_y(part: &Part, site: Vec3, xz: Vec2, generator: &Generator) -> f32 {
+/// `ground` is `None` when a structure is grown in UNIT SPACE, where
+/// there is no terrain to seat against and the origin IS the seat.
+fn seat_y(part: &Part, site: Vec3, xz: Vec2, ground: Option<&Generator>) -> f32 {
     match part.seat {
-        Seat::Terrain => generator.height(xz, 1.0),
+        Seat::Terrain => ground.map_or(0.0, |g| g.height(xz, 1.0)),
         Seat::Site => site.y,
     }
 }
@@ -254,7 +380,7 @@ fn arrange(
     part: &Part,
     site: Vec3,
     size: f32,
-    generator: &Generator,
+    ground: Option<&Generator>,
     rng: &mut Rng,
 ) -> Vec<Instance> {
     let site_xz = Vec2::new(site.x, site.z);
@@ -339,7 +465,7 @@ fn arrange(
                 // An entry point above the first instance; `link` carves
                 // the tunnel down to it.
                 let first = out[0].pos;
-                let surface = generator.height(Vec2::new(first.x, first.z), 1.0);
+                let surface = ground.map_or(site.y, |g| g.height(Vec2::new(first.x, first.z), 1.0));
                 let above = surface + 1.2 - (site.y + first.y);
                 out.insert(
                     0,
@@ -363,7 +489,7 @@ fn quantize_heading(heading: f32) -> f32 {
 fn emit_part(
     part: &Part,
     instances: &[Instance],
-    generator: &Generator,
+    ground: Option<&Generator>,
     rng: &mut Rng,
     out: &mut Vec<CsgOp>,
 ) {
@@ -372,7 +498,7 @@ fn emit_part(
         // The link needs every position, including skipped ones, or a
         // collapsed room would break the corridor chain.
         let xz = Vec2::new(instance.pos.x, instance.pos.z);
-        let site_y = seat_y(part, Vec3::new(xz.x, 0.0, xz.y), xz, generator);
+        let site_y = seat_y(part, Vec3::new(xz.x, 0.0, xz.y), xz, ground);
         let yaw = match part.yaw {
             Yaw::Zero => 0.0,
             Yaw::Random => rng.next_f32() * std::f32::consts::TAU,
@@ -444,6 +570,7 @@ fn push_branches(part: &Part, center: Vec3, half: Vec3, rng: &mut Rng, out: &mut
         tip_r,
         droop,
         max_limbs,
+        leaf,
         ..
     } = part.shape
     else {
@@ -469,7 +596,12 @@ fn push_branches(part: &Part, center: Vec3, half: Vec3, rng: &mut Rng, out: &mut
         // Reach has to span root to crown or nothing is ever pulled and
         // the structure is a stump.
         attraction_m: half.y + crown_r.max_element(),
-        kill_m: spacing * 1.4,
+        // UNDER the attractor spacing, or one stem consumes the whole
+        // cloud as it passes and the growth is a bare pole with no fork
+        // in it. Was 1.4x, which is over: the conifer and the birch grew
+        // as poles when the prop meshes made the same mistake, and this
+        // is the value that fixed them.
+        kill_m: spacing * 0.7,
         step_m: step,
         max_nodes: max_limbs as usize + 1,
         tip_r_m: tip_r,
@@ -477,7 +609,8 @@ fn push_branches(part: &Part, center: Vec3, half: Vec3, rng: &mut Rng, out: &mut
         droop: if inverted { -droop } else { droop },
         wobble: 0.14,
     };
-    for l in voxel_core::branch::colonize(root, up, &cloud, &growth, rng) {
+    let limbs = voxel_core::branch::colonize(root, up, &cloud, &growth, rng);
+    for l in &limbs {
         out.push(CsgOp::capsule(
             l.a,
             l.b,
@@ -486,6 +619,25 @@ fn push_branches(part: &Part, center: Vec3, half: Vec3, rng: &mut Rng, out: &mut
             part.material,
             part.cut,
         ));
+    }
+    let Some(leaf) = leaf else {
+        return;
+    };
+    // A tip is a limb no other limb grows out of. Every limb is compared
+    // against every other, which is quadratic in a few dozen — and this
+    // runs once per pooled variant, not once per instance.
+    for (i, l) in limbs.iter().enumerate() {
+        if l.depth < leaf.from || limbs.iter().any(|o| o.a == l.b) {
+            continue;
+        }
+        // Deterministic per tip: the same skeleton must give the same
+        // canopy every time it is grown, or two chunks that both hold
+        // this tree disagree about where the field is.
+        let h = ((i as u32).wrapping_mul(2_246_822_519) ^ 0x9E37_79B9) >> 8;
+        let vary = 1.0 + ((h & 0xFFFF) as f32 / 65535.0 - 0.5) * 2.0 * leaf.jitter;
+        let mut blob = CsgOp::sphere(l.b, leaf.radius * vary, leaf.material, part.cut);
+        blob.blend = leaf.blend;
+        out.push(blob);
     }
 }
 
@@ -569,6 +721,144 @@ fn push_link(link: &Link, a: Vec3, b: Vec3, out: &mut Vec<CsgOp>) {
 
 #[cfg(test)]
 mod tests {
+
+    /// A tree, as `planet.json` declares one.
+    fn tree_structure() -> Structure {
+        Structure {
+            size: [1.0, 1.0],
+            variants: (0..3)
+                .map(|i| Variant {
+                    weight: 1.0,
+                    parts: vec![Part {
+                        arrange: Arrange::Single,
+                        shape: Shape::Branches {
+                            trunk: [1.8 + i as f32 * 0.4, 2.2 + i as f32 * 0.4],
+                            crown: [2.4, 1.8, 2.4],
+                            conical: i == 1,
+                            inverted: false,
+                            spacing: 0.95,
+                            step: 0.6,
+                            tip_r: 0.125,
+                            droop: 0.05,
+                            max_limbs: 34,
+                            leaf: Some(Leaf {
+                                radius: 0.85,
+                                from: 4,
+                                material: 8,
+                                blend: 0.15,
+                                jitter: 0.4,
+                            }),
+                        },
+                        material: 9,
+                        cut: false,
+                        hollow: None,
+                        skip: 0.0,
+                        seat: Seat::Terrain,
+                        anchor: Anchor::Base,
+                        y_offset: [0.0, 0.0],
+                        yaw: Yaw::Zero,
+                        link: None,
+                    }],
+                })
+                .collect(),
+        }
+    }
+
+    fn placement(variant: u32, seed: u64, scale: f32) -> Placement {
+        Placement {
+            position: Vec3::new(-120.5, 44.25, 903.0),
+            rotation: glam::Quat::from_rotation_y(0.9),
+            scale,
+            variant,
+            seed,
+            seat_y: 44.7,
+        }
+    }
+
+    /// The pool is a pure function of the structure — which is what lets
+    /// it be grown once at level load and instanced from every worker.
+    ///
+    /// If this ever stopped holding, two chunks holding one tree would
+    /// disagree about where the field is and the seam between them would
+    /// be a crack nobody owns.
+    #[test]
+    fn a_pool_is_the_same_pool_every_time() {
+        let s = tree_structure();
+        let (a, b) = (Pool::grow(&s, 0x7BEE), Pool::grow(&s, 0x7BEE));
+        let mut ops_a = Vec::new();
+        let mut ops_b = Vec::new();
+        for variant in 0..3 {
+            for seed in [1u64, 0x9E37_79B9_7F4A_7C15, u64::MAX] {
+                a.instance(&placement(variant, seed, 1.3), &mut ops_a);
+                b.instance(&placement(variant, seed, 1.3), &mut ops_b);
+            }
+        }
+        assert!(!ops_a.is_empty(), "a tree grew nothing");
+        assert_eq!(ops_a, ops_b);
+        // And a different seed is a different tree, or the pool is just
+        // one tree stamped repeatedly.
+        let other = Pool::grow(&s, 0x7BEF);
+        let mut ops_c = Vec::new();
+        other.instance(&placement(0, 1, 1.3), &mut ops_c);
+        assert_ne!(ops_a[..ops_c.len()], ops_c[..]);
+    }
+
+    /// Every variant grows wood AND leaves, and a placement's variant is
+    /// the one that gets built.
+    ///
+    /// Variant `i` of a population is variant `i` of its structure and row
+    /// `i` of the impostor table; a pool that quietly rolled its own would
+    /// change a tree's species between the tier you walk through and the
+    /// tier you see from the hill.
+    #[test]
+    fn a_placement_gets_its_own_variant() {
+        let pool = Pool::grow(&tree_structure(), 0x7BEE);
+        let mut seen = Vec::new();
+        for variant in 0..3u32 {
+            let mut ops = Vec::new();
+            pool.instance(&placement(variant, 7, 1.0), &mut ops);
+            let wood = ops.iter().filter(|o| o.material == 9).count();
+            let leaves = ops.iter().filter(|o| o.material == 8).count();
+            assert!(wood > 3, "variant {variant} grew {wood} limbs");
+            assert!(leaves > 0, "variant {variant} grew no leaves");
+            seen.push(ops);
+        }
+        assert_ne!(seen[0], seen[1]);
+        assert_ne!(seen[1], seen[2]);
+        // A variant the structure has no entry for emits nothing rather
+        // than silently becoming another species.
+        let mut ops = Vec::new();
+        pool.instance(&placement(9, 7, 1.0), &mut ops);
+        assert!(ops.is_empty());
+    }
+
+    /// A placement's scale scales the tree, and its position moves it.
+    #[test]
+    fn a_pooled_tree_lands_on_its_placement() {
+        let pool = Pool::grow(&tree_structure(), 0x7BEE);
+        let (mut small, mut big) = (Vec::new(), Vec::new());
+        pool.instance(&placement(0, 3, 1.0), &mut small);
+        pool.instance(&placement(0, 3, 2.0), &mut big);
+        let seat = placement(0, 3, 1.0).position;
+        let top = |ops: &[voxel_core::csg::CsgOp]| {
+            ops.iter().map(|o| o.aabb().max.y).fold(f32::MIN, f32::max)
+        };
+        let (h1, h2) = (top(&small) - seat.y, top(&big) - seat.y);
+        assert!(h1 > 3.0, "a tree only {h1} m tall");
+        assert!(
+            (h2 / h1 - 2.0).abs() < 0.02,
+            "doubling the scale gave {h1} -> {h2}"
+        );
+        // Grown from the seat, not through it.
+        let base = small
+            .iter()
+            .map(|o| o.aabb().min.y)
+            .fold(f32::MAX, f32::min);
+        assert!(
+            base > seat.y - 1.0,
+            "the trunk starts {base} under {seat:?}"
+        );
+    }
     use super::*;
     use voxel_core::seed::chunk_seed;
 

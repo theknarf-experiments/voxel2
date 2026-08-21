@@ -345,6 +345,10 @@ impl Node for Emit {
                 ("structure", Value::Host("structure")),
             ],
             EmitDef::Tubes { .. } => &[("source", Value::Host("paths3"))],
+            EmitDef::PopulationStructure => &[
+                ("source", Value::Host("population")),
+                ("structure", Value::Host("structure")),
+            ],
         };
         (source, &[])
     }
@@ -383,7 +387,11 @@ impl Node for Population {
             (false, true) => &[("density", Value::Field)],
             (true, true) => &[("density", Value::Field), ("gate", Value::Host("biomes"))],
         };
-        (ins, &[])
+        // A population PRODUCES its placements, so an emit can build the
+        // near tier's geometry out of the very set the impostor ring and
+        // the painted cover stand in for — one placement decision, three
+        // readers. See [`super::schema::EmitDef::PopulationStructure`].
+        (ins, &[("props", Value::Host("population"))])
     }
     /// Props are entities. A population decides where they go and carves
     /// nothing, so editing one must not restream a world whose voxels
@@ -717,6 +725,14 @@ impl RegionLayer for Emit {
             emit,
             ..
         } = self.clone();
+        // The finest ground this emit's ops will ever be carved into —
+        // one voxel of the finest chunk its gate admits. DERIVED, because
+        // it is the same number twice: an emit gated at 25.6 m serves
+        // chunks of 0.8 m voxels, and a structure seated against any
+        // other height stands off the ground it was placed on.
+        let seat_vs = self
+            .max_chunk_edge_m
+            .map(|edge| edge / voxel_core::CHUNK_CELLS as f32);
         let source = ctx.source();
         let name = ctx.name.to_string();
         mgr.register_as(
@@ -727,6 +743,7 @@ impl RegionLayer for Emit {
                     kind: emit.to_kind(ctx.structure().as_ref()),
                     pad_m,
                     importance,
+                    seat_vs,
                 },
                 cell_m,
                 cell_y_m,

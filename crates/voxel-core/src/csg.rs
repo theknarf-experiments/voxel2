@@ -104,6 +104,53 @@ impl CsgOp {
         self
     }
 
+    /// This op moved onto a placement: scaled about the origin, rotated,
+    /// then translated.
+    ///
+    /// What makes a grown shape affordable in bulk. Space colonization is
+    /// O(nodes x attractors) and a forest places hundreds of trees in a
+    /// chunk, so the skeleton is grown ONCE in unit space and every
+    /// instance is this — a handful of flops per op instead of a growth.
+    /// The prop meshes have always done it this way (one mesh per variant,
+    /// instanced a million times); this is the same trick for the field.
+    ///
+    /// Capsules and spheres transform exactly: an axis is a vector, so an
+    /// arbitrary rotation is just the vector rotated. Boxes and cylinders
+    /// carry a yaw and nothing else, so a rotation with any tilt in it
+    /// keeps them upright and takes only the yaw — the shape has no way to
+    /// express the rest. Documented rather than asserted because the tilt
+    /// a population applies is a few degrees, and refusing it would refuse
+    /// the whole placement over a difference nothing can see.
+    pub fn transformed(&self, translation: Vec3, rotation: glam::Quat, scale: f32) -> Self {
+        let mut out = *self;
+        let center = Vec3::from(self.center);
+        out.center = (translation + rotation * (center * scale)).to_array();
+        if self.kind >= CSG_KIND_CAPSULE_ADD {
+            // `half` is the axis to the tip and `yaw`/`aux.x` the two
+            // radii — every one of them a length or a vector, so the
+            // whole limb scales and rotates without a special case.
+            out.half = (rotation * (Vec3::from(self.half) * scale)).to_array();
+            out.yaw = self.yaw * scale;
+            out.aux[0] = self.aux[0] * scale;
+        } else {
+            out.half = (Vec3::from(self.half) * scale).to_array();
+            out.yaw = self.yaw + Self::yaw_of(rotation);
+        }
+        out.blend = self.blend * scale;
+        out
+    }
+
+    /// The yaw a rotation carries, for the kinds that can hold nothing
+    /// else. Degenerate when the rotation points Z straight up or down,
+    /// which no placement tilt of a few degrees can reach.
+    fn yaw_of(q: glam::Quat) -> f32 {
+        let forward = q * Vec3::Z;
+        if forward.x.abs() + forward.z.abs() < 1.0e-6 {
+            return 0.0;
+        }
+        forward.x.atan2(forward.z)
+    }
+
     /// Signed distance to this op's primitive (mirrors the WGSL `op_sdf`).
     pub fn sdf(&self, p: Vec3) -> f32 {
         // BEFORE the yaw rotation: a capsule has no yaw — that field is
@@ -524,6 +571,73 @@ impl Aabb {
 
 #[cfg(test)]
 mod tests {
+
+    /// A transformed op is the SAME field, moved.
+    ///
+    /// The whole memoization rests on this: a skeleton grown once in unit
+    /// space and placed by [`CsgOp::transformed`] has to be the field the
+    /// growth would have produced there. Checked where it matters — the
+    /// distance at a point, against the distance at the point pulled back
+    /// through the same transform, which for a scaled field is scaled too.
+    #[test]
+    fn a_transformed_op_is_the_same_field_moved() {
+        let q = glam::Quat::from_euler(glam::EulerRot::YXZ, 0.7, 0.12, -0.05);
+        let t = Vec3::new(-31.5, 88.25, 7.0);
+        for scale in [0.5f32, 1.0, 1.7] {
+            for op in [
+                CsgOp::capsule(
+                    Vec3::new(0.0, 0.0, 0.0),
+                    Vec3::new(0.4, 2.6, -0.9),
+                    0.31,
+                    0.08,
+                    3,
+                    false,
+                ),
+                CsgOp::sphere(Vec3::new(0.2, 3.1, -0.4), 0.75, 4, false),
+            ] {
+                let moved = op.transformed(t, q, scale);
+                for p in [
+                    Vec3::new(0.0, 1.0, 0.0),
+                    Vec3::new(1.3, 2.2, -0.7),
+                    Vec3::new(-2.0, 0.2, 3.4),
+                    Vec3::new(0.05, 4.0, 0.05),
+                ] {
+                    let want = op.sdf(p) * scale;
+                    let got = moved.sdf(t + q * (p * scale));
+                    assert!(
+                        (want - got).abs() < 1.0e-3 * scale.max(1.0),
+                        "kind {} scale {scale}: {want} vs {got}",
+                        op.kind
+                    );
+                }
+                assert_eq!(moved.kind, op.kind);
+                assert_eq!(moved.material, op.material);
+            }
+        }
+    }
+
+    /// The bounds of a moved op still contain it — what the per-cell index
+    /// prunes against, so an op that escaped its own box would vanish from
+    /// chunks that need it.
+    #[test]
+    fn a_transformed_op_stays_inside_its_bounds() {
+        let q = glam::Quat::from_euler(glam::EulerRot::YXZ, 2.1, 0.06, 0.0);
+        let op = CsgOp::capsule(Vec3::ZERO, Vec3::new(-0.7, 3.4, 0.25), 0.28, 0.06, 3, false)
+            .transformed(Vec3::new(11.0, -4.0, 60.0), q, 1.4);
+        let b = op.aabb();
+        let (min, max) = (b.min, b.max);
+        for i in 0..=8 {
+            let t = i as f32 / 8.0;
+            let a = Vec3::from(op.center);
+            let p = a + Vec3::from(op.half) * t;
+            let r = op.yaw + (op.aux[0] - op.yaw) * t;
+            assert!(
+                (p - Vec3::splat(r)).cmpge(min - Vec3::splat(1.0e-4)).all()
+                    && (p + Vec3::splat(r)).cmple(max + Vec3::splat(1.0e-4)).all(),
+                "t {t}: {p:?} r {r} outside {min:?}..{max:?}"
+            );
+        }
+    }
     use super::*;
 
     #[test]

@@ -43,6 +43,15 @@ pub struct Placement {
     pub scale: f32,
     pub variant: u32,
     pub seed: u64,
+    /// The surface height this was seated on, at the population's own
+    /// [`ScatterDef::detail_vs`] and BEFORE sink or altitude falloff.
+    ///
+    /// Carried rather than recoverable: `position.y` has both of those
+    /// baked in, so a consumer that wants to re-seat this finely would
+    /// otherwise have to walk the program a second time to find what it
+    /// is subtracting — and a population places hundreds of these per
+    /// tile. The placer already had the number.
+    pub seat_y: f32,
 }
 
 const SCATTER_SALT: u64 = 0x5CA7;
@@ -289,6 +298,7 @@ pub fn tile_placements(
             .unwrap_or(def.sink_m + def.sink_scaled * scale);
         out.push(Placement {
             position: Vec3::new(xz.x, y - sink, xz.y),
+            seat_y: y,
             rotation: placement_rotation(
                 generator,
                 &def.placement,

@@ -80,6 +80,9 @@ struct Emitter {
     importance: u8,
     /// Its ribbons lie on the ground rather than at a level.
     seated: bool,
+    /// It builds its geometry out of a population's placements, so it
+    /// sits DOWNSTREAM of the placer instead of gating it.
+    from_population: bool,
     ribbons: bool,
     clearance: bool,
     markers: bool,
@@ -94,6 +97,7 @@ impl Emitter {
         emit: &EmitDef,
     ) -> Self {
         let seated = matches!(emit, EmitDef::PathRibbon { .. });
+        let from_population = matches!(emit, EmitDef::PopulationStructure);
         let (ribbons, clearance, markers) = match emit {
             EmitDef::Ribbon { .. } => (true, true, false),
             // Ribbons yes; clearance no — the carved road beside it
@@ -104,13 +108,16 @@ impl Emitter {
             EmitDef::SiteStructure { marker, .. } | EmitDef::SiteStructure3 { marker, .. } => {
                 (false, false, marker.is_some())
             }
-            EmitDef::WormCuts | EmitDef::Tubes { .. } => (false, false, false),
+            EmitDef::WormCuts | EmitDef::Tubes { .. } | EmitDef::PopulationStructure => {
+                (false, false, false)
+            }
         };
         Self {
             name,
             keep_m,
             importance,
             seated,
+            from_population,
             gate,
             ribbons,
             clearance,
@@ -655,6 +662,9 @@ impl RegionPlanner {
         let ctx = Arc::new(world::WorldCtx::new(generator.clone()));
         let mut graph = LayerGraph::with_context(seed, ctx.clone());
         let mut emitters = Vec::new();
+        // Emits whose source is a population, held until the populations
+        // they read are in the graph.
+        let mut after_populations: Vec<&voxel_engine::graph::NodeDef> = Vec::new();
         // (structure extent bound, importance) of every emit that
         // publishes landmarks; what the coverage widening below is
         // computed from.
@@ -668,6 +678,19 @@ impl RegionPlanner {
                 wires: &node.wires,
                 by_name: &by_name,
             };
+            // Registration order must be topological — that is what makes
+            // the layer graph a DAG by construction. Almost every region
+            // node can register the moment its turn comes, because source
+            // order is program order; the exception is an emit built out
+            // of a POPULATION, whose layers this loop does not register at
+            // all (they arrive in bulk below, needing every emit name at
+            // once). So those are held back and registered after.
+            let deferred = node
+                .node
+                .0
+                .as_any()
+                .downcast_ref::<nodes::Emit>()
+                .is_some_and(|e| matches!(e.emit, schema::EmitDef::PopulationStructure));
             // Dispatched through the registry, not a match: the kinds are
             // open, and a kind that forgot `#[reflect(RegionLayer)]` is a
             // named warning rather than a layer that silently is not there.
@@ -676,6 +699,7 @@ impl RegionPlanner {
                 .get_type_data::<nodes::ReflectRegionLayer>(node.node.0.as_any().type_id())
                 .and_then(|d| d.get(node.node.0.as_reflect()))
             {
+                Some(_) if deferred => after_populations.push(node),
                 Some(layer) => layer.register(&rctx, &mut graph),
                 None => warn!("planning: '{name}' is a region node but implements no RegionLayer"),
             }
@@ -715,27 +739,33 @@ impl RegionPlanner {
         // whole point of expressing this as a dependency graph.
         let lod = voxel_engine::LodConfig::from(&level.lod);
         // A level whose emits carry importance keeps landmarks refined
-        // out to their bias range, and a refined chunk asks EVERY
-        // emitter its edge admits for ops — so every emitter's coverage
-        // must reach that far. Static, from authored sizes: the range a
-        // landmark can matter at plus the farthest a refined leaf can
-        // sit from it. Zero when no emit publishes landmarks.
-        let landmark_reach: f32 = landmark_bounds
-            .iter()
-            .map(|&(extent, levels)| {
-                let v = voxel_engine::streaming::DetailVolume {
-                    min: bevy::math::DVec3::ZERO,
-                    max: bevy::math::DVec3::splat(f64::from(extent)),
-                    levels,
-                };
-                let fade = (0..=32u8)
-                    .map(|l| voxel_engine::streaming::detail_reach_m(&v, l))
-                    .fold(0.0, f64::max);
-                (voxel_engine::streaming::detail_range_m(&v, lod.split_k) + fade) as f32
-                    + layers::ELEM_PAD_M
-                    + ANCHOR_SLOP_M
-            })
-            .fold(0.0, f32::max);
+        // out to their bias range, and a refined chunk asks EVERY emitter
+        // its edge admits for ops — so every emitter's coverage must
+        // reach that far. Per EMITTER, though, and not once for all of
+        // them: how far a landmark can push a leaf depends on the leaf's
+        // level, and an emitter only ever hears from leaves its own gate
+        // admits. Sized for every level at once, the forest's 25 m gate
+        // inherited the range of the ruins' 800 m one and planned 72 km²
+        // to serve 130 m of it.
+        let landmark = |leaf: u8| -> f32 {
+            landmark_bounds
+                .iter()
+                .map(|&(extent, levels)| {
+                    let v = voxel_engine::streaming::DetailVolume {
+                        min: bevy::math::DVec3::ZERO,
+                        max: bevy::math::DVec3::splat(f64::from(extent)),
+                        levels,
+                    };
+                    let reach = voxel_engine::streaming::landmark_reach_m(&lod, &v, leaf);
+                    if reach == 0.0 {
+                        return 0.0;
+                    }
+                    // The volume is a BOX, so its far face is its own
+                    // extent further out than its near one.
+                    reach as f32 + extent + layers::ELEM_PAD_M + ANCHOR_SLOP_M
+                })
+                .fold(0.0, f32::max)
+        };
         let mut deps = Vec::new();
         for e in &emitters {
             // How far a leaf of edge E can be and still be drawn is the
@@ -767,7 +797,7 @@ impl RegionPlanner {
             // 40 km — measured at 132 -> 360 ops per chunk when tried.
             // Landmarks widen every emitter alike: a refined chunk near
             // one queries whatever its edge's gate admits.
-            let reach = ops_reach.max(e.keep_m.unwrap_or(0.0)).max(landmark_reach);
+            let reach = ops_reach.max(e.keep_m.unwrap_or(0.0)).max(landmark(leaf));
 
             // Nothing else needs sizing in here any more: every other
             // consumer of these layers — ribbon surfaces, scatter
@@ -837,11 +867,42 @@ impl RegionPlanner {
             .expect("the level compiled when it was validated")
             .fields;
         let defs = nodes::populations(&level.nodes, &fields);
-        let emit_names: Vec<String> = emitters.iter().map(|e| e.name.clone()).collect();
+        // Populations read every emit for the clearance and the carved
+        // ground their placement is gated on — every emit EXCEPT the ones
+        // built out of populations, which would be a cycle: a tree cannot
+        // be kept off ground that a tree carved. Sound as well as
+        // necessary, since a pooled structure emits neither clearance nor
+        // cuts that a placer reads.
+        let emit_names: Vec<String> = emitters
+            .iter()
+            .filter(|e| !e.from_population)
+            .map(|e| e.name.clone())
+            .collect();
         let (scatter_tops, populations) =
             crate::scatter::register(&mut graph, &defs, emit_names, &biome_tables);
         deps.extend(scatter_tops);
         *ctx.populations.lock().unwrap() = Some(populations);
+
+        // Now the populations exist as layers, the emits built out of
+        // them can be registered — and their top dependencies are already
+        // in `deps`, sized from the same `max_chunk_edge_m` gate as
+        // everyone else's, because that pass read the node list and not
+        // the graph.
+        for node in after_populations {
+            let name = node.name.as_deref().expect("a deferred emit is named");
+            let rctx = nodes::RegionCtx {
+                name,
+                wires: &node.wires,
+                by_name: &by_name,
+            };
+            if let Some(layer) = registry
+                .read()
+                .get_type_data::<nodes::ReflectRegionLayer>(node.node.0.as_any().type_id())
+                .and_then(|d| d.get(node.node.0.as_reflect()))
+            {
+                layer.register(&rctx, &mut graph);
+            }
+        }
 
         // Camera-following handles only: `set_focus` must not drag a
         // pinned box to the camera. The pinned ones get their one focus —
@@ -1223,39 +1284,56 @@ mod tests {
         assert!(err.contains("element padding"), "{err}");
     }
 
-    /// Tuning a population must not restream the world.
+    /// Tuning a population restreams the world only if something CARVES
+    /// with it.
     ///
-    /// The engine's rule proved on a real level: planet's populations are
-    /// the only nodes in it that reach no voxel, and every other kind it
-    /// ships has to keep the conservative answer. Written against the
-    /// SHIPPED nodes rather than a fixture, because what this protects is
-    /// a live edit to this level.
+    /// The engine's rule proved on a real level. A population decides
+    /// where props go and props are entities, so editing one is planning
+    /// work and not five seconds of every chunk regenerating to place the
+    /// voxels it already had — UNLESS an emit builds geometry out of its
+    /// placements, which planet's `tree` does. Neither half may be
+    /// assumed: charge every population the world's price and a live edit
+    /// to the undergrowth costs a restream; charge none of them and moving
+    /// the forest leaves the old trunks carved into the ground.
+    ///
+    /// Written against the SHIPPED nodes rather than a fixture, because
+    /// what this protects is a live edit to this level.
     #[test]
-    fn tuning_a_population_does_not_restream_the_world() {
+    fn tuning_a_population_restreams_only_if_it_carves() {
         use voxel_engine::graph::{changed, node::Invalidates};
         let planet = shipped("planet.json");
         assert_eq!(changed(&planet.nodes, &planet.nodes), None);
 
-        let mut edited = planet.clone();
-        let population = edited
-            .nodes
-            .iter_mut()
-            .find_map(|n| {
-                n.node
-                    .0
-                    .as_any_mut()
-                    .downcast_mut::<super::nodes::Population>()
-            })
-            .expect("planet ships populations");
-        population.0.per_tile += 1;
+        let bump = |class: &str| {
+            let mut edited = planet.clone();
+            let population = edited
+                .nodes
+                .iter_mut()
+                .find(|n| n.name.as_deref() == Some(class))
+                .and_then(|n| {
+                    n.node
+                        .0
+                        .as_any_mut()
+                        .downcast_mut::<super::nodes::Population>()
+                })
+                .unwrap_or_else(|| panic!("planet ships a '{class}' population"));
+            population.0.per_tile += 1;
+            changed(&edited.nodes, &planet.nodes)
+        };
+
         assert_eq!(
-            changed(&edited.nodes, &planet.nodes),
+            bump("bush"),
             Some(Invalidates::Plan),
-            "props are entities — the voxels would come back identical"
+            "an undergrowth prop is an entity — the voxels come back identical"
+        );
+        assert_eq!(
+            bump("tree"),
+            Some(Invalidates::World),
+            "the forest's near tier is carved from its placements"
         );
 
-        // And every other kind keeps the conservative answer, so a new one
-        // is only cheap when somebody says so in its own impl.
+        // The KIND still answers cheaply; what widened the answer is the
+        // wire, which is where a reader has to go looking for it.
         for node in &planet.nodes {
             let is_population = node
                 .node
@@ -1453,7 +1531,15 @@ mod output_is_unchanged {
                 "planet.json",
                 Vec3::new(-27000.0, 0.0, -38000.0),
                 4096.0,
-                (50200, 5809, 5809, 146),
+                // Was (50200, 5809, 5809, 146) when the forest's near
+                // tier was prop MESHES standing on the ground. It is
+                // geometry now: every tree in the window carries a
+                // trunk, its limbs and its canopy as ops. A DECISION —
+                // this number IS the forest, and the thing that keeps it
+                // affordable is not a small op count but the per-cell
+                // interval index, which is why `stalled` and the settle
+                // time are what get watched instead.
+                (372709, 5809, 5809, 146),
             ),
             // Was (18778, 0, 0, 772) before the interior had populations.
             // A population brings a top dependency of its own, so more of
