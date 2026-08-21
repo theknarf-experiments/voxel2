@@ -413,10 +413,39 @@ impl ChunkOps {
                     let (start, outer) = coarse[t].as_ref().expect("filled above");
                     let keep: Vec<u32> = match start {
                         Some(start) => {
-                            // Refine within the coarse survivors, then map
-                            // the local indices back to the chunk's ops.
-                            let subset: Vec<CsgOp> =
-                                outer.iter().map(|i| ops[*i as usize]).collect();
+                            // Reject by BOX before evaluating by field.
+                            // A true distance field is at least the
+                            // distance to its own AABB, and a union can
+                            // only matter within the terrain's upper
+                            // bound — so an add whose box is further than
+                            // that cannot change `min`, proved with a few
+                            // compares instead of an sdf call. Cuts are
+                            // kept: how deep the terrain sits is what
+                            // decides them.
+                            let reach = start.hi;
+                            let subset: Vec<CsgOp> = outer
+                                .iter()
+                                .map(|i| ops[*i as usize])
+                                .filter(|op| {
+                                    op.kind & 1 != 0 || {
+                                        let bb = op.aabb();
+                                        let gap = (bb.min - hi).max(lo - bb.max).max(Vec3::ZERO);
+                                        gap.length() <= reach
+                                    }
+                                })
+                                .collect();
+                            let outer: Vec<u32> = outer
+                                .iter()
+                                .copied()
+                                .filter(|i| {
+                                    let op = ops[*i as usize];
+                                    op.kind & 1 != 0 || {
+                                        let bb = op.aabb();
+                                        let gap = (bb.min - hi).max(lo - bb.max).max(Vec3::ZERO);
+                                        gap.length() <= reach
+                                    }
+                                })
+                                .collect();
                             prune_chain(&subset, *start, lo, hi)
                                 .into_iter()
                                 .map(|i| outer[i as usize])
