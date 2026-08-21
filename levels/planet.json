@@ -640,7 +640,7 @@
    "in": {
     "biome": "biomes"
    },
-   "chance": 0.1,
+   "chance": 0.85,
    "altitude": [
     6.0,
     240.0
@@ -649,7 +649,8 @@
     0.9,
     1.0
    ],
-   "biome": "forest"
+   "biome": "forest",
+   "cell_m": 32
   },
   {
    "kind": "emit",

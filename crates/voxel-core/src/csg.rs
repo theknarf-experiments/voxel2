@@ -383,7 +383,7 @@ impl ChunkOps {
         // A coarse box's interval BOUNDS every fine box inside it, so
         // reusing it is sound and merely looser, and 8 calls buy most of
         // what 512 did.
-        const T: usize = 2;
+        const T: usize = 4;
         let tstep = (max - min) / T as f32;
         let mut coarse: Vec<Option<(Option<Interval>, Vec<u32>)>> = vec![None; T * T * T];
         for (i, slot) in coarse.iter_mut().enumerate() {
