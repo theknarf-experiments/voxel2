@@ -388,7 +388,7 @@ struct CoverJob {
     generator: std::sync::Arc<voxel_worldgen::Generator>,
     /// Each population that paints, with the region material its placer
     /// gates on and the voxel size its paint takes over at.
-    populations: Vec<(voxel_engine::level::ScatterDef, Option<u32>, f32)>,
+    populations: Vec<(voxel_engine::level::ScatterDef, Vec<u32>, f32)>,
 }
 
 impl CoverJob {
@@ -406,7 +406,7 @@ impl CoverJob {
                 // resolves it — what grows somewhere and what is painted
                 // there are then the same question asked twice, not two
                 // answers that must be kept equal by hand.
-                let gate = planner.gate_material(def);
+                let gate = planner.gate_materials(def);
                 Some((
                     def.clone(),
                     gate,
@@ -447,21 +447,14 @@ impl CoverJob {
         for (def, gate, from_voxel_m) in &self.populations {
             let cover = def.cover.as_ref().expect("filtered on having one");
             coarse_from.push((cover.material, *from_voxel_m));
-            let generator = self.generator.clone();
-            let zero_generator = self.generator.clone();
-            let gate = *gate;
+            let (gate_weight, gate_is_zero_over) =
+                crate::scatter::gate_closures(&self.generator, gate);
             let inputs = voxel_engine::scatter::PlacementInputs {
                 generator: &self.generator,
                 clearance: Vec::new(),
                 cut_ops: Vec::new(),
-                gate_weight: Box::new(move |xz| {
-                    gate.map_or(1.0, |m| generator.surface_material_weight(xz, 8.0, m))
-                }),
-                gate_is_zero_over: Box::new(move |lo, hi| {
-                    gate.is_some_and(|m| {
-                        zero_generator.material_weight_is_zero_over(lo, hi, 8.0, m)
-                    })
-                }),
+                gate_weight,
+                gate_is_zero_over,
             };
             let full_at = cover.full_at.max(1.0e-6);
             let started = std::time::Instant::now();

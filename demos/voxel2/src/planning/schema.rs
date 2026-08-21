@@ -440,23 +440,28 @@ pub fn validate_level(level: &LevelDef) -> Result<(), String> {
     // second, because it is a parameter rather than a wire.
     for node in &level.nodes {
         let any = node.node.0.as_any();
-        // The port a kind reads its table through, and the member it
+        // The port a kind reads its table through, and the members it
         // names. A population calls the port `gate` because what it gates
-        // on is a weight; a layer calls it `biome` because it IS one.
-        let named = any
+        // on is a weight; a layer calls it `biome` because it IS one. A
+        // population names a LIST; a layer names at most one, which is
+        // the same question with a shorter answer.
+        let named: Option<(&str, Vec<String>)> = any
             .downcast_ref::<super::nodes::Scatter>()
-            .map(|n| ("biome", n.biome.clone()))
+            .map(|n| ("biome", n.biome.clone().into_iter().collect()))
             .or_else(|| {
                 any.downcast_ref::<super::nodes::Scatter3>()
-                    .map(|n| ("biome", n.biome.clone()))
+                    .map(|n| ("biome", n.biome.clone().into_iter().collect()))
             })
             .or_else(|| {
                 any.downcast_ref::<super::nodes::Population>()
                     .map(|n| ("gate", n.0.region.clone()))
             });
-        let (Some((port, Some(member))), Some(name)) = (named, node.name.as_deref()) else {
+        let (Some((port, members)), Some(name)) = (named, node.name.as_deref()) else {
             continue;
         };
+        if members.is_empty() {
+            continue; // ungated: names nothing, so there is nothing to check
+        }
         let instance = node
             .wires
             .get(port)
@@ -466,10 +471,12 @@ pub fn validate_level(level: &LevelDef) -> Result<(), String> {
             .iter()
             .find(|(n, _)| n == instance)
             .ok_or_else(|| format!("layer {name:?}: {instance:?} is not a biomes layer"))?;
-        if !table.iter().any(|(n, _)| *n == member) {
-            return Err(format!(
-                "layer {name:?}: region {member:?} not in layer {instance:?}"
-            ));
+        for member in &members {
+            if !table.iter().any(|(n, _)| n == member) {
+                return Err(format!(
+                    "layer {name:?}: region {member:?} not in layer {instance:?}"
+                ));
+            }
         }
     }
 

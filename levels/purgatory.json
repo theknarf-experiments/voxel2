@@ -551,7 +551,9 @@
      ]
     }
    ],
-   "region": "boneyard"
+   "region": [
+    "boneyard"
+   ]
   },
   {
    "kind": "population",
@@ -580,7 +582,9 @@
      ]
     }
    ],
-   "region": "ashfield"
+   "region": [
+    "ashfield"
+   ]
   },
   {
    "kind": "population",

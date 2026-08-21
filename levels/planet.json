@@ -809,7 +809,9 @@
      ]
     }
    ],
-   "region": "forest",
+   "region": [
+    "forest"
+   ],
    "output": "points",
    "tile_m": 64.0,
    "radius_tiles": 80,
@@ -850,11 +852,16 @@
      ]
     }
    ],
-   "region": "tundra"
+   "region": [
+    "tundra"
+   ]
   },
   {
    "kind": "population",
    "name": "groundcover",
+   "in": {
+    "gate": "biomes"
+   },
    "output": "points",
    "tile_m": 16.0,
    "radius_tiles": 7,
@@ -864,7 +871,12 @@
     300.0
    ],
    "min_up": 0.8,
-   "detail_vs": 1.0
+   "detail_vs": 1.0,
+   "region": [
+    "forest",
+    "wetland",
+    "tundra"
+   ]
   },
   {
    "kind": "population",
@@ -894,7 +906,9 @@
      ]
     }
    ],
-   "region": "forest"
+   "region": [
+    "forest"
+   ]
   },
   {
    "kind": "population",
@@ -924,7 +938,9 @@
      ]
     }
    ],
-   "region": "forest"
+   "region": [
+    "forest"
+   ]
   },
   {
    "kind": "population",
@@ -954,7 +970,9 @@
      ]
     }
    ],
-   "region": "forest"
+   "region": [
+    "forest"
+   ]
   },
   {
    "kind": "population",
@@ -984,7 +1002,9 @@
      ]
     }
    ],
-   "region": "forest"
+   "region": [
+    "forest"
+   ]
   },
   {
    "kind": "population",
@@ -1012,7 +1032,9 @@
      ]
     }
    ],
-   "region": "desert"
+   "region": [
+    "desert"
+   ]
   },
   {
    "kind": "population",
@@ -1040,7 +1062,9 @@
      ]
     }
    ],
-   "region": "desert"
+   "region": [
+    "desert"
+   ]
   },
   {
    "kind": "population",
@@ -1068,7 +1092,9 @@
      ]
     }
    ],
-   "region": "wetland"
+   "region": [
+    "wetland"
+   ]
   },
   {
    "kind": "population",
@@ -1096,7 +1122,9 @@
      ]
     }
    ],
-   "region": "wetland"
+   "region": [
+    "wetland"
+   ]
   },
   {
    "kind": "population",
@@ -1124,7 +1152,9 @@
      ]
     }
    ],
-   "region": "tundra"
+   "region": [
+    "tundra"
+   ]
   },
   {
    "kind": "population",
@@ -1153,7 +1183,9 @@
      ]
     }
    ],
-   "region": "mountains"
+   "region": [
+    "mountains"
+   ]
   },
   {
    "kind": "population",
@@ -1181,7 +1213,9 @@
      ]
     }
    ],
-   "region": "mountains"
+   "region": [
+    "mountains"
+   ]
   }
  ],
  "materials": [

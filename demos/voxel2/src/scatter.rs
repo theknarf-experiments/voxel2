@@ -43,9 +43,9 @@ pub struct ScatterPopulation {
     def: ScatterDef,
     /// Emit instances whose carved ground and clearance gate placement.
     emit_sources: Vec<String>,
-    /// The material of the region this population is gated on, resolved
-    /// through its wired `biomes` node once. `None` grows anywhere.
-    biome: Option<u32>,
+    /// The materials of the regions this population is gated on, resolved
+    /// through its wired `biomes` node once. Empty grows anywhere.
+    biomes: Vec<u32>,
 }
 
 #[derive(Default)]
@@ -131,25 +131,13 @@ impl LayerChunk for ScatterChunk {
         // The region gate and the ground colour are the same ops, so a
         // population that grows in the forest grows exactly where the
         // ground is forest-coloured.
-        let gate_generator = world.generator.clone();
-        let zero_generator = world.generator.clone();
-        let gate_material = layer.biome;
-        let gate_weight = move |xz: Vec2| -> f32 {
-            match gate_material {
-                Some(m) => gate_generator.surface_material_weight(xz, 8.0, m),
-                None => 1.0,
-            }
-        };
-
+        let (gate_weight, gate_is_zero_over) = gate_closures(&world.generator, &layer.biomes);
         let inputs = PlacementInputs {
             generator: &world.generator,
             clearance,
             cut_ops,
-            gate_weight: Box::new(gate_weight),
-            gate_is_zero_over: Box::new(move |lo, hi| match gate_material {
-                Some(m) => zero_generator.material_weight_is_zero_over(lo, hi, 8.0, m),
-                None => false,
-            }),
+            gate_weight,
+            gate_is_zero_over,
         };
         let tile = IVec2::new(ctx.coord().x, ctx.coord().z);
         self.placements = tile_placements(&layer.def, &inputs, tile);
@@ -291,21 +279,71 @@ pub struct PopulationHandle {
     seen_generation: u64,
 }
 
-/// The material of the region a population's `"instance:member"` gate
-/// names, or `None` for one that grows anywhere.
+/// Blended weight of a population's region gate at a point.
+pub type GateWeight = Box<dyn Fn(Vec2) -> f32 + Send + Sync>;
+
+/// Is that weight provably zero everywhere in an xz box?
+pub type GateIsZeroOver = Box<dyn Fn(Vec2, Vec2) -> bool + Send + Sync>;
+
+/// The two gate closures a placer reads, for a population gated on
+/// `materials` (empty = ungated, grows anywhere).
 ///
-/// A region IS a generator band, so this resolves to the same material id
+/// ONE definition, because the placer and the cover paint must ask the
+/// same question: what grows somewhere and what is painted there are the
+/// same question asked twice, not two answers kept equal by hand. Two
+/// copies of "members ADD" would be two chances for the far-field paint
+/// to disagree with the props it stands in for.
+///
+/// Members are alternatives, so their weights add: they are fractions of
+/// the same surface and cannot double-count, and a point half forest and
+/// half wetland is fully both members' ground. Max would thin a
+/// population to half density along every boundary between two biomes it
+/// named. The `is_zero` half is prunable only where EVERY member is
+/// absent — one member with weight in the box can still place.
+pub fn gate_closures(
+    generator: &Arc<voxel_worldgen::Generator>,
+    materials: &[u32],
+) -> (GateWeight, GateIsZeroOver) {
+    let weight_materials = materials.to_vec();
+    let zero_materials = materials.to_vec();
+    let weight_generator = generator.clone();
+    let zero_generator = generator.clone();
+    (
+        Box::new(move |xz: Vec2| {
+            if weight_materials.is_empty() {
+                return 1.0;
+            }
+            weight_materials
+                .iter()
+                .map(|m| weight_generator.surface_material_weight(xz, 8.0, *m))
+                .sum::<f32>()
+                .min(1.0)
+        }),
+        Box::new(move |lo: Vec2, hi: Vec2| {
+            !zero_materials.is_empty()
+                && zero_materials
+                    .iter()
+                    .all(|m| zero_generator.material_weight_is_zero_over(lo, hi, 8.0, *m))
+        }),
+    )
+}
+
+/// The materials of the regions a population's `"instance:member"` gates
+/// name; empty for one that grows anywhere.
+///
+/// A region IS a generator band, so these resolve to the same material ids
 /// the ground is painted with — which is what lets anything that draws the
 /// population where its instances are not (the far-field ground paint) ask
 /// the same question the placer asked.
-pub fn gate_material(
-    def: &ScatterDef,
-    biome_tables: &[(String, Vec<(String, u32)>)],
-) -> Option<u32> {
-    let reference = def.gate.as_ref()?;
-    let (instance, name) = reference.rsplit_once(':')?;
-    let table = biome_tables.iter().find(|(n, _)| n == instance)?;
-    table.1.iter().find(|(n, _)| n == name).map(|(_, m)| *m)
+pub fn gate_materials(def: &ScatterDef, biome_tables: &[(String, Vec<(String, u32)>)]) -> Vec<u32> {
+    def.gate
+        .iter()
+        .filter_map(|reference| {
+            let (instance, name) = reference.rsplit_once(':')?;
+            let table = biome_tables.iter().find(|(n, _)| n == instance)?;
+            table.1.iter().find(|(n, _)| n == name).map(|(_, m)| *m)
+        })
+        .collect()
 }
 
 /// Register one layer per population and return their top dependencies.
@@ -318,12 +356,12 @@ pub fn register(
     let mut tops = Vec::new();
     let mut handles = Vec::new();
     for def in populations {
-        let biome = gate_material(def, biome_tables);
+        let biomes = gate_materials(def, biome_tables);
         let sink = Sink::default();
         let population = ScatterPopulation {
             def: def.clone(),
             emit_sources: emit_sources.clone(),
-            biome,
+            biomes,
         };
         // The population's own radius, as declared in the level, becomes
         // the size of its top dependency — the one number that decides how

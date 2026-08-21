@@ -377,7 +377,7 @@ impl Node for Population {
         // A port only where there is something to name: a population with
         // no region reads no biomes, and one with no density reads no
         // field.
-        let ins: &'static [Port] = match (self.0.region.is_some(), self.0.density.is_some()) {
+        let ins: &'static [Port] = match (!self.0.region.is_empty(), self.0.density.is_some()) {
             (false, false) => &[],
             (true, false) => &[("gate", Value::Host("biomes"))],
             (false, true) => &[("density", Value::Field)],
@@ -426,11 +426,14 @@ pub fn populations(
         };
         let mut def = p.0.clone();
         def.class = name.to_string();
-        def.gate = def
-            .region
-            .as_ref()
-            .zip(source("gate"))
-            .map(|(member, src)| format!("{src}:{member}"));
+        def.gate = match source("gate") {
+            Some(src) => def
+                .region
+                .iter()
+                .map(|member| format!("{src}:{member}"))
+                .collect(),
+            None => Vec::new(),
+        };
         if let Some(density) = &mut def.density {
             density.field = source("density")
                 .and_then(|n| fields.get(&n).copied())

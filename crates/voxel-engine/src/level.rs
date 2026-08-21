@@ -228,19 +228,28 @@ pub struct ScatterDef {
     /// Density from a generator field register.
     #[serde(default)]
     pub density: Option<FieldDensityDef>,
-    /// Which member of the wired weight source gates this population.
+    /// Which members of the wired weight source gate this population.
     ///
     /// The wire says WHICH source; this says which of its members. The
-    /// engine never interprets the name — what a member means is the
+    /// engine never interprets the names — what a member means is the
     /// host's business (this demo's are biomes; another game's could be
-    /// factions or pollution) — it only asks the host for the weight.
+    /// factions or pollution) — it only asks the host for the weights.
+    ///
+    /// A LIST because the honest answer is usually a list: grass belongs
+    /// in forest and wetland and tundra, and what it must not do is grow
+    /// on open sand. Spelling that as one member forces a choice between
+    /// a bare biome and a wrong one. Empty is ungated — everywhere.
+    ///
+    /// Members are alternatives, so their weights ADD: on a boundary
+    /// between two members the population is at full density, which is
+    /// the point of naming both.
     #[serde(default)]
-    pub region: Option<String>,
-    /// The two halves above, joined: the `"instance:member"` reference the
-    /// host resolves. Written by the compiler, never by a level.
+    pub region: Vec<String>,
+    /// The above, joined to the wire: the `"instance:member"` references
+    /// the host resolves. Written by the compiler, never by a level.
     #[serde(skip)]
     #[reflect(@schema::Hidden)]
-    pub gate: Option<String>,
+    pub gate: Vec<String>,
     /// Respect planning clearance (roadbeds, riverbeds).
     #[serde(default = "d_true")]
     pub clearance: bool,

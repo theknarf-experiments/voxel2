@@ -497,9 +497,9 @@ impl RegionPlanner {
     }
 
     /// The material of the region this population is gated on. See
-    /// [`crate::scatter::gate_material`].
-    pub fn gate_material(&self, def: &voxel_engine::level::ScatterDef) -> Option<u32> {
-        crate::scatter::gate_material(def, &self.biome_tables)
+    /// [`crate::scatter::gate_materials`].
+    pub fn gate_materials(&self, def: &voxel_engine::level::ScatterDef) -> Vec<u32> {
+        crate::scatter::gate_materials(def, &self.biome_tables)
     }
 
     pub fn weight_fields(&self) -> Vec<String> {
@@ -943,6 +943,57 @@ mod tests {
         );
     }
 
+    /// Members of a region list are ALTERNATIVES, so their weights add.
+    ///
+    /// This is the whole point of the list: "grass in forest and wetland,
+    /// never on sand" has to be at FULL density on a forest/wetland
+    /// boundary, not half of it in each. Taking the max instead would
+    /// thin every population along every boundary between two biomes it
+    /// named, which is a look bug nothing else here would catch.
+    #[test]
+    fn region_members_add_their_weights() {
+        use crate::scatter::gate_closures;
+        let planet = shipped("planet.json");
+        let generator = Arc::new(planet.generator(0));
+        let (ungated, _) = gate_closures(&generator, &[]);
+        let (forest, _) = gate_closures(&generator, &[1]);
+        let (wetland, _) = gate_closures(&generator, &[6]);
+        let (both, _) = gate_closures(&generator, &[1, 6]);
+
+        let mut saw_a_sum = false;
+        for i in 0..400 {
+            // A spread of real ground, not one lucky point.
+            let p = bevy::math::Vec2::new(
+                -28000.0 + (i % 20) as f32 * 700.0,
+                -39000.0 + (i / 20) as f32 * 700.0,
+            );
+            let (f, w, b) = (forest(p), wetland(p), both(p));
+            assert!(
+                b >= f - 1e-5 && b >= w - 1e-5,
+                "a member list is weaker than one of its members at {p:?}: \
+                 forest {f}, wetland {w}, both {b}"
+            );
+            assert!(
+                (0.0..=1.0).contains(&b),
+                "weight out of range at {p:?}: {b}"
+            );
+            assert!((ungated(p) - 1.0).abs() < 1e-6, "empty must be ungated");
+            // Where both members have weight, the list must EXCEED
+            // either — that is the sum, and it is what max would lose.
+            if f > 0.02 && w > 0.02 {
+                assert!(
+                    b > f + 0.01 && b > w + 0.01,
+                    "members did not add at {p:?}: forest {f}, wetland {w}, both {b}"
+                );
+                saw_a_sum = true;
+            }
+        }
+        assert!(
+            saw_a_sum,
+            "no sampled point had two members at once; the sum is untested"
+        );
+    }
+
     /// An emit that carries importance publishes each placed site as a
     /// landmark, and the facade serves them as detail volumes sized by
     /// the REAL ops the site emitted — a box a structure actually fills,
@@ -1203,7 +1254,19 @@ mod tests {
 
         // The wiring, in the form the placer reads it.
         let tree = defs.iter().find(|d| d.class == "tree").unwrap();
-        assert_eq!(tree.gate.as_deref(), Some("biomes:forest"));
+        assert_eq!(tree.gate, vec!["biomes:forest".to_string()]);
+        // Every member a population names becomes its own reference —
+        // one wire, N members, N gates.
+        let cover = defs.iter().find(|d| d.class == "groundcover").unwrap();
+        assert_eq!(
+            cover.gate,
+            cover
+                .region
+                .iter()
+                .map(|r| format!("biomes:{r}"))
+                .collect::<Vec<_>>(),
+            "a multi-member gate must resolve every member it names"
+        );
         assert_eq!(
             tree.density.as_ref().map(|d| d.field),
             Some(0),
@@ -1243,8 +1306,8 @@ mod tests {
                 .as_any_mut()
                 .downcast_mut::<super::nodes::Population>()
             {
-                Some(p) if p.0.region.is_some() => {
-                    p.0.region = Some("forrest".into());
+                Some(p) if !p.0.region.is_empty() => {
+                    p.0.region = vec!["forrest".into()];
                     true
                 }
                 _ => false,
