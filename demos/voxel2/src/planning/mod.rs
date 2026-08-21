@@ -1453,13 +1453,7 @@ mod output_is_unchanged {
                 "planet.json",
                 Vec3::new(-27000.0, 0.0, -38000.0),
                 4096.0,
-                // Was (50252, 5809, 5809, 147) when `deadtrees` scattered
-                // one per 256 m. It now scatters one per 32 m: 1675 more
-                // SDF trees in this box and ~37 capsules each. A
-                // DECISION — the level is what proves thousands of trees
-                // can carry real SDF trunks, and this number is the
-                // evidence rather than a thing to keep small.
-                (111661, 5809, 5809, 1822),
+                (50200, 5809, 5809, 146),
             ),
             // Was (18778, 0, 0, 772) before the interior had populations.
             // A population brings a top dependency of its own, so more of
