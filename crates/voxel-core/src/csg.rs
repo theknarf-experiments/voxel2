@@ -5,6 +5,8 @@
 use bytemuck::{Pod, Zeroable};
 use glam::Vec3;
 
+use crate::interval::Interval;
+
 pub const CSG_KIND_BOX_ADD: u32 = 0;
 pub const CSG_KIND_BOX_CUT: u32 = 1;
 pub const CSG_KIND_CYLINDER_ADD: u32 = 2;
@@ -128,6 +130,33 @@ impl CsgOp {
         }
     }
 
+    /// Bound of [`Self::sdf`] over an axis-aligned box.
+    ///
+    /// Every primitive here is a TRUE distance field, so its gradient
+    /// has magnitude at most one and the whole interval follows from a
+    /// single evaluation: within `r` metres of the centre the value can
+    /// have moved by at most `r`. That is what makes pruning cheap
+    /// enough to do per sub-cell — one `sdf` call, not a per-kind
+    /// interval arithmetic twin that would have to stay in sync.
+    ///
+    /// The tapered capsule is the exception and is handled: its
+    /// round-cone field changes by `|r_a - r_b|` more than distance does
+    /// over its own length, so its Lipschitz bound is inflated by
+    /// exactly that ratio. Understating it would drop an op that matters,
+    /// which is a hole in the world.
+    pub fn sdf_range(&self, min: Vec3, max: Vec3) -> Interval {
+        let c = (min + max) * 0.5;
+        let r = (max - min).length() * 0.5;
+        let lip = if self.kind >= CSG_KIND_CAPSULE_ADD {
+            let len = Vec3::from(self.half).length().max(1.0e-6);
+            1.0 + (self.aux[0] - self.yaw).abs() / len
+        } else {
+            1.0
+        };
+        let d = self.sdf(c);
+        Interval::new(d - lip * r, d + lip * r)
+    }
+
     /// Fold this op into a scene distance (ignores smooth blend — CPU
     /// collision does not need it).
     pub fn apply(&self, d: f32, p: Vec3) -> f32 {
@@ -166,6 +195,79 @@ impl CsgOp {
     pub fn touches(&self, r#box: Aabb) -> bool {
         self.aabb().touches(r#box)
     }
+}
+
+/// What interval evaluation proved about one op over a box.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Choice {
+    /// Cannot change the result anywhere in the box — drop it.
+    Skip,
+    /// Decides the result everywhere in the box — every op BEFORE it is
+    /// dead, whatever they were.
+    Replaces,
+    /// Undecided: it matters somewhere in here.
+    Both,
+}
+
+/// The ops in a union/cut chain that can change the result over a box.
+///
+/// This is Keeter's tape pruning (MPR, Algorithms 1 and 2) specialised to
+/// the chain `apply_csg` actually runs: a forward interval pass records a
+/// choice per op, and a backward pass keeps only what is live. A chain is
+/// linear rather than a DAG, so "live" collapses to "after the last op
+/// that decides the result", and no register liveness is needed.
+///
+/// `start` is the interval of the distance the chain STARTS from — the
+/// generator's own field over this box. It is what makes pruning work at
+/// all: without a finite bound on what is already there, no op can be
+/// proved irrelevant.
+///
+/// Sound, never exact: it can keep an op that turns out not to matter,
+/// and must never drop one that does. Every bound below is conservative
+/// in that direction.
+pub fn prune_chain(ops: &[CsgOp], start: Interval, min: Vec3, max: Vec3) -> Vec<u32> {
+    let mut choices: Vec<Choice> = Vec::with_capacity(ops.len());
+    let mut d = start;
+    for op in ops {
+        let od = op.sdf_range(min, max);
+        let choice = if op.kind & 1 == 0 {
+            // Union: `d = min(d, od)`.
+            if od.lo > d.hi {
+                Choice::Skip // always further than what we have
+            } else if od.hi < d.lo {
+                Choice::Replaces // always nearer: it IS the result
+            } else {
+                Choice::Both
+            }
+        } else {
+            // Cut: `d = max(d, -od)`. Irrelevant when `-od <= d` over the
+            // whole box, i.e. when `-od.lo <= d.lo`.
+            if -od.lo <= d.lo {
+                Choice::Skip
+            } else if -od.hi >= d.hi {
+                Choice::Replaces
+            } else {
+                Choice::Both
+            }
+        };
+        d = match choice {
+            Choice::Skip => d,
+            Choice::Replaces if op.kind & 1 == 0 => od,
+            Choice::Replaces => Interval::new(-od.hi, -od.lo),
+            Choice::Both if op.kind & 1 == 0 => d.min(od),
+            Choice::Both => d.max(Interval::new(-od.hi, -od.lo)),
+        };
+        choices.push(choice);
+    }
+    // Backward: everything before the last decider is dead.
+    let from = choices
+        .iter()
+        .rposition(|c| *c == Choice::Replaces)
+        .unwrap_or(0);
+    (from..ops.len())
+        .filter(|i| choices[*i] != Choice::Skip)
+        .map(|i| i as u32)
+        .collect()
 }
 
 /// An axis-aligned box in world meters.
@@ -218,6 +320,84 @@ mod tests {
         let bytes: &[u8] = bytemuck::bytes_of(&op);
         let back: &CsgOp = bytemuck::from_bytes(bytes);
         assert_eq!(*back, op);
+    }
+
+    /// THE property the whole optimisation rests on: a pruned chain
+    /// answers exactly what the full chain answers, everywhere inside
+    /// the box it was pruned for.
+    ///
+    /// Dropping an op that mattered is a hole in the world that appears
+    /// only where some camera happens to look, so this is checked
+    /// against the real evaluator over randomised scenes rather than
+    /// argued about. Randomised because the failure mode is a bound that
+    /// is tight for the shapes you thought of.
+    #[test]
+    fn a_pruned_chain_answers_what_the_full_chain_answers() {
+        use crate::seed::Rng;
+        let mut rng = Rng::new(0xC5_6A);
+        let mut total_kept = 0usize;
+        let mut total_ops = 0usize;
+        for case in 0..200 {
+            let mut f = || rng.next_f32();
+            // A scene of mixed kinds scattered over a wide area, so most
+            // ops are far from any one box and prunable — the situation
+            // a chunk full of trees is actually in.
+            let ops: Vec<CsgOp> = (0..24)
+                .map(|i| {
+                    let c = Vec3::new(f() * 40.0 - 20.0, f() * 40.0 - 20.0, f() * 40.0 - 20.0);
+                    let cut = i % 4 == 3;
+                    match i % 4 {
+                        0 => CsgOp::sphere(c, 0.5 + f() * 3.0, 1, cut),
+                        1 => CsgOp::boxy(c, Vec3::splat(0.5 + f() * 2.0), f() * 3.0, 1, cut),
+                        2 => CsgOp::capsule(
+                            c,
+                            c + Vec3::new(f() * 6.0 - 3.0, f() * 6.0 - 3.0, f() * 6.0 - 3.0),
+                            0.2 + f() * 1.0,
+                            0.2 + f() * 1.0,
+                            1,
+                            cut,
+                        ),
+                        _ => CsgOp::cylinder(c, 0.5 + f() * 2.0, 0.5 + f() * 3.0, 1, cut),
+                    }
+                })
+                .collect();
+
+            // A box somewhere in the scene, at a chunk-ish scale.
+            let lo = Vec3::new(f() * 30.0 - 15.0, f() * 30.0 - 15.0, f() * 30.0 - 15.0);
+            let size = 0.5 + f() * 6.0;
+            let hi = lo + Vec3::splat(size);
+
+            // The chain starts from a terrain-like field. Its interval
+            // has to BOUND it or pruning is unsound, so use a plane and
+            // its exact bound.
+            let plane_h = f() * 10.0 - 5.0;
+            let start = Interval::new(lo.y - plane_h, hi.y - plane_h);
+
+            let kept = prune_chain(&ops, start, lo, hi);
+            total_kept += kept.len();
+            total_ops += ops.len();
+
+            for _ in 0..40 {
+                let p = lo + Vec3::new(f(), f(), f()) * size;
+                let d0 = p.y - plane_h;
+                let full = ops.iter().fold(d0, |d, op| op.apply(d, p));
+                let pruned = kept.iter().fold(d0, |d, i| ops[*i as usize].apply(d, p));
+                assert!(
+                    (full - pruned).abs() < 1.0e-4,
+                    "case {case}: pruned chain disagrees at {p:?}: {full} vs {pruned} \
+                     (kept {} of {})",
+                    kept.len(),
+                    ops.len(),
+                );
+            }
+        }
+        // And it has to actually prune, or the test above passes for the
+        // most boring possible reason.
+        assert!(
+            total_kept * 3 < total_ops,
+            "pruning kept {total_kept} of {total_ops} — not pruning"
+        );
+        println!("pruned to {total_kept} of {total_ops}");
     }
 
     /// A capsule is the one kind that points anywhere, so the thing to
