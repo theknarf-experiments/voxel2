@@ -10,6 +10,7 @@ pub mod lod_layers;
 pub mod planning;
 pub mod scatter;
 pub mod schema;
+pub mod stages;
 pub mod streaming;
 
 use bevy::prelude::*;

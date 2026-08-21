@@ -148,6 +148,12 @@ fn status(
             "worst_settle_s": p.worst_settle_s,
         });
     }
+    // Thread-SUMMED wall time per stage; see `voxel_engine::stages` for
+    // why that can exceed the settle it happened inside.
+    out["stages"] = json!(voxel_engine::stages::all()
+        .into_iter()
+        .map(|(name, ms, calls)| (name.to_string(), json!({ "ms": ms, "n": calls })))
+        .collect::<serde_json::Map<_, _>>());
     // The world the camera is in: its planning is the one whose residency
     // and missed reads say whether what you are looking at is covered.
     if let Some(world) = worlds.as_ref().and_then(|w| w.query(camera_world.0)) {

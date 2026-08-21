@@ -1206,8 +1206,8 @@ fn ribbon_bed_ops(a: Vec2, b: Vec2, half_w: f32, levels: [f32; 2], out: &mut Vec
 /// One definition, because [`patches_in`] and [`patches_cover`] must
 /// agree exactly: a coverage test over a smaller box than the read would
 /// declare a chunk ready and then read a tile that is not there.
-fn patch_bounds(min: Vec3, max: Vec3) -> IAabb {
-    let pad = ELEM_PAD_M as i32;
+fn patch_bounds(min: Vec3, max: Vec3, elem_pad_m: f32) -> IAabb {
+    let pad = elem_pad_m.clamp(0.0, ELEM_PAD_M).ceil() as i32;
     // Real y bounds (volumetric emits bucket per y-row; a planar emit's
     // collapsed axis ignores them), padded like xz and clamped so a
     // facade query with sentinel y (±1e9) cannot enumerate millions of
@@ -1226,15 +1226,29 @@ fn patch_bounds(min: Vec3, max: Vec3) -> IAabb {
 /// PEEKED: an uncovered box here is the question being asked, not a
 /// consumer reading outside its working set, so it must not count against
 /// `reads_missed`.
-pub fn patches_cover(mgr: &LayerGraph, instance: &str, min: Vec3, max: Vec3) -> bool {
-    mgr.covered(instance, patch_bounds(min, max))
+pub fn patches_cover(
+    mgr: &LayerGraph,
+    instance: &str,
+    min: Vec3,
+    max: Vec3,
+    elem_pad_m: f32,
+) -> bool {
+    mgr.covered(instance, patch_bounds(min, max, elem_pad_m))
 }
 
 /// Patches of one emit instance overlapping the world box `[min, max]`,
 /// filtered to elements that touch it. Local: reads only the index cells
 /// within `ELEM_PAD_M` of the box.
-pub fn patches_in(mgr: &LayerGraph, instance: &str, min: Vec3, max: Vec3) -> PatchSet {
-    let bounds = patch_bounds(min, max);
+pub fn patches_in(
+    mgr: &LayerGraph,
+    instance: &str,
+    min: Vec3,
+    max: Vec3,
+    elem_pad_m: f32,
+) -> PatchSet {
+    let bounds = patch_bounds(min, max, elem_pad_m);
+    // Hoisted: it was rebuilt for every op in every cell.
+    let query = voxel_core::csg::Aabb::new(min, max);
     let seg_touches = |a: Vec2, b: Vec2, half_w: f32| {
         let lo = a.min(b) - Vec2::splat(half_w);
         let hi = a.max(b) + Vec2::splat(half_w);
@@ -1242,8 +1256,9 @@ pub fn patches_in(mgr: &LayerGraph, instance: &str, min: Vec3, max: Vec3) -> Pat
     };
     let mut out = PatchSet::default();
     for (_, c) in mgr.view::<EmitPatches>(instance, bounds).iter() {
+        voxel_core::csg::QUERY_WALKED.count(c.patches.ops.len() as u64);
         for op in &c.patches.ops {
-            if op.touches(voxel_core::csg::Aabb::new(min, max)) {
+            if op.touches(query) {
                 out.ops.push(*op);
             }
         }
@@ -1847,7 +1862,7 @@ mod tests {
     }
 
     fn build_patches(mgr: &LayerGraph, instance: &str, min: Vec3, max: Vec3) -> PatchSet {
-        patches_in(mgr, instance, min, max)
+        patches_in(mgr, instance, min, max, ELEM_PAD_M)
     }
 
     #[test]
@@ -1899,7 +1914,7 @@ mod tests {
             Vec3::new(b.min.x as f32, -100.0, b.min.z as f32),
             Vec3::new(b.max.x as f32, 500.0, b.max.z as f32),
         );
-        let patches = patches_in(mgr.graph(), "roads", min, max);
+        let patches = patches_in(mgr.graph(), "roads", min, max, ELEM_PAD_M);
         assert!(!patches.ops.is_empty(), "no road slabs");
         assert!(!patches.clearance.is_empty(), "no clearance segments");
         for op in &patches.ops {
@@ -1911,7 +1926,7 @@ mod tests {
             min + Vec3::new(2048.0, 0.0, 2048.0),
             max - Vec3::new(2048.0, 0.0, 2048.0),
         );
-        let sub = patches_in(mgr.graph(), "roads", smin, smax);
+        let sub = patches_in(mgr.graph(), "roads", smin, smax, ELEM_PAD_M);
         let expect: Vec<_> = patches
             .ops
             .iter()
@@ -2002,7 +2017,7 @@ mod tests {
             Vec3::new(b.min.x as f32, -200.0, b.min.z as f32),
             Vec3::new(b.max.x as f32, 500.0, b.max.z as f32),
         );
-        let rivers = patches_in(mgr.graph(), "rivers", min, max);
+        let rivers = patches_in(mgr.graph(), "rivers", min, max, ELEM_PAD_M);
         assert!(!rivers.ribbons.is_empty(), "no ribbon segments");
         assert!(!rivers.ops.is_empty(), "no river bed ops");
         assert!(!rivers.clearance.is_empty(), "no river clearance");
@@ -2019,7 +2034,7 @@ mod tests {
             );
             assert_eq!(w.material, 4);
         }
-        let caves = patches_in(mgr.graph(), "caves", min, max);
+        let caves = patches_in(mgr.graph(), "caves", min, max, ELEM_PAD_M);
         assert!(!caves.ops.is_empty(), "no cave cuts");
         for op in &caves.ops {
             assert_eq!(op.kind, voxel_core::csg::CSG_KIND_SPHERE_CUT);
@@ -2118,10 +2133,10 @@ mod tests {
             Vec3::new(-1024.0, -264.0, -1024.0),
             Vec3::new(1024.0, 264.0, 1024.0),
         );
-        let pockets = patches_in(mgr.graph(), "pockets", min, max);
+        let pockets = patches_in(mgr.graph(), "pockets", min, max, ELEM_PAD_M);
         assert!(!pockets.ops.is_empty());
         assert!(!pockets.markers.is_empty());
-        let tubes = patches_in(mgr.graph(), "tubes", min, max);
+        let tubes = patches_in(mgr.graph(), "tubes", min, max, ELEM_PAD_M);
         assert!(!tubes.ops.is_empty(), "no tube geometry");
         assert!(
             tubes.ops.iter().any(|op| op.kind & 1 == 0)
@@ -2318,6 +2333,7 @@ mod tests {
             "pockets",
             Vec3::new(-1024.0, -1.0e9, -1024.0),
             Vec3::new(1024.0, 1.0e9, 1024.0),
+            ELEM_PAD_M,
         );
         let mut rows: Vec<i32> = all
             .markers
@@ -2336,6 +2352,7 @@ mod tests {
             "pockets",
             Vec3::new(-1024.0, 132.0, -1024.0),
             Vec3::new(1024.0, 264.0, 1024.0),
+            ELEM_PAD_M,
         );
         assert!(row1
             .markers
@@ -2363,6 +2380,7 @@ mod tests {
                         "tubes",
                         mid - Vec3::splat(20.0),
                         mid + Vec3::splat(20.0),
+                        ELEM_PAD_M,
                     );
                     assert!(
                         !near.ops.is_empty(),

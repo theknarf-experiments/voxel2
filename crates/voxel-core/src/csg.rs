@@ -3,7 +3,7 @@
 //! WGSL `CsgOp` struct.
 
 use bytemuck::{Pod, Zeroable};
-use glam::Vec3;
+use glam::{IVec3, Vec3};
 
 use crate::interval::Interval;
 
@@ -15,6 +15,19 @@ pub const CSG_KIND_SPHERE_ADD: u32 = 4;
 pub const CSG_KIND_SPHERE_CUT: u32 = 5;
 pub const CSG_KIND_CAPSULE_ADD: u32 = 6;
 pub const CSG_KIND_CAPSULE_CUT: u32 = 7;
+
+/// Candidate ops the per-cell index examined, summed over cells — what
+/// explains [`ChunkOps::build`]'s cost, since every candidate costs an
+/// interval evaluation whether it survives or not.
+pub static CELL_TESTED: crate::Stage = crate::Stage::new();
+/// Candidates that survived, summed over cells. The ratio against
+/// `CELL_TESTED` is what the pruning is worth.
+pub static CELL_KEPT: crate::Stage = crate::Stage::new();
+
+/// Ops the emit index walked to answer a chunk's query, and ops it
+/// returned. Their ratio is what the index is worth.
+pub static QUERY_WALKED: crate::Stage = crate::Stage::new();
+pub static QUERY_RETURNED: crate::Stage = crate::Stage::new();
 
 /// One CSG operation, 48 bytes, `#[repr(C)]` — uploaded verbatim.
 ///
@@ -404,11 +417,22 @@ impl ChunkOps {
     /// `apron` widens every cell by what the density pass can sample
     /// outside it. Understate it and a sample reads a list that was
     /// pruned for somewhere it is not.
+    ///
+    /// `band` is the half-width the stored field is clamped to, in the
+    /// same meters — [`crate::SDF_BAND`] voxels. It is what makes the
+    /// index worth building at forest density: an op whose box is
+    /// further than `band` from a cell cannot change ONE stored value in
+    /// it, so the question becomes a box test and every op can be pushed
+    /// into the few cells it reaches instead of being asked about by all
+    /// 512. The answer this index gives is therefore equal to the flat
+    /// list's AFTER CLAMPING, not before, which is the only sense in
+    /// which the density pass ever reads it.
     pub fn build(
         ops: Vec<CsgOp>,
         min: Vec3,
         max: Vec3,
         apron: f32,
+        band: f32,
         terrain: impl Fn(Vec3, Vec3) -> Option<Interval>,
     ) -> Self {
         if ops.len() < INDEX_FROM {
@@ -421,6 +445,13 @@ impl ChunkOps {
         let table_len = 2 * N * N * N;
         let mut cells = vec![0u32; table_len];
         let step = (max - min) / N as f32;
+        // Boxes computed ONCE per op rather than once per op per cell.
+        // The fine loop below asks 512 times whether each surviving op
+        // reaches its cell, and `aabb()` is a square root and a dozen
+        // min/max — in a forest chunk carrying a few thousand ops that
+        // was millions of calls per chunk, and the largest single cost
+        // in a cold start.
+        let boxes: Vec<Aabb> = ops.iter().map(CsgOp::aabb).collect();
         // Terrain intervals on a COARSER grid than the op cells.
         //
         // `terrain` walks the whole generator program; at one call per op
@@ -448,62 +479,99 @@ impl ChunkOps {
             };
             *slot = Some((start, keep));
         }
-        for z in 0..N {
-            for y in 0..N {
-                for x in 0..N {
-                    let c = Vec3::new(x as f32, y as f32, z as f32);
-                    let lo = min + step * c - Vec3::splat(apron);
-                    let hi = min + step * (c + Vec3::ONE) + Vec3::splat(apron);
-                    // No bound on the terrain means no bound on what the
-                    // chain starts from, so nothing is provably dead.
-                    let t = (x * T / N) + (y * T / N) * T + (z * T / N) * T * T;
+        // Fine cells filled by BINNING, not by asking every cell about
+        // every op.
+        //
+        // Why a box test is enough: a stored voxel is clamped to
+        // +/-`band`. An ADD whose box is further than that can only ever
+        // be further than the band, and `min` keeps whatever was already
+        // out there — both clamp to +band. A CUT that far leaves `max`
+        // at what it had, or drags it somewhere between that and -band —
+        // both clamp to -band. So neither can change a value, and which
+        // cells an op can reach is a question about boxes.
+        //
+        // The field test stays on top of it for adds, because the
+        // terrain's own upper bound over the cell is often tighter than
+        // the band: an add further than the terrain can be cannot win
+        // `min` at all.
+        //
+        // Measured on the planet's forest before this: 146071 candidates
+        // evaluated per chunk of which 85.8% survived — 10.7 ms a chunk
+        // to remove a seventh of the work, because at that density the
+        // intervals all overlap and `prune_chain` proves nothing.
+        const SUB: usize = N / T;
+        let mut bucket: Vec<Vec<u32>> = vec![Vec::new(); SUB * SUB * SUB];
+        let mut subset: Vec<CsgOp> = Vec::new();
+        for tz in 0..T {
+            for ty in 0..T {
+                for tx in 0..T {
+                    let t = tx + ty * T + tz * T * T;
                     let (start, outer) = coarse[t].as_ref().expect("filled above");
-                    let keep: Vec<u32> = match start {
-                        Some(start) => {
-                            // Reject by BOX before evaluating by field.
-                            // A true distance field is at least the
-                            // distance to its own AABB, and a union can
-                            // only matter within the terrain's upper
-                            // bound — so an add whose box is further than
-                            // that cannot change `min`, proved with a few
-                            // compares instead of an sdf call. Cuts are
-                            // kept: how deep the terrain sits is what
-                            // decides them.
-                            let reach = start.hi;
-                            let subset: Vec<CsgOp> = outer
-                                .iter()
-                                .map(|i| ops[*i as usize])
-                                .filter(|op| {
-                                    op.kind & 1 != 0 || {
-                                        let bb = op.aabb();
-                                        let gap = (bb.min - hi).max(lo - bb.max).max(Vec3::ZERO);
-                                        gap.length() <= reach
-                                    }
-                                })
-                                .collect();
-                            let outer: Vec<u32> = outer
-                                .iter()
-                                .copied()
-                                .filter(|i| {
-                                    let op = ops[*i as usize];
-                                    op.kind & 1 != 0 || {
-                                        let bb = op.aabb();
-                                        let gap = (bb.min - hi).max(lo - bb.max).max(Vec3::ZERO);
-                                        gap.length() <= reach
-                                    }
-                                })
-                                .collect();
-                            prune_chain(&subset, *start, lo, hi)
-                                .into_iter()
-                                .map(|i| outer[i as usize])
-                                .collect()
+                    let base = IVec3::new((tx * SUB) as i32, (ty * SUB) as i32, (tz * SUB) as i32);
+                    for b in bucket.iter_mut() {
+                        b.clear();
+                    }
+                    for &i in outer {
+                        let op = ops[i as usize];
+                        // Adds also lose to the terrain's own bound; a
+                        // negative one means the cell is solid throughout
+                        // and no add can matter in it at all.
+                        let inflate = match (op.kind & 1 == 0, start) {
+                            (true, Some(s)) => band.min(s.hi),
+                            _ => band,
+                        };
+                        if inflate < 0.0 {
+                            continue;
                         }
-                        None => outer.clone(),
-                    };
-                    let cell = x + y * N + z * N * N;
-                    cells[cell * 2] = cells.len() as u32;
-                    cells[cell * 2 + 1] = keep.len() as u32;
-                    cells.extend_from_slice(&keep);
+                        let bb = boxes[i as usize];
+                        let pad = Vec3::splat(inflate + apron);
+                        // Cell c spans `min + step*c - apron ..
+                        // min + step*(c+1) + apron`, so the low end is a
+                        // cell earlier than the division says.
+                        let lo = ((bb.min - pad - min) / step - Vec3::ONE).floor();
+                        let hi = ((bb.max + pad - min) / step).floor();
+                        let lo = IVec3::new(lo.x as i32, lo.y as i32, lo.z as i32).max(base);
+                        let hi = IVec3::new(hi.x as i32, hi.y as i32, hi.z as i32)
+                            .min(base + IVec3::splat(SUB as i32 - 1));
+                        for z in lo.z..=hi.z {
+                            for y in lo.y..=hi.y {
+                                for x in lo.x..=hi.x {
+                                    let s = (x - base.x) as usize
+                                        + (y - base.y) as usize * SUB
+                                        + (z - base.z) as usize * SUB * SUB;
+                                    bucket[s].push(i);
+                                }
+                            }
+                        }
+                    }
+                    for (s, near) in bucket.iter().enumerate() {
+                        let c = base
+                            + IVec3::new(
+                                (s % SUB) as i32,
+                                ((s / SUB) % SUB) as i32,
+                                (s / (SUB * SUB)) as i32,
+                            );
+                        let cf = c.as_vec3();
+                        let lo = min + step * cf - Vec3::splat(apron);
+                        let hi = min + step * (cf + Vec3::ONE) + Vec3::splat(apron);
+                        let keep: Vec<u32> = match start {
+                            Some(start) => {
+                                subset.clear();
+                                subset.extend(near.iter().map(|i| ops[*i as usize]));
+                                prune_chain(&subset, *start, lo, hi)
+                                    .into_iter()
+                                    .map(|j| near[j as usize])
+                                    .collect()
+                            }
+                            None => near.clone(),
+                        };
+                        CELL_TESTED.count(near.len() as u64);
+                        CELL_KEPT.count(keep.len() as u64);
+                        let cell = c.x as usize + c.y as usize * N + c.z as usize * N * N;
+                        cells[cell * 2] = cells.len() as u32;
+                        cells[cell * 2 + 1] = keep.len() as u32;
+                        cells.extend_from_slice(&keep);
+                    }
                 }
             }
         }
@@ -827,7 +895,10 @@ mod tests {
             // A sloped plane as the terrain, bounded exactly.
             let plane = min.y + edge * 0.5;
             let terrain = |lo: Vec3, hi: Vec3| Some(Interval::new(lo.y - plane, hi.y - plane));
-            let indexed = ChunkOps::build(ops.clone(), min, max, apron, terrain);
+            // A band a chunk of this edge would really have: 12.8 m
+            // over 32 cells is 0.4 m voxels, four of them.
+            let band = crate::SDF_BAND * (edge / crate::CHUNK_CELLS as f32);
+            let indexed = ChunkOps::build(ops.clone(), min, max, apron, band, terrain);
             let ncells = CSG_CELLS * CSG_CELLS * CSG_CELLS;
             kept += indexed.cells.len().saturating_sub(2 * ncells);
             total += ops.len() * ncells;
@@ -846,8 +917,14 @@ mod tests {
                         indexed.ops[indexed.cells[off + i] as usize].apply(d, p)
                     })
                 };
+                // CLAMPED, which is the only form the density pass ever
+                // stores: the index drops ops that can only ever put the
+                // value outside the band, and outside the band every
+                // value is the same value. Comparing raw distances here
+                // would be asserting something the field does not keep.
+                let clamp = |d: f32| d.clamp(-band, band);
                 assert!(
-                    (full - via).abs() < 1.0e-4,
+                    (clamp(full) - clamp(via)).abs() < 1.0e-4,
                     "cell index disagrees at {p:?} (rel {rel:?}): {full} vs {via}"
                 );
             }
@@ -856,7 +933,16 @@ mod tests {
         // A floor, not the measured number: what it prunes depends on
         // how clustered the scene is, and encoding one scene's ratio
         // here would just be a number to update.
-        assert!(kept * 4 < total, "kept {kept} of {total} — not pruning");
+        // Was `kept * 4 < total` when the index pruned by field alone
+        // and this scene was the generous case for it. The band reject
+        // is a different order of thing: 4.7% here against 25%.
+        //
+        // The field prune stays ON TOP of the band reject even though it
+        // removes only a further 0.1% in THIS scene — dropping it
+        // measured as no settle change at all on the planet, and the
+        // megastructure is a solid interior where the box test is the
+        // one that proves nothing.
+        assert!(kept * 20 < total, "kept {kept} of {total} — not pruning");
     }
 
     /// A capsule is the one kind that points anywhere, so the thing to

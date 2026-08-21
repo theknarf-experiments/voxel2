@@ -30,6 +30,67 @@ pub const BASE_VOXEL_M: f64 = 0.1;
 /// Stored SDF values are clamped to `±SDF_BAND`.
 pub const SDF_BAND: f32 = 4.0;
 
+/// Wall time and call count charged to one named stage, summed across
+/// every thread that ran it.
+///
+/// Attribution for a SETTLE, which the per-frame [`timed`] cannot give:
+/// the work is spread over dozens of worker threads and hundreds of
+/// frames, so what matters is the total charged to each stage, not
+/// whether any one frame overran. A sampling profiler answers "which
+/// symbol" and this answers "which stage", which is the question when
+/// deciding what to cut.
+///
+/// Always on: two relaxed atomics on paths that already do far more, and
+/// a number nobody reads costs nothing. Read them with
+/// `voxctl status` -> `stages`.
+#[derive(Default)]
+pub struct Stage {
+    nanos: core::sync::atomic::AtomicU64,
+    calls: core::sync::atomic::AtomicU64,
+}
+
+impl Stage {
+    pub const fn new() -> Self {
+        Self {
+            nanos: core::sync::atomic::AtomicU64::new(0),
+            calls: core::sync::atomic::AtomicU64::new(0),
+        }
+    }
+
+    /// Run `f`, charging its wall time here.
+    pub fn time<T>(&self, f: impl FnOnce() -> T) -> T {
+        use core::sync::atomic::Ordering::Relaxed;
+        let started = std::time::Instant::now();
+        let out = f();
+        self.nanos
+            .fetch_add(started.elapsed().as_nanos() as u64, Relaxed);
+        self.calls.fetch_add(1, Relaxed);
+        out
+    }
+
+    /// Charge `n` to the call count without timing anything — for the
+    /// sizes that explain a stage's cost (ops walked, cells built).
+    pub fn count(&self, n: u64) {
+        self.calls
+            .fetch_add(n, core::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// (milliseconds, calls) so far.
+    pub fn read(&self) -> (f64, u64) {
+        use core::sync::atomic::Ordering::Relaxed;
+        (
+            self.nanos.load(Relaxed) as f64 / 1.0e6,
+            self.calls.load(Relaxed),
+        )
+    }
+
+    pub fn reset(&self) {
+        use core::sync::atomic::Ordering::Relaxed;
+        self.nanos.store(0, Relaxed);
+        self.calls.store(0, Relaxed);
+    }
+}
+
 /// Is per-system cost attribution switched on? `VOXEL_COST=1`.
 ///
 /// Read once. See [`timed`] for why it is off by default.

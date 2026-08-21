@@ -83,6 +83,18 @@ struct Emitter {
     /// It builds its geometry out of a population's placements, so it
     /// sits DOWNSTREAM of the placer instead of gating it.
     from_population: bool,
+    /// How far one of its elements reaches beyond its owning cell — the
+    /// pad every query of it must use.
+    ///
+    /// [`layers::ELEM_PAD_M`] is the CEILING for this, not the value: a
+    /// blanket 64 m made every query read a 153 m neighbourhood around a
+    /// 25 m chunk, whatever the emit actually produced. A tree reaches
+    /// five metres. A structure knows its own answer — `max_reach` is
+    /// the bound the level validator already checks — and everything
+    /// else keeps the blanket, because what a path sub-segment or a
+    /// ribbon reaches is not written down anywhere yet and guessing it
+    /// low is a missing op.
+    elem_pad_m: f32,
     ribbons: bool,
     clearance: bool,
     markers: bool,
@@ -94,6 +106,7 @@ impl Emitter {
         gate: Option<f32>,
         keep_m: Option<f32>,
         importance: u8,
+        elem_pad_m: f32,
         emit: &EmitDef,
     ) -> Self {
         let seated = matches!(emit, EmitDef::PathRibbon { .. });
@@ -118,6 +131,7 @@ impl Emitter {
             importance,
             seated,
             from_population,
+            elem_pad_m,
             gate,
             ribbons,
             clearance,
@@ -135,7 +149,7 @@ impl WorldPlanner for RegionPlanner {
             let mgr = rt.graph();
             for e in &self.emitters {
                 if e.gate.is_none_or(|g| chunk_edge_m <= g) {
-                    out.extend(layers::patches_in(mgr, &e.name, min, max).ops);
+                    out.extend(layers::patches_in(mgr, &e.name, min, max, e.elem_pad_m).ops);
                 }
             }
         }
@@ -158,7 +172,7 @@ impl WorldPlanner for RegionPlanner {
         self.emitters
             .iter()
             .filter(|e| e.gate.is_none_or(|g| chunk_edge_m <= g))
-            .all(|e| layers::patches_cover(mgr, &e.name, min, max))
+            .all(|e| layers::patches_cover(mgr, &e.name, min, max, e.elem_pad_m))
     }
 
     fn as_any(&self) -> &(dyn std::any::Any + Send + Sync) {
@@ -546,7 +560,13 @@ impl RegionPlanner {
         if let Some(rt) = &self.graph {
             let mgr = rt.graph();
             for e in self.emitters.iter().filter(|e| produces(e)) {
-                out.extend(take(layers::patches_in(mgr, &e.name, min3, max3)));
+                out.extend(take(layers::patches_in(
+                    mgr,
+                    &e.name,
+                    min3,
+                    max3,
+                    e.elem_pad_m,
+                )));
             }
         }
         out
@@ -597,7 +617,7 @@ impl RegionPlanner {
             let mgr = rt.graph();
             for e in self.emitters.iter().filter(|e| e.markers) {
                 out.extend(
-                    layers::patches_in(mgr, &e.name, min3, max3)
+                    layers::patches_in(mgr, &e.name, min3, max3, e.elem_pad_m)
                         .markers
                         .into_iter()
                         .filter(|m| kind.is_none_or(|k| m.kind == k)),
@@ -717,6 +737,8 @@ impl RegionPlanner {
                     emit.max_chunk_edge_m,
                     emit.keep_m,
                     emit.importance,
+                    rctx.structure()
+                        .map_or(layers::ELEM_PAD_M, |s| s.pack().max_reach()),
                     &emit.emit,
                 ));
             }

@@ -243,7 +243,9 @@ impl LayerChunk for LodChunk {
         // interval operations and saves a 38³ density pass and the GPU
         // round trip the pass is waited on — which is what actually
         // bounds how fast a world can appear.
-        if ops.is_none() && !can_hold_surface(&shared.generator, key) {
+        if ops.is_none()
+            && !crate::stages::CAN_HOLD.time(|| can_hold_surface(&shared.generator, key))
+        {
             shared.pruned.fetch_add(1, Ordering::Relaxed);
             self.key = None;
             return;
@@ -491,7 +493,7 @@ impl WorldLod {
                 // all. Nearer than that, planning may still carve one, and
                 // `create` decides with the chunk's actual ops in hand.
                 (key.edge_m() as f32) <= crate::planning::OPS_HORIZON_EDGE_M
-                    || can_hold_surface(&at.generator, key)
+                    || crate::stages::CAN_HOLD.time(|| can_hold_surface(&at.generator, key))
             });
             filters[usize::from(level)] = Some(filter.clone());
             let dep = TopDep::new(&instance(level), level_span(&config, level))
@@ -787,18 +789,22 @@ impl WorldLod {
 /// same 4 voxels `chunk_ops` pads its query by. A cell pruned without it
 /// would be read by a sample standing outside the box it was proved for.
 fn index_ops(shared: &LodShared, key: ChunkKey) -> Option<Arc<voxel_core::csg::ChunkOps>> {
-    let ops = shared.chunks.ops_for(key)?;
+    let ops = crate::stages::OPS_QUERY.time(|| shared.chunks.ops_for(key))?;
+    crate::stages::OPS_PER_CHUNK.count(ops.len() as u64);
     let min = key.min_corner_m().as_vec3();
     let max = min + Vec3::splat(key.edge_m() as f32);
     let vs = key.voxel_size_m() as f32;
     let generator = shared.generator.clone();
-    Some(Arc::new(voxel_core::csg::ChunkOps::build(
-        (*ops).clone(),
-        min,
-        max,
-        4.0 * vs,
-        |lo, hi| generator.range(lo, hi, vs),
-    )))
+    crate::stages::OPS_INDEX.time(|| {
+        Some(Arc::new(voxel_core::csg::ChunkOps::build(
+            (*ops).clone(),
+            min,
+            max,
+            4.0 * vs,
+            voxel_core::SDF_BAND * vs,
+            |lo, hi| generator.range(lo, hi, vs),
+        )))
+    })
 }
 
 /// Rebuild, in place, every resident chunk whose mask the field has
