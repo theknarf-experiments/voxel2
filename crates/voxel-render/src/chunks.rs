@@ -219,7 +219,7 @@ pub enum ChunkCommand {
         /// controller land a whole epoch of seam-coupled meshes in one
         /// frame (readiness is reported when the held mesh is drawable).
         hold: bool,
-        ops: Option<Arc<Vec<CsgOp>>>,
+        ops: Option<Arc<voxel_core::csg::ChunkOps>>,
         /// 2 bits per face (+x,-x,+y,-y,+z,-z): 0 equal/none, 1 = neighbor
         /// coarser, 2 = neighbor finer. Drives seam ownership + band blend.
         face_mask: u32,
@@ -1112,7 +1112,7 @@ struct RenderChunk {
     /// Hold a finished in-place regen until [`ChunkCommand::Commit`].
     hold: bool,
     /// Planning-layer ops, held until the density pass consumes them.
-    ops: Option<Arc<Vec<CsgOp>>>,
+    ops: Option<Arc<voxel_core::csg::ChunkOps>>,
     /// Seam ownership mask (see [`ChunkCommand::Request`]); baked into both
     /// the gen and mesh params of one generation so passes always agree.
     face_mask: u32,
@@ -1249,7 +1249,7 @@ struct ChunkParams {
     /// Range into this frame's concatenated CSG op buffer.
     csg_offset: u32,
     csg_count: u32,
-    _pad: UVec2,
+    aux: bevy::math::UVec4,
 }
 
 #[derive(ShaderType, Clone, Copy)]
@@ -1306,7 +1306,10 @@ pub struct ChunkGpuResources {
     counts: Buffer,
     /// This frame's concatenated planning ops (None → bind the dummy).
     csg_buffer: Option<Buffer>,
+    /// This frame's concatenated per-cell op index (None → dummy).
+    csg_cell_buffer: Option<Buffer>,
     csg_dummy: Buffer,
+    csg_cell_dummy: Buffer,
     staging: Vec<StagingSlot>,
     arena_free: Vec<u32>,
     slab: SlabAllocator,
@@ -1403,6 +1406,12 @@ fn init_chunk_resources(
             BufferUsages::STORAGE | BufferUsages::COPY_SRC | BufferUsages::COPY_DST,
         ),
         csg_buffer: None,
+        csg_cell_buffer: None,
+        csg_cell_dummy: render_device.create_buffer_with_data(&BufferInitDescriptor {
+            label: Some("voxel_csg_cell_dummy"),
+            contents: bytemuck::cast_slice(&[0u32, 0u32]),
+            usage: BufferUsages::STORAGE,
+        }),
         csg_dummy: render_device.create_buffer_with_data(&BufferInitDescriptor {
             label: Some("voxel_csg_dummy"),
             contents: bytemuck::bytes_of(&CsgOp::boxy(
@@ -1440,6 +1449,7 @@ fn init_chunk_resources(
                 uniform_buffer::<ChunkParams>(true),         // per-chunk params
                 storage_buffer_sized(false, None),           // planning CSG ops
                 storage_buffer_read_only_sized(false, None), // generator program
+                storage_buffer_read_only_sized(false, None), // per-cell op index
             ),
         ),
     );
@@ -1692,7 +1702,7 @@ fn make_params(
     slot: u32,
     alloc: Option<&SlabAlloc>,
     counts_slot: u32,
-    csg: (u32, u32),
+    csg: (u32, u32, u32),
     face_mask: u32,
 ) -> ChunkParams {
     let origin = key.min_corner_m();
@@ -1710,9 +1720,11 @@ fn make_params(
         counts_slot,
         csg_offset: csg.0,
         csg_count: csg.1,
-        _pad: UVec2::new(
+        aux: bevy::math::UVec4::new(
             face_mask,
             std::env::var("VOXEL_EVAL_HOLES").map_or(0, |_| 1),
+            csg.2,
+            0,
         ),
     }
 }
@@ -2266,7 +2278,7 @@ fn plan_frame_inner(
             slot,
             Some(&alloc),
             mesh_counts_slot,
-            (0, 0),
+            (0, 0, 0),
             chunk.gen_mask,
         ));
         batches.mesh.push(MeshEntry {
@@ -2364,6 +2376,7 @@ fn plan_frame_inner(
     if let Some(staging_idx) = staging_idx {
         let mut entries = Vec::new();
         let mut frame_ops: Vec<CsgOp> = Vec::new();
+        let mut frame_cells: Vec<u32> = Vec::new();
         let mut queued: Vec<(ChunkKey, f64)> = table
             .chunks
             .iter()
@@ -2388,13 +2401,26 @@ fn plan_frame_inner(
             // on the chunk (not consumed): any later regen of the same
             // generation request must re-apply them, or CSG content
             // silently vanishes from the reissued mesh.
+            // The per-cell index rides alongside, its offsets rebased
+            // into the frame buffer so the shader needs no per-chunk
+            // arithmetic beyond one add.
             let csg = match &chunk.ops {
-                Some(ops) => {
+                Some(o) => {
                     let offset = frame_ops.len() as u32;
-                    frame_ops.extend_from_slice(ops);
-                    (offset, ops.len() as u32)
+                    frame_ops.extend_from_slice(&o.ops);
+                    let cells = frame_cells.len() as u32;
+                    frame_cells.extend(o.cells.iter().copied());
+                    // Rebase the table's run offsets; the runs themselves
+                    // hold indices into the chunk's OWN ops, which
+                    // `csg_offset` already accounts for.
+                    let table = 2 * voxel_core::csg::CSG_CELLS.pow(3);
+                    for e in 0..table.min(o.cells.len()) / 2 {
+                        frame_cells[cells as usize + e * 2] += cells;
+                    }
+                    let base = if o.cells.is_empty() { 0 } else { cells + 1 };
+                    (offset, o.ops.len() as u32, base)
                 }
-                None => (0, 0),
+                None => (0, 0, 0),
             };
             let counts_slot = entries.len() as u32;
             let offset = gpu.gen_uniforms.push(&make_params(
@@ -2421,6 +2447,17 @@ fn plan_frame_inner(
             gpu.staging[staging_idx].state = StagingState::PendingMap { entries };
         }
         // Upload this frame's op set (dummy is kept bound when empty).
+        gpu.csg_cell_buffer = if frame_cells.is_empty() {
+            None
+        } else {
+            Some(
+                render_device.create_buffer_with_data(&BufferInitDescriptor {
+                    label: Some("voxel_csg_cells"),
+                    contents: bytemuck::cast_slice(&frame_cells),
+                    usage: BufferUsages::STORAGE,
+                }),
+            )
+        };
         gpu.csg_buffer = if frame_ops.is_empty() {
             None
         } else {
@@ -2601,7 +2638,7 @@ fn plan_frame_inner(
             }
             if let Some(ops) = &c.ops {
                 with_ops += 1;
-                total_ops += ops.len();
+                total_ops += ops.ops.len();
             }
         }
         counts.insert("with_ops", with_ops);
@@ -2664,6 +2701,7 @@ fn dispatch_chunk_work(
         return;
     };
     let csg = gpu.csg_buffer.as_ref().unwrap_or(&gpu.csg_dummy);
+    let csg_cells = gpu.csg_cell_buffer.as_ref().unwrap_or(&gpu.csg_cell_dummy);
     let gen_bg = render_context.render_device().create_bind_group(
         "voxel_gen_bg",
         &pipeline_cache.get_bind_group_layout(&pipelines.gen_layout),
@@ -2672,6 +2710,7 @@ fn dispatch_chunk_work(
             gen_uniform_binding.clone(),
             csg.as_entire_buffer_binding(),
             program_binding.clone(),
+            csg_cells.as_entire_buffer_binding(),
         )),
     );
     let mesh_bg = render_context.render_device().create_bind_group(
@@ -3019,15 +3058,23 @@ mod surface_map_tests {
     /// change that actually happens — a field added to one, not the other.
     #[test]
     fn the_chunk_params_table_is_the_size_of_this_struct() {
-        let bytes: usize = voxel_core::layout::CHUNK_PARAMS
-            .iter()
-            .map(|f| match f.ty {
-                "vec4<f32>" | "vec4<i32>" | "vec4<u32>" => 16,
-                "vec2<u32>" | "vec2<f32>" => 8,
-                "u32" | "i32" | "f32" => 4,
+        // WGSL layout rules, not a naive sum: a `vec4` aligns to 16, so a
+        // run of scalars before one is PADDED. Summing sizes agreed with
+        // the struct only as long as the tail happened to be a `vec2`;
+        // the first field that needed real padding made it disagree by
+        // the padding, which is a confusing way to be told the truth.
+        let (mut bytes, mut align) = (0usize, 1usize);
+        for f in voxel_core::layout::CHUNK_PARAMS {
+            let (a, sz) = match f.ty {
+                "vec4<f32>" | "vec4<i32>" | "vec4<u32>" => (16, 16),
+                "vec2<u32>" | "vec2<f32>" => (8, 8),
+                "u32" | "i32" | "f32" => (4, 4),
                 other => panic!("size of `{other}` is not known here"),
-            })
-            .sum();
+            };
+            bytes = bytes.next_multiple_of(a) + sz;
+            align = align.max(a);
+        }
+        let bytes = bytes.next_multiple_of(align);
         assert_eq!(
             bytes,
             core::mem::size_of::<ChunkParams>(),

@@ -374,6 +374,33 @@ impl ChunkOps {
         let table_len = 2 * N * N * N;
         let mut cells = vec![0u32; table_len];
         let step = (max - min) / N as f32;
+        // Terrain intervals on a COARSER grid than the op cells.
+        //
+        // `terrain` walks the whole generator program; at one call per op
+        // cell that is 512 program evaluations per chunk on top of the
+        // ones admission control already pays, and it stalled the
+        // pipeline outright — 2484 chunks past their create timeout.
+        // A coarse box's interval BOUNDS every fine box inside it, so
+        // reusing it is sound and merely looser, and 8 calls buy most of
+        // what 512 did.
+        const T: usize = 2;
+        let tstep = (max - min) / T as f32;
+        let mut coarse: Vec<Option<(Option<Interval>, Vec<u32>)>> = vec![None; T * T * T];
+        for (i, slot) in coarse.iter_mut().enumerate() {
+            let c = Vec3::new((i % T) as f32, ((i / T) % T) as f32, (i / (T * T)) as f32);
+            let lo = min + tstep * c - Vec3::splat(apron);
+            let hi = min + tstep * (c + Vec3::ONE) + Vec3::splat(apron);
+            let start = terrain(lo, hi);
+            // Prune the coarse box FIRST and refine only what survives —
+            // the recursion the paper is built on. A fine cell can only
+            // need ops its enclosing box needed, so this is exact, and it
+            // turns 512xN work into 8xN + 512x(survivors).
+            let keep: Vec<u32> = match start {
+                Some(i) => prune_chain(&ops, i, lo, hi),
+                None => (0..ops.len() as u32).collect(),
+            };
+            *slot = Some((start, keep));
+        }
         for z in 0..N {
             for y in 0..N {
                 for x in 0..N {
@@ -382,9 +409,20 @@ impl ChunkOps {
                     let hi = min + step * (c + Vec3::ONE) + Vec3::splat(apron);
                     // No bound on the terrain means no bound on what the
                     // chain starts from, so nothing is provably dead.
-                    let keep = match terrain(lo, hi) {
-                        Some(start) => prune_chain(&ops, start, lo, hi),
-                        None => (0..ops.len() as u32).collect(),
+                    let t = (x * T / N) + (y * T / N) * T + (z * T / N) * T * T;
+                    let (start, outer) = coarse[t].as_ref().expect("filled above");
+                    let keep: Vec<u32> = match start {
+                        Some(start) => {
+                            // Refine within the coarse survivors, then map
+                            // the local indices back to the chunk's ops.
+                            let subset: Vec<CsgOp> =
+                                outer.iter().map(|i| ops[*i as usize]).collect();
+                            prune_chain(&subset, *start, lo, hi)
+                                .into_iter()
+                                .map(|i| outer[i as usize])
+                                .collect()
+                        }
+                        None => outer.clone(),
                     };
                     let cell = x + y * N + z * N * N;
                     cells[cell * 2] = cells.len() as u32;

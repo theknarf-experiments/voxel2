@@ -46,7 +46,11 @@ struct ChunkParams {
     csg_count: u32,
     // x = seam mask, 2 bits per face (+x,-x,+y,-y,+z,-z): 1 = neighbour
     // coarser, 2 = neighbour finer. Read by the mesh pass only.
-    _pad: vec2<u32>,
+    // y = draw the cells a snap failed in (VOXEL_EVAL_HOLES).
+    // z = base of this chunk's per-cell op index in `csg_cells`, or
+    // 0 when the chunk carries none and every op is walked.
+    // w = unused. It was `_pad` and already carried the first two.
+    aux: vec4<u32>,
 }
 // GENMAT CHUNKPARAMS END
 
@@ -93,6 +97,34 @@ fn world_header() -> WorldHeader {
     return prog.worlds[u32(params.origin_voxels.w)];
 }
 @group(0) @binding(3) var<storage, read> prog: WorldProgram;
+
+// Per-cell op index: `[table][runs]` per chunk, based at `params.aux.z`.
+// The table is 2 u32 (offset, count) per cell of an N^3 grid over the
+// chunk; the runs it points at are indices into this chunk's own ops.
+// Twin of `ChunkOps::cell_run` — one definition, two readers.
+const CSG_CELLS: u32 = 8u;
+@group(0) @binding(4) var<storage, read> csg_cells: array<u32>;
+
+// Which run of ops a point needs. Clamped, which is what makes the apron
+// sound: a sample outside the chunk reads the border cell, and that cell
+// was pruned with the apron included.
+fn csg_run(p: vec3<f32>) -> vec2<u32> {
+    if (params.csg_count == 0u) {
+        return vec2<u32>(0u, 0u);
+    }
+    // Base is stored BIASED BY ONE so that zero means "no index": a
+    // chunk with few enough ops does not get one, and walks them all.
+    if (params.aux.z == 0u) {
+        return vec2<u32>(0xFFFFFFFFu, params.csg_count);
+    }
+    let edge = params.origin.w * 32.0;
+    let rel = (p - params.origin.xyz) / edge;
+    let f = floor(rel * f32(CSG_CELLS));
+    let c = clamp(vec3<i32>(f), vec3<i32>(0), vec3<i32>(i32(CSG_CELLS) - 1));
+    let cell = u32(c.x) + u32(c.y) * CSG_CELLS + u32(c.z) * CSG_CELLS * CSG_CELLS;
+    let base = (params.aux.z - 1u) + cell * 2u;
+    return vec2<u32>(csg_cells[base], csg_cells[base + 1u]);
+}
 
 fn op_sdf(op: CsgOp, p: vec3<f32>) -> f32 {
     // BEFORE the yaw rotation: a capsule has no yaw — that field is its
@@ -461,8 +493,17 @@ fn apply_csg(d_in: f32, mat_in: u32, p: vec3<f32>) -> vec2<f32> {
     var d_m = d_in;
     var mat = mat_in;
     if (params.csg_count > 0u) {
-        for (var i = 0u; i < params.csg_count; i++) {
-            let op = csg_ops[params.csg_offset + i];
+        // Only the ops this cell was proved to need. Everything else in
+        // the chunk was shown, by interval arithmetic on the CPU, to be
+        // unable to change the result anywhere in here.
+        let run = csg_run(p);
+        for (var i = 0u; i < run.y; i++) {
+            // `run.x == ~0` marks an unindexed chunk: walk ops directly.
+            var slot = i;
+            if (run.x != 0xFFFFFFFFu) {
+                slot = csg_cells[run.x + i];
+            }
+            let op = csg_ops[params.csg_offset + slot];
             let od = op_sdf(op, p);
             if ((op.kind & 1u) == 0u) {
                 if (op.blend > 0.0) {

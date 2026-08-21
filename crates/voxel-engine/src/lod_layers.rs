@@ -195,7 +195,7 @@ struct ShownChunk {
     /// The ops that shaped it. Kept so a seam-only rebuild does not have
     /// to ask the planning graph again for an answer that cannot have
     /// changed: same chunk, same coordinate, same ops.
-    ops: Option<Arc<Vec<CsgOp>>>,
+    ops: Option<Arc<voxel_core::csg::ChunkOps>>,
 }
 
 #[derive(Default)]
@@ -236,7 +236,7 @@ impl LayerChunk for LodChunk {
     fn create(&mut self, ctx: &ChunkCtx<'_, VoxelLod>) {
         let shared = &ctx.layer().shared;
         let key = ChunkKey::in_world(shared.world, ctx.layer().level, ctx.coord());
-        let ops = shared.chunks.ops_for(key);
+        let ops = index_ops(shared, key);
         // With the chunk's own ops in hand the question is exact: nothing
         // planned here, and a generator that cannot put a surface in the
         // box, means there is nothing to build. Skipping costs a dozen
@@ -776,6 +776,31 @@ impl WorldLod {
     }
 }
 
+/// This chunk's ops, indexed per cell against the generator's own field.
+///
+/// The index can only be built HERE: pruning needs a bound on what the
+/// CSG chain starts from, which is the generator, and the renderer that
+/// consumes the result has no access to one. Doing it without that bound
+/// measured 2x where this measures 7.2x.
+///
+/// The apron is what the density pass samples outside the chunk — the
+/// same 4 voxels `chunk_ops` pads its query by. A cell pruned without it
+/// would be read by a sample standing outside the box it was proved for.
+fn index_ops(shared: &LodShared, key: ChunkKey) -> Option<Arc<voxel_core::csg::ChunkOps>> {
+    let ops = shared.chunks.ops_for(key)?;
+    let min = key.min_corner_m().as_vec3();
+    let max = min + Vec3::splat(key.edge_m() as f32);
+    let vs = key.voxel_size_m() as f32;
+    let generator = shared.generator.clone();
+    Some(Arc::new(voxel_core::csg::ChunkOps::build(
+        (*ops).clone(),
+        min,
+        max,
+        4.0 * vs,
+        |lo, hi| generator.range(lo, hi, vs),
+    )))
+}
+
 /// Rebuild, in place, every resident chunk whose mask the field has
 /// changed, and swap them all at once.
 ///
@@ -862,7 +887,7 @@ fn restale(shared: &LodShared) {
             was != now
         })
         .map(|(key, mask)| {
-            let ops = shared.chunks.ops_for(key);
+            let ops = index_ops(shared, key);
             (key, ShownChunk { mask, ops })
         })
         .collect();

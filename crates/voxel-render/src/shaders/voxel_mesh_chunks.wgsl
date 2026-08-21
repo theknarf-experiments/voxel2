@@ -60,7 +60,11 @@ struct ChunkParams {
     csg_count: u32,
     // x = seam mask, 2 bits per face (+x,-x,+y,-y,+z,-z): 1 = neighbour
     // coarser, 2 = neighbour finer. Read by the mesh pass only.
-    _pad: vec2<u32>,
+    // y = draw the cells a snap failed in (VOXEL_EVAL_HOLES).
+    // z = base of this chunk's per-cell op index in `csg_cells`, or
+    // 0 when the chunk carries none and every op is walked.
+    // w = unused. It was `_pad` and already carried the first two.
+    aux: vec4<u32>,
 }
 // GENMAT CHUNKPARAMS END
 
@@ -134,7 +138,7 @@ fn cell_slot_index(c: vec3<i32>) -> u32 {
 // neighbors are equal must still snap its shared edge/corner cells, or a
 // pinhole opens at the junction where the face neighbors do snap.
 fn dir_coarser(bit: u32) -> bool {
-    return ((params._pad.x >> bit) & 1u) == 1u;
+    return ((params.aux.x >> bit) & 1u) == 1u;
 }
 
 // Apron cells snap onto the coarse-parity vertex (bit-equal to the coarser
@@ -401,7 +405,7 @@ fn sn_vertices(@builtin(global_invocation_id) id: vec3<u32>) {
     //
     // Debug (eval): flag failed-snap vertices via a reserved material so
     // the draw shader can paint them for correlation with hole pixels.
-    if (snap_failed && params._pad.y == 1u) {
+    if (snap_failed && params.aux.y == 1u) {
         mat = 255u;
     }
 

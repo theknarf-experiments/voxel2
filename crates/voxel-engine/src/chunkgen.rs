@@ -109,7 +109,7 @@ impl ChunkGen {
         face_mask: u32,
         show_on_ready: bool,
         hold: bool,
-        ops: Option<Arc<Vec<CsgOp>>>,
+        ops: Option<Arc<voxel_core::csg::ChunkOps>>,
     ) {
         self.0.queue.push(ChunkCommand::Request {
             key,
@@ -172,7 +172,7 @@ impl ChunkBatch {
         key: ChunkKey,
         face_mask: u32,
         hold: bool,
-        ops: Option<Arc<Vec<CsgOp>>>,
+        ops: Option<Arc<voxel_core::csg::ChunkOps>>,
     ) {
         let ready = chunks.wait_for(key);
         chunks.request(key, face_mask, false, hold, ops);

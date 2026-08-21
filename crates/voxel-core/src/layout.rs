@@ -77,10 +77,14 @@ pub const CHUNK_PARAMS: &[Field] = &[
         doc: "",
     },
     Field {
-        name: "_pad",
-        ty: "vec2<u32>",
+        name: "aux",
+        ty: "vec4<u32>",
         doc: "x = seam mask, 2 bits per face (+x,-x,+y,-y,+z,-z): 1 = neighbour\n\
-              coarser, 2 = neighbour finer. Read by the mesh pass only.",
+              coarser, 2 = neighbour finer. Read by the mesh pass only.\n\
+              y = draw the cells a snap failed in (VOXEL_EVAL_HOLES).\n\
+              z = base of this chunk's per-cell op index in `csg_cells`, or\n\
+              0 when the chunk carries none and every op is walked.\n\
+              w = unused. It was `_pad` and already carried the first two.",
     },
 ];
 
