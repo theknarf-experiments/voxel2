@@ -89,6 +89,19 @@ pub trait WorldPlanner: Send + Sync + 'static {
         self.is_idle()
     }
 
+    /// Landmarks the LOD field should refine toward, near a point:
+    /// structures this planner has placed, published as detail volumes.
+    ///
+    /// Must be PEEKED by the implementation — a landmark whose tile is
+    /// not resident yet is undiscovered, not a consumer reading outside
+    /// its working set — and per-tile deterministic, because residency
+    /// and seam masks are derived from the answer. The engine filters
+    /// what it gets by [`crate::streaming::detail_range_m`], so
+    /// returning every landmark in the box is fine.
+    fn detail_volumes(&self, _center: Vec3, _radius: f32) -> Vec<crate::streaming::DetailVolume> {
+        Vec::new()
+    }
+
     /// The host's own per-world state, if it has any. The engine never
     /// looks inside; this is how a host's systems read what its own layers
     /// published, without the engine learning what a river is.
@@ -246,6 +259,14 @@ impl WorldQuery {
     /// sample the world through this.
     pub fn generator(&self) -> &Arc<voxel_worldgen::Generator> {
         &self.generator
+    }
+
+    /// Landmarks near a point, as detail volumes. Empty without a
+    /// planner: authored volumes travel through `lod.detail`, not here.
+    pub fn detail_volumes(&self, center: Vec3, radius: f32) -> Vec<crate::streaming::DetailVolume> {
+        self.planner
+            .as_ref()
+            .map_or_else(Vec::new, |p| p.detail_volumes(center, radius))
     }
 
     /// All ops overlapping the box, as served to a chunk of the given edge.

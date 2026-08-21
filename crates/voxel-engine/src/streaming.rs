@@ -99,6 +99,27 @@ pub fn detail_reach_m(volume: &DetailVolume, level: u8) -> f64 {
     (2.0 * f64::from(parent) + 4.0) * ChunkKey::new(level, IVec3::ZERO).edge_m()
 }
 
+/// The camera distance beyond which a volume is INERT — it changes no
+/// chunk's level, so nothing needs to be resident, covered, or watched
+/// for it. The coarsest level the scale cap can bias splits within
+/// `split_k · 2 · edge` of the camera; past that plus a fade ring, the
+/// biased thresholds are all below the plain ones' reach.
+///
+/// This is what turns "every landmark planning ever placed" into "the
+/// handful near the camera": a derived volume outside this range costs
+/// zero dependencies and zero table entries.
+pub fn detail_range_m(volume: &DetailVolume, split_k: f64) -> f64 {
+    if volume.levels == 0 {
+        return 0.0;
+    }
+    let coarsest = (0..=32u8)
+        .rev()
+        .find(|l| scale_cap(volume, *l) > 0)
+        .unwrap_or(0);
+    let edge = ChunkKey::new(coarsest, IVec3::ZERO).edge_m();
+    split_k * 2.0 * edge + 2.0 * edge
+}
+
 /// The largest faded bias of any volume near this chunk's box; zero almost
 /// everywhere, so the common case is one empty-slice check.
 ///

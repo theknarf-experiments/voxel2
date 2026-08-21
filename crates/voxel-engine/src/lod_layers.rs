@@ -27,7 +27,7 @@
 //! graph — see [`refresh_masks`].
 
 use std::sync::atomic::{AtomicI32, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 
 use bevy::math::DVec3;
@@ -39,9 +39,21 @@ use voxel_layers::{ChunkCtx, CoordFilter, Layer, LayerChunk, LayerGraph, LayerRu
 
 use crate::chunkgen::ChunkGen;
 use crate::streaming::{
-    can_hold_surface, detail_reach_m, level_span, resident_clamped, seam_mask_at, LodConfig,
-    StreamProbe, StreamingRebuild,
+    can_hold_surface, detail_range_m, detail_reach_m, level_span, resident_clamped, seam_mask_at,
+    DetailVolume, LodConfig, StreamProbe, StreamingRebuild,
 };
+
+/// Slots kept for detail volumes DERIVED from planning, per world. A
+/// derived volume beyond [`detail_range_m`] is inert and takes no slot,
+/// so this bounds simultaneous nearby landmarks, not landmarks placed.
+/// Overflow keeps the nearest and logs the drop — a silent cap reads as
+/// "refined everything" when it did not.
+const DETAIL_POOL: usize = 8;
+
+/// How far out landmarks are asked for. Generous on purpose: activation
+/// is decided by [`detail_range_m`] per volume, and the query is a
+/// resident-only gather, so the radius costs lookups, not generation.
+const DETAIL_QUERY_RADIUS_M: f32 = 8_000.0;
 
 /// How long a `create` waits for its chunk to become drawable before
 /// giving up on it.
@@ -107,7 +119,17 @@ struct LodShared {
     /// so one `ChunkGen` and one GPU arena serve every loaded world.
     world: voxel_core::WorldId,
     chunks: ChunkGen,
-    config: LodConfig,
+    /// The field's configuration, detail table included. Locked because
+    /// the DERIVED half of the table follows planning: the pass head
+    /// swaps in [`Self::pending_detail`], so one pass reads one table
+    /// the same way it reads one anchor. Readers clone (the payload is
+    /// scalars and an `Arc`); a torn table mid-pass would give two
+    /// neighbors different masks, which is a crack nobody owns.
+    config: RwLock<LodConfig>,
+    /// The detail table the NEXT pass should use — authored volumes plus
+    /// the active derived ones. Written by the app thread, applied at
+    /// the head of a pass.
+    pending_detail: Mutex<Option<Arc<Vec<DetailVolume>>>>,
     /// The world itself, for asking whether a chunk can hold a surface
     /// before paying to find out.
     generator: Arc<voxel_worldgen::Generator>,
@@ -230,7 +252,8 @@ impl LayerChunk for LodChunk {
         if ops.is_some() {
             shared.had_ops.fetch_add(1, Ordering::Relaxed);
         }
-        let mask = seam_mask_at(&shared.config, shared.anchor.load().as_dvec3(), key);
+        let config = shared.config.read().unwrap().clone();
+        let mask = seam_mask_at(&config, shared.anchor.load().as_dvec3(), key);
         // ASK, do not wait. Waiting here made the round trip the unit of
         // work: the framework runs a level's creates in a pool and joins
         // it, so every level drained the pipeline to empty and refilled it
@@ -278,10 +301,24 @@ pub struct WorldLod {
     /// How many leading top dependencies follow the camera; the rest are
     /// pinned on detail volumes.
     camera_tops: usize,
-    /// The pinned dependencies' focuses. Their boxes never move — only
-    /// their FILTER's answer does, so a re-centred anchor touches them
-    /// instead of moving them.
+    /// The AUTHORED pinned dependencies' focuses. Their boxes never move
+    /// — only their FILTER's answer does, so a re-centred anchor touches
+    /// them instead of moving them.
     volume_tops: Vec<IVec3>,
+    /// The level's own `lod.detail`, kept apart so the published table
+    /// can always be rebuilt as authored ∪ slotted.
+    authored: Arc<Vec<DetailVolume>>,
+    /// First top index of the derived-volume slot pool; each slot owns
+    /// `levels_per_slot` consecutive deps, one per level below the top.
+    pool_base: usize,
+    levels_per_slot: usize,
+    /// Which derived volume each slot currently serves. Slots are
+    /// STABLE: a surviving volume keeps its slot, because moving one
+    /// releases and rebuilds every chunk it holds for nothing.
+    pool: Vec<Option<DetailVolume>>,
+    /// (anchor, planner idle) of the last landmark probe — the two
+    /// things whose change can change the answer.
+    last_probe: Option<(IVec3, bool)>,
 }
 
 /// Every world the engine is streaming.
@@ -387,6 +424,7 @@ impl WorldLod {
         chunks: ChunkGen,
         generator: Arc<voxel_worldgen::Generator>,
     ) -> Self {
+        let authored = config.detail.clone();
         let shared = Arc::new(LodShared {
             world,
             chunks,
@@ -400,7 +438,8 @@ impl WorldLod {
             pruned: AtomicUsize::new(0),
             unpruned: AtomicUsize::new(0),
             had_ops: AtomicUsize::new(0),
-            config: config.clone(),
+            config: RwLock::new(config.clone()),
+            pending_detail: Mutex::new(None),
         });
         let mut graph = LayerGraph::new(u64::from(world)).with_threads(LOD_WORKERS);
         let mut tops = Vec::new();
@@ -429,6 +468,7 @@ impl WorldLod {
         // volume's own box is small and static; only the filter's answer
         // moves with the camera, which is what `touch` re-asks for.
         let mut volumes: Vec<(TopDep, IVec3)> = Vec::new();
+        let mut filters: Vec<Option<CoordFilter>> = vec![None; usize::from(config.max_level) + 1];
         for level in (0..=config.max_level).rev() {
             graph.register_as(
                 &instance(level),
@@ -442,7 +482,8 @@ impl WorldLod {
             let at = shared.clone();
             let filter: CoordFilter = Arc::new(move |coord: IVec3| {
                 let key = ChunkKey::in_world(at.world, level, coord);
-                if !resident_clamped(&at.config, at.anchor.load().as_dvec3(), key) {
+                let config = at.config.read().unwrap().clone();
+                if !resident_clamped(&config, at.anchor.load().as_dvec3(), key) {
                     return false;
                 }
                 // Past the ops horizon the generator is the whole story,
@@ -452,6 +493,7 @@ impl WorldLod {
                 (key.edge_m() as f32) <= crate::planning::OPS_HORIZON_EDGE_M
                     || can_hold_surface(&at.generator, key)
             });
+            filters[usize::from(level)] = Some(filter.clone());
             let dep = TopDep::new(&instance(level), level_span(&config, level))
                 .with_filter(filter.clone());
             if level < config.max_level {
@@ -487,13 +529,32 @@ impl WorldLod {
         let camera_tops = tops.len();
         let volume_tops: Vec<IVec3> = volumes.iter().map(|(_, center)| *center).collect();
         tops.extend(volumes.into_iter().map(|(dep, _)| dep));
+        // Slots for volumes DERIVED from planning, born inactive: which
+        // landmarks are near is not knowable until the planner has run,
+        // and a runtime's dependency list is fixed at start.
+        // `refresh_detail` points them at volumes and retires them.
+        let levels_per_slot = usize::from(config.max_level);
+        let pool_base = tops.len();
+        for _slot in 0..DETAIL_POOL {
+            for level in 0..config.max_level {
+                let filter = filters[usize::from(level)].clone().expect("every level");
+                tops.push(TopDep::new(&instance(level), IVec3::ONE).with_filter(filter));
+            }
+        }
         // `before` freezes the focus this pass works from. `between` runs
         // after every ensure and before any release — the only moment when
         // the new configuration is resident and the old one is still there
         // to be drawn while its replacements are built.
         let before: voxel_layers::BetweenPasses = {
             let shared = shared.clone();
-            Arc::new(move |_| shared.anchor.store(shared.requested.load()))
+            Arc::new(move |_| {
+                shared.anchor.store(shared.requested.load());
+                // One pass, one table — swapped here for the same reason
+                // the anchor is snapshotted here.
+                if let Some(detail) = shared.pending_detail.lock().unwrap().take() {
+                    shared.config.write().unwrap().detail = detail;
+                }
+            })
         };
         let between: voxel_layers::BetweenPasses = {
             let shared = shared.clone();
@@ -519,6 +580,113 @@ impl WorldLod {
             published: None,
             camera_tops,
             volume_tops,
+            authored,
+            pool_base,
+            levels_per_slot,
+            pool: vec![None; DETAIL_POOL],
+            last_probe: None,
+        }
+    }
+
+    /// Ask planning for landmarks and reconcile the slot pool. Runs when
+    /// the anchor steps or the planner's idleness flips — the two things
+    /// whose change can change the answer.
+    ///
+    /// Derived volumes deliberately BYPASS admission control: the budget
+    /// was fitted before the planner had placed anything. [`DETAIL_POOL`]
+    /// and each volume's own locality are what bound the overdraft.
+    fn refresh_detail(&mut self, query: &crate::planning::WorldQuery, camera: DVec3) {
+        let probe = (self.shared.requested.load(), query.is_idle());
+        if self.last_probe == Some(probe) {
+            return;
+        }
+        self.last_probe = Some(probe);
+        let split_k = self.shared.config.read().unwrap().split_k;
+        let found = query.detail_volumes(camera.as_vec3(), DETAIL_QUERY_RADIUS_M);
+        let dist = |v: &DetailVolume| camera.distance(camera.clamp(v.min, v.max));
+        let held: Vec<DetailVolume> = self.pool.iter().flatten().copied().collect();
+        let mut wanted: Vec<DetailVolume> = found
+            .into_iter()
+            .filter(|v| {
+                // A step of hysteresis for volumes already slotted, so
+                // the range boundary does not churn an island per
+                // anchor step.
+                let range = detail_range_m(v, split_k);
+                let slack = if held.contains(v) { 1.2 } else { 1.0 };
+                dist(v) < slack * range
+            })
+            .collect();
+        if wanted.len() > DETAIL_POOL {
+            // FARTHEST first: distance is what starves a landmark of
+            // detail, so the far ones are what the bias is for — and the
+            // near ones, which plain refinement already serves, are also
+            // the dearest to bias further.
+            wanted.sort_by(|a, b| dist(b).total_cmp(&dist(a)));
+            warn!(
+                "detail: {} landmarks in range, keeping the {DETAIL_POOL} farthest",
+                wanted.len()
+            );
+            wanted.truncate(DETAIL_POOL);
+        }
+        if held.len() == wanted.len() && wanted.iter().all(|v| held.contains(v)) {
+            return;
+        }
+        // Stable slots: keep survivors where they are — moving one would
+        // release and rebuild every chunk it holds for nothing.
+        for slot in 0..DETAIL_POOL {
+            if let Some(v) = self.pool[slot] {
+                if !wanted.contains(&v) {
+                    self.set_slot(slot, &v, false);
+                    self.pool[slot] = None;
+                }
+            }
+        }
+        for v in &wanted {
+            if self.pool.iter().flatten().any(|p| p == v) {
+                continue;
+            }
+            let Some(slot) = self.pool.iter().position(Option::is_none) else {
+                break; // capped above; never panic on a full pool
+            };
+            self.pool[slot] = Some(*v);
+            self.set_slot(slot, v, true);
+        }
+        // One table for the next pass: authored plus whatever holds a
+        // slot.
+        let mut table = (*self.authored).clone();
+        table.extend(self.pool.iter().flatten().copied());
+        *self.shared.pending_detail.lock().unwrap() = Some(Arc::new(table));
+        // The filter's answer moved wherever a volume appeared or went,
+        // and most of those coords sit inside CAMERA boxes, which
+        // nothing else would re-ask. Touch everything; a no-op ensure is
+        // cheap, a stale one is a wrong-level island.
+        for i in 0..self.runtime.tops() {
+            self.runtime.top(i).touch();
+        }
+    }
+
+    /// Point one slot's per-level dependencies at a volume, or retire
+    /// them. Only levels the volume can refine are driven — an untouched
+    /// inactive slot stays silent, so an idle refresh cannot request
+    /// passes for nothing.
+    fn set_slot(&self, slot: usize, v: &DetailVolume, active: bool) {
+        for level in 0..self.levels_per_slot {
+            let reach = 2.0 * detail_reach_m(v, level as u8);
+            if reach == 0.0 {
+                continue;
+            }
+            let top = self
+                .runtime
+                .top(self.pool_base + slot * self.levels_per_slot + level);
+            if active {
+                let span = ((v.max - v.min) + DVec3::splat(reach)).ceil().as_ivec3();
+                top.set_size(span);
+                // Activates on first call; a no-op after.
+                top.set_focus(((v.min + v.max) * 0.5).as_ivec3());
+                top.touch();
+            } else {
+                top.set_active(false);
+            }
         }
     }
 
@@ -550,6 +718,19 @@ impl WorldLod {
             // it is a no-op, and `touch` is what carries the anchor move.
             top.set_focus(*center);
             top.touch();
+        }
+        // Slotted derived volumes are pinned the same way and read the
+        // same anchor, so the move has to be announced to them too.
+        for slot in 0..self.pool.len() {
+            if let Some(v) = self.pool[slot] {
+                for level in 0..self.levels_per_slot {
+                    if detail_reach_m(&v, level as u8) > 0.0 {
+                        self.runtime
+                            .top(self.pool_base + slot * self.levels_per_slot + level)
+                            .touch();
+                    }
+                }
+            }
         }
     }
 
@@ -721,16 +902,17 @@ fn settle_builds(shared: &LodShared) {
 
 fn refresh_masks(shared: &LodShared) {
     let at = shared.anchor.load().as_dvec3();
+    let config = shared.config.read().unwrap().clone();
     let stale: Vec<(ChunkKey, ShownChunk)> = {
         let state = shared.state.lock().unwrap();
         state
             .shown
             .iter()
             .filter_map(|(key, shown)| {
-                if !resident_clamped(&shared.config, at, *key) {
+                if !resident_clamped(&config, at, *key) {
                     return None; // about to be released
                 }
-                let want = seam_mask_at(&shared.config, at, *key);
+                let want = seam_mask_at(&config, at, *key);
                 (want != shown.mask).then(|| {
                     (
                         *key,
@@ -802,7 +984,13 @@ fn follow_lod_focus(
         return;
     }
     if let Ok(source) = sources.single() {
-        layers.follow(source.translation().as_dvec3(), &focus);
+        let camera = source.translation().as_dvec3();
+        layers.follow(camera, &focus);
+        for world in layers.worlds.iter_mut() {
+            if let Some(w) = worlds.iter().find(|w| w.id == world.shared.world) {
+                world.refresh_detail(&w.query, focus.at(w.id, camera));
+            }
+        }
     }
     probe.resident = layers.resident();
     probe.generating = layers.is_generating();

@@ -76,6 +76,8 @@ struct Emitter {
     gate: Option<f32>,
     /// Residency this layer's data is held to regardless of the gate.
     keep_m: Option<f32>,
+    /// Its sites are published as landmarks worth this many LOD levels.
+    importance: u8,
     /// Its ribbons lie on the ground rather than at a level.
     seated: bool,
     ribbons: bool,
@@ -84,7 +86,13 @@ struct Emitter {
 }
 
 impl Emitter {
-    fn new(name: String, gate: Option<f32>, keep_m: Option<f32>, emit: &EmitDef) -> Self {
+    fn new(
+        name: String,
+        gate: Option<f32>,
+        keep_m: Option<f32>,
+        importance: u8,
+        emit: &EmitDef,
+    ) -> Self {
         let seated = matches!(emit, EmitDef::PathRibbon { .. });
         let (ribbons, clearance, markers) = match emit {
             EmitDef::Ribbon { .. } => (true, true, false),
@@ -101,6 +109,7 @@ impl Emitter {
         Self {
             name,
             keep_m,
+            importance,
             seated,
             gate,
             ribbons,
@@ -344,6 +353,30 @@ impl WorldPlanner for RegionPlanner {
             .store(true, std::sync::atomic::Ordering::Release);
     }
 
+    /// Landmarks near the camera, as engine detail volumes.
+    ///
+    /// PEEKED: a landmark whose tile has not generated yet is
+    /// undiscovered, not a consumer reading outside its working set —
+    /// the engine re-asks when planning goes idle, which is when the
+    /// answer can have grown.
+    fn detail_volumes(
+        &self,
+        center: Vec3,
+        radius: f32,
+    ) -> Vec<voxel_engine::streaming::DetailVolume> {
+        let _peek = voxel_layers::peek();
+        let min = bevy::math::Vec2::new(center.x - radius, center.z - radius);
+        let max = bevy::math::Vec2::new(center.x + radius, center.z + radius);
+        self.gather(min, max, |e| e.importance > 0, |p| p.landmarks)
+            .into_iter()
+            .map(|l| voxel_engine::streaming::DetailVolume {
+                min: l.min.as_dvec3(),
+                max: l.max.as_dvec3(),
+                levels: l.levels,
+            })
+            .collect()
+    }
+
     fn host_ctx(&self) -> Option<&(dyn std::any::Any + Send + Sync)> {
         self.ctx
             .as_ref()
@@ -573,6 +606,10 @@ impl RegionPlanner {
         let ctx = Arc::new(world::WorldCtx::new(generator.clone()));
         let mut graph = LayerGraph::with_context(seed, ctx.clone());
         let mut emitters = Vec::new();
+        // (structure extent bound, importance) of every emit that
+        // publishes landmarks; what the coverage widening below is
+        // computed from.
+        let mut landmark_bounds: Vec<(f32, u8)> = Vec::new();
         for node in &region {
             let Some(name) = node.name.as_deref() else {
                 continue;
@@ -594,10 +631,19 @@ impl RegionPlanner {
                 None => warn!("planning: '{name}' is a region node but implements no RegionLayer"),
             }
             if let Some(emit) = node.node.0.as_any().downcast_ref::<nodes::Emit>() {
+                if emit.importance > 0 {
+                    // The structure's authored size bounds the landmark
+                    // boxes its sites will publish. Generous on purpose:
+                    // oversizing coverage costs planning tiles, while
+                    // undersizing is a missed read at a refined chunk.
+                    let extent = rctx.structure().map_or(64.0, |s| 4.0 * s.size[1]);
+                    landmark_bounds.push((extent, emit.importance));
+                }
                 emitters.push(Emitter::new(
                     name.to_string(),
                     emit.max_chunk_edge_m,
                     emit.keep_m,
+                    emit.importance,
                     &emit.emit,
                 ));
             }
@@ -619,6 +665,28 @@ impl RegionPlanner {
         // per-query filter and becomes a residency size — which is the
         // whole point of expressing this as a dependency graph.
         let lod = voxel_engine::LodConfig::from(&level.lod);
+        // A level whose emits carry importance keeps landmarks refined
+        // out to their bias range, and a refined chunk asks EVERY
+        // emitter its edge admits for ops — so every emitter's coverage
+        // must reach that far. Static, from authored sizes: the range a
+        // landmark can matter at plus the farthest a refined leaf can
+        // sit from it. Zero when no emit publishes landmarks.
+        let landmark_reach: f32 = landmark_bounds
+            .iter()
+            .map(|&(extent, levels)| {
+                let v = voxel_engine::streaming::DetailVolume {
+                    min: bevy::math::DVec3::ZERO,
+                    max: bevy::math::DVec3::splat(f64::from(extent)),
+                    levels,
+                };
+                let fade = (0..=32u8)
+                    .map(|l| voxel_engine::streaming::detail_reach_m(&v, l))
+                    .fold(0.0, f64::max);
+                (voxel_engine::streaming::detail_range_m(&v, lod.split_k) + fade) as f32
+                    + layers::ELEM_PAD_M
+                    + ANCHOR_SLOP_M
+            })
+            .fold(0.0, f32::max);
         let mut deps = Vec::new();
         for e in &emitters {
             // How far a leaf of edge E can be and still be drawn is the
@@ -648,7 +716,9 @@ impl RegionPlanner {
             // the feature is. Sizing residency from the gate alone would
             // make "on the map at 40 km" cost a carve op per chunk out to
             // 40 km — measured at 132 -> 360 ops per chunk when tried.
-            let reach = ops_reach.max(e.keep_m.unwrap_or(0.0));
+            // Landmarks widen every emitter alike: a refined chunk near
+            // one queries whatever its edge's gate admits.
+            let reach = ops_reach.max(e.keep_m.unwrap_or(0.0)).max(landmark_reach);
 
             // Nothing else needs sizing in here any more: every other
             // consumer of these layers — ribbon surfaces, scatter
@@ -871,6 +941,58 @@ mod tests {
             "no ops within 40 m of pocket marker at {:?}",
             m.pos
         );
+    }
+
+    /// An emit that carries importance publishes each placed site as a
+    /// landmark, and the facade serves them as detail volumes sized by
+    /// the REAL ops the site emitted — a box a structure actually fills,
+    /// not a nominal radius.
+    ///
+    /// Importance is set here, in memory, not in the shipped JSON: on a
+    /// scatter as dense as ruins it refines a dozen islands at once, and
+    /// until the pre-existing black-seam rendering bug those islands
+    /// surface is fixed, shipping it would trade a readable vista for a
+    /// visible one.
+    #[test]
+    fn important_emits_publish_detail_volumes() {
+        let mut planet = shipped("planet.json");
+        for n in planet.nodes.iter_mut() {
+            if n.name.as_deref() == Some("ruins") {
+                if let Some(e) = n.node.0.as_any_mut().downcast_mut::<super::nodes::Emit>() {
+                    e.importance = 3;
+                }
+            }
+        }
+        let focus = Vec3::new(-2332.0, 0.0, -38199.0); // the demo start
+        let world = world_at(&planet, 0, focus);
+        let volumes = world.detail_volumes(focus, 4000.0);
+        assert!(
+            !volumes.is_empty(),
+            "planet's ruins carry importance but published no landmarks"
+        );
+        let planner = world.planner_as::<RegionPlanner>().expect("region planner");
+        let markers = planner.markers_in(
+            bevy::math::Vec2::new(focus.x - 4000.0, focus.z - 4000.0),
+            bevy::math::Vec2::new(focus.x + 4000.0, focus.z + 4000.0),
+            Some("ruin"),
+        );
+        for v in &volumes {
+            assert_eq!(v.levels, 3, "importance rides through as levels");
+            let extent = (v.max - v.min).max_element();
+            assert!(
+                extent > 1.0 && extent < 200.0,
+                "landmark box is not structure-sized: {extent} m"
+            );
+            assert!(
+                markers.iter().any(|m| {
+                    f64::from(m.pos.x) >= v.min.x - 1.0
+                        && f64::from(m.pos.x) <= v.max.x + 1.0
+                        && f64::from(m.pos.z) >= v.min.z - 1.0
+                        && f64::from(m.pos.z) <= v.max.z + 1.0
+                }),
+                "a landmark with no ruin marker inside it: {v:?}"
+            );
+        }
     }
 
     /// The graph compiler refuses what a hand-written validator used to.

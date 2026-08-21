@@ -781,6 +781,9 @@ pub struct EmitCfg {
     /// becomes the dependency padding. Author-declared, like every
     /// LayerProcGen padding.
     pub pad_m: f32,
+    /// Publish each site's bounds as a landmark worth this many extra
+    /// LOD levels. 0 publishes nothing.
+    pub importance: u8,
 }
 
 #[derive(Clone)]
@@ -952,7 +955,9 @@ impl EmitPatches {
                                 ^ ((site.x.to_bits() as u64) << 32 | site.z.to_bits() as u64)
                                 ^ (site.y.to_bits() as u64) << 16,
                         ));
+                        let before = out.ops.len();
                         super::structure::build(structure, site, generator, &mut rng, &mut out.ops);
+                        push_landmark(&mut out, before, self.cfg.importance);
                         if let Some(kind) = marker {
                             out.markers.push(Marker {
                                 pos: site,
@@ -1010,6 +1015,7 @@ impl EmitPatches {
                             ctx.seed()
                                 ^ ((site.x.to_bits() as u64) << 32 | site.y.to_bits() as u64),
                         ));
+                        let before = out.ops.len();
                         super::structure::build(
                             structure,
                             Vec3::new(site.x, 0.0, site.y),
@@ -1017,6 +1023,7 @@ impl EmitPatches {
                             &mut rng,
                             &mut out.ops,
                         );
+                        push_landmark(&mut out, before, self.cfg.importance);
                         if let Some(kind) = marker {
                             let y = generator.height(site, 1.0);
                             out.markers.push(Marker {
@@ -1029,6 +1036,27 @@ impl EmitPatches {
             }
         }
         PatchChunk { patches: out }
+    }
+}
+
+/// Publish the ops a site just emitted as one landmark: their union box,
+/// worth `importance` extra LOD levels. The bounds are measured from the
+/// REAL ops rather than the structure's nominal size, so a variant that
+/// grew a tall part is refined to what it actually built.
+fn push_landmark(out: &mut PatchSet, ops_from: usize, importance: u8) {
+    if importance == 0 {
+        return;
+    }
+    if let Some(aabb) = out.ops[ops_from..]
+        .iter()
+        .map(CsgOp::aabb)
+        .reduce(|a, b| a.union(b))
+    {
+        out.landmarks.push(voxel_core::patch::Landmark {
+            min: aabb.min,
+            max: aabb.max,
+            levels: importance,
+        });
     }
 }
 
@@ -1190,6 +1218,17 @@ pub fn patches_in(mgr: &LayerGraph, instance: &str, min: Vec3, max: Vec3) -> Pat
                 && m.pos.z <= max.z
             {
                 out.markers.push(m.clone());
+            }
+        }
+        for l in &c.patches.landmarks {
+            if l.min.x <= max.x
+                && l.max.x >= min.x
+                && l.min.y <= max.y
+                && l.max.y >= min.y
+                && l.min.z <= max.z
+                && l.max.z >= min.z
+            {
+                out.landmarks.push(*l);
             }
         }
     }
@@ -1725,6 +1764,7 @@ mod tests {
                             marker: Some("ruin".into()),
                         },
                         pad_m: 0.0,
+                        importance: 0,
                     },
                     cell_m: 256,
                 },
@@ -1799,6 +1839,7 @@ mod tests {
                     // Endpoints within reach/2 of the midpoint cell, plus
                     // the pathfinding corridor.
                     pad_m: 700.0 * 0.5 + 192.0 + 64.0,
+                    importance: 0,
                 },
                 cell_m: 256,
             },
@@ -1866,6 +1907,7 @@ mod tests {
                     },
                     // Courses run up to max_steps * step from their spring.
                     pad_m: 400.0 * 8.0 + 64.0,
+                    importance: 0,
                 },
                 cell_m: 512,
             },
@@ -1898,6 +1940,7 @@ mod tests {
                     source: "worm:caves".into(),
                     kind: EmitKind::WormCuts,
                     pad_m: 340.0,
+                    importance: 0,
                 },
                 cell_m: 256,
             },
@@ -1965,6 +2008,7 @@ mod tests {
                         marker: Some("pocket".into()),
                     },
                     pad_m: 0.0,
+                    importance: 0,
                 },
                 cell_m: 128,
             },
@@ -1981,6 +2025,7 @@ mod tests {
                         lift_m: 3.0,
                     },
                     pad_m: 400.0 + 64.0,
+                    importance: 0,
                 },
                 cell_m: 128,
             },
@@ -2173,6 +2218,7 @@ mod tests {
                         marker: Some("pocket".into()),
                     },
                     pad_m: 0.0,
+                    importance: 0,
                 },
                 cell_m: 128,
             },
@@ -2189,6 +2235,7 @@ mod tests {
                         lift_m: 3.0,
                     },
                     pad_m: 464.0,
+                    importance: 0,
                 },
                 cell_m: 128,
             },

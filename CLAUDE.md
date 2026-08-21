@@ -131,7 +131,14 @@ architecture. Design plan: `~/.claude/plans/binary-twirling-brooks.md`.
   sizes from `detail_reach_m`, never from `resident_reach`, which
   deliberately excludes volumes. A consumer sized without it silently
   clips the refined island, a hole that shows only from some camera
-  positions.
+  positions. Volumes also arrive from PLANNING (`emit`'s `importance` →
+  `WorldPlanner::detail_volumes`), so the table is per-pass state: it is
+  swapped at the pass head beside the anchor, and every consumer of
+  `LodShared::config` reads one snapshot per pass. A mid-pass table is
+  two neighbours with different masks, which is a crack nobody owns.
+  **Refined islands at range render as black weld faces** where the
+  hard cut meets steep relief — real and unfixed, which is why no
+  shipped level opts in yet.
 - Planning generation is **dependency-driven**: consumers `ensure_loaded`
   the region they are about to query (the LOD planner does this per epoch,
   plus a streamer-radius pass), then read. `voxctl status` →

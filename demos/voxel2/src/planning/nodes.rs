@@ -306,6 +306,15 @@ pub struct Emit {
     /// chunk out to 40 km.
     #[serde(default)]
     pub keep_m: Option<f32>,
+    /// Bias LOD refinement toward each placed structure: extra octree
+    /// levels its site holds against distance, so a spire still reads
+    /// from a range where the plain voxels would swallow it. 0 = none.
+    ///
+    /// A residency size like the two above — the emit layer publishes
+    /// each site's bounds as a landmark, and `RegionPlanner::new` widens
+    /// every emitter's coverage to the landmark range it implies.
+    #[serde(default)]
+    pub importance: u8,
     pub emit: EmitDef,
 }
 
@@ -701,6 +710,7 @@ impl RegionLayer for Emit {
             cell_m,
             cell_y_m,
             pad_m,
+            importance,
             emit,
             ..
         } = self.clone();
@@ -713,6 +723,7 @@ impl RegionLayer for Emit {
                     source,
                     kind: emit.to_kind(ctx.structure().as_ref()),
                     pad_m,
+                    importance,
                 },
                 cell_m,
                 cell_y_m,

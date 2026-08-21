@@ -40,6 +40,16 @@ pub struct Marker {
     pub kind: String,
 }
 
+/// A placed structure that asks the LOD field to refine toward it: its
+/// bounds, and how many extra levels it is worth. What refinement means
+/// is the consumer's business — this only says where and how much.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Landmark {
+    pub min: Vec3,
+    pub max: Vec3,
+    pub levels: u8,
+}
+
 /// Everything one planning chunk emits, bucketed together so a single
 /// spatial query answers every consumer.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -49,6 +59,7 @@ pub struct PatchSet {
     /// Segments props must keep off: roadbeds, ribbon beds, thresholds.
     pub clearance: Vec<[Vec2; 2]>,
     pub markers: Vec<Marker>,
+    pub landmarks: Vec<Landmark>,
 }
 
 impl PatchSet {
@@ -57,6 +68,7 @@ impl PatchSet {
             && self.ribbons.is_empty()
             && self.clearance.is_empty()
             && self.markers.is_empty()
+            && self.landmarks.is_empty()
     }
 
     pub fn extend(&mut self, other: PatchSet) {
@@ -64,5 +76,6 @@ impl PatchSet {
         self.ribbons.extend(other.ribbons);
         self.clearance.extend(other.clearance);
         self.markers.extend(other.markers);
+        self.landmarks.extend(other.landmarks);
     }
 }
