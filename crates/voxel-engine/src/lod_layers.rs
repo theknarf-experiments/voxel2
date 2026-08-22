@@ -1021,6 +1021,7 @@ fn follow_lod_focus(
     mut layers: ResMut<LodLayers>,
     focus: Res<WorldFocus>,
     mut probe: ResMut<StreamProbe>,
+    mut first_load: ResMut<voxel_render::FirstLoadDone>,
     worlds: Res<crate::Worlds>,
     sources: crate::StreamSourceQuery,
     stats: Res<voxel_render::SharedRenderStats>,
@@ -1066,6 +1067,12 @@ fn follow_lod_focus(
     let awaiting = stats.0.lock().map_or(0, |s| s.awaiting);
     let planned = worlds.iter().all(|w| w.query.is_idle());
     let settled = layers.is_idle() && awaiting == 0 && !layers.is_generating() && planned;
+    // Latched, never cleared: this is what the renderer's loading budgets
+    // end on, and the thing they must NOT end on is the first reveal —
+    // that is the world showing what it has, not the world being done.
+    // See `voxel_render::FirstLoadDone`. A jump or a newly opened world
+    // is `ChunkTable::reloading`'s question, not this one.
+    first_load.0 |= settled;
     if settled {
         if *settling > 0.0 {
             probe.last_settle_s = *settling;

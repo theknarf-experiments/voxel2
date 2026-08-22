@@ -891,6 +891,7 @@ impl Plugin for VoxelChunksPlugin {
             .init_resource::<CameraWorld>()
             .init_resource::<EnvParams>();
         app.init_resource::<ChunkCommandQueue>()
+            .init_resource::<FirstLoadDone>()
             .init_resource::<SharedRenderStats>()
             .insert_resource(ChunkReadyChannel { rx: ready_rx })
             .init_resource::<ChunkWaiters>()
@@ -918,6 +919,7 @@ impl Plugin for VoxelChunksPlugin {
             .insert_resource(stats)
             .insert_resource(slab_config)
             .insert_resource(ChunkReadySender(ready_tx))
+            .init_resource::<FirstLoadDone>()
             .init_resource::<ExtractedChunkCommands>()
             .init_resource::<ChunkTable>()
             .init_resource::<FrameBatches>()
@@ -1047,6 +1049,25 @@ struct ExtractedChunkCommands(Vec<ChunkCommand>);
 
 #[derive(Resource, Default)]
 struct ExtractedCameraPos(DVec3);
+
+/// Has this world finished its first load — not "shown its first chunk",
+/// FINISHED.
+///
+/// The loading budgets used to end at [`ChunkTable::revealed`], and a
+/// reveal is not the end of a load: the first pass reveals whatever is
+/// ready and the rest of the world keeps arriving for seconds afterwards.
+/// On the planet that put 2500 chunks — a third of the world — on the
+/// flight budget of 12 a frame, which at 60 Hz is 720 a second against
+/// the 2300 the loading budget manages. Three and a half seconds of a six
+/// second settle, with the GPU idle at 16.5 ms a frame the whole way.
+///
+/// The queue cannot answer it either: `awaiting` hits zero between the
+/// two waves and would clear this exactly where the reveal already does.
+/// So the engine latches it from the one thing that means the world is
+/// done — its own settle — and never unlatches. A jump or a new world is
+/// [`ChunkTable::reloading`]'s job, which is a different question.
+#[derive(Resource, Default, Clone, Copy)]
+pub struct FirstLoadDone(pub bool);
 
 /// Where each world is being looked at FROM, and through what frustum.
 ///
@@ -1675,6 +1696,7 @@ fn extract_worlds(
 fn extract_camera_pos(
     cameras: Extract<Query<(&GlobalTransform, &Frustum), crate::PlayerCameraFilter>>,
     worlds: Extract<WorldViewQuery>,
+    first_load: Extract<Res<FirstLoadDone>>,
     mut commands: Commands,
 ) {
     let (pos, frustum) = cameras
@@ -1683,6 +1705,7 @@ fn extract_camera_pos(
         .map(|(t, f)| (t.translation().as_dvec3(), Some(*f)))
         .unwrap_or_default();
     commands.insert_resource(ExtractedCameraPos(pos));
+    commands.insert_resource(**first_load);
     commands.insert_resource(ExtractedFrustum(frustum));
     let mut per_world = vec![None; MAX_WORLDS];
     for (transform, frustum, world) in worlds.iter() {
@@ -1818,6 +1841,7 @@ fn plan_frame(
     pipeline_cache: Res<PipelineCache>,
     render_device: Res<RenderDevice>,
     render_queue: Res<RenderQueue>,
+    first_load: Res<FirstLoadDone>,
 ) {
     voxel_core::timed!(
         "render::plan_frame",
@@ -1838,6 +1862,7 @@ fn plan_frame(
             pipeline_cache,
             render_device,
             render_queue,
+            first_load,
         )
     );
 }
@@ -1860,6 +1885,7 @@ fn plan_frame_inner(
     pipeline_cache: Res<PipelineCache>,
     render_device: Res<RenderDevice>,
     render_queue: Res<RenderQueue>,
+    first_load: Res<FirstLoadDone>,
 ) {
     // Stage counters: which stage is narrowest is not something the
     // budgets can tell you, since a budget only says what a frame is
@@ -2081,7 +2107,7 @@ fn plan_frame_inner(
     // Budgets for THIS frame. Phase 1 has just applied the commands, so
     // a world that revealed its first chunk this frame is already out of
     // the loading case.
-    let (gen_budget, mesh_budget) = if table.revealed && !table.reloading {
+    let (gen_budget, mesh_budget) = if table.revealed && !table.reloading && first_load.0 {
         (*GEN_BUDGET, *MESH_BUDGET)
     } else {
         (*LOAD_GEN_BUDGET, *LOAD_MESH_BUDGET)

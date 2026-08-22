@@ -17,9 +17,9 @@ pub mod slab;
 
 pub use chunks::{
     material_slot_index, material_table, CameraWorld, ChunkCommand, ChunkCommandQueue,
-    ChunkGpuResources, ChunkReadyChannel, ChunkWaiters, EnvParams, GpuWorldProgram, RenderWorld,
-    RenderWorlds, SharedRenderStats, SurfaceMap, ViewWorld, VoxelChunksPlugin, WorldMaterial,
-    WorldProgram, MATERIAL_SLOTS, MAT_KIND_CANOPY, MAT_KIND_SURFACE, MAT_KIND_ZONED,
+    ChunkGpuResources, ChunkReadyChannel, ChunkWaiters, EnvParams, FirstLoadDone, GpuWorldProgram,
+    RenderWorld, RenderWorlds, SharedRenderStats, SurfaceMap, ViewWorld, VoxelChunksPlugin,
+    WorldMaterial, WorldProgram, MATERIAL_SLOTS, MAT_KIND_CANOPY, MAT_KIND_SURFACE, MAT_KIND_ZONED,
     MAX_CLIP_PLANES, MAX_WORLDS,
 };
 pub use material::VoxelSurfaceMaterial;
