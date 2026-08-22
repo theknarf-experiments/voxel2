@@ -24,6 +24,18 @@ pub static CELL_TESTED: crate::Stage = crate::Stage::new();
 /// `CELL_TESTED` is what the pruning is worth.
 pub static CELL_KEPT: crate::Stage = crate::Stage::new();
 
+/// Blocking inside the ops path: waiting for this chunk's planning to be
+/// resident, against actually answering the query. They are charged apart
+/// because a stage that is mostly SLEEP wants a different fix from one
+/// that is mostly work, and summed thread time cannot tell them apart.
+pub static OPS_WAIT: crate::Stage = crate::Stage::new();
+pub static OPS_ANSWER: crate::Stage = crate::Stage::new();
+/// Chunks that reached the wait at all.
+pub static OPS_WAITED: crate::Stage = crate::Stage::new();
+/// The two halves of the readiness CHECK that guards the wait.
+pub static OPS_IS_IDLE: crate::Stage = crate::Stage::new();
+pub static OPS_COVERED: crate::Stage = crate::Stage::new();
+
 /// Chunks whose ops were asked for, and how many of those a LANDMARK had
 /// refined. If the second is zero the landmark gate is not firing at all.
 pub static OPS_CHUNKS: crate::Stage = crate::Stage::new();

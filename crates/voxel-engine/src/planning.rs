@@ -456,7 +456,18 @@ pub fn ops_provider(world: &WorldQuery) -> Option<crate::chunkgen::OpsFn> {
         // concurrently is N milliseconds of streaming thrown away per
         // poll, and every worker waiting on its own region would be
         // exactly that.
-        if !world.is_idle() && !world.chunk_covered(key, refined) {
+        let idle_at = std::time::Instant::now();
+        let idle = world.is_idle();
+        voxel_core::csg::OPS_IS_IDLE.add_nanos(idle_at.elapsed().as_nanos() as u64);
+        let covered = idle || {
+            let at = std::time::Instant::now();
+            let c = world.chunk_covered(key, refined);
+            voxel_core::csg::OPS_COVERED.add_nanos(at.elapsed().as_nanos() as u64);
+            c
+        };
+        if !covered {
+            voxel_core::csg::OPS_WAITED.count(1);
+            let waited = std::time::Instant::now();
             let _one_waiter = wait_gate.lock().unwrap_or_else(|e| e.into_inner());
             // Wait for THIS chunk's region, not for the whole world, and
             // stop the moment planning goes idle — at that point whatever
@@ -473,8 +484,12 @@ pub fn ops_provider(world: &WorldQuery) -> Option<crate::chunkgen::OpsFn> {
             while !world.is_idle() && !world.chunk_covered(key, refined) {
                 std::thread::sleep(std::time::Duration::from_millis(1));
             }
+            voxel_core::csg::OPS_WAIT.add_nanos(waited.elapsed().as_nanos() as u64);
         }
-        world.chunk_ops(key, refined)
+        let answering = std::time::Instant::now();
+        let out = world.chunk_ops(key, refined);
+        voxel_core::csg::OPS_ANSWER.add_nanos(answering.elapsed().as_nanos() as u64);
+        out
     }))
 }
 
