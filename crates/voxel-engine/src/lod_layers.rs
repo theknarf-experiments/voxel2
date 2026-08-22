@@ -570,6 +570,8 @@ impl WorldLod {
                 // released.
                 let pending: Vec<ChunkKey> =
                     shared.state.lock().unwrap().pending.drain(..).collect();
+                voxel_core::csg::LOD_PASSES.count(1);
+                voxel_core::csg::LOD_COMMITTED.count(pending.len() as u64);
                 for key in pending {
                     shared.chunks.commit(key);
                 }

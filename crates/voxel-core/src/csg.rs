@@ -24,6 +24,12 @@ pub static CELL_TESTED: crate::Stage = crate::Stage::new();
 /// `CELL_TESTED` is what the pruning is worth.
 pub static CELL_KEPT: crate::Stage = crate::Stage::new();
 
+/// Residency passes run, and chunks committed by them. A cold start with
+/// a stationary camera should need ONE: the LOD field is a pure function
+/// of (config, anchor, key) and neither moves.
+pub static LOD_PASSES: crate::Stage = crate::Stage::new();
+pub static LOD_COMMITTED: crate::Stage = crate::Stage::new();
+
 /// Blocking inside the ops path: waiting for this chunk's planning to be
 /// resident, against actually answering the query. They are charged apart
 /// because a stage that is mostly SLEEP wants a different fix from one

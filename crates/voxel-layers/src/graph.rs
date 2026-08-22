@@ -275,17 +275,67 @@ impl LayerGraph {
         //    arbitrary predicate the caller supplies — for LOD, the field
         //    itself — so it is asked once per coordinate and the answer
         //    kept, not re-asked under the write lock.
-        let mut wanted: Vec<IVec3> = Vec::new();
-        for z in lo.z..=hi.z {
+        //
+        // In PARALLEL when there is enough of it, because for the LOD
+        // this predicate is the whole octree descent: `resident_clamped`
+        // walks a chunk's ancestors and asks every detail volume about
+        // each one. Serial, it was the narrowest part of a cold start —
+        // 180% of a possible 1000% with every worker parked on a condvar,
+        // waiting for a scan to finish deciding what they should build.
+        // The creates it feeds were already parallel; only the deciding
+        // was not.
+        //
+        // Split by z and concatenated in order, so `wanted` is exactly the
+        // sequence the serial walk produced — the nearest-first sort below
+        // is stable and the grid is a map, but an order that wandered
+        // between runs would make every downstream count unreproducible.
+        const FILTER_MIN: usize = 4096;
+        let rows = (hi.z - lo.z + 1).max(0) as usize;
+        let span = |z: i32, out: &mut Vec<IVec3>| {
             for y in lo.y..=hi.y {
                 for x in lo.x..=hi.x {
                     let coord = IVec3::new(x, y, z);
                     if filter.is_none_or(|f| f(coord)) {
-                        wanted.push(coord);
+                        out.push(coord);
                     }
                 }
             }
+        };
+        let total =
+            rows * ((hi.y - lo.y + 1).max(0) as usize) * ((hi.x - lo.x + 1).max(0) as usize);
+        let helpers = if filter.is_none() || total < FILTER_MIN || rows < 2 {
+            0
+        } else {
+            self.reserve_workers(rows - 1)
+        };
+        let mut wanted: Vec<IVec3> = Vec::new();
+        if helpers == 0 {
+            for z in lo.z..=hi.z {
+                span(z, &mut wanted);
+            }
+        } else {
+            let mut per_row: Vec<Vec<IVec3>> = (0..rows).map(|_| Vec::new()).collect();
+            let span = &span;
+            let queue: std::sync::Mutex<Vec<(usize, &mut Vec<IVec3>)>> =
+                std::sync::Mutex::new(per_row.iter_mut().enumerate().collect());
+            let queue = &queue;
+            std::thread::scope(|scope| {
+                // The owner takes a share too, so `helpers` threads is
+                // `helpers + 1` hands.
+                for _ in 0..=helpers {
+                    scope.spawn(move || loop {
+                        let Some((i, out)) = queue.lock().unwrap().pop() else {
+                            return;
+                        };
+                        span(lo.z + i as i32, out);
+                    });
+                }
+            });
+            for rowset in per_row {
+                wanted.extend(rowset);
+            }
         }
+        self.free_workers.fetch_add(helpers, Ordering::Relaxed);
 
         // 2. Slots for every wanted coordinate, creating empty ones as
         //    needed. Only this step touches the grid lock.
