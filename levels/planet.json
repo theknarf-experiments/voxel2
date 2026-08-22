@@ -1344,7 +1344,7 @@
    },
    "cell_m": 64,
    "pad_m": 8.0,
-   "max_chunk_edge_m": 25.6,
+   "max_chunk_edge_m": 12.8,
    "emit": {
     "type": "population_structure"
    }

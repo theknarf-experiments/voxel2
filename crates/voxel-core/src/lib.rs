@@ -68,6 +68,14 @@ impl Stage {
         out
     }
 
+    /// Charge nanoseconds measured by the caller — for a stage whose
+    /// span does not fit inside one closure.
+    pub fn add_nanos(&self, n: u64) {
+        use core::sync::atomic::Ordering::Relaxed;
+        self.nanos.fetch_add(n, Relaxed);
+        self.calls.fetch_add(1, Relaxed);
+    }
+
     /// Charge `n` to the call count without timing anything — for the
     /// sizes that explain a stage's cost (ops walked, cells built).
     pub fn count(&self, n: u64) {

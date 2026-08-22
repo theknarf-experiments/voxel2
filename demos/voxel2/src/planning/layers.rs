@@ -815,6 +815,11 @@ pub struct EmitPatches {
 #[derive(Default)]
 pub struct PatchChunk {
     pub patches: PatchSet,
+    /// Spatial index over `patches.ops`, built once when the cell is
+    /// created and read by every chunk query for the life of it. Empty
+    /// for a cell with too few ops to be worth indexing, and then
+    /// [`patches_in`] scans as it always did.
+    grid: voxel_core::csg::OpGrid,
 }
 
 /// Largest reach of one emitted element beyond the cell that owns its
@@ -1083,7 +1088,10 @@ impl EmitPatches {
                 }
             }
         }
-        PatchChunk { patches: out }
+        PatchChunk {
+            patches: out,
+            ..Default::default()
+        }
     }
 }
 
@@ -1255,11 +1263,28 @@ pub fn patches_in(
         lo.x <= max.x && hi.x >= min.x && lo.y <= max.z && hi.y >= min.z
     };
     let mut out = PatchSet::default();
-    for (_, c) in mgr.view::<EmitPatches>(instance, bounds).iter() {
-        voxel_core::csg::QUERY_WALKED.count(c.patches.ops.len() as u64);
-        for op in &c.patches.ops {
+    let view_started = std::time::Instant::now();
+    let view = mgr.view::<EmitPatches>(instance, bounds);
+    voxel_core::csg::QUERY_VIEW.add_nanos(view_started.elapsed().as_nanos() as u64);
+    let scan_started = std::time::Instant::now();
+    for (_, c) in view.iter() {
+        // The cell's own index where it has one; a flat scan where the
+        // cell was too small to be worth indexing. Either way the exact
+        // test below decides, so the index only ever narrows.
+        let ops = &c.patches.ops;
+        let indexed = c.grid.candidates(query, |i| {
+            voxel_core::csg::QUERY_WALKED.count(1);
+            let op = ops[i as usize];
             if op.touches(query) {
-                out.ops.push(*op);
+                out.ops.push(op);
+            }
+        });
+        if !indexed {
+            voxel_core::csg::QUERY_WALKED.count(ops.len() as u64);
+            for op in ops {
+                if op.touches(query) {
+                    out.ops.push(*op);
+                }
             }
         }
         for w in &c.patches.ribbons {
@@ -1295,6 +1320,7 @@ pub fn patches_in(
             }
         }
     }
+    voxel_core::csg::QUERY_SCAN.add_nanos(scan_started.elapsed().as_nanos() as u64);
     out
 }
 
@@ -1375,9 +1401,11 @@ impl LayerChunk for PatchChunk {
 
     fn create(&mut self, ctx: &ChunkCtx<'_, EmitPatches>) {
         *self = ctx.layer().build(ctx);
+        self.grid = voxel_core::csg::OpGrid::build(&self.patches.ops);
     }
 
     fn destroy(&mut self, _ctx: &ChunkCtx<'_, EmitPatches>) {
+        self.grid = voxel_core::csg::OpGrid::default();
         self.patches.ops.clear();
         self.patches.ribbons.clear();
         self.patches.clearance.clear();

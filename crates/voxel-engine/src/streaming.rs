@@ -149,6 +149,9 @@ pub fn detail_range_m(volume: &DetailVolume, split_k: f64) -> f64 {
 /// The largest faded bias of any volume near this chunk's box; zero almost
 /// everywhere, so the common case is one empty-slice check.
 ///
+/// See [`landmark_refined`] for the question a gated emit actually asks,
+/// which is about this chunk's ANCESTORS and not about this chunk.
+///
 /// Distance is Chebyshev — the clamp's neighborhoods are 26-connected, so
 /// a touching pair of chunks is within one edge on EVERY axis, which is
 /// what bounds the bias step across any touching pair to one level.
@@ -156,7 +159,36 @@ pub fn detail_range_m(volume: &DetailVolume, split_k: f64) -> f64 {
 /// Monotone up the tree, which the descent relies on: a parent's box is
 /// closer to the volume than its child's and its edge is twice as long, so
 /// its ring gap is no larger and its bias no smaller.
-fn detail_bias(config: &LodConfig, key: ChunkKey) -> u8 {
+/// Does this chunk exist because a LANDMARK refined it, rather than
+/// because the camera is near?
+///
+/// Asked of the ANCESTORS, not of the chunk. A chunk is a leaf because
+/// its parent split, its grandparent split, and so on — and it is the
+/// bias at each of THOSE that decided it. `detail_bias` fades with the
+/// chunk's own edge, so a fine chunk far from a volume reports zero while
+/// every one of its ancestors carried bias and split for it: asking the
+/// chunk itself said "the camera put me here" about chunks a ruin had
+/// put there, and the forest followed the ruins anyway.
+///
+/// Cheap: at most `max_level` box tests against a table that is empty on
+/// almost every level, and the common answer is the first one.
+pub fn landmark_refined(config: &LodConfig, key: ChunkKey) -> bool {
+    if config.detail.is_empty() {
+        return false;
+    }
+    let mut k = key;
+    loop {
+        if detail_bias(config, k) > 0 {
+            return true;
+        }
+        if k.level >= config.max_level {
+            return false;
+        }
+        k = k.parent();
+    }
+}
+
+pub fn detail_bias(config: &LodConfig, key: ChunkKey) -> u8 {
     if config.detail.is_empty() {
         return 0;
     }
@@ -1386,6 +1418,79 @@ mod residency_shape {
             .map(|k| (*k, seam_mask_at(&config, anchor, *k)))
             .collect();
         assert_consistent(&config, &leaves, &masks);
+    }
+
+    /// Every leaf a volume ADDS is reported as landmark-refined, and no
+    /// leaf the camera would have made on its own is.
+    ///
+    /// The distinction a gated emit lives or dies by. Asking the chunk's
+    /// own `detail_bias` gets this wrong in one direction only, and
+    /// silently: the bias fades with the chunk's OWN edge, so a fine leaf
+    /// far from the volume reports zero while every ancestor that split
+    /// for it carried bias. That let the planet's forest follow its ruins
+    /// out to 860 m, generating voxel trees under a canopy of impostors
+    /// that already covered them.
+    #[test]
+    fn a_leaf_knows_whether_a_landmark_or_the_camera_put_it_there() {
+        let (config, volume) = biased();
+        let plain = planet();
+        let anchor = DVec3::new(-27570.0, 80.0, -36770.0);
+        let with = clamped_leaves(&config, anchor);
+        let without = clamped_leaves(&plain, anchor);
+
+        // Every leaf the volume ADDED at a level it can actually bias
+        // must say so, or an emit it should have been kept out of is
+        // served anyway.
+        //
+        // Only those levels: keeping the 2:1 rule also splits chunks well
+        // away from the volume, so the added set has coarse leaves in it
+        // that no volume biased and no gate could be fooled by — their
+        // edges are far above any gate that exists.
+        let added: Vec<ChunkKey> = with
+            .difference(&without)
+            .copied()
+            .filter(|k| scale_cap(&volume, k.level) > 0)
+            .collect();
+        assert!(!added.is_empty(), "the volume added no leaves to test");
+        // Every added leaf a gate could see. Keeping the 2:1 rule ALSO
+        // splits chunks with no bias anywhere up their chain — a cascade
+        // outward from the refined region — and those are not reported.
+        // They cannot fool a gate: measured here they are levels 6 and 7,
+        // edges of 205 m and 410 m, and the coarsest gate any shipped
+        // level uses is 140. The claim is bounded to what it can carry.
+        const COARSEST_GATE_M: f64 = 140.0;
+        let mut checked = 0;
+        for key in &added {
+            if key.edge_m() > COARSEST_GATE_M {
+                continue;
+            }
+            checked += 1;
+            assert!(
+                landmark_refined(&config, *key),
+                "{key:?} ({:.1} m) exists only because of the volume and denies it",
+                key.edge_m()
+            );
+        }
+        assert!(checked > 0, "no gate-visible leaf was added");
+
+        // And every leaf that stands with or without it must NOT, or the
+        // near forest is gated away from ground it has every right to.
+        let mut kept = 0;
+        for key in with.intersection(&without) {
+            if landmark_refined(&config, *key) {
+                continue;
+            }
+            kept += 1;
+        }
+        assert!(
+            kept > 0,
+            "every shared leaf was called landmark-refined; the gate would empty the world"
+        );
+
+        // No volumes, no refinement, and the walk costs nothing.
+        for key in &without {
+            assert!(!landmark_refined(&plain, *key));
+        }
     }
 
     /// A gate's landmark residency covers every leaf a landmark can push

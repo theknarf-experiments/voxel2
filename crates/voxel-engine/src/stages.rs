@@ -44,6 +44,13 @@ pub fn all() -> Vec<(&'static str, f64, u64)> {
         ("cell_tested", &voxel_core::csg::CELL_TESTED),
         ("cell_kept", &voxel_core::csg::CELL_KEPT),
         ("query_walked", &voxel_core::csg::QUERY_WALKED),
+        ("ops_chunks", &voxel_core::csg::OPS_CHUNKS),
+        ("ops_biased", &voxel_core::csg::OPS_BIASED),
+        ("gate_skipped", &voxel_core::csg::GATE_SKIPPED),
+        ("query_view", &voxel_core::csg::QUERY_VIEW),
+        ("query_scan", &voxel_core::csg::QUERY_SCAN),
+        ("index_coarse", &voxel_core::csg::INDEX_COARSE),
+        ("index_fine", &voxel_core::csg::INDEX_FINE),
     ]
     .into_iter()
     .map(|(name, s)| {
@@ -62,6 +69,13 @@ pub fn reset() {
         &voxel_core::csg::CELL_TESTED,
         &voxel_core::csg::CELL_KEPT,
         &voxel_core::csg::QUERY_WALKED,
+        &voxel_core::csg::OPS_CHUNKS,
+        &voxel_core::csg::OPS_BIASED,
+        &voxel_core::csg::GATE_SKIPPED,
+        &voxel_core::csg::QUERY_VIEW,
+        &voxel_core::csg::QUERY_SCAN,
+        &voxel_core::csg::INDEX_COARSE,
+        &voxel_core::csg::INDEX_FINE,
     ] {
         s.reset();
     }

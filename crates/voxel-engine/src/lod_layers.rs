@@ -789,7 +789,11 @@ impl WorldLod {
 /// same 4 voxels `chunk_ops` pads its query by. A cell pruned without it
 /// would be read by a sample standing outside the box it was proved for.
 fn index_ops(shared: &LodShared, key: ChunkKey) -> Option<Arc<voxel_core::csg::ChunkOps>> {
-    let ops = crate::stages::OPS_QUERY.time(|| shared.chunks.ops_for(key))?;
+    // Is this chunk a leaf because a LANDMARK refined it? The ops gate
+    // needs it to tell "the camera is near" from "a ruin is near", which
+    // are the same chunk edge and want different geometry — see `OpsFn`.
+    let refined = crate::streaming::landmark_refined(&shared.config.read().unwrap(), key);
+    let ops = crate::stages::OPS_QUERY.time(|| shared.chunks.ops_for(key, refined))?;
     crate::stages::OPS_PER_CHUNK.count(ops.len() as u64);
     let min = key.min_corner_m().as_vec3();
     let max = min + Vec3::splat(key.edge_m() as f32);

@@ -179,6 +179,34 @@ fn status(
     }
     if let Some(s) = stats {
         let s = s.0.lock().unwrap();
+        // Drawn chunks by LOD level, and how far from the camera each
+        // level reaches. What a settle's PHASES are made of: a count
+        // alone cannot tell "the near world arrived" from "the far world
+        // refined", and those two want opposite fixes.
+        let cam = t.translation.as_dvec3();
+        let mut per: std::collections::BTreeMap<u8, (usize, f64, f64)> =
+            std::collections::BTreeMap::new();
+        for (key, _) in &s.drawn_masks {
+            let d = (key.center_m() - cam).length();
+            let e = per.entry(key.level).or_insert((0, f64::MAX, 0.0));
+            e.0 += 1;
+            e.1 = e.1.min(d);
+            e.2 = e.2.max(d);
+        }
+        let drawn_levels: serde_json::Map<String, Value> = per
+            .into_iter()
+            .map(|(lvl, (n, near, far))| {
+                (
+                    lvl.to_string(),
+                    json!({
+                        "n": n,
+                        "edge_m": voxel_core::ChunkKey::new(lvl, bevy::math::IVec3::ZERO).edge_m(),
+                        "near_m": near.round(),
+                        "far_m": far.round(),
+                    }),
+                )
+            })
+            .collect();
         out["chunks"] = json!({
             "gen_started": s.gen_started,
             "mesh_started": s.mesh_started,
@@ -204,6 +232,11 @@ fn status(
             "slab_failed": s.slab_pressure.failed,
             "slab_fragmented": s.slab_pressure.fragmented,
             "states": s.state_counts.iter().cloned().collect::<std::collections::HashMap<_,_>>(),
+            // Drawn chunks by LOD level, and how far from the camera each
+            // level reaches. What a settle's PHASES are made of: a count
+            // alone cannot tell "the near world arrived" from "the far
+            // world refined", and those want opposite fixes.
+            "drawn_levels": drawn_levels,
         });
     }
     Ok(out)
@@ -279,7 +312,14 @@ fn ops(
     // Introspection: what the provider WOULD serve here. An absent chunk
     // is part of the answer, not a consumer failing to declare coverage.
     let _peek = world.peek();
-    let found = world.ops_in(center - Vec3::splat(r), center + Vec3::splat(r), edge);
+    // Not landmark-refined: a tooling query asks what a chunk of this
+    // edge gets when the camera is what put it there.
+    let found = world.ops_in(
+        center - Vec3::splat(r),
+        center + Vec3::splat(r),
+        edge,
+        false,
+    );
     let adds = found.iter().filter(|o| o.kind & 1 == 0).count();
     let sample: Vec<Value> = found
         .iter()

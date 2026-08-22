@@ -24,6 +24,26 @@ pub static CELL_TESTED: crate::Stage = crate::Stage::new();
 /// `CELL_TESTED` is what the pruning is worth.
 pub static CELL_KEPT: crate::Stage = crate::Stage::new();
 
+/// Chunks whose ops were asked for, and how many of those a LANDMARK had
+/// refined. If the second is zero the landmark gate is not firing at all.
+pub static OPS_CHUNKS: crate::Stage = crate::Stage::new();
+pub static OPS_BIASED: crate::Stage = crate::Stage::new();
+/// Times a gated emitter was skipped because the chunk was fine only
+/// because of a landmark.
+pub static GATE_SKIPPED: crate::Stage = crate::Stage::new();
+
+/// `patches_in` split: taking the layer view (locks, slot lookups, an
+/// `Arc` clone each) against walking the ops it found.
+pub static QUERY_VIEW: crate::Stage = crate::Stage::new();
+pub static QUERY_SCAN: crate::Stage = crate::Stage::new();
+/// Queries that returned no ops at all.
+pub static QUERY_EMPTY: crate::Stage = crate::Stage::new();
+
+/// [`ChunkOps::build`] split in two: bounding the terrain and pruning the
+/// coarse boxes, against binning and pruning the 512 fine cells.
+pub static INDEX_COARSE: crate::Stage = crate::Stage::new();
+pub static INDEX_FINE: crate::Stage = crate::Stage::new();
+
 /// Ops the emit index walked to answer a chunk's query, and ops it
 /// returned. Their ratio is what the index is worth.
 pub static QUERY_WALKED: crate::Stage = crate::Stage::new();
@@ -464,6 +484,7 @@ impl ChunkOps {
         const T: usize = 4;
         let tstep = (max - min) / T as f32;
         let mut coarse: Vec<Option<(Option<Interval>, Vec<u32>)>> = vec![None; T * T * T];
+        let coarse_started = std::time::Instant::now();
         for (i, slot) in coarse.iter_mut().enumerate() {
             let c = Vec3::new((i % T) as f32, ((i / T) % T) as f32, (i / (T * T)) as f32);
             let lo = min + tstep * c - Vec3::splat(apron);
@@ -499,6 +520,8 @@ impl ChunkOps {
         // evaluated per chunk of which 85.8% survived — 10.7 ms a chunk
         // to remove a seventh of the work, because at that density the
         // intervals all overlap and `prune_chain` proves nothing.
+        INDEX_COARSE.add_nanos(coarse_started.elapsed().as_nanos() as u64);
+        let fine_started = std::time::Instant::now();
         const SUB: usize = N / T;
         let mut bucket: Vec<Vec<u32>> = vec![Vec::new(); SUB * SUB * SUB];
         let mut subset: Vec<CsgOp> = Vec::new();
@@ -575,6 +598,7 @@ impl ChunkOps {
                 }
             }
         }
+        INDEX_FINE.add_nanos(fine_started.elapsed().as_nanos() as u64);
         Self { ops, cells }
     }
 
@@ -595,6 +619,167 @@ impl ChunkOps {
             self.cells[cell * 2] as usize,
             self.cells[cell * 2 + 1] as usize,
         )
+    }
+}
+
+/// A uniform grid over one set of ops, so a box query walks the bins it
+/// overlaps instead of every op in the set.
+///
+/// The other half of the op index, and a different question from
+/// [`ChunkOps`]. That one asks "of the ops this CHUNK was given, which
+/// can each of its cells need" — a few hundred ops, pruned against the
+/// field. This one asks "of the ops in this emit CELL, which reach that
+/// box at all" — thousands of ops, and the answer is pure geometry.
+///
+/// It exists because the emit index bottoms out in a linear scan: a
+/// chunk's ops query walked 125 million ops to return 988 thousand on
+/// the planet's forest, a 127x over-scan, and it could not be fixed by
+/// making the emit cells smaller — sixteen times as many layer chunks
+/// cost back exactly what the shorter scan saved. The cell has to stay
+/// big and get an index INSIDE it.
+///
+/// Each op is bucketed by its box's MIDPOINT and a query is widened by
+/// the largest half-extent in the grid — the same rule the emit cells
+/// themselves use, one level down. The alternative, storing an op in
+/// every bin it overlaps, needs the reader to dedupe: an op handed over
+/// twice is applied twice, and for a smooth blend that is not the same
+/// field. One bin per op means there is nothing to dedupe.
+///
+/// Bins hold op INDICES, not ops: the caller still has the op array and
+/// still applies the exact test, so this only ever narrows the
+/// candidates and can never change an answer.
+#[derive(Clone, Debug, Default)]
+pub struct OpGrid {
+    min: Vec3,
+    max: Vec3,
+    inv_step: Vec3,
+    dim: IVec3,
+    /// Largest half-extent of any op in here, per axis — what a query
+    /// must widen by to be sure it reaches every midpoint that matters.
+    reach: Vec3,
+    /// Prefix sums, `dim.x*dim.y*dim.z + 1` long.
+    starts: Vec<u32>,
+    /// Op indices, one entry each, bucketed by midpoint.
+    items: Vec<u32>,
+}
+
+/// Bin edge, in meters. Comfortably larger than one emitted element and
+/// comfortably smaller than an emit cell, which is the whole requirement:
+/// bigger and a bin holds ops a query does not want, smaller and the
+/// query's widening spans so many bins that nothing is narrowed.
+const BIN_M: f32 = 8.0;
+
+/// Bins per axis, capped. A cell far taller than it is wide (a
+/// megastructure column) would otherwise ask for a grid with more bins
+/// than it has ops to put in them.
+const BIN_MAX: i32 = 24;
+
+/// Ops below this stay a flat scan: the grid costs two passes and an
+/// allocation to build, and under a bin's worth of ops there is nothing
+/// for it to narrow.
+const GRID_FROM: usize = 64;
+
+impl OpGrid {
+    /// Index `ops` by their boxes. Cheap enough to do at cell creation:
+    /// two passes and one allocation, against a scan per query for the
+    /// life of the cell.
+    pub fn build(ops: &[CsgOp]) -> Self {
+        if ops.len() < GRID_FROM {
+            return Self::default();
+        }
+        let boxes: Vec<Aabb> = ops.iter().map(CsgOp::aabb).collect();
+        let mut lo = boxes[0].min;
+        let mut hi = boxes[0].max;
+        let mut reach = Vec3::ZERO;
+        for b in &boxes {
+            lo = lo.min(b.min);
+            hi = hi.max(b.max);
+            reach = reach.max((b.max - b.min) * 0.5);
+        }
+        let span = (hi - lo).max(Vec3::splat(1.0e-3));
+        let dim = IVec3::new(
+            ((span.x / BIN_M).ceil() as i32).clamp(1, BIN_MAX),
+            ((span.y / BIN_M).ceil() as i32).clamp(1, BIN_MAX),
+            ((span.z / BIN_M).ceil() as i32).clamp(1, BIN_MAX),
+        );
+        let inv_step = dim.as_vec3() / span;
+        let bins = (dim.x * dim.y * dim.z) as usize;
+        let bin_of = |p: Vec3| -> IVec3 {
+            let c = ((p - lo) * inv_step).floor();
+            IVec3::new(c.x as i32, c.y as i32, c.z as i32).clamp(IVec3::ZERO, dim - IVec3::ONE)
+        };
+        // Counting sort: count, prefix-sum, place. No per-bin `Vec` — a
+        // cell holds thousands of ops and `bins` allocations would cost
+        // more than the scan this replaces.
+        let mut starts = vec![0u32; bins + 1];
+        let mids: Vec<usize> = boxes
+            .iter()
+            .map(|b| {
+                let c = bin_of((b.min + b.max) * 0.5);
+                Self::bin(dim, c)
+            })
+            .collect();
+        for &b in &mids {
+            starts[b + 1] += 1;
+        }
+        for i in 1..=bins {
+            starts[i] += starts[i - 1];
+        }
+        let mut items = vec![0u32; ops.len()];
+        let mut fill = starts.clone();
+        for (i, &b) in mids.iter().enumerate() {
+            items[fill[b] as usize] = i as u32;
+            fill[b] += 1;
+        }
+        Self {
+            min: lo,
+            max: hi,
+            inv_step,
+            dim,
+            reach,
+            starts,
+            items,
+        }
+    }
+
+    fn bin(dim: IVec3, c: IVec3) -> usize {
+        (c.x + c.y * dim.x + c.z * dim.x * dim.y) as usize
+    }
+
+    /// Every op index that could touch `query`, each exactly once, or
+    /// `None` if this grid was never built and the caller must scan.
+    pub fn candidates(&self, query: Aabb, mut f: impl FnMut(u32)) -> bool {
+        if self.items.is_empty() {
+            return false;
+        }
+        // Widened by the largest op in here, because ops are bucketed by
+        // midpoint: one whose midpoint sits a bin away can still reach in.
+        let want = Aabb::new(query.min - self.reach, query.max + self.reach);
+        // A query outside the indexed span clamps INTO it, so reject it
+        // before the clamp turns "outside" into "the border bin".
+        if !Aabb::new(self.min, self.max).touches(want) {
+            return true;
+        }
+        let bin_of = |p: Vec3| -> IVec3 {
+            let c = ((p - self.min) * self.inv_step).floor();
+            IVec3::new(c.x as i32, c.y as i32, c.z as i32).clamp(IVec3::ZERO, self.dim - IVec3::ONE)
+        };
+        let (a, z) = (bin_of(want.min), bin_of(want.max));
+        for cz in a.z..=z.z {
+            for cy in a.y..=z.y {
+                for cx in a.x..=z.x {
+                    let b = Self::bin(self.dim, IVec3::new(cx, cy, cz));
+                    for &i in &self.items[self.starts[b] as usize..self.starts[b + 1] as usize] {
+                        f(i);
+                    }
+                }
+            }
+        }
+        true
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.items.is_empty()
     }
 }
 
@@ -639,6 +824,141 @@ impl Aabb {
 
 #[cfg(test)]
 mod tests {
+
+    /// The grid narrows candidates and never loses one.
+    ///
+    /// The whole contract: whatever the emit index hands a chunk must be
+    /// what a full scan would have handed it. A grid that dropped an op
+    /// on a bin edge is a hole in the world that only shows from some
+    /// camera positions, so this checks EVERY op against every query
+    /// rather than sampling.
+    #[test]
+    fn a_grid_narrows_candidates_without_losing_any() {
+        use crate::seed::Rng;
+        let mut rng = Rng::new(0x0_611D);
+        let mut f = || rng.next_f32();
+        // A cell's worth of forest: clustered limbs, not a uniform
+        // scatter, which is what the bins have to cope with.
+        let trunks: Vec<Vec3> = (0..60)
+            .map(|_| Vec3::new(f() * 64.0, f() * 40.0, f() * 64.0))
+            .collect();
+        let ops: Vec<CsgOp> = (0..1200)
+            .map(|i| {
+                let t = trunks[i % trunks.len()];
+                let c = t + Vec3::new(f() * 2.0 - 1.0, f() * 5.0, f() * 2.0 - 1.0);
+                if i % 5 == 0 {
+                    CsgOp::sphere(c, 0.3 + f() * 1.2, 8, false)
+                } else {
+                    CsgOp::capsule(
+                        c,
+                        c + Vec3::new(f() * 2.0 - 1.0, f() * 2.0, f() * 2.0 - 1.0),
+                        0.05 + f() * 0.3,
+                        0.05 + f() * 0.3,
+                        9,
+                        false,
+                    )
+                }
+            })
+            .collect();
+        let grid = OpGrid::build(&ops);
+        assert!(!grid.is_empty(), "1200 ops should be worth indexing");
+        let (mut candidates, mut hits) = (0usize, 0usize);
+        for q in 0..200u32 {
+            let lo = Vec3::new(f() * 70.0 - 3.0, f() * 45.0 - 3.0, f() * 70.0 - 3.0);
+            let query = Aabb::new(lo, lo + Vec3::splat(3.2 + f() * 22.4));
+            // What a full scan would return.
+            let want: Vec<u32> = (0..ops.len() as u32)
+                .filter(|i| ops[*i as usize].touches(query))
+                .collect();
+            let mut got: Vec<u32> = Vec::new();
+            assert!(grid.candidates(query, |i| {
+                candidates += 1;
+                if ops[i as usize].touches(query) {
+                    got.push(i);
+                }
+            }));
+            let _ = q;
+            got.sort_unstable();
+            assert_eq!(got, want, "query {q} {query:?} lost or duplicated ops");
+            hits += want.len();
+        }
+        println!("grid walked {candidates} candidates for {hits} hits");
+        // The point of it: a query looks at a small multiple of what it
+        // returns, not at the whole cell. A flat scan would be 1200 per
+        // query, 240000 in all.
+        assert!(
+            candidates * 4 < 200 * ops.len(),
+            "walked {candidates} — barely narrowing"
+        );
+    }
+
+    /// An op far longer than a bin is still found, from either end.
+    ///
+    /// Bucketing by midpoint is only sound because the query is widened
+    /// by the largest half-extent in the grid; a long diagonal limb is
+    /// what that rule is for.
+    #[test]
+    fn a_grid_finds_an_op_far_bigger_than_a_bin() {
+        let long = CsgOp::capsule(
+            Vec3::new(-90.0, 0.0, -90.0),
+            Vec3::new(90.0, 5.0, 90.0),
+            1.0,
+            1.0,
+            3,
+            false,
+        );
+        let mut ops = vec![long];
+        // Enough small ops around it to be worth indexing at all.
+        for i in 0..GRID_FROM {
+            let t = i as f32;
+            ops.push(CsgOp::sphere(
+                Vec3::new(t * 2.0 - 60.0, 0.0, t * 2.0 - 60.0),
+                0.5,
+                4,
+                false,
+            ));
+        }
+        let grid = OpGrid::build(&ops);
+        assert!(!grid.is_empty());
+        for end in [Vec3::new(-88.0, 0.0, -88.0), Vec3::new(88.0, 5.0, 88.0)] {
+            let query = Aabb::new(end - Vec3::splat(2.0), end + Vec3::splat(2.0));
+            let mut found = false;
+            assert!(grid.candidates(query, |i| found |= i == 0));
+            assert!(found, "the long limb was lost at {end:?}");
+        }
+    }
+
+    /// A query that misses the indexed span entirely walks nothing —
+    /// the clamp into the grid must not turn "outside" into "the border
+    /// bin".
+    #[test]
+    fn a_grid_rejects_a_query_that_misses_it() {
+        let ops: Vec<CsgOp> = (0..GRID_FROM)
+            .map(|i| CsgOp::sphere(Vec3::splat(i as f32 * 0.5), 1.0, 3, false))
+            .collect();
+        let grid = OpGrid::build(&ops);
+        let mut n = 0;
+        assert!(
+            grid.candidates(Aabb::new(Vec3::splat(500.0), Vec3::splat(510.0)), |_| n +=
+                1)
+        );
+        assert_eq!(n, 0);
+    }
+
+    /// Under the threshold there is no grid, and the caller is told to
+    /// scan — a silent empty answer there would be a world with no ops
+    /// in it.
+    #[test]
+    fn a_small_set_is_not_worth_indexing() {
+        let ops = vec![CsgOp::sphere(Vec3::ZERO, 1.0, 3, false)];
+        let grid = OpGrid::build(&ops);
+        assert!(grid.is_empty());
+        assert!(
+            !grid.candidates(Aabb::new(Vec3::splat(-9.0), Vec3::splat(9.0)), |_| {
+                panic!("no grid should yield nothing")
+            })
+        );
+    }
 
     /// A transformed op is the SAME field, moved.
     ///

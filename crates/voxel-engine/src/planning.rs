@@ -38,7 +38,12 @@ pub trait WorldPlanner: Send + Sync + 'static {
     /// edge. A planner that gates features by chunk edge MUST apply the
     /// gate per chunk, never per op: a per-op gate desynchronizes
     /// neighboring LODs and cracks every seam.
-    fn ops_in(&self, min: Vec3, max: Vec3, chunk_edge_m: f32) -> Vec<CsgOp>;
+    /// `landmark_refined` says this chunk is a leaf because a LANDMARK
+    /// refined it, not because the camera is near. A gated emit that does
+    /// not itself publish landmarks is never served to one, so a refined
+    /// ruin brings its own geometry into focus and nothing else.
+    fn ops_in(&self, min: Vec3, max: Vec3, chunk_edge_m: f32, landmark_refined: bool)
+        -> Vec<CsgOp>;
 
     /// Publish where the streaming source is. A planner decides for
     /// itself what follows it — how far each of its layers stays
@@ -84,8 +89,8 @@ pub trait WorldPlanner: Send + Sync + 'static {
     ///
     /// The default is the global answer, which is always correct and
     /// never earlier.
-    fn covers(&self, min: Vec3, max: Vec3, chunk_edge_m: f32) -> bool {
-        let _ = (min, max, chunk_edge_m);
+    fn covers(&self, min: Vec3, max: Vec3, chunk_edge_m: f32, landmark_refined: bool) -> bool {
+        let _ = (min, max, chunk_edge_m, landmark_refined);
         self.is_idle()
     }
 
@@ -270,13 +275,19 @@ impl WorldQuery {
     }
 
     /// All ops overlapping the box, as served to a chunk of the given edge.
-    pub fn ops_in(&self, min: Vec3, max: Vec3, chunk_edge_m: f32) -> Vec<CsgOp> {
+    pub fn ops_in(
+        &self,
+        min: Vec3,
+        max: Vec3,
+        chunk_edge_m: f32,
+        landmark_refined: bool,
+    ) -> Vec<CsgOp> {
         let mut out = Vec::new();
         for source in &self.sources {
             out.extend(source(min, max));
         }
         if let Some(planner) = &self.planner {
-            out.extend(planner.ops_in(min, max, chunk_edge_m));
+            out.extend(planner.ops_in(min, max, chunk_edge_m, landmark_refined));
         }
         out
     }
@@ -287,24 +298,24 @@ impl WorldQuery {
     /// samples extend 2 voxels below and 3 above the 32-cell core, so an
     /// op grazing only the apron still shapes this chunk. Culling it would
     /// desynchronize the seam with the neighbor that keeps it.
-    pub fn chunk_ops(&self, key: ChunkKey) -> Vec<CsgOp> {
+    pub fn chunk_ops(&self, key: ChunkKey, landmark_refined: bool) -> Vec<CsgOp> {
         if key.edge_m() as f32 > OPS_HORIZON_EDGE_M {
             return Vec::new();
         }
         let (min, max) = Self::ops_box(key);
-        self.ops_in(min, max, key.edge_m() as f32)
+        self.ops_in(min, max, key.edge_m() as f32, landmark_refined)
     }
 
     /// Is the planning that could reach this chunk resident yet?
     ///
     /// Asked over the SAME box `chunk_ops` reads, so a chunk cannot be
     /// declared ready and then read a tile that is not there.
-    pub fn chunk_covered(&self, key: ChunkKey) -> bool {
+    pub fn chunk_covered(&self, key: ChunkKey, landmark_refined: bool) -> bool {
         if key.edge_m() as f32 > OPS_HORIZON_EDGE_M {
             return true;
         }
         let (min, max) = Self::ops_box(key);
-        self.covers(min, max, key.edge_m() as f32)
+        self.covers(min, max, key.edge_m() as f32, landmark_refined)
     }
 
     /// The world box a chunk's ops are queried over: its own, grown by the
@@ -370,10 +381,10 @@ impl WorldQuery {
 
     /// Is the planning reaching this box resident? See
     /// [`WorldPlanner::covers`].
-    pub fn covers(&self, min: Vec3, max: Vec3, chunk_edge_m: f32) -> bool {
+    pub fn covers(&self, min: Vec3, max: Vec3, chunk_edge_m: f32, landmark_refined: bool) -> bool {
         self.planner
             .as_ref()
-            .is_none_or(|p| p.covers(min, max, chunk_edge_m))
+            .is_none_or(|p| p.covers(min, max, chunk_edge_m, landmark_refined))
     }
 
     /// Downcast to the concrete planner — see [`WorldPlanning::as_any`].
@@ -425,7 +436,7 @@ pub fn ops_provider(world: &WorldQuery) -> Option<crate::chunkgen::OpsFn> {
     // waiting concurrently is N milliseconds of streaming thrown away per
     // poll, and the lock had been hiding that by accident.
     let wait_gate = std::sync::Mutex::new(());
-    Some(Arc::new(move |key: ChunkKey| {
+    Some(Arc::new(move |key: ChunkKey, refined: bool| {
         // Past the ops horizon `chunk_ops` returns nothing whatever
         // planning says, so waiting for residency is waiting to be told
         // the answer is empty — and on a cold start that wait IS the cold
@@ -445,7 +456,7 @@ pub fn ops_provider(world: &WorldQuery) -> Option<crate::chunkgen::OpsFn> {
         // concurrently is N milliseconds of streaming thrown away per
         // poll, and every worker waiting on its own region would be
         // exactly that.
-        if !world.is_idle() && !world.chunk_covered(key) {
+        if !world.is_idle() && !world.chunk_covered(key, refined) {
             let _one_waiter = wait_gate.lock().unwrap_or_else(|e| e.into_inner());
             // Wait for THIS chunk's region, not for the whole world, and
             // stop the moment planning goes idle — at that point whatever
@@ -459,11 +470,11 @@ pub fn ops_provider(world: &WorldQuery) -> Option<crate::chunkgen::OpsFn> {
             // one chunk reaches here per cold start — the coarsest level
             // inside the ops horizon, whose box is the largest and so the
             // last to be covered.
-            while !world.is_idle() && !world.chunk_covered(key) {
+            while !world.is_idle() && !world.chunk_covered(key, refined) {
                 std::thread::sleep(std::time::Duration::from_millis(1));
             }
         }
-        world.chunk_ops(key)
+        world.chunk_ops(key, refined)
     }))
 }
 

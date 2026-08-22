@@ -101,6 +101,36 @@ struct Emitter {
 }
 
 impl Emitter {
+    /// Does this emitter serve ops to a chunk of this edge?
+    ///
+    /// The gate is a carve horizon: carving stops paying once a chunk's
+    /// voxels dwarf the feature. What normally decides "how fine is this
+    /// chunk" is the camera — but a LANDMARK also refines, and it refines
+    /// a neighbourhood far larger than itself, because a bias of three
+    /// levels has to grade out over three levels' worth of chunks to stay
+    /// crack-free. On the planet that put level-3 chunks 860 m out, and
+    /// every one of them pulled in the forest.
+    ///
+    /// So a gated emitter that does not OWN the landmark is never served
+    /// to a chunk a landmark refined — not "judged at its unbiased edge",
+    /// which has a boundary hole exactly one level wide and let the
+    /// forest follow the ruins anyway. A ruin brings ITSELF into focus.
+    /// Nothing else rides along.
+    ///
+    /// The point of the strictness is that it makes the served region a
+    /// clean function of camera distance again: a gated emit reaches
+    /// `resident_reach(its level)` and no further, whatever the landmarks
+    /// are doing. Anything that has to hand over to it — an impostor
+    /// ring, a painted cover — can then be told one distance and be right.
+    ///
+    /// Ungated emitters are unaffected: they serve every chunk already.
+    fn admits(&self, chunk_edge_m: f32, landmark_refined: bool) -> bool {
+        let Some(gate) = self.gate else {
+            return true;
+        };
+        chunk_edge_m <= gate && (self.importance > 0 || !landmark_refined)
+    }
+
     fn new(
         name: String,
         gate: Option<f32>,
@@ -143,12 +173,26 @@ impl Emitter {
 impl WorldPlanner for RegionPlanner {
     /// Gated emitters drop out wholesale for coarse chunks — the gate is
     /// per chunk, never per op.
-    fn ops_in(&self, min: Vec3, max: Vec3, chunk_edge_m: f32) -> Vec<CsgOp> {
+    fn ops_in(
+        &self,
+        min: Vec3,
+        max: Vec3,
+        chunk_edge_m: f32,
+        landmark_refined: bool,
+    ) -> Vec<CsgOp> {
         let mut out = Vec::new();
+        let refined = landmark_refined;
+        voxel_core::csg::OPS_CHUNKS.count(1);
+        if refined {
+            voxel_core::csg::OPS_BIASED.count(1);
+        }
         if let Some(rt) = &self.graph {
             let mgr = rt.graph();
             for e in &self.emitters {
-                if e.gate.is_none_or(|g| chunk_edge_m <= g) {
+                if refined && !e.admits(chunk_edge_m, true) && e.admits(chunk_edge_m, false) {
+                    voxel_core::csg::GATE_SKIPPED.count(1);
+                }
+                if e.admits(chunk_edge_m, refined) {
                     out.extend(layers::patches_in(mgr, &e.name, min, max, e.elem_pad_m).ops);
                 }
             }
@@ -164,14 +208,14 @@ impl WorldPlanner for RegionPlanner {
     /// would declare a chunk ready and then miss a tile. Populations are
     /// not consulted: they produce placements, never ops, so no chunk's
     /// geometry has ever depended on one.
-    fn covers(&self, min: Vec3, max: Vec3, chunk_edge_m: f32) -> bool {
+    fn covers(&self, min: Vec3, max: Vec3, chunk_edge_m: f32, landmark_refined: bool) -> bool {
         let Some(rt) = &self.graph else {
             return true;
         };
         let mgr = rt.graph();
         self.emitters
             .iter()
-            .filter(|e| e.gate.is_none_or(|g| chunk_edge_m <= g))
+            .filter(|e| e.admits(chunk_edge_m, landmark_refined))
             .all(|e| layers::patches_cover(mgr, &e.name, min, max, e.elem_pad_m))
     }
 
@@ -1053,7 +1097,7 @@ mod tests {
         let planner = world.planner_as::<RegionPlanner>().expect("region planner");
         let min = Vec3::new(-1500.0, -260.0, -1500.0);
         let max = Vec3::new(1500.0, 260.0, 1500.0);
-        let ops = world.ops_in(min, max, 12.8);
+        let ops = world.ops_in(min, max, 12.8, false);
         assert!(!ops.is_empty(), "the megastructure served no ops");
         // Room shells and tube shells: adds and cuts both present.
         assert!(ops.iter().any(|op| op.kind & 1 == 0), "no shell adds");
@@ -1067,7 +1111,12 @@ mod tests {
         );
         // A specific marker's room shell exists near the site.
         let m = &planner.markers_in(min2, max2, Some("pocket"))[0];
-        let near = world.ops_in(m.pos - Vec3::splat(40.0), m.pos + Vec3::splat(40.0), 12.8);
+        let near = world.ops_in(
+            m.pos - Vec3::splat(40.0),
+            m.pos + Vec3::splat(40.0),
+            12.8,
+            false,
+        );
         assert!(
             !near.is_empty(),
             "no ops within 40 m of pocket marker at {:?}",
@@ -1475,7 +1524,7 @@ mod tests {
         let planner = world.planner_as::<RegionPlanner>().expect("region planner");
         let min = Vec3::new(-31096.0, -200.0, -42096.0);
         let max = Vec3::new(-22904.0, 500.0, -33904.0);
-        let fine = world.ops_in(min, max, 12.8);
+        let fine = world.ops_in(min, max, 12.8, false);
         assert!(!fine.is_empty(), "the planner served no ops");
         let has_sphere_cuts = |ops: &[CsgOp]| {
             ops.iter()
@@ -1483,7 +1532,7 @@ mod tests {
         };
         assert!(has_sphere_cuts(&fine), "no cave cuts at fine LOD");
         // Coarse chunks must not see gated emitters (carve horizon).
-        let coarse = world.ops_in(min, max, 500.0);
+        let coarse = world.ops_in(min, max, 500.0, false);
         assert!(!has_sphere_cuts(&coarse), "cave cuts leaked past the gate");
         // Clearance + water flow through the same facade.
         let min2 = bevy::math::Vec2::new(min.x, min.z);
@@ -1531,7 +1580,7 @@ mod tests {
         );
         // Determinism across a fresh build.
         let world2 = world_at(&planet, 0, Vec3::new(-27000.0, 0.0, -38000.0));
-        assert_eq!(fine, world2.ops_in(min, max, 12.8));
+        assert_eq!(fine, world2.ops_in(min, max, 12.8, false));
     }
 }
 
@@ -1553,15 +1602,15 @@ mod output_is_unchanged {
                 "planet.json",
                 Vec3::new(-27000.0, 0.0, -38000.0),
                 4096.0,
-                // Was (50200, 5809, 5809, 146) when the forest's near
-                // tier was prop MESHES standing on the ground. It is
-                // geometry now: every tree in the window carries a
-                // trunk, its limbs and its canopy as ops. A DECISION —
-                // this number IS the forest, and the thing that keeps it
-                // affordable is not a small op count but the per-cell
-                // interval index, which is why `stalled` and the settle
-                // time are what get watched instead.
-                (372709, 5809, 5809, 146),
+                // Was (50200, ...) when the forest's near tier was prop
+                // MESHES standing on the ground, then (372709, ...) when
+                // it became geometry served to every chunk of 25.6 m or
+                // finer. It is 12.8 m now, which is where the SDF tier
+                // ENDS and the impostor ring begins — 86 m against the
+                // impostors' 85 m fade-in. Two tiers of the same forest
+                // drawn over each other is the thing this number went
+                // down for, and the settle came with it.
+                (104263, 5809, 5809, 146),
             ),
             // Was (18778, 0, 0, 772) before the interior had populations.
             // A population brings a top dependency of its own, so more of
@@ -1590,7 +1639,7 @@ mod output_is_unchanged {
             let (min2, max2) = (Vec2::new(min.x, min.z), Vec2::new(max.x, max.z));
             let planner = world.planner_as::<super::RegionPlanner>().unwrap();
             let got = (
-                world.ops_in(min, max, 12.8).len(),
+                world.ops_in(min, max, 12.8, false).len(),
                 planner.clearance_in(min2, max2).len(),
                 planner.ribbons_in(min2, max2).len(),
                 planner.markers_in(min2, max2, None).len(),
@@ -1630,7 +1679,7 @@ mod output_is_unchanged {
         let wb = super::tests::world_at(&with, 0, focus);
 
         let ops = |w: &voxel_engine::WorldQuery| -> std::collections::HashSet<String> {
-            w.ops_in(min, max, 12.8)
+            w.ops_in(min, max, 12.8, false)
                 .iter()
                 .map(|o| format!("{:?}{:?}{:?}{}", o.center, o.half, o.kind, o.material))
                 .collect()
