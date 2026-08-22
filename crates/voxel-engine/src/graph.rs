@@ -563,6 +563,53 @@ fn scan<'a>(nodes: &'a [NodeDef], path: &str, out: &mut Vec<(String, &'a NodeDef
     }
 }
 
+/// Every node of a document, with the reflect path that reaches it.
+///
+/// Scopes nest, so a node inside a `region` is
+/// `.nodes[2].node.nodes[0]` — the extra `.node` is the boxed kind the
+/// children hang off. That is the path an edit takes, and the only form
+/// anything pointing AT a node can use.
+pub fn walk<'a>(nodes: &'a [NodeDef], at: &str, f: &mut impl FnMut(&'a NodeDef, &str)) {
+    for (i, node) in nodes.iter().enumerate() {
+        let path = format!("{at}.nodes[{i}]");
+        f(node, &path);
+        let children = node.node.0.children();
+        if !children.is_empty() {
+            walk(children, &format!("{path}.node"), f);
+        }
+    }
+}
+
+/// The node a reflect path names, if it names one.
+///
+/// `.nodes[3].node` and `.nodes[3]` both find it: what a caller has is
+/// usually the path of something INSIDE the node, trimmed back.
+pub fn walk_find<'a>(nodes: &'a [NodeDef], path: &str) -> Option<&'a NodeDef> {
+    let want = path.strip_suffix(".node").unwrap_or(path);
+    let mut found = None;
+    walk(nodes, "", &mut |node, at| {
+        if at == want {
+            found = Some(node);
+        }
+    });
+    found
+}
+
+/// Named nodes, each with the path that reaches it.
+///
+/// Names are unique across a document — `Error::DuplicateName` is what
+/// makes that true — so a scope's children are in here beside the top
+/// level's, which is what lets a wire cross one.
+pub fn nodes_by_name(nodes: &[NodeDef]) -> HashMap<&str, (&NodeDef, String)> {
+    let mut out = HashMap::default();
+    walk(nodes, "", &mut |node, at| {
+        if let Some(name) = node.name.as_deref() {
+            out.insert(name, (node, at.to_string()));
+        }
+    });
+    out
+}
+
 /// Rename a node, and every wire that named it.
 ///
 /// A name is not a label: it is the only way anything refers to a node, so
@@ -624,9 +671,11 @@ pub fn names(nodes: &[NodeDef]) -> Vec<String> {
 pub mod node;
 pub mod nodes;
 pub mod registry;
+pub mod shapes;
 
 pub use node::{AnyNode, CloneNode, Domain, Node, Ports, ReflectNode};
 pub use registry::with_registry;
+pub use shapes::{NodeShapes, ReflectNodeShapes, Shape, ShapeCtx};
 
 /// One node of a level's graph: a name, the inputs it consumes, and what
 /// it is.

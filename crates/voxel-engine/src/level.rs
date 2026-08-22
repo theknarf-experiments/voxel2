@@ -7,6 +7,7 @@
 //! exactly this file. The engine has no hardcoded worlds — a lush planet
 //! and a concrete megacity are the same interpreter fed different data.
 
+pub mod place;
 pub mod prefab;
 
 use std::sync::Arc;
@@ -380,61 +381,6 @@ impl CsgOpDef {
     }
 }
 
-/// A reusable authored object: local-space CSG ops that a
-/// [`PlacementDef`] stamps into the world wherever it likes.
-///
-/// Normally one per file — `{"use": "prefabs/monolith_circle.json"}` in a
-/// level, and the file holds the name and the ops. That is what makes a
-/// prefab shareable: two levels naming the same file get the same object,
-/// and editing the file changes it in both. Written inline it is still a
-/// prefab, just one only its own level can reach.
-#[derive(Reflect, Deserialize, Clone, Debug, PartialEq, Default)]
-pub struct PrefabDef {
-    /// What a placement calls it. Unique within a level.
-    #[reflect(@schema::Title)]
-    pub name: String,
-    /// The object, in its own local space, around the origin.
-    pub ops: Vec<CsgOpDef>,
-    /// The file this prefab's text lives in, relative to the level that
-    /// used it — `None` for one written inline.
-    ///
-    /// Read from the `use` key the loader leaves behind, and the reason
-    /// saving can put the prefab back where it came from instead of
-    /// swallowing it into the level.
-    #[serde(rename = "use", default)]
-    #[reflect(@schema::Hidden)]
-    pub from: Option<String>,
-}
-
-impl PrefabDef {
-    /// This prefab without its link to the file it came from — what gets
-    /// written INTO that file.
-    pub fn detached(&self) -> Self {
-        Self {
-            from: None,
-            ..self.clone()
-        }
-    }
-}
-
-impl Serialize for PrefabDef {
-    /// In a level, a prefab that lives in a file is one line naming it;
-    /// everything else about it belongs to that file, and
-    /// [`prefab::write`] has already put it there.
-    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
-        use serde::ser::SerializeStruct;
-        if let Some(path) = &self.from {
-            let mut out = s.serialize_struct("PrefabDef", 1)?;
-            out.serialize_field("use", path)?;
-            return out.end();
-        }
-        let mut out = s.serialize_struct("PrefabDef", 2)?;
-        out.serialize_field("name", &self.name)?;
-        out.serialize_field("ops", &self.ops)?;
-        out.end()
-    }
-}
-
 /// Every authored placement of a level, in the world, grouped by
 /// priority — the ONE list of what a level's `placements` put where.
 ///
@@ -446,29 +392,71 @@ pub fn authored_ops(
     ground: impl Fn(bevy::math::Vec2) -> f32 + Copy,
 ) -> Vec<(i32, Vec<CsgOp>)> {
     let mut placed: Vec<(i32, Vec<CsgOp>)> = authored(level)
-        .map(|(p, local)| (p.priority, place(p, local, ground)))
+        .iter()
+        .map(|a| (a.place.priority, place::stamp(a.place, a.local, ground)))
         .collect();
     placed.sort_by_key(|(priority, _)| *priority);
     placed
 }
 
-/// Every placement of a level paired with the local ops it stamps.
+/// Every `place` node of a level paired with the local ops it stamps,
+/// and the reflect path of whatever OWNS those ops.
 ///
-/// The one walk over `placements`, because resolving a prefab reference
-/// is where they can disagree — and they did: the editor's copy dropped
+/// The one walk, because resolving what a placement refers to is where
+/// two readers can disagree — and they did: the editor's copy dropped
 /// every INLINE placement, so a level authoring one saw it carved and
-/// never drawn.
-pub fn authored(level: &LevelDef) -> impl Iterator<Item = (&PlacementDef, &[CsgOpDef])> {
-    level.placements.iter().filter_map(|p| {
-        let Some(local) = level.local_ops(p) else {
-            warn!(
-                "placement references unknown prefab '{}'",
-                p.prefab.as_deref().unwrap_or("?")
-            );
-            return None;
+/// never drawn. The path is here for the same reason, so a handle and a
+/// carve are looking at the same field.
+pub fn authored(level: &LevelDef) -> Vec<Authored<'_>> {
+    let by_name = crate::graph::nodes_by_name(&level.nodes);
+    let mut out = Vec::new();
+    crate::graph::walk(&level.nodes, "", &mut |node, at| {
+        let Some(place) = node.node.0.as_any().downcast_ref::<place::Place>() else {
+            return;
         };
-        Some((p, local))
-    })
+        if !place.ops.is_empty() {
+            out.push(Authored {
+                place,
+                local: &place.ops,
+                owner: format!("{at}.node"),
+            });
+            return;
+        }
+        let wired = node
+            .wires
+            .get("prefab")
+            .and_then(|w| w.sources().first())
+            .map(String::as_str);
+        let Some((prefab, owner)) = wired.and_then(|n| by_name.get(n)).and_then(|(node, at)| {
+            let p = node.node.0.as_any().downcast_ref::<place::Prefab>()?;
+            Some((p, format!("{at}.node")))
+        }) else {
+            // The compiler refuses an unwired or wrongly-wired port, so
+            // reaching here means the port names a kind that is not a
+            // prefab — worth a word rather than silence.
+            warn!(
+                "a `place` names '{}', which is not a prefab",
+                wired.unwrap_or("?")
+            );
+            return;
+        };
+        out.push(Authored {
+            place,
+            local: &prefab.ops,
+            owner,
+        });
+    });
+    out
+}
+
+/// One authored instance: where it goes, what it stamps, and the reflect
+/// path of the node those ops belong to.
+pub struct Authored<'a> {
+    pub place: &'a place::Place,
+    pub local: &'a [CsgOpDef],
+    /// `.nodes[3].node` — the PREFAB when there is one, because that is
+    /// what a handle on this instance edits.
+    pub owner: String,
 }
 
 /// Those ops as a chunk-culled source, or `None` if a level authored none.
@@ -485,68 +473,6 @@ pub fn authored_source(placed: Vec<(i32, Vec<CsgOp>)>) -> Option<OpsSource> {
         }
         out
     }))
-}
-
-/// One placement's local ops, in the world.
-///
-/// Translate, yaw, uniform scale, and optional terrain seating. Public and
-/// separate because it is the ONE description of where an authored object
-/// actually is: the world is carved from what this returns, and an editor
-/// that drew handles from its own copy of this arithmetic would draw them
-/// next to the thing rather than on it.
-///
-/// `ground` answers the heightfield at an xz — a closure rather than a
-/// generator, because a tool drawing a placement it is not standing in
-/// does not have that world's generator to hand.
-pub fn place(
-    placement: &PlacementDef,
-    local: &[CsgOpDef],
-    ground: impl Fn(bevy::math::Vec2) -> f32,
-) -> Vec<CsgOp> {
-    let mut pos = bevy::math::Vec3::from(placement.position);
-    if placement.snap_to_terrain {
-        pos.y = ground(bevy::math::Vec2::new(pos.x, pos.z)) + placement.position[1];
-    }
-    let (sin, cos) = placement.yaw_deg.to_radians().sin_cos();
-    let rot = |v: bevy::math::Vec3| {
-        bevy::math::Vec3::new(v.x * cos - v.z * sin, v.y, v.x * sin + v.z * cos)
-    };
-    local
-        .iter()
-        .map(|def| {
-            let mut op = def.to_op();
-            op.center = (pos + rot(bevy::math::Vec3::from(op.center) * placement.scale)).to_array();
-            op.half = (bevy::math::Vec3::from(op.half) * placement.scale).to_array();
-            op.yaw += placement.yaw_deg.to_radians();
-            op.blend *= placement.scale;
-            op
-        })
-        .collect()
-}
-
-/// A hand-authored instance of a prefab (or inline ops) in the world —
-/// VoxelPlugin's placeable asset items as level data. Applied after the
-/// procedural op providers, ordered by `priority`.
-#[derive(Reflect, Serialize, Deserialize, Clone, Debug, PartialEq)]
-pub struct PlacementDef {
-    /// Name into the level's `prefabs` table...
-    #[serde(default)]
-    #[reflect(@schema::OneOf("prefabs[].name"))]
-    pub prefab: Option<String>,
-    /// ...or inline local-space ops.
-    #[serde(default)]
-    pub ops: Vec<CsgOpDef>,
-    pub position: [f32; 3],
-    #[serde(default)]
-    pub yaw_deg: f32,
-    #[serde(default = "default_one")]
-    pub scale: f32,
-    /// Seat on the terrain surface: `position[1]` becomes an offset from
-    /// the heightfield at (x, z).
-    #[serde(default)]
-    pub snap_to_terrain: bool,
-    #[serde(default)]
-    pub priority: i32,
 }
 
 /// Spawn density driven by a generator field register (`field` op):
@@ -907,19 +833,6 @@ pub struct LevelDef {
     /// tuning a colour is instant.
     #[serde(default)]
     pub materials: Vec<MaterialDef>,
-    /// Reusable authored objects, each usually in a file of its own.
-    ///
-    /// A list rather than a map keyed by name, because a prefab that lives
-    /// in its own file carries its own name — a level that named it again
-    /// would be a second copy of the name to keep in step, and two levels
-    /// could give one file two names.
-    #[serde(default)]
-    #[reflect(@schema::Rebuilds)]
-    pub prefabs: Vec<PrefabDef>,
-    /// Hand-authored prefab instances in the world.
-    #[serde(default)]
-    #[reflect(@schema::Rebuilds)]
-    pub placements: Vec<PlacementDef>,
 }
 
 /// When a generator op applies across the LOD range.
@@ -1054,17 +967,6 @@ impl LevelDef {
 
     /// The local-space ops a placement stamps: its prefab's, or its own
     /// inline ones. `None` when it names a prefab this level has not got.
-    pub fn local_ops<'a>(&'a self, placement: &'a PlacementDef) -> Option<&'a [CsgOpDef]> {
-        match &placement.prefab {
-            Some(name) => self
-                .prefabs
-                .iter()
-                .find(|p| p.name == *name)
-                .map(|p| p.ops.as_slice()),
-            None => Some(&placement.ops),
-        }
-    }
-
     /// Splice the prefabs, then read what that leaves.
     ///
     /// One place, because the two things that could disagree — what the
@@ -1294,7 +1196,7 @@ fn watch_list(
 ) -> Vec<(std::path::PathBuf, Option<std::time::SystemTime>)> {
     let base = path.parent().unwrap_or(std::path::Path::new("."));
     std::iter::once(path.to_path_buf())
-        .chain(prefab::sources(&level.prefabs, base))
+        .chain(prefab::sources(&place::prefabs(level), base))
         .map(|p| {
             let mtime = std::fs::metadata(&p).and_then(|m| m.modified()).ok();
             (p, mtime)
@@ -1513,14 +1415,16 @@ fn changed_by(new: &LevelDef, old: &LevelDef) -> Changed {
         || new.lod.top_radius != old.lod.top_radius
         || new.lod.top_y != old.lod.top_y
         || new.lod.detail != old.lod.detail;
+    // Authored geometry is nodes now, so the graph's own answer already
+    // covers it — `Invalidates::Authored` is what a `place` and a
+    // `prefab` report, and it is the middle rung for the same reason the
+    // partial rebuild exists.
     let nodes = crate::graph::changed(&new.nodes, &old.nodes);
-    let authored = new.placements != old.placements || new.prefabs != old.prefabs;
-    match (world, nodes, authored) {
-        (true, _, _) | (_, Some(Invalidates::World), _) => Changed::World,
-        (false, None, true) => Changed::Authored,
-        (false, Some(Invalidates::Plan), true) => Changed::World,
-        (false, Some(Invalidates::Plan), false) => Changed::Plan,
-        (false, None, false) => Changed::Nothing,
+    match (world, nodes) {
+        (true, _) | (_, Some(Invalidates::World)) => Changed::World,
+        (false, Some(Invalidates::Authored)) => Changed::Authored,
+        (false, Some(Invalidates::Plan)) => Changed::Plan,
+        (false, None) => Changed::Nothing,
     }
 }
 
@@ -1686,7 +1590,7 @@ pub fn save_to(
     // file that is not there yet is a level that does not load, and a
     // crash between the two writes should leave the readable half.
     let base = path.parent().unwrap_or(std::path::Path::new("."));
-    prefab::write(&level.prefabs, base)?;
+    prefab::write(&place::prefabs(level), base)?;
     let json = level.to_json(registry).map_err(|e| e.to_string())?;
     // A trailing newline, because a level is a text file under version
     // control and every other tool that writes one leaves it.
@@ -1781,13 +1685,11 @@ mod tests {
             "an unchanged level must not rebuild — a repaint would loop"
         );
 
-        let mut placements = planet.clone();
-        placements.placements.clear();
-        assert!(needs_regen(&placements, &planet), "placements");
-
-        let mut prefabs = planet.clone();
-        prefabs.prefabs.clear();
-        assert!(needs_regen(&prefabs, &planet), "prefabs");
+        for kind in ["place", "prefab"] {
+            let mut without = planet.clone();
+            without.nodes.retain(|n| n.node.kind() != kind);
+            assert!(needs_regen(&without, &planet), "{kind}");
+        }
 
         let mut lod = planet.clone();
         lod.lod.max_level -= 1;
@@ -1922,8 +1824,14 @@ mod tests {
                 },
                 false,
             ),
-            ("prefabs", |l| l.prefabs.clear(), true),
-            ("placements", |l| l.placements.clear(), true),
+            // Authored geometry is nodes, so it is `nodes` that carries
+            // the attribute — and dropping a `place` has to restream for
+            // the same reason dropping a generator op does.
+            (
+                "nodes",
+                |l| l.nodes.retain(|n| n.node.kind() != "place"),
+                true,
+            ),
         ];
 
         for (path, edit, restreams) in cases {
@@ -2093,7 +2001,8 @@ mod tests {
         save_to(&planet, &path, &reg).expect("writes");
         let back = LevelDef::from_path_known(&path, &reg).unwrap();
         assert_eq!(
-            back.prefabs, planet.prefabs,
+            place::prefabs(&back),
+            place::prefabs(&planet),
             "the prefab came back through its own file"
         );
         std::fs::remove_dir_all(&dir).ok();

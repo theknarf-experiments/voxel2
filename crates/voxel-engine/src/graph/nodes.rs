@@ -561,6 +561,10 @@ pub fn register(registry: &mut bevy::reflect::TypeRegistry) {
     registry.register::<LatticeY>();
     registry.register::<MaterialBand>();
     registry.register::<PillarsXz>();
+    // Authored geometry. Kinds like any other, and the only ones that
+    // carry `NodeShapes` — see `crate::level::place`.
+    registry.register::<crate::level::place::Place>();
+    registry.register::<crate::level::place::Prefab>();
     registry.register::<Region>();
     registry.register::<RegionAxes>();
     registry.register::<SdfVoid>();

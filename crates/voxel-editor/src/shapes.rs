@@ -7,7 +7,7 @@
 //!
 //! A prefab's ops are authored in LOCAL space and carved in world space,
 //! and the difference is a placement's translate/yaw/scale
-//! (`voxel_engine::level::place`). Handles are drawn and dragged in world
+//! (`voxel_engine::level::place::stamp`). Handles are drawn and dragged in world
 //! space because that is where you can see them; what an edit writes is
 //! the local value, which is why every drag ends in [`to_local`].
 
@@ -239,11 +239,6 @@ pub fn to_local(op: &CsgOp, drag: Drag, ray: Ray, scale: f32) -> Option<[f32; 3]
         out[a] += local;
     }
     Some(out)
-}
-
-/// The reflect path of one op inside a level.
-pub fn op_path(prefab: usize, op: usize) -> String {
-    format!(".prefabs[{prefab}].ops[{op}]")
 }
 
 #[cfg(test)]

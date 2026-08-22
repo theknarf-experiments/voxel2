@@ -6,11 +6,18 @@
 //! the same [`crate::edit::Edit`] a row would have queued — so undo,
 //! Cmd+S and the partial rebuild all work without knowing a handle exists.
 //!
-//! **What moves is the PREFAB.** A placement puts an object somewhere; the
-//! handles change the object. Since a prefab file can back several levels,
-//! [`ShapeTool::shared_with`] names the others, because an edit that
-//! quietly changed a second level would be worse than one that says it is
-//! about to.
+//! It knows nothing about what a shape IS. A node kind answers with its
+//! geometry in world space and the reflect path of the field behind each
+//! piece — `voxel_engine::graph::NodeShapes` — and everything here works
+//! off that pair. Adding a kind with handles is implementing that trait;
+//! this file does not change and never names a kind.
+//!
+//! **What moves may not be what you clicked.** A placement puts an object
+//! somewhere and the handles change the object, so the path a kind gives
+//! back can point at another node entirely. Since a prefab file can back
+//! several levels, [`ShapeTool::shared_with`] names the others, because an
+//! edit that quietly changed a second level would be worse than one that
+//! says it is about to.
 
 use bevy::camera::RenderTarget;
 use bevy::gizmos::config::{GizmoConfigGroup, GizmoConfigStore};
@@ -37,8 +44,12 @@ pub struct ShapeGizmos;
 #[derive(Resource, Reflect, Default, Debug)]
 #[reflect(Resource)]
 pub struct ShapeTool {
-    /// Which prefab, and which of its ops, the handles are on.
-    pub selected: Option<[usize; 2]>,
+    /// The reflect path of the op the handles are on —
+    /// `.nodes[7].node.ops[2]`. A path rather than a pair of indices
+    /// because it is the same thing `EditorState::selected` is and the
+    /// same thing an edit carries, so a selection survives the document
+    /// changing shape around it and tooling can set one by name.
+    pub selected: Option<String>,
     /// Move the selected op by this many LOCAL meters, then clear.
     ///
     /// The pointer drives the same write through the same queue; this is
@@ -46,7 +57,8 @@ pub struct ShapeTool {
     pub nudge: [f32; 3],
     /// Grow the selected op by this many LOCAL meters, then clear.
     pub grow: [f32; 3],
-    /// Levels other than the open one whose `prefabs` name the same file.
+    /// Levels other than the open one whose `prefab` nodes name the same
+    /// file.
     /// Read-only; recomputed when the selection changes.
     pub shared_with: Vec<String>,
     /// The drag in flight, and the value it has reached. Not reflected:
@@ -75,48 +87,94 @@ const AXIS: [Color; 3] = [
     Color::srgb(0.40, 0.60, 1.0),
 ];
 
-/// Every placement of the open level, in world space.
+/// Every authored shape of the open level, in world space.
 ///
-/// Through `voxel_engine::level::place`, which is what the world is
-/// actually carved from — a second copy of that arithmetic would draw the
-/// handles next to the shape rather than on it.
-/// World 0, always: [`LevelDef`] IS world 0's document, and a portal
-/// world is a different level this resource says nothing about.
+/// Asked of the KINDS, through `NodeShapes`: a kind knows which of its
+/// fields are geometry and where a placement puts them, and this knows
+/// how to draw and drag anything that answers. Neither knows the other.
+///
+/// A drag in flight is previewed by applying it to a COPY of the document
+/// and asking again — so the shape follows the pointer without the level,
+/// and therefore the streamed world, hearing about every frame of it.
 fn placed(
     level: &LevelDef,
     worlds: &voxel_engine::Worlds,
-    live: Option<(usize, usize, Handle, [f32; 3])>,
-) -> Vec<(Option<usize>, Vec<CsgOp>)> {
+    registry: &AppTypeRegistry,
+    live: Option<(&str, Handle, [f32; 3])>,
+) -> Vec<voxel_engine::graph::Shape> {
     let Some(query) = worlds.query(0) else {
         return Vec::new();
     };
     let generator = query.generator();
     let ground = |xz: Vec2| generator.height(xz, 1.0);
-    voxel_engine::level::authored(level)
-        .map(|(p, local)| {
-            // Which prefab these ops came from, so a click can name the
-            // path to edit. An INLINE placement has none: it is drawn,
-            // because it is there, but its handles would have nothing to
-            // write to.
-            let prefab = level
-                .prefabs
-                .iter()
-                .position(|f| Some(&f.name) == p.prefab.as_ref());
-            // A drag in flight is applied HERE, to a copy, so the shape
-            // follows the pointer without the document — and therefore
-            // the streamed world — hearing about every frame of it.
-            match live {
-                Some((f, op, handle, value)) if Some(f) == prefab => {
-                    let mut local = local.to_vec();
-                    if let Some(def) = local.get_mut(op) {
-                        apply_local(def, handle, value);
-                    }
-                    (prefab, voxel_engine::level::place(p, &local, ground))
+
+    // The preview copy. Cloning a document per frame of a drag is far
+    // cheaper than restreaming the chunks a real edit touches, which is
+    // what writing it would cost.
+    let previewed;
+    let level = match live {
+        None => level,
+        Some((path, handle, value)) => {
+            let mut copy = level.clone();
+            if let Ok(v) = crate::path::resolve_mut(&mut copy, path) {
+                if let Some(def) = v.try_downcast_mut::<voxel_engine::level::CsgOpDef>() {
+                    apply_local(def, handle, value);
                 }
-                _ => (prefab, voxel_engine::level::place(p, local, ground)),
             }
-        })
-        .collect()
+            previewed = copy;
+            &previewed
+        }
+    };
+
+    let by_name = voxel_engine::graph::nodes_by_name(&level.nodes);
+    let named: bevy::platform::collections::HashMap<String, &dyn voxel_engine::graph::Node> =
+        by_name
+            .iter()
+            .map(|(name, (node, _))| ((*name).to_string(), &*node.node.0))
+            .collect();
+    let path_of = |name: &str| by_name.get(name).map(|(_, at)| format!("{at}.node"));
+    let registry = registry.read();
+    let mut out = Vec::new();
+    voxel_engine::graph::walk(&level.nodes, "", &mut |node, at| {
+        let Some(shapes) = registry
+            .get_type_data::<voxel_engine::graph::ReflectNodeShapes>(node.node.0.as_any().type_id())
+            .and_then(|d| d.get(node.node.0.as_reflect()))
+        else {
+            return;
+        };
+        let here = format!("{at}.node");
+        out.extend(shapes.shapes(&voxel_engine::graph::ShapeCtx {
+            by_name: &named,
+            wires: &node.wires,
+            path_of: &path_of,
+            here: &here,
+            ground: &ground,
+        }));
+    });
+    out
+}
+
+/// The authored op a shape's path names.
+///
+/// Found through the same walk that produced the path, rather than by
+/// resolving it: the walk already has the ops in hand, and a second
+/// resolver would be a second place for the two to disagree about which
+/// field a handle writes.
+fn def_at<'a>(level: &'a LevelDef, path: &str) -> Option<&'a voxel_engine::level::CsgOpDef> {
+    for a in voxel_engine::level::authored(level) {
+        let Some(rest) = path.strip_prefix(&a.owner) else {
+            continue;
+        };
+        let Some(i) = rest
+            .strip_prefix(".ops[")
+            .and_then(|r| r.strip_suffix(']'))
+            .and_then(|n| n.parse::<usize>().ok())
+        else {
+            continue;
+        };
+        return a.local.get(i);
+    }
+    None
 }
 
 /// Which field of a shape a handle writes.
@@ -163,6 +221,7 @@ pub fn draw(
     tool: Res<ShapeTool>,
     level: Option<Res<LevelDef>>,
     worlds: Option<Res<voxel_engine::Worlds>>,
+    registry: Res<AppTypeRegistry>,
     cameras: Cameras,
 ) {
     let (Some(level), Some(worlds)) = (level, worlds) else {
@@ -176,20 +235,21 @@ pub fn draw(
     };
     let eye = eye.translation();
 
-    let live = tool
-        .drag
-        .zip(tool.preview)
-        .zip(tool.selected)
-        .map(|((drag, value), [f, i])| (f, i, drag.handle, value));
-    for (prefab, ops) in placed(&level, &worlds, live) {
-        for (i, op) in ops.iter().enumerate() {
-            let live = prefab.is_some_and(|f| tool.selected == Some([f, i]));
-            outline(&mut gizmos, op, if live { LIVE } else { IDLE });
-            if live {
-                handles(&mut gizmos, op, eye);
-            }
+    let live = live_drag(&tool);
+    for shape in placed(&level, &worlds, &registry, live) {
+        let selected = tool.selected.as_deref() == Some(shape.path.as_str());
+        outline(&mut gizmos, &shape.op, if selected { LIVE } else { IDLE });
+        if selected {
+            handles(&mut gizmos, &shape.op, eye);
         }
     }
+}
+
+/// The drag in flight, as `placed` wants it.
+fn live_drag(tool: &ShapeTool) -> Option<(&str, Handle, [f32; 3])> {
+    let drag = tool.drag?;
+    let value = tool.preview?;
+    Some((tool.selected.as_deref()?, drag.handle, value))
 }
 
 /// One shape, drawn as the shape it is.
@@ -297,6 +357,7 @@ pub fn on_click(
     mut tool: ResMut<ShapeTool>,
     level: Option<Res<LevelDef>>,
     worlds: Option<Res<voxel_engine::Worlds>>,
+    registry: Res<AppTypeRegistry>,
     cameras: Cameras,
     windows: Query<&Window>,
 ) {
@@ -309,24 +370,22 @@ pub fn on_click(
     let Some(ray) = pointer_ray(&cameras, &windows, state.width) else {
         return;
     };
-    let all = placed(&level, &worlds, None);
+    let all = placed(&level, &worlds, &registry, None);
 
     // A handle on the CURRENT selection wins over selecting something
     // else: the handles stand outside the shape, and reaching for one
     // must not pick whatever is behind it.
-    if let Some([prefab, i]) = tool.selected {
-        if let Some(op) = all
-            .iter()
-            .find(|(p, _)| *p == Some(prefab))
-            .and_then(|(_, ops)| ops.get(i))
-        {
-            if let Some(handle) = shapes::pick_handle(op, ray) {
-                let axis = shapes::axes(op.yaw)[handle.axis()];
-                if let Some(from) = shapes::along_axis(shapes::handle_at(op, handle), axis, ray) {
+    if let Some(path) = tool.selected.clone() {
+        if let Some(shape) = all.iter().find(|s| s.path == path) {
+            if let Some(handle) = shapes::pick_handle(&shape.op, ray) {
+                let axis = shapes::axes(shape.op.yaw)[handle.axis()];
+                if let Some(from) =
+                    shapes::along_axis(shapes::handle_at(&shape.op, handle), axis, ray)
+                {
                     // The LOCAL value the drag starts from, so a long
                     // drag is one multiplication rather than an
                     // accumulation that drifts.
-                    let start = local_start(&level, prefab, i, handle);
+                    let start = local_start(&level, &path, handle);
                     tool.drag = Some(Drag {
                         handle,
                         from,
@@ -339,19 +398,8 @@ pub fn on_click(
     }
 
     // Otherwise select whatever is under the pointer, nearest first.
-    let mut best: Option<(f32, [usize; 2])> = None;
-    for (prefab, ops) in &all {
-        // An inline placement is drawn but not selectable: its ops belong
-        // to the placement, and the handles write a prefab's path.
-        let Some(prefab) = *prefab else { continue };
-        if let Some(i) = shapes::pick_op(ops, ray) {
-            let d = Vec3::from(ops[i].center).distance(ray.origin);
-            if best.is_none_or(|(bd, _)| d < bd) {
-                best = Some((d, [prefab, i]));
-            }
-        }
-    }
-    tool.selected = best.map(|(_, s)| s);
+    let ops: Vec<CsgOp> = all.iter().map(|s| s.op).collect();
+    tool.selected = shapes::pick_op(&ops, ray).map(|i| all[i].path.clone());
     tool.drag = None;
 }
 
@@ -361,8 +409,8 @@ pub fn on_click(
 /// carries its extents as a radius and a half height rather than three
 /// numbers, and saying so twice is how the preview and the commit come to
 /// disagree.
-fn local_start(level: &LevelDef, prefab: usize, op: usize, handle: Handle) -> [f32; 3] {
-    let Some(def) = level.prefabs.get(prefab).and_then(|p| p.ops.get(op)) else {
+fn local_start(level: &LevelDef, path: &str, handle: Handle) -> [f32; 3] {
+    let Some(def) = def_at(level, path) else {
         return [0.0; 3];
     };
     match target(def, handle) {
@@ -388,13 +436,14 @@ pub fn preview_drag(
     mut tool: ResMut<ShapeTool>,
     level: Option<Res<LevelDef>>,
     worlds: Option<Res<voxel_engine::Worlds>>,
+    registry: Res<AppTypeRegistry>,
     cameras: Cameras,
     windows: Query<&Window>,
 ) {
     if !mouse.pressed(MouseButton::Left) {
         return;
     }
-    let (Some(drag), Some([prefab, i])) = (tool.drag, tool.selected) else {
+    let (Some(drag), Some(path)) = (tool.drag, tool.selected.clone()) else {
         return;
     };
     let (Some(level), Some(worlds)) = (level, worlds) else {
@@ -405,20 +454,16 @@ pub fn preview_drag(
     };
     // The UNDRAGGED shape: the grab was measured against it, so steering
     // off the preview would let the drag chase itself.
-    let all = placed(&level, &worlds, None);
-    let Some(op) = all
-        .iter()
-        .find(|(p, _)| *p == Some(prefab))
-        .and_then(|(_, ops)| ops.get(i))
-    else {
+    let all = placed(&level, &worlds, &registry, None);
+    let Some(shape) = all.iter().find(|s| s.path == path) else {
         return;
     };
-    let scale = level
-        .placements
-        .iter()
-        .find(|p| p.prefab.as_deref() == level.prefabs.get(prefab).map(|f| f.name.as_str()))
-        .map_or(1.0, |p| p.scale);
-    if let Some(value) = shapes::to_local(op, drag, ray, scale) {
+    // The kind said how its local space relates to the world; a drag is
+    // measured in world meters and written to a field authored in local
+    // ones. `to_local` is not applied here because `shapes::to_local`
+    // already un-yaws by the OP's own turn, and the placement's is the
+    // rest of it.
+    if let Some(value) = shapes::to_local(&shape.op, drag, ray, 1.0 / shape.scale.max(1.0e-6)) {
         tool.preview = Some(value);
     }
 }
@@ -441,18 +486,10 @@ pub fn commit_drag(
     let (Some(drag), Some(value)) = taken else {
         return;
     };
-    let (Some([prefab, i]), Some(level)) = (tool.selected, level) else {
+    let (Some(path), Some(level)) = (tool.selected.clone(), level) else {
         return;
     };
-    write(
-        &mut pending,
-        &level,
-        state.root,
-        prefab,
-        i,
-        drag.handle,
-        value,
-    );
+    write(&mut pending, &level, state.root, &path, drag.handle, value);
 }
 
 /// A nudge or a grow set from outside — the tooling path, and the tested
@@ -464,7 +501,7 @@ pub fn on_nudge(
     mut pending: ResMut<Pending>,
 ) {
     let Some(level) = level else { return };
-    let Some([prefab, i]) = tool.selected else {
+    let Some(path) = tool.selected.clone() else {
         return;
     };
     const MOVES: [Handle; 3] = [Handle::MoveX, Handle::MoveY, Handle::MoveZ];
@@ -473,7 +510,7 @@ pub fn on_nudge(
         if delta == [0.0; 3] {
             continue;
         }
-        let start = local_start(&level, prefab, i, axes[0]);
+        let start = local_start(&level, &path, axes[0]);
         let value = [
             start[0] + delta[0],
             start[1] + delta[1],
@@ -482,7 +519,7 @@ pub fn on_nudge(
         // Queued together, so a nudge on two axes is one undo step.
         for (axis, handle) in axes.into_iter().enumerate() {
             if delta[axis] != 0.0 {
-                write(&mut pending, &level, state.root, prefab, i, handle, value);
+                write(&mut pending, &level, state.root, &path, handle, value);
             }
         }
     }
@@ -499,15 +536,13 @@ fn write(
     pending: &mut Pending,
     level: &LevelDef,
     root: usize,
-    prefab: usize,
-    op: usize,
+    base: &str,
     handle: Handle,
     value: [f32; 3],
 ) {
-    let Some(def) = level.prefabs.get(prefab).and_then(|p| p.ops.get(op)) else {
+    let Some(def) = def_at(level, base) else {
         return;
     };
-    let base = shapes::op_path(prefab, op);
     let (path, v) = match target(def, handle) {
         Target::Center(a) => (format!("{base}.center[{a}]"), value[a]),
         Target::Half(a) => (format!("{base}.half[{a}]"), value[a]),
@@ -537,11 +572,23 @@ pub fn count_sharing(
     let (Some(level), Some(source)) = (level, source) else {
         return;
     };
-    let Some([prefab, _]) = tool.selected else {
-        tool.shared_with.clear();
-        return;
-    };
-    let Some(rel) = level.prefabs.get(prefab).and_then(|p| p.from.as_deref()) else {
+    // The selection points INTO a node; the node it points into is the
+    // one whose file might be shared.
+    let owner = tool
+        .selected
+        .as_deref()
+        .and_then(|p| p.strip_suffix(&p[p.rfind(".ops[")?..]));
+    let Some(rel) = owner
+        .and_then(|owner| {
+            voxel_engine::graph::walk_find(&level.nodes, owner).and_then(|n| {
+                n.node
+                    .0
+                    .as_any()
+                    .downcast_ref::<voxel_engine::level::place::Prefab>()
+            })
+        })
+        .and_then(|p| p.from.as_deref())
+    else {
         tool.shared_with.clear();
         return;
     };
@@ -569,37 +616,30 @@ fn configure(mut store: ResMut<GizmoConfigStore>) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use voxel_engine::level::{CsgOpDef, PrefabDef};
-
-    /// A level with one prefab holding one box, which is all `write`
-    /// needs to name a path.
+    /// A level with one prefab holding one box, and a place that puts
+    /// it somewhere — which is all `write` needs to name a path.
     fn level() -> LevelDef {
         // Through the parser, because a level's serde defaults are not
         // its `Default` and a fixture built the other way is a level
-        // nothing would load.
-        let mut level = LevelDef::from_json(
+        // nothing would load. Written as NODES, which is what a prefab
+        // and a placement are.
+        LevelDef::from_json(
             r#"{"lod":{"max_level":8,"top_radius":3,"top_y":[-1,0],
-                "split_k":2.5,"merge_k":3.0},"nodes":[]}"#,
+                "split_k":2.5,"merge_k":3.0},
+                "nodes":[
+                  {"kind":"prefab","name":"thing",
+                   "ops":[{"shape":"box","half":[1,1,1]}]},
+                  {"kind":"place","name":"put","in":{"prefab":"thing"},
+                   "position":[0,0,0]}
+                ]}"#,
             &voxel_engine::graph::registry::engine_kinds(),
         )
-        .unwrap();
-        level.prefabs.push(PrefabDef {
-            name: "thing".into(),
-            ops: vec![CsgOpDef {
-                shape: "box".into(),
-                op: "add".into(),
-                center: [0.0; 3],
-                half: [1.0; 3],
-                radius: 0.0,
-                half_height: 0.0,
-                yaw_deg: 0.0,
-                material: voxel_engine::level::d_op_material(),
-                blend: 0.0,
-            }],
-            from: None,
-        });
-        level
+        .unwrap()
     }
+
+    /// The reflect path of the prefab's only op — what a handle on the
+    /// placement writes, because what moves is the object.
+    const OP: &str = ".nodes[0].node.ops[0]";
 
     fn app(pressed: bool) -> App {
         let mut app = App::new();
@@ -617,7 +657,7 @@ mod tests {
             .insert_resource(level())
             .init_resource::<Pending>()
             .insert_resource(ShapeTool {
-                selected: Some([0, 0]),
+                selected: Some(OP.into()),
                 drag: Some(Drag {
                     handle: Handle::MoveX,
                     from: 0.0,
@@ -651,7 +691,7 @@ mod tests {
         let_go.update();
         let queued = &let_go.world().resource::<Pending>().0;
         assert_eq!(queued.len(), 1, "one edit for the whole gesture");
-        assert_eq!(queued[0].path, ".prefabs[0].ops[0].center[0]");
+        assert_eq!(queued[0].path, format!("{OP}.center[0]"));
         // Cleared, so a second frame with the button up writes nothing.
         let_go.update();
         assert_eq!(let_go.world().resource::<Pending>().0.len(), 1);

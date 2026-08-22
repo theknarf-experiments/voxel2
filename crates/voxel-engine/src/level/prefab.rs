@@ -19,7 +19,7 @@ use std::path::{Path, PathBuf};
 
 use serde_json::Value;
 
-use crate::level::PrefabDef;
+use crate::level::place::Prefab as PrefabNode;
 
 /// Splice every `use` in the document's `prefabs` list, in place.
 ///
@@ -28,11 +28,25 @@ use crate::level::PrefabDef;
 /// prefab, and saying so is better than resolving against a working
 /// directory nobody chose.
 pub fn resolve(doc: &mut Value, base: Option<&Path>) -> Result<(), String> {
-    let Some(list) = doc.get_mut("prefabs").and_then(Value::as_array_mut) else {
+    let Some(list) = doc.get_mut("nodes").and_then(Value::as_array_mut) else {
         return Ok(());
     };
+    resolve_nodes(list, base)
+}
+
+/// Splice every `use` in a node list, and in the scopes it contains.
+///
+/// Recursive because a scope holds nodes: a prefab declared inside a
+/// `region` is still a prefab, and one that silently kept its `use` key
+/// would deserialize as a prefab with no ops.
+fn resolve_nodes(list: &mut [Value], base: Option<&Path>) -> Result<(), String> {
     for entry in list.iter_mut() {
-        splice(entry, base)?;
+        if entry.get("use").is_some() {
+            splice(entry, base)?;
+        }
+        if let Some(inner) = entry.get_mut("nodes").and_then(Value::as_array_mut) {
+            resolve_nodes(inner, base)?;
+        }
     }
     Ok(())
 }
@@ -49,10 +63,14 @@ fn splice(entry: &mut Value, base: Option<&Path>) -> Result<(), String> {
     let Some(rel) = rel.as_str() else {
         return Err(format!("use must be a path, not {rel}"));
     };
-    if map.len() > 1 {
+    // `kind` and `name` are the node's own: a wire names a node, so a
+    // level that uses a prefab has to be able to write the name down and
+    // saving writes it back. Everything else belongs to the file.
+    const OWN: [&str; 3] = ["use", "kind", "name"];
+    if map.keys().any(|k| !OWN.contains(&k.as_str())) {
         let extra: Vec<&str> = map
             .keys()
-            .filter(|k| *k != "use")
+            .filter(|k| !OWN.contains(&k.as_str()))
             .map(String::as_str)
             .collect();
         return Err(format!(
@@ -80,6 +98,26 @@ fn splice(entry: &mut Value, base: Option<&Path>) -> Result<(), String> {
              pointer to one"
         ));
     }
+    // The file holds `{name, ops}` — what a prefab IS — and the level
+    // says where it goes. Stamping the kind here is what lets a prefab
+    // file stay the same file it was before prefabs became nodes.
+    // The FILE names it. A level may write that name down — it has to,
+    // for a wire to read — but it may not disagree with it, or one file
+    // would have two names and the wires in two levels would mean
+    // different things.
+    if let (Some(here), Some(theirs)) = (
+        map.get("name").and_then(Value::as_str),
+        merged.get("name").and_then(Value::as_str),
+    ) {
+        if here != theirs {
+            return Err(format!(
+                "the prefab using '{rel}' calls it '{here}', but the file calls it \
+                 '{theirs}' — the file is the one copy of it, and a second name is a \
+                 second thing to keep in step"
+            ));
+        }
+    }
+    merged.insert("kind".into(), Value::String("prefab".into()));
     merged.insert("use".into(), Value::String(rel.to_string()));
     *entry = Value::Object(merged);
     Ok(())
@@ -91,23 +129,30 @@ fn splice(entry: &mut Value, base: Option<&Path>) -> Result<(), String> {
 /// `use` line, so the level half needs nothing here — this is the other
 /// half, and it runs FIRST: a level pointing at a file that does not exist
 /// yet is a level that does not load.
-pub fn write(prefabs: &[PrefabDef], base: &Path) -> Result<(), String> {
-    for prefab in prefabs {
+pub fn write(prefabs: &[(&str, &PrefabNode)], base: &Path) -> Result<(), String> {
+    for (name, prefab) in prefabs {
         let Some(rel) = &prefab.from else { continue };
         let path = base.join(rel);
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir)
                 .map_err(|e| format!("prefab '{rel}' ({}): {e}", dir.display()))?;
         }
-        let json = serde_json::to_string_pretty(&prefab.detached())
-            .map_err(|e| format!("prefab '{rel}': {e}"))?;
+        // `{name, ops}` — what a prefab file has always held. The name
+        // lives on the NODE now, so it is written back explicitly rather
+        // than falling out of the struct, and a file from before prefabs
+        // were nodes still loads unchanged.
+        let json = serde_json::to_string_pretty(&serde_json::json!({
+            "name": name,
+            "ops": prefab.ops,
+        }))
+        .map_err(|e| format!("prefab '{rel}': {e}"))?;
         std::fs::write(&path, format!("{json}\n"))
             .map_err(|e| format!("prefab '{rel}' ({}): {e}", path.display()))?;
     }
     Ok(())
 }
 
-/// The other levels beside `level` whose `prefabs` name the same file.
+/// The other levels beside `level` whose nodes name the same file.
 ///
 /// Read off the documents rather than off anything loaded, because a
 /// prefab is shared by whoever names its path and a level in memory knows
@@ -142,12 +187,17 @@ fn names_prefab(path: &Path, rel: &str) -> bool {
     let Ok(doc) = serde_json::from_str::<Value>(&text) else {
         return false;
     };
-    doc.get("prefabs")
-        .and_then(Value::as_array)
-        .is_some_and(|list| {
-            list.iter()
-                .any(|e| e.get("use").and_then(Value::as_str) == Some(rel))
+    fn names(list: &[Value], rel: &str) -> bool {
+        list.iter().any(|e| {
+            e.get("use").and_then(Value::as_str) == Some(rel)
+                || e.get("nodes")
+                    .and_then(Value::as_array)
+                    .is_some_and(|inner| names(inner, rel))
         })
+    }
+    doc.get("nodes")
+        .and_then(Value::as_array)
+        .is_some_and(|list| names(list, rel))
 }
 
 /// Every prefab file a level reads, deduplicated and in a stable order.
@@ -155,10 +205,10 @@ fn names_prefab(path: &Path, rel: &str) -> bool {
 /// The watcher needs these: a prefab edited on disk has to reload the
 /// levels that use it, or hot reload would work on levels and quietly not
 /// on the things levels are made of.
-pub fn sources(prefabs: &[PrefabDef], base: &Path) -> Vec<PathBuf> {
+pub fn sources(prefabs: &[(&str, &PrefabNode)], base: &Path) -> Vec<PathBuf> {
     let mut out: Vec<PathBuf> = prefabs
         .iter()
-        .filter_map(|p| p.from.as_ref())
+        .filter_map(|(_, p)| p.from.as_ref())
         .map(|rel| base.join(rel))
         .collect();
     out.sort();
@@ -190,30 +240,38 @@ mod tests {
     ]}"#;
 
     /// A level whose `prefabs` list is `prefabs`, written to `dir/name`.
-    fn level_at(dir: &std::path::Path, name: &str, prefabs: &str) -> std::path::PathBuf {
+    fn level_at(dir: &std::path::Path, name: &str, prefab: &str) -> std::path::PathBuf {
         let path = dir.join(name);
-        let placement = r#"{"prefab":"monolith","position":[0.0,0.0,0.0]}"#;
+        let place = r#"{"kind":"place","name":"put",
+                        "in":{"prefab":"monolith"},"position":[0.0,0.0,0.0]}"#;
         std::fs::write(
             &path,
-            format!(
-                r#"{{{LOD},"materials":[],"nodes":[],
-                    "prefabs":[{prefabs}],"placements":[{placement}]}}"#
-            ),
+            format!(r#"{{{LOD},"materials":[],"nodes":[{prefab},{place}]}}"#),
         )
         .unwrap();
         path
+    }
+
+    /// The prefabs of a level, as the tests want to read them.
+    fn prefabs(level: &LevelDef) -> Vec<(&str, &crate::level::place::Prefab)> {
+        crate::level::place::prefabs(level)
     }
 
     #[test]
     fn a_prefab_from_a_file_is_an_ordinary_prefab() {
         let dir = scratch("load");
         std::fs::write(dir.join("prefabs/monolith.json"), MONOLITH).unwrap();
-        let path = level_at(&dir, "l.json", r#"{"use":"prefabs/monolith.json"}"#);
+        let path = level_at(
+            &dir,
+            "l.json",
+            r#"{"kind":"prefab","use":"prefabs/monolith.json"}"#,
+        );
 
         let level = LevelDef::from_path(&path, &reg()).unwrap();
-        assert_eq!(level.prefabs.len(), 1);
-        let p = &level.prefabs[0];
-        assert_eq!(p.name, "monolith", "the FILE carries the name");
+        let found = prefabs(&level);
+        assert_eq!(found.len(), 1);
+        let (name, p) = found[0];
+        assert_eq!(name, "monolith", "the FILE carries the name");
         assert_eq!(p.ops.len(), 1);
         assert_eq!(p.from.as_deref(), Some("prefabs/monolith.json"));
     }
@@ -223,10 +281,10 @@ mod tests {
     fn two_levels_use_one_prefab_and_get_the_same_object() {
         let dir = scratch("share");
         std::fs::write(dir.join("prefabs/monolith.json"), MONOLITH).unwrap();
-        let entry = r#"{"use":"prefabs/monolith.json"}"#;
+        let entry = r#"{"kind":"prefab","use":"prefabs/monolith.json"}"#;
         let a = LevelDef::from_path(&level_at(&dir, "a.json", entry), &reg()).unwrap();
         let b = LevelDef::from_path(&level_at(&dir, "b.json", entry), &reg()).unwrap();
-        assert_eq!(a.prefabs, b.prefabs);
+        assert_eq!(prefabs(&a), prefabs(&b));
 
         // Edit the file and BOTH levels have the edit, which is what makes
         // it one prefab rather than two copies that agree today.
@@ -237,8 +295,8 @@ mod tests {
         .unwrap();
         let a2 = LevelDef::from_path(&level_at(&dir, "a.json", entry), &reg()).unwrap();
         let b2 = LevelDef::from_path(&level_at(&dir, "b.json", entry), &reg()).unwrap();
-        assert_eq!(a2.prefabs, b2.prefabs);
-        assert_ne!(a2.prefabs, a.prefabs, "the edit reached the level");
+        assert_eq!(prefabs(&a2), prefabs(&b2));
+        assert_ne!(prefabs(&a2), prefabs(&a), "the edit reached the level");
     }
 
     /// Saving puts each half back where it came from: the level keeps its
@@ -247,10 +305,25 @@ mod tests {
     fn saving_writes_the_prefab_to_its_own_file() {
         let dir = scratch("save");
         std::fs::write(dir.join("prefabs/monolith.json"), MONOLITH).unwrap();
-        let path = level_at(&dir, "l.json", r#"{"use":"prefabs/monolith.json"}"#);
+        let path = level_at(
+            &dir,
+            "l.json",
+            r#"{"kind":"prefab","use":"prefabs/monolith.json"}"#,
+        );
         let mut level = LevelDef::from_path(&path, &reg()).unwrap();
 
-        level.prefabs[0].ops[0].material = 77;
+        let node = level
+            .nodes
+            .iter_mut()
+            .find(|n| n.node.kind() == "prefab")
+            .unwrap();
+        node.node
+            .0
+            .as_any_mut()
+            .downcast_mut::<crate::level::place::Prefab>()
+            .unwrap()
+            .ops[0]
+            .material = 77;
         crate::level::save_to(&level, &path, &reg()).unwrap();
 
         let level_text = std::fs::read_to_string(&path).unwrap();
@@ -268,16 +341,19 @@ mod tests {
         assert!(!prefab_text.contains("use"), "{prefab_text}");
 
         let back = LevelDef::from_path(&path, &reg()).unwrap();
-        assert_eq!(back.prefabs, level.prefabs);
+        assert_eq!(prefabs(&back), prefabs(&level));
     }
 
     /// An inline prefab is still a prefab, and saving leaves it inline.
     #[test]
     fn an_inline_prefab_stays_in_the_level() {
         let dir = scratch("inline");
-        let path = level_at(&dir, "l.json", MONOLITH);
+        // Written inline, so the entry IS the prefab: the same object,
+        // with a kind on it and no file behind it.
+        let inline = MONOLITH.replacen('{', r#"{"kind":"prefab","#, 1);
+        let path = level_at(&dir, "l.json", &inline);
         let level = LevelDef::from_path(&path, &reg()).unwrap();
-        assert_eq!(level.prefabs[0].from, None);
+        assert_eq!(prefabs(&level)[0].1.from, None);
 
         crate::level::save_to(&level, &path, &reg()).unwrap();
         let text = std::fs::read_to_string(&path).unwrap();
@@ -292,7 +368,7 @@ mod tests {
     fn a_shared_prefab_names_the_levels_that_share_it() {
         let dir = scratch("users");
         std::fs::write(dir.join("prefabs/monolith.json"), MONOLITH).unwrap();
-        let entry = r#"{"use":"prefabs/monolith.json"}"#;
+        let entry = r#"{"kind":"prefab","use":"prefabs/monolith.json"}"#;
         let a = level_at(&dir, "alpha.json", entry);
         level_at(&dir, "beta.json", entry);
         level_at(&dir, "gamma.json", MONOLITH); // its own copy, inline
@@ -318,10 +394,25 @@ mod tests {
         let path = level_at(
             &dir,
             "l.json",
-            r#"{"use":"prefabs/monolith.json","name":"other"}"#,
+            r#"{"kind":"prefab","use":"prefabs/monolith.json","ops":[]}"#,
         );
         let e = LevelDef::from_path(&path, &reg()).unwrap_err();
-        assert!(e.contains("name") && e.contains("override"), "{e}");
+        assert!(e.contains("ops") && e.contains("override"), "{e}");
+    }
+
+    /// A level may write the name down — a wire has to read it — but not
+    /// a DIFFERENT one, or one file has two names.
+    #[test]
+    fn a_use_that_renames_the_prefab_is_refused() {
+        let dir = scratch("rename");
+        std::fs::write(dir.join("prefabs/monolith.json"), MONOLITH).unwrap();
+        let path = level_at(
+            &dir,
+            "l.json",
+            r#"{"kind":"prefab","use":"prefabs/monolith.json","name":"other"}"#,
+        );
+        let e = LevelDef::from_path(&path, &reg()).unwrap_err();
+        assert!(e.contains("'other'") && e.contains("'monolith'"), "{e}");
     }
 
     /// A prefab file holds an object, not a pointer to another file.
@@ -343,7 +434,7 @@ mod tests {
     #[test]
     fn a_level_from_a_string_cannot_reach_a_prefab() {
         let e = LevelDef::from_json(
-            &format!(r#"{{{LOD},"nodes":[],"prefabs":[{{"use":"prefabs/x.json"}}]}}"#),
+            &format!(r#"{{{LOD},"nodes":[{{"kind":"prefab","use":"prefabs/x.json"}}]}}"#),
             &reg(),
         )
         .unwrap_err()
@@ -358,7 +449,7 @@ mod tests {
         let path = level_at(&dir, "l.json", r#"{"use":"prefabs/monolith.json"}"#);
         let level = LevelDef::from_path(&path, &reg()).unwrap();
         assert_eq!(
-            super::sources(&level.prefabs, &dir),
+            super::sources(&prefabs(&level), &dir),
             vec![dir.join("prefabs/monolith.json")]
         );
     }

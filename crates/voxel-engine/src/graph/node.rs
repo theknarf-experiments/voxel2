@@ -62,6 +62,12 @@ pub enum Invalidates {
     /// The planning graph and nothing under it. What this node produces
     /// never reaches a voxel.
     Plan,
+    /// Authored geometry: the chunks this node's ops touched, and only
+    /// those. Between the other two because it IS between them — a voxel
+    /// changes, but which voxels is knowable from the ops themselves, so
+    /// the world is rebuilt where it moved rather than everywhere. That
+    /// is the difference between 0.115 s and 4.7 s on the planet.
+    Authored,
     /// The streamed world: every chunk regenerates.
     #[default]
     World,

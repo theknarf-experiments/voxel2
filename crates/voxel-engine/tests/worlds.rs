@@ -227,8 +227,9 @@ fn a_world_with_nothing_to_plan_gets_no_provider() {
     // No host planner is installed, so a level's ops come only from its
     // authored placements. Strip them from one world and not the other.
     let mut bare = planet.clone();
-    bare.placements.clear();
-    bare.prefabs.clear();
+    // Authored geometry is nodes now; strip the two kinds that make it.
+    bare.nodes
+        .retain(|n| !matches!(n.node.kind(), "prefab" | "place"));
     let placed = level_with(
         "planet.json",
         "placements",
