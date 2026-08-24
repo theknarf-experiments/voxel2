@@ -35,6 +35,21 @@ pub struct PanelStyle {
     pub label: f32,
     /// Control column: slider, swatch, value or menu.
     pub value: f32,
+    /// The typed-number box where a slider shares the control column with
+    /// one. Fixed, so the slider tracks line up down the panel; a number
+    /// with no slider gets the whole column instead, because that is what
+    /// a level's `5e-5` needs to be readable at all.
+    pub number: f32,
+    /// The narrowest that box may be squeezed to before it is dropped
+    /// instead, and the narrowest a slider track may be and still be
+    /// swept. The control column is not always wide enough for both — the
+    /// graph inspector's is a third of its width — so `row::value_widget`
+    /// splits it against these two floors rather than against a fixed
+    /// `number`, which left a 39px track there and would have gone
+    /// NEGATIVE in a narrower column still.
+    pub number_min: f32,
+    /// See [`PanelStyle::number_min`].
+    pub track_min: f32,
     /// The disclosure column, ahead of the label. Constant whether or not
     /// a row has a chevron, so the columns after it always align.
     pub gutter: f32,
@@ -70,6 +85,9 @@ impl Default for PanelStyle {
             indent: 14.0,
             label: 230.0,
             value: 150.0,
+            number: 58.0,
+            number_min: 40.0,
+            track_min: 56.0,
             gutter: 16.0,
             gap: 8.0,
             row_gap: 2.0,

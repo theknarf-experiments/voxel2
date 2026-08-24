@@ -734,6 +734,8 @@ fn text_commits_on_enter_and_only_then() {
     let mut app = app();
     app.init_resource::<ButtonInput<KeyCode>>()
         .init_resource::<InputFocus>()
+        .init_resource::<voxel_editor::PressedOut>()
+        .init_resource::<voxel_editor::Typing>()
         .add_systems(Update, voxel_editor::on_typed);
 
     let container = app
@@ -769,6 +771,478 @@ fn text_commits_on_enter_and_only_then() {
         voxel_engine::graph::compile(&level.nodes).is_ok(),
         "and the rename took its wires with it"
     );
+}
+
+/// A box with `WritesNum` on it, focused, and nothing that drains the
+/// queue: what a keystroke QUEUES is the half these pin, and the half that
+/// applies it is every other test in this file.
+///
+/// `num` is what makes a box a NUMBER rather than a name — the same
+/// distinction `row::typed_box` draws — so a `None` here is a text row.
+fn box_holding(path: &str, num: Option<Num>, text: &str) -> App {
+    use bevy::input::ButtonInput;
+    use bevy::input_focus::{FocusCause, InputFocus};
+    use bevy::text::EditableText;
+    use voxel_editor::{FieldPath, WritesNum};
+
+    let mut app = App::new();
+    app.add_plugins(MinimalPlugins)
+        .register_type::<LevelDef>()
+        .insert_resource(planet())
+        .init_resource::<Pending>()
+        .init_resource::<EditorState>()
+        .init_resource::<ButtonInput<KeyCode>>()
+        .init_resource::<InputFocus>()
+        .init_resource::<voxel_editor::PressedOut>()
+        .init_resource::<voxel_editor::Typing>()
+        .add_observer(voxel_editor::on_press)
+        .add_systems(Update, voxel_editor::on_typed);
+
+    let mut container = app.world_mut().spawn(FieldPath(path.to_string()));
+    if let Some(num) = num {
+        container.insert(WritesNum(num));
+    }
+    let container = container.id();
+    let input = app
+        .world_mut()
+        .spawn((EditableText::new(text), ChildOf(container)))
+        .id();
+    app.world_mut()
+        .resource_mut::<InputFocus>()
+        .set(input, FocusCause::Pressed);
+    app.update();
+    app
+}
+
+fn enter(app: &mut App) {
+    app.world_mut()
+        .resource_mut::<bevy::input::ButtonInput<KeyCode>>()
+        .press(KeyCode::Enter);
+    app.update();
+}
+
+/// What is waiting to be applied.
+fn queued(app: &App) -> &[Edit] {
+    &app.world().resource::<Pending>().0
+}
+
+/// What the panel is saying was refused, if anything.
+fn refused(app: &App) -> Option<String> {
+    app.world().resource::<EditorState>().refused.clone()
+}
+
+/// A typed number goes down the SAME path a drag does: one `Value::Num`,
+/// at the field's own type, so it gets the same `apply`, the same undo
+/// snapshot and the same rebuild decision.
+///
+/// Typing exists because dragging cannot do this: the step is a percent of
+/// the value, so a field left at its default of 0 is hundreds of millions
+/// of pixels away from 800 and every node created from scratch would be
+/// unreachable.
+#[test]
+fn a_typed_number_is_queued_as_a_number_at_the_fields_own_type() {
+    let mut app = box_holding(".lod.max_level", Some(Num::U8), "9");
+    enter(&mut app);
+    match queued(&app) {
+        [Edit {
+            path,
+            value: Value::Num(v, num),
+            ..
+        }] => {
+            assert_eq!(path, ".lod.max_level");
+            assert_eq!(*v, 9.0);
+            assert_eq!(*num, Num::U8, "a u8 field is written as a u8");
+        }
+        other => panic!("one numeric edit, got {} edits", other.len()),
+    }
+    assert_eq!(refused(&app), None);
+
+    // And the box with no `WritesNum` is still a name: the text IS the
+    // value, not something to parse.
+    let mut app = box_holding(".nodes[0].name.0", None, "9");
+    enter(&mut app);
+    assert!(matches!(queued(&app), [Edit { value: Value::Text(s), .. }] if s == "9"));
+}
+
+/// Nonsense writes NOTHING, and the panel says so.
+///
+/// A refusal that only warned in the log is indistinguishable from a
+/// broken editor: nothing in the document moves, so silence would read as
+/// "that landed". What was typed stays in the box to be corrected — see
+/// `panel::notice`, which is why a refusal does not rebuild the panel.
+#[test]
+fn an_unparseable_entry_queues_nothing_and_the_panel_says_which_field() {
+    let mut app = box_holding(".lod.split_k", Some(Num::F64), "eight hundred");
+    enter(&mut app);
+    assert!(queued(&app).is_empty(), "nothing is written");
+    let said = refused(&app).expect("the panel says it was refused");
+    assert!(said.contains(".lod.split_k"), "and which field: {said}");
+    assert!(said.contains("f64"), "and what it would have to be: {said}");
+}
+
+/// An integer field refuses a fraction rather than rounding one.
+///
+/// The drag rounds because a pointer has no exact value to mean; text
+/// does, and `3.7` silently becoming 3 is the tool getting the level
+/// wrong.
+#[test]
+fn a_fraction_typed_into_an_integer_field_is_refused_not_truncated() {
+    for (num, text) in [(Num::U8, "3.7"), (Num::U32, "3.7"), (Num::I32, "-3.7")] {
+        let mut app = box_holding(".lod.max_level", Some(num), text);
+        enter(&mut app);
+        assert!(
+            queued(&app).is_empty(),
+            "{text} is not a {num:?} and must not be rounded into one"
+        );
+        assert!(refused(&app).is_some());
+    }
+}
+
+/// And refuses what its type cannot hold, rather than clamping it.
+#[test]
+fn a_number_outside_its_types_range_is_refused_not_clamped() {
+    for (num, text) in [(Num::U8, "999"), (Num::Usize, "-1"), (Num::U32, "-1")] {
+        let mut app = box_holding(".lod.max_level", Some(num), text);
+        enter(&mut app);
+        assert!(
+            queued(&app).is_empty(),
+            "{text} is not a {num:?} and must not be clamped into one"
+        );
+    }
+}
+
+/// Leaving the box commits it, exactly once.
+///
+/// A designer who types a number and clicks the next row has said what
+/// they meant. Committing again on the way out of a box Enter already
+/// committed would be a second, identical edit — and a step of undo that
+/// does nothing.
+#[test]
+fn leaving_a_box_commits_what_is_in_it_and_enter_does_not_commit_twice() {
+    use bevy::input_focus::InputFocus;
+
+    let mut app = box_holding(".lod.split_k", Some(Num::F64), "0.75");
+    assert!(queued(&app).is_empty(), "focused is not committed");
+
+    app.world_mut().resource_mut::<InputFocus>().clear();
+    app.update();
+    assert_eq!(queued(&app).len(), 1, "leaving the box commits it");
+
+    // Enter, then focus moves on: still one edit.
+    let mut app = box_holding(".lod.split_k", Some(Num::F64), "0.75");
+    enter(&mut app);
+    assert_eq!(queued(&app).len(), 1);
+    app.world_mut().resource_mut::<InputFocus>().clear();
+    app.update();
+    assert_eq!(queued(&app).len(), 1, "and not again on the way out");
+}
+
+/// End to end: what is typed reaches the document, and undo takes it back
+/// — because it is the same `Value::Num` the drag produces and there is
+/// only one write path.
+#[test]
+fn a_typed_number_reaches_the_document_and_can_be_undone() {
+    use bevy::input::ButtonInput;
+    use bevy::input_focus::{FocusCause, InputFocus};
+    use bevy::text::EditableText;
+    use voxel_editor::{FieldPath, WritesNum};
+
+    let mut app = app();
+    app.init_resource::<ButtonInput<KeyCode>>()
+        .init_resource::<InputFocus>()
+        .init_resource::<voxel_editor::PressedOut>()
+        .init_resource::<voxel_editor::Typing>()
+        .add_systems(Update, voxel_editor::on_typed.before(apply));
+
+    let at = app
+        .world()
+        .resource::<LevelDef>()
+        .nodes
+        .iter()
+        .position(|n| n.node.0.kind() == "height_fbm")
+        .expect("planet has fbm height");
+    let path = format!(".nodes[{at}].node.amp");
+    let was = read(&app, &path);
+
+    let container = app.world_mut().spawn(FieldPath(path.clone())).id();
+    app.world_mut()
+        .entity_mut(container)
+        .insert(WritesNum(Num::F32));
+    let input = app
+        .world_mut()
+        .spawn((EditableText::new("800"), ChildOf(container)))
+        .id();
+    app.world_mut()
+        .resource_mut::<InputFocus>()
+        .set(input, FocusCause::Pressed);
+    app.update();
+    assert_eq!(read(&app, &path), was, "nothing lands before Enter");
+
+    app.world_mut()
+        .resource_mut::<ButtonInput<KeyCode>>()
+        .press(KeyCode::Enter);
+    app.update();
+    assert_eq!(read(&app, &path), 800.0, "a number no drag could reach");
+
+    // No `InputPlugin` here, so the key stays "just pressed" until it is
+    // told otherwise — the real one is cleared every frame.
+    app.world_mut()
+        .resource_mut::<ButtonInput<KeyCode>>()
+        .clear();
+    app.add_systems(Update, voxel_editor::undo);
+    app.world_mut().resource_mut::<EditorState>().undo = true;
+    app.update();
+    assert_eq!(read(&app, &path), was, "and one snapshot took it back");
+}
+
+/// Queue a string at `path`, the way a box on the way out does.
+fn text_edit(app: &mut App, path: &str, value: &str) {
+    app.world_mut().resource_mut::<Pending>().0.push(Edit {
+        root: 0,
+        path: path.to_string(),
+        value: Value::Text(value.to_string()),
+    });
+    app.update();
+}
+
+/// What the level calls the node at `at`.
+fn name_of(app: &App, at: usize) -> Option<String> {
+    app.world().resource::<LevelDef>().nodes[at].name.clone()
+}
+
+/// A named node, and one no wire refers to.
+fn a_named_node(app: &App) -> (usize, String) {
+    let level = app.world().resource::<LevelDef>();
+    level
+        .nodes
+        .iter()
+        .enumerate()
+        .find_map(|(i, n)| Some((i, n.name.clone()?)))
+        .expect("planet names its nodes")
+}
+
+/// A no-op edit is not a step, and taking a step is what throws the redo
+/// stack away.
+///
+/// Renaming reports how many WIRES followed, and zero is the answer both
+/// to "renamed, and nothing referred to it" and to "the name did not
+/// change". Counting the second as an edit costs an undo step that undoes
+/// A no-op edit must not mark the document changed.
+///
+/// The tick is what `apply_level_change` re-diffs on and what
+/// `panel::rebuild` respawns on, so an edit that writes nothing and stamps
+/// it anyway rebuilds the world and throws the panel away for nothing. A
+/// value box commits when it loses focus, so clicking from one box to the
+/// next commits the first with the value it was seeded with — and the
+/// respawn would despawn the box just clicked into, along with the caret
+/// the click had put there.
+#[test]
+fn a_no_op_edit_does_not_mark_the_document_changed() {
+    let mut app = app();
+    let was = app.world().resource::<LevelDef>().materials[0].id();
+
+    // Something landed: the tick has to move, or this test would pass
+    // against a document nothing can write to at all.
+    app.world_mut().resource_mut::<Pending>().0.push(Edit {
+        root: 0,
+        path: ".materials[0].id".into(),
+        value: Value::Num(f64::from(was) + 1.0, Num::U32),
+    });
+    app.update();
+    let after_real = app
+        .world()
+        .get_resource_ref::<LevelDef>()
+        .unwrap()
+        .last_changed();
+
+    // And now the same value it already holds, which is what a box echoes
+    // back on its way out.
+    let now = app.world().resource::<LevelDef>().materials[0].id();
+    app.world_mut().resource_mut::<Pending>().0.push(Edit {
+        root: 0,
+        path: ".materials[0].id".into(),
+        value: Value::Num(f64::from(now), Num::U32),
+    });
+    app.update();
+    assert_eq!(
+        app.world()
+            .get_resource_ref::<LevelDef>()
+            .unwrap()
+            .last_changed(),
+        after_real,
+        "a no-op edit stamped the change tick, so the world re-diffs and \
+         the panel respawns for an edit that wrote nothing"
+    );
+}
+
+/// nothing and a future that cannot be redone — and the commit on the way
+/// out of a box makes it reachable with a click: focus a name box, click
+/// away, lose your redo.
+#[test]
+fn a_no_op_rename_costs_no_step_and_leaves_the_redo_alone() {
+    let mut app = app();
+    app.add_systems(Update, voxel_editor::undo);
+    let (at, name) = a_named_node(&app);
+    let path = format!(".nodes[{at}].name.0");
+
+    text_edit(&mut app, &path, "renamed");
+    assert_eq!(name_of(&app, at).as_deref(), Some("renamed"));
+
+    app.world_mut().resource_mut::<EditorState>().undo = true;
+    app.update();
+    assert_eq!(name_of(&app, at), Some(name.clone()), "undo put it back");
+    let history = app.world().resource::<voxel_editor::History>();
+    assert!(history.can_redo(), "and left a redo to reach for");
+    assert!(!history.can_undo(), "with nothing behind it");
+
+    // The blur a click away from an untouched name box produces.
+    text_edit(&mut app, &path, &name);
+    let history = app.world().resource::<voxel_editor::History>();
+    assert!(
+        history.can_redo(),
+        "a no-op must not throw the redo stack away"
+    );
+    assert!(!history.can_undo(), "nor be a step of its own");
+}
+
+/// And the other half of that distinction: a REAL rename is a step even
+/// when no wire happened to say the old name.
+///
+/// The two are the same wire count, so anything that told them apart by
+/// the count alone would take this away with the bug it was fixing.
+#[test]
+fn a_rename_no_wire_referred_to_is_still_a_step() {
+    let mut app = app();
+    let (at, name) = {
+        let level = app.world().resource::<LevelDef>();
+        level
+            .nodes
+            .iter()
+            .enumerate()
+            .filter_map(|(i, n)| Some((i, n.name.clone()?)))
+            .find(|(_, name)| {
+                !level.nodes.iter().any(|n| {
+                    n.wires
+                        .iter()
+                        .any(|(_, w)| w.sources().iter().any(|s| s == name))
+                })
+            })
+            .expect("planet names a node nothing is wired to")
+    };
+    assert_ne!(name, "unreferenced");
+
+    text_edit(&mut app, &format!(".nodes[{at}].name.0"), "unreferenced");
+
+    assert_eq!(name_of(&app, at).as_deref(), Some("unreferenced"));
+    assert!(
+        app.world().resource::<voxel_editor::History>().can_undo(),
+        "a rename nothing followed still changed the document"
+    );
+}
+
+/// A press on something that takes no focus still ends the typing.
+///
+/// The text input, the checkbox and the menu are the only widgets in this
+/// stack that take focus when pressed, so a slider, a scrub label, the tab
+/// strip or the resize grip left the box focused and what was typed in it
+/// uncommitted. That is the silent discard "leaving the box commits" is
+/// there to rule out.
+#[test]
+fn a_press_outside_the_box_commits_what_is_in_it() {
+    use bevy::input_focus::InputFocus;
+
+    let mut app = box_holding(".lod.split_k", Some(Num::F64), "0.75");
+    // A slider, as far as focus is concerned: something with no editable
+    // text anywhere above it.
+    let elsewhere = app.world_mut().spawn_empty().id();
+    press(&mut app, elsewhere);
+    app.update();
+    assert_eq!(queued(&app).len(), 1, "the press committed the box");
+    assert!(
+        app.world().resource::<InputFocus>().get().is_none(),
+        "and let it go, so the next keystroke does not land in it"
+    );
+
+    // Pressing your own text moves the caret; it is not leaving the box.
+    let mut app = box_holding(".lod.split_k", Some(Num::F64), "0.75");
+    let input = app.world().resource::<InputFocus>().get().unwrap();
+    press(&mut app, input);
+    app.update();
+    assert!(queued(&app).is_empty(), "still typing");
+    assert_eq!(app.world().resource::<InputFocus>().get(), Some(input));
+}
+
+/// Focus follows the FIELD through the rebuild that despawns its box.
+///
+/// A commit and the click that caused it land in the same frame — focus is
+/// set during picking in `PreUpdate`, and the commit, the apply and the
+/// rebuild all run in `Update` behind it — so the box the click was FOR is
+/// despawned before a keystroke can reach it. The path outlives the
+/// rebuild; the entity does not.
+#[test]
+fn focus_follows_the_field_through_a_rebuild() {
+    use bevy::ecs::system::RunSystemOnce;
+    use bevy::input_focus::InputFocus;
+    use bevy::text::EditableText;
+    use voxel_editor::{FieldPath, WritesNum};
+
+    let path = ".lod.split_k";
+    let mut app = box_holding(path, Some(Num::F64), "0.75");
+    let was = app.world().resource::<InputFocus>().get().unwrap();
+
+    // What a rebuild does: every widget of the panel, gone and made again.
+    let container = app.world().get::<ChildOf>(was).unwrap().parent();
+    app.world_mut().entity_mut(container).despawn();
+    let container = app
+        .world_mut()
+        .spawn((FieldPath(path.into()), WritesNum(Num::F64)))
+        .id();
+    let now = app
+        .world_mut()
+        .spawn((EditableText::new("0.75"), ChildOf(container)))
+        .id();
+
+    app.world_mut()
+        .run_system_once(voxel_editor::refocus)
+        .unwrap();
+    assert_eq!(
+        app.world().resource::<InputFocus>().get(),
+        Some(now),
+        "the box at the same path took the focus back"
+    );
+
+    // And a path with no box left — a collapsed section, a shut panel —
+    // leaves focus on nothing rather than on a despawned entity.
+    app.world_mut().entity_mut(container).despawn();
+    app.world_mut()
+        .run_system_once(voxel_editor::refocus)
+        .unwrap();
+    assert_eq!(app.world().resource::<InputFocus>().get(), None);
+}
+
+/// Press `at`, the way the picking backend does.
+fn press(app: &mut App, at: Entity) {
+    use bevy::picking::events::{Pointer, Press};
+    use bevy::picking::pointer::{Location, PointerButton, PointerId};
+
+    let window = app.world_mut().spawn(bevy::window::Window::default()).id();
+    let location = Location {
+        target: bevy::window::WindowRef::Entity(window)
+            .normalize(None)
+            .unwrap()
+            .into(),
+        position: Vec2::ZERO,
+    };
+    app.world_mut().trigger(Pointer::<Press>::new(
+        PointerId::Mouse,
+        location,
+        Press {
+            button: PointerButton::Primary,
+            hit: bevy::picking::backend::HitData::new(Entity::PLACEHOLDER, 0.0, None, None),
+            count: 1,
+        },
+        at,
+    ));
 }
 
 /// The panel knows whether there is work not yet on disk.

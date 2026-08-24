@@ -507,6 +507,45 @@ pub fn rebuild(world: &mut World) {
     }
 }
 
+/// Put focus back on the box the pointer put it in, after a rebuild took
+/// the box away.
+///
+/// A commit and the click that caused it land in the SAME frame: focus is
+/// set during picking in `PreUpdate`, and `on_typed`, `apply` and
+/// `rebuild` all run in `Update` behind it — so the box the click was FOR
+/// is despawned before a keystroke can reach it. Typing a number and
+/// clicking the next box lost the focus that click had just given.
+///
+/// Keyed to the reflect path, the way expansion already is, and triggered
+/// by the focused ENTITY ceasing to exist rather than by the rebuild
+/// having run: those are the same moment, and only the first is something
+/// this can see for itself. A path with no box any more — a collapsed
+/// section, a closed panel — clears focus, because focus naming a
+/// despawned entity is worse than none.
+pub fn refocus(
+    typing: Res<crate::edit::Typing>,
+    entities: &bevy::ecs::entity::Entities,
+    mut focus: ResMut<bevy::input_focus::InputFocus>,
+    boxes: Query<(&row::FieldPath, &Children)>,
+    editable: Query<(), With<bevy::text::EditableText>>,
+) {
+    let Some(path) = typing.0.as_deref() else {
+        return;
+    };
+    if focus.get().is_some_and(|at| entities.contains(at)) {
+        return;
+    }
+    let found = boxes.iter().find_map(|(row::FieldPath(p), children)| {
+        (p == path)
+            .then(|| children.iter().find(|&child| editable.contains(child)))
+            .flatten()
+    });
+    match found {
+        Some(input) => focus.set(input, bevy::input_focus::FocusCause::Pressed),
+        None => focus.clear(),
+    }
+}
+
 /// What one tab's document turned into.
 struct Document {
     tick: u32,
@@ -566,36 +605,104 @@ fn inspector(props: &Option<(String, Vec<walk::Row>)>, style: &PanelStyle) -> im
     )})
 }
 
+/// The one line along the top, and what it says when nothing was refused.
+///
+/// The base is carried on the widget because the panel is respawned and a
+/// refusal is not allowed to respawn it — see [`notice`] — so the bar a
+/// refusal appears in is whichever one is already on screen.
+#[derive(Component, Clone, Debug, Default)]
+pub struct NoticeBar(Option<(String, Color)>);
+
+/// What a refusal and a complaint are both painted in. One colour: they
+/// are the same claim, that what you are looking at is not what the
+/// document holds.
+const ALARM: Color = Color::srgb(0.42, 0.13, 0.13);
+
 /// The one line along the top: what the compiler says is wrong, or that
 /// there is work not yet on disk.
 ///
-/// Absent when there is neither, so the panel carries no permanent strip
-/// for the sake of the moments one is needed. A complaint wins: a level
-/// that does not compile is worth more of your attention than one that is
-/// merely unsaved.
+/// Spawned always and hidden when there is neither, so that [`notice`] has
+/// somewhere to put a refusal without a rebuild. A complaint wins over
+/// unsaved work: a level that does not compile is worth more of your
+/// attention than one that is merely not on disk.
 fn notice_bar(complaint: Option<&str>, edited: bool, style: &PanelStyle) -> impl SceneList {
-    let (said, colour) = match (complaint, edited) {
-        (Some(said), _) => (said.to_string(), Color::srgb(0.42, 0.13, 0.13)),
-        (None, true) => (
+    let base = match (complaint, edited) {
+        (Some(said), _) => Some((said.to_string(), ALARM)),
+        (None, true) => Some((
             "edited — ⌘S to save, ⌘Z to undo".to_string(),
             Color::srgb(0.20, 0.20, 0.22),
-        ),
-        (None, false) => return None,
+        )),
+        (None, false) => None,
     };
+    let (said, colour, display) = shown_notice(&base);
     let font = bevy::text::FontSize::Px(style.font);
     let pad = px(style.pad);
-    Some(bsn_list! {(
+    bsn_list! {(
+        NoticeBar({base})
         Node {
             padding: UiRect::all(pad),
             flex_shrink: 0.0,
+            display: {display},
         }
-        BackgroundColor(colour)
+        BackgroundColor({colour})
         Children [(
             Text({said})
             TextFont { font_size: {font} }
             ThemedText
         )]
-    )})
+    )}
+}
+
+/// How the bar renders a notice, or the absence of one.
+fn shown_notice(notice: &Option<(String, Color)>) -> (String, Color, Display) {
+    match notice {
+        Some((said, colour)) => (said.clone(), *colour, Display::Flex),
+        None => (String::new(), Color::NONE, Display::None),
+    }
+}
+
+/// Put a refusal in the notice bar WITHOUT respawning the panel.
+///
+/// A refusal writes nothing to the document, so nothing would rebuild the
+/// panel — and nothing may: the box holds the text that was refused, and a
+/// rebuild reseeds every box from the document. The one moment what you
+/// typed is most worth keeping is the moment it was rejected, so the bar
+/// is painted in place, the way the width and the camera are.
+///
+/// A refusal outranks whatever the bar was saying: it is the answer to
+/// what was just typed, it is gone the moment any edit lands, and a level
+/// that does not compile will still be saying so on the next rebuild.
+pub fn notice(
+    state: Res<EditorState>,
+    bars: Query<(Entity, &NoticeBar, &Children)>,
+    mut painted: Query<(&mut Node, &mut BackgroundColor)>,
+    mut texts: Query<&mut Text>,
+) {
+    for (bar, NoticeBar(base), children) in &bars {
+        let notice = match &state.refused {
+            Some(said) => Some((said.clone(), ALARM)),
+            None => base.clone(),
+        };
+        let (said, colour, display) = shown_notice(&notice);
+        // Compared before written: a `Text` written every frame is a
+        // re-layout every frame, and this runs on every frame the panel is
+        // open.
+        if let Ok((mut node, mut background)) = painted.get_mut(bar) {
+            if node.display != display {
+                node.display = display;
+            }
+            if background.0 != colour {
+                background.0 = colour;
+            }
+        }
+        for child in children.iter() {
+            if let Ok(mut text) = texts.get_mut(child) {
+                if text.0 != said {
+                    text.0 = said.clone();
+                }
+            }
+        }
+    }
 }
 
 /// The properties column's own title bar.
@@ -757,4 +864,57 @@ fn read_document(world: &mut World) -> Option<Document> {
         body,
         props,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A refusal is painted onto the bar that is ALREADY there.
+    ///
+    /// It must not arrive by rebuilding the panel: a rebuild reseeds every
+    /// box from the document, so it would answer a rejected `3.7` by
+    /// throwing it away — and the moment what you typed is most worth
+    /// keeping is the moment it was rejected. That is why `refused` is no
+    /// part of [`Shown`], and this is the mechanism that replaces it.
+    #[test]
+    fn a_refusal_is_painted_onto_the_live_bar() {
+        let mut app = App::new();
+        app.init_resource::<EditorState>()
+            .add_systems(Update, notice);
+        let bar = app
+            .world_mut()
+            .spawn((
+                NoticeBar(None),
+                Node::default(),
+                BackgroundColor(Color::NONE),
+            ))
+            .id();
+        let text = app
+            .world_mut()
+            .spawn((Text::new(String::new()), ChildOf(bar)))
+            .id();
+
+        app.update();
+        assert_eq!(
+            app.world().get::<Node>(bar).unwrap().display,
+            Display::None,
+            "nothing to say, no strip"
+        );
+
+        app.world_mut().resource_mut::<EditorState>().refused =
+            Some(".lod.max_level: '3.7' is not a u8".into());
+        app.update();
+        assert_eq!(
+            app.world().get::<Text>(text).unwrap().0,
+            ".lod.max_level: '3.7' is not a u8",
+            "which field, and what it would have to be"
+        );
+        assert_eq!(app.world().get::<Node>(bar).unwrap().display, Display::Flex);
+
+        // And it goes with the edit that answers it.
+        app.world_mut().resource_mut::<EditorState>().refused = None;
+        app.update();
+        assert_eq!(app.world().get::<Node>(bar).unwrap().display, Display::None);
+    }
 }

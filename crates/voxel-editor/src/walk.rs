@@ -91,6 +91,18 @@ pub enum Num {
 }
 
 impl Num {
+    /// What the field's type is CALLED, so a refusal can name it.
+    fn name(self) -> &'static str {
+        match self {
+            Num::F32 => "f32",
+            Num::F64 => "f64",
+            Num::U8 => "u8",
+            Num::U32 => "u32",
+            Num::I32 => "i32",
+            Num::Usize => "usize",
+        }
+    }
+
     fn of(value: &dyn PartialReflect) -> Option<(Self, f64)> {
         if let Some(v) = value.try_downcast_ref::<f32>() {
             return Some((Num::F32, *v as f64));
@@ -729,5 +741,40 @@ pub fn format_num(value: f64, num: Num) -> String {
         Num::F32 => format!("{}", value as f32),
         Num::F64 => format!("{value}"),
         _ => format!("{}", value as i64),
+    }
+}
+
+/// What was typed, at the field's own type — or why it is not one.
+///
+/// The inverse of [`format_num`], and EXACT where that is: each type
+/// parses as itself, so `3.7`, `-1` and `5e9` are refused by a `u32` field
+/// rather than rounded, negated or clamped into a number nobody typed. A
+/// drag rounds because a pointer has no exact value to mean; text does,
+/// and a tool that silently wrote a different one would be the thing
+/// getting the level wrong.
+///
+/// Widened to `f64` on the way out because that is what an [`Edit`] carries
+/// — the same value a drag produces, down the same write path.
+///
+/// [`Edit`]: crate::edit::Edit
+pub fn parse_num(text: &str, num: Num) -> Result<f64, String> {
+    let text = text.trim();
+    let refuse = || format!("'{text}' is not a {}", num.name());
+    // Infinity and NaN are parsed by Rust and held by no level: a field
+    // that means a distance or a scale has no use for either.
+    let finite = |v: f64| v.is_finite().then_some(v).ok_or_else(refuse);
+    match num {
+        Num::F32 => text
+            .parse::<f32>()
+            .map_err(|_| refuse())
+            .and_then(|v| finite(v as f64)),
+        Num::F64 => text.parse::<f64>().map_err(|_| refuse()).and_then(finite),
+        Num::U8 => text.parse::<u8>().map(f64::from).map_err(|_| refuse()),
+        Num::U32 => text.parse::<u32>().map(f64::from).map_err(|_| refuse()),
+        Num::I32 => text.parse::<i32>().map(f64::from).map_err(|_| refuse()),
+        Num::Usize => text
+            .parse::<usize>()
+            .map(|v| v as f64)
+            .map_err(|_| refuse()),
     }
 }

@@ -8,12 +8,14 @@
 //! observer per value TYPE rather than one per field, and a type this
 //! crate has never heard of is editable the moment it is annotated.
 //!
-//! What a value can be told to become: a number drags (at the speed its
-//! field declares, or one percent of itself), a bool toggles, a reference
-//! offers what the document actually contains, and an enum offers its own
-//! variants — switching one builds the new variant's fields from the
-//! registry. A colour opens into the numbers it is made of. Text and the
-//! structure of a document — adding, removing, reordering — are not
+//! What a value can be told to become: a number is TYPED in its box, or
+//! dragged by its label (at the speed its field declares, or one percent
+//! of itself) — dragging cannot reach 800 from a default of 0, and typing
+//! cannot be swept across a range, so a number needs both. A bool toggles,
+//! a reference offers what the document actually contains, and an enum
+//! offers its own variants — switching one builds the new variant's fields
+//! from the registry. A colour opens into the numbers it is made of. The
+//! structure of a document — adding, removing, reordering — is not
 //! editable yet, and the rows say so by being inert rather than by
 //! pretending.
 //!
@@ -27,7 +29,10 @@
 //! exclusive system, which is where [`edit::History`] takes its snapshot,
 //! so undo is a whole document rather than an inverse per widget. The
 //! panel refuses to respawn while a widget is being dragged, or the drag
-//! would despawn its own widget. And a document that does not compile is
+//! would despawn its own widget; a box being typed into survives the same
+//! hazard the other way, by focus being restored to the PATH after the
+//! rebuild rather than the panel being frozen — see `panel::refocus`. And
+//! a document that does not compile is
 //! shown with the compiler's complaint across the top, because the panel
 //! is now able to make one.
 
@@ -46,9 +51,10 @@ mod style;
 mod walk;
 
 pub use bevy_graph_view::{hover, GraphCamera, GraphViewport, SelectsNode, PLAIN_BORDER};
-pub use edit::{on_drag, on_drag_done, on_pick, on_typed, undo, History};
+pub use edit::{on_drag, on_drag_done, on_pick, on_press, on_typed, undo, History};
+pub use edit::{PressedOut, Typing};
 pub use panel::on_tab;
-pub use panel::{on_pinch, on_select, on_wheel, save};
+pub use panel::{notice, on_pinch, on_select, on_wheel, refocus, save};
 pub use row::{DragsNum, FieldPath, PicksOption, SelectsRoot, WritesNum};
 pub use style::PanelStyle;
 pub use walk::{rows, rows_at, rows_in, Num, Row, RowKind};
@@ -161,6 +167,17 @@ pub struct EditorState {
     pub undo: bool,
     /// Set to put back what [`EditorState::undo`] took away.
     pub redo: bool,
+    /// Why the last thing typed was NOT written, if it was refused.
+    ///
+    /// Cleared by the next edit that lands. A number that cannot be the
+    /// field's type is written nowhere, so without this the panel would
+    /// answer a typo by looking like nothing happened — which is
+    /// indistinguishable from a broken editor. What was typed stays in the
+    /// box to be corrected: a refusal changes no document, and `panel`
+    /// deliberately paints this without a rebuild, because a rebuild is
+    /// what would throw the text away. It is therefore NOT part of
+    /// `panel::Shown`.
+    pub refused: Option<String>,
     /// The document has been edited HERE since the last save was asked
     /// for. Optimistic — the host does the saving and says if it failed —
     /// but it is the difference between knowing your work is on disk and
@@ -184,6 +201,7 @@ impl Default for EditorState {
             save: false,
             undo: false,
             redo: false,
+            refused: None,
             edited: false,
             width: 620.0,
         }
@@ -274,6 +292,8 @@ impl Plugin for EditorPlugin {
             .insert_resource(EditorRoots(self.roots.clone()))
             .init_resource::<EditorState>()
             .init_resource::<edit::Pending>()
+            .init_resource::<edit::PressedOut>()
+            .init_resource::<edit::Typing>()
             .init_resource::<panel::Dragging>()
             .init_resource::<edit::History>()
             .init_resource::<PanelStyle>()
@@ -289,6 +309,7 @@ impl Plugin for EditorPlugin {
             .add_observer(edit::on_f32)
             .add_observer(edit::on_bool)
             .add_observer(edit::on_pick)
+            .add_observer(edit::on_press)
             .add_observer(edit::on_drag)
             .add_observer(edit::on_drag_done)
             .add_systems(
@@ -319,6 +340,12 @@ impl Plugin for EditorPlugin {
                         edit::apply,
                         edit::undo,
                         panel::rebuild,
+                        // Straight after the rebuild that despawned the
+                        // box the pointer is in — see `panel::refocus`.
+                        panel::refocus,
+                        // And after it, so a bar spawned this frame is
+                        // painted with the refusal in the same one.
+                        panel::notice,
                         // Wire a graph canvas to its camera the frame the
                         // rebuild spawns it — and bury both the frame the
                         // panel despawns, taking the canvas that stopped

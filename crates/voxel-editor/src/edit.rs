@@ -102,36 +102,197 @@ impl History {
     }
 }
 
-/// Commit what has been typed, on Enter.
+/// The boxes a commit can come out of, and how each one has to be written.
+///
+/// `WritesNum` is the whole difference between a name and a number: with
+/// it the text is parsed at the field's type, without it the text IS the
+/// value.
+type TypedBoxes<'w, 's> = Query<'w, 's, (&'static FieldPath, Option<&'static WritesNum>)>;
+
+/// A press landed somewhere that is not a text box at all.
+///
+/// Set by [`on_press`] and consumed by [`on_typed`] rather than acted on
+/// where it is seen: the widgets that take focus for themselves do it from
+/// their OWN press observers, and two observers on one event have no
+/// order, so a focus written here would race a checkbox's. By `Update`
+/// every observer has run and focus says who won.
+#[derive(Resource, Default)]
+pub struct PressedOut(pub bool);
+
+/// The reflect path of the box the keystrokes are going to, if any.
+///
+/// Focus is an ENTITY, and every widget the panel holds is respawned when
+/// the document changes — which a commit does, in the same frame as the
+/// click that caused it. The path survives that; the entity does not.
+/// Written here because this is where focus is already resolved to a box,
+/// and read by `panel::refocus`.
+#[derive(Resource, Default)]
+pub struct Typing(pub Option<String>);
+
+/// Everything a commit has to know about focus: where it is, whether a
+/// press took it nowhere, and which field it is in.
+#[derive(bevy::ecs::system::SystemParam)]
+pub struct Focused<'w> {
+    at: ResMut<'w, bevy::input_focus::InputFocus>,
+    pressed_out: ResMut<'w, PressedOut>,
+    path: ResMut<'w, Typing>,
+}
+
+/// A pointer press that is not in any text box.
+///
+/// Only three widgets in this stack take focus when pressed — the text
+/// input, the checkbox and the menu — so pressing a SLIDER, a scrub label,
+/// the tab strip or the resize grip left the box focused and what was
+/// typed in it uncommitted. That is a silent discard, which is the one
+/// thing a value box must not do.
+///
+/// The test is the press TARGET's own ancestry rather than a comparison
+/// with the focused box, so that pressing your own text to move the caret
+/// is not "leaving", and so that a press on some OTHER box is left for
+/// that box's observer to answer — whichever order the two run in.
+///
+/// Where the press LANDED, not where the bubble has got to: a pointer
+/// event runs this observer once per ancestor, and every ancestor of a
+/// text box is something that is not one.
+///
+/// The gap this leaves, stated rather than hidden: it is an observer on a
+/// picking event, so a press that HITS nothing — the sky, terrain no
+/// backend picks — is no event and ends no typing. Every node of the panel
+/// is picked, so the gap is outside it, and what is in the box is still
+/// committed by Enter or by the next thing that takes focus.
+pub fn on_press(
+    press: On<Pointer<Press>>,
+    focus: Res<bevy::input_focus::InputFocus>,
+    editable: Query<(), With<EditableText>>,
+    parents: Query<&ChildOf>,
+    mut pressed_out: ResMut<PressedOut>,
+) {
+    // Nothing is being typed into, so nothing can be lost.
+    if !focus.get().is_some_and(|at| editable.contains(at)) {
+        return;
+    }
+    let mut at = press.original_event_target();
+    loop {
+        if editable.contains(at) {
+            return;
+        }
+        match parents.get(at) {
+            Ok(parent) => at = parent.parent(),
+            Err(_) => break,
+        }
+    }
+    pressed_out.0 = true;
+}
+
+/// Commit what has been typed, on Enter or on leaving the box.
 ///
 /// Not per keystroke. A name is a REFERENCE — the only way anything refers
 /// to a node — so a half-typed one refers to nothing, and every
 /// intermediate would be a document that does not compile and an entry in
-/// the undo stack.
+/// the undo stack. A number is the same bargain for a different reason:
+/// each keystroke of `800` is a value, and a field that restreams the
+/// world would rebuild it three times on the way.
+///
+/// LEAVING the box commits too, and leaving means either: focus moved to
+/// another widget, or a press landed on a panel widget that takes no focus
+/// at all — a slider, a scrub label, the tab strip, the grip. The second
+/// is [`on_press`]'s doing, and its limits are stated there. A designer
+/// who types a number and clicks the next thing has said what they meant,
+/// and the alternative is work that disappears without a word.
 pub fn on_typed(
     keys: Res<ButtonInput<KeyCode>>,
-    focus: Res<bevy::input_focus::InputFocus>,
+    mut focus: Focused,
     typed: Query<(&EditableText, &ChildOf)>,
-    fields: Query<&FieldPath>,
-    state: Res<EditorState>,
+    fields: TypedBoxes,
+    mut state: ResMut<EditorState>,
     mut pending: ResMut<Pending>,
+    // Which box the last commit would come from. Focus is where the
+    // keystrokes go; this is what they were going to a frame ago, which is
+    // the only way a system can see that focus LEFT somewhere.
+    mut typing: Local<Option<Entity>>,
 ) {
+    let at = focus.at.get();
+    // Read once and cleared once: the flag is a report of what happened
+    // between two runs of this system, not state anything else reads.
+    let pressed_out = std::mem::take(&mut focus.pressed_out.bypass_change_detection().0);
+    if *typing != at {
+        if let Some(left) = std::mem::replace(&mut *typing, at) {
+            commit(left, &typed, &fields, &mut state, &mut pending);
+        }
+    } else if pressed_out {
+        // Focus did not move, because nothing under the pointer wanted it.
+        // Dropping it here, in `Update`, is what turns that press into the
+        // same blur any other widget would have caused.
+        if let Some(left) = typing.take() {
+            commit(left, &typed, &fields, &mut state, &mut pending);
+            focus.at.clear();
+        }
+    }
+    let wanted = typing.and_then(|at| box_path(at, &typed, &fields));
+    if focus.path.0 != wanted {
+        focus.path.0 = wanted;
+    }
     if !keys.just_pressed(KeyCode::Enter) {
         return;
     }
-    let Some(at) = focus.get() else { return };
+    let Some(at) = *typing else { return };
+    commit(at, &typed, &fields, &mut state, &mut pending);
+    // Committed here, so the blur that follows must not queue it again.
+    // A second identical commit no longer costs a step of undo — `apply`
+    // drops an edit that changes nothing before it takes the document —
+    // but it is still a queue entry and a walk of the path for nothing.
+    *typing = None;
+}
+
+/// The field the box at `at` edits, if `at` is in a box at all.
+fn box_path(
+    at: Entity,
+    typed: &Query<(&EditableText, &ChildOf)>,
+    fields: &TypedBoxes,
+) -> Option<String> {
+    let (_, parent) = typed.get(at).ok()?;
+    let (FieldPath(path), _) = fields.get(parent.parent()).ok()?;
+    Some(path.clone())
+}
+
+/// Queue what is in the box at `at`, at the type of the field it edits.
+fn commit(
+    at: Entity,
+    typed: &Query<(&EditableText, &ChildOf)>,
+    fields: &TypedBoxes,
+    state: &mut EditorState,
+    pending: &mut Pending,
+) {
     let Ok((text, parent)) = typed.get(at) else {
         return;
     };
     // The path is on the CONTAINER: the editable part is a child, which is
     // where focus lands.
-    let Ok(FieldPath(path)) = fields.get(parent.parent()) else {
+    let Ok((FieldPath(path), num)) = fields.get(parent.parent()) else {
         return;
     };
+    let text = text.value().to_string();
+    let value = match num {
+        // The SAME value a drag produces, so it goes down the same `apply`,
+        // the same snapshot and the same rebuild decision. What text adds
+        // is exactness: `3.7` is not a `u32`, so nothing is written and the
+        // panel says why — see [`EditorState::refused`].
+        Some(WritesNum(num)) => match crate::walk::parse_num(&text, *num) {
+            Ok(v) => Value::Num(v, *num),
+            Err(said) => {
+                state.refused = Some(format!("{path}: {said}"));
+                return;
+            }
+        },
+        None => Value::Text(text),
+    };
+    if state.refused.is_some() {
+        state.refused = None;
+    }
     pending.0.push(Edit {
         root: state.root,
         path: path.clone(),
-        value: Value::Text(text.value().to_string()),
+        value,
     });
 }
 
@@ -398,6 +559,37 @@ pub fn apply(world: &mut World) {
         let Some(entity) = world.resource_entities().get(component_id) else {
             continue;
         };
+        // Would this edit change anything? Asked BEFORE the document is
+        // taken mutably, because going through `Mut` marks it changed
+        // whether or not a byte differs — and every consumer of that tick
+        // then pays: `apply_level_change` re-diffs and rebuilds, and
+        // `panel::rebuild` respawns every row and every widget.
+        //
+        // That respawn is what makes this a correctness fix rather than an
+        // economy. A value box commits when it loses focus, so clicking
+        // from one box into the next commits the first with the value it
+        // was seeded with — and the panel would rebuild underneath the
+        // click, despawning the box just clicked into and discarding the
+        // caret the click had put there.
+        //
+        // Read with `reflect_path` — bevy's `GetPath`, the same resolver
+        // the panel reads rows with, and since `path::parse` learned that
+        // a dotted digit is an index it answers the same paths
+        // `resolve_mut` writes.
+        //
+        // A variant is not pre-checked: building one needs the slot, which
+        // needs the `Mut`. It arrives from a menu pick, which is deliberate
+        // rather than echoed, and the guard further down still catches it.
+        if !matches!(edit.value, Value::Variant(_)) {
+            let wanted = typed(&edit.value);
+            let unchanged = reflect
+                .reflect(world.entity(entity))
+                .and_then(|d| d.reflect_path(edit.path.as_str()).ok())
+                .is_some_and(|at| at.reflect_partial_eq(&*wanted) == Some(true));
+            if unchanged {
+                continue;
+            }
+        }
         // A resource is an entity in 0.19, and going through `Mut` is what
         // marks it changed — which is the whole mechanism: `LevelDef`
         // changing is what makes `apply_level_change` rebuild the world.
@@ -415,12 +607,17 @@ pub fn apply(world: &mut World) {
         // anything refers to a node, so writing one without its references
         // is the same edit as deleting the node — see `graph::rename`.
         if let Value::Text(to) = &edit.value {
-            if let Some(renamed) = rename_node(&mut *document, &edit.path, to) {
-                if renamed > 0 {
-                    info!("editor: renamed, and {renamed} wires followed");
+            match rename_node(&mut *document, &edit.path, to) {
+                // Some other string: fall through to the field write.
+                Renamed::NotAName => {}
+                Renamed::Unchanged => continue,
+                Renamed::Wires(wires) => {
+                    if wires > 0 {
+                        info!("editor: renamed, and {wires} wires followed");
+                    }
+                    landed = true;
+                    continue;
                 }
-                landed = true;
-                continue;
             }
         }
         let slot = match path::resolve_mut(document.as_partial_reflect_mut(), &edit.path) {
@@ -462,38 +659,70 @@ pub fn apply(world: &mut World) {
             warn!("editor: '{}' would not take that value — {e}", edit.path);
         }
     }
-    for step in history {
-        world.resource_mut::<History>().remember(step);
-    }
+    // A batch that changed nothing is not a step. `remember` also clears
+    // the redo stack, so a widget echoing back the value it was given —
+    // which a box committed on Enter AND on the way out does — would cost
+    // an undo that does nothing and a future that cannot be redone.
     if landed {
-        world.resource_mut::<EditorState>().edited = true;
+        for step in history {
+            world.resource_mut::<History>().remember(step);
+        }
+        let mut state = world.resource_mut::<EditorState>();
+        state.edited = true;
+        // Anything that landed has answered the question the refusal was
+        // asking, so the notice goes with it.
+        state.refused = None;
     }
 }
 
-/// If `path` names a NODE's name, rename it and every wire that said it.
+/// What [`rename_node`] found at the path it was given.
 ///
-/// `None` when the path is some other string — a class, a marker kind —
-/// which is an ordinary field write.
-fn rename_node(document: &mut dyn Reflect, path: &str, to: &str) -> Option<usize> {
+/// Three outcomes, not a count. `Wires(0)` — a real rename that no wire
+/// happened to say — and `Unchanged` are the same number and must not be
+/// the same answer: the first CHANGED the document and owes a `History`
+/// snapshot, the second changed nothing and must not take one. Taking one
+/// is what clears the redo stack, and a blur commits, so `Some(0)` for
+/// both meant that focusing a name box and clicking away threw the future
+/// you were about to redo on the floor.
+enum Renamed {
+    /// The path is some other string — a class, a marker kind. An ordinary
+    /// field write, and the caller falls through to one.
+    NotAName,
+    /// The name is already what was typed.
+    Unchanged,
+    /// Renamed, and this many wires followed it.
+    Wires(usize),
+}
+
+/// If `path` names a NODE's name, rename it and every wire that said it.
+fn rename_node(document: &mut dyn Reflect, path: &str, to: &str) -> Renamed {
     // `.nodes[3].name.0`, and nothing else. A scope's children live at
     // `.nodes[3].node.nodes[1].name.0`, which ends the same way.
     let suffix = ".name.0";
     if !path.starts_with(".nodes[") || !path.ends_with(suffix) {
-        return None;
+        return Renamed::NotAName;
     }
-    let level = document
+    let Some(level) = document
         .as_any_mut()
-        .downcast_mut::<voxel_engine::LevelDef>()?;
+        .downcast_mut::<voxel_engine::LevelDef>()
+    else {
+        return Renamed::NotAName;
+    };
     let from = level
         .as_reflect()
         .reflect_path(path)
-        .ok()?
-        .try_downcast_ref::<String>()?
-        .clone();
+        .ok()
+        .and_then(|n| n.try_downcast_ref::<String>())
+        .cloned();
+    // A path of the right SHAPE that resolves to no name is not a rename
+    // this can do; the ordinary write reports what is wrong with it.
+    let Some(from) = from else {
+        return Renamed::NotAName;
+    };
     if from == to {
-        return Some(0);
+        return Renamed::Unchanged;
     }
-    Some(voxel_engine::graph::rename(&mut level.nodes, &from, to))
+    Renamed::Wires(voxel_engine::graph::rename(&mut level.nodes, &from, to))
 }
 
 /// The value at the field's own type.

@@ -8,11 +8,12 @@
 //!
 //! Every row carries [`FieldPath`], which is what makes editing one
 //! observer rather than one per field. What a row can be told to become
-//! is the widget's business: a slider where the field declares bounds, a
-//! drag where it does not, a menu of the level's own answers for a
-//! reference, a menu of an enum's own variants, a text field for a name.
-//! A kind with no widget renders as a greyed line saying so — a row that
-//! silently vanished would read as a field that does not exist.
+//! is the widget's business: a box to type into for a name and for a
+//! number alike, a slider beside it where the field declares bounds, a
+//! scrub on the LABEL where it does not, a menu of the level's own answers
+//! for a reference, a menu of an enum's own variants. A kind with no
+//! widget renders as a greyed line saying so — a row that silently
+//! vanished would read as a field that does not exist.
 
 use bevy::feathers::constants::{fonts, size};
 use bevy::feathers::controls::{
@@ -32,6 +33,24 @@ use bevy::ui_widgets::{SliderPrecision, SliderStep};
 
 use crate::style::PanelStyle;
 use crate::walk::{format_num, Num, Row, RowKind};
+
+/// The number a row's LABEL scrubs, if it scrubs one.
+///
+/// The label rather than the value cell, because the value cell is now the
+/// box you type in and a pointer cannot mean both at once: dragging inside
+/// a text field selects text. Only numbers with no declared bounds — a
+/// bounded one has a slider, which is what a sweep is for.
+fn scrub(row: &Row) -> Option<(f32, f32, Num)> {
+    match row.kind {
+        RowKind::Number {
+            value,
+            num,
+            range: None,
+            speed,
+        } => Some((value as f32, speed, num)),
+        _ => None,
+    }
+}
 
 /// The reflect path this row edits, from its document's root.
 ///
@@ -96,9 +115,7 @@ pub struct PicksOption {
 
 pub fn scene(row: &Row, style: &PanelStyle) -> impl Scene {
     let path = row.path.clone();
-    let indent = px(style.indent * row.depth as f32);
-    let label = row.label.clone();
-    let (gap, label_w) = (px(style.gap), px(style.label));
+    let gap = px(style.gap);
 
     bsn! {
         FieldPath({path})
@@ -124,35 +141,72 @@ pub fn scene(row: &Row, style: &PanelStyle) -> impl Scene {
                     flex_shrink: 0.0,
                 }
                 Children [
-                    // The NAME column holds the nesting: the indent and the
-                    // disclosure are inside it, and it is a fixed width. So
-                    // the value column starts at the same x on every row
-                    // however deep it sits — an inspector reads down its
-                    // values, and a value column that stepped right with
-                    // depth cannot be read down at all.
-                    (
-                        Node {
-                            width: {label_w},
-                            height: {size::ROW_HEIGHT},
-                            flex_shrink: 0.0,
-                            display: Display::Flex,
-                            flex_direction: FlexDirection::Row,
-                            align_items: AlignItems::Center,
-                            column_gap: {gap},
-                            padding: UiRect::left(indent),
-                            overflow: Overflow::clip(),
-                        }
-                        Children [
-                            {gutter(row, style)},
-                            {vec![text(label, style.font)]},
-                        ]
-                    ),
+                    {label_column(row, style)},
                     {value_widget(row, style)},
                 ]
             ),
             {doc_line(row.docs, style.indent * row.depth as f32, style)},
         ]
     }
+}
+
+/// A box the value is TYPED into — the one answer to typed input, for a
+/// name and a number alike.
+///
+/// Seeded with what the document holds, and read back when the edit is
+/// COMMITTED — never per keystroke: a name is a reference and half a name
+/// refers to nothing, and half a number is a value the world would be
+/// rebuilt for.
+///
+/// `num` is the whole difference between the two: it is what makes
+/// `edit::on_typed` parse the text at the field's type instead of writing
+/// the text itself, so a box without one can only ever hold a string.
+fn typed_box(
+    value: String,
+    path: String,
+    num: Option<Num>,
+    width: f32,
+    style: &PanelStyle,
+) -> Box<dyn SceneList> {
+    let (width, height) = (px(width), px(style.tab));
+    match num {
+        Some(num) => Box::new(bsn_list!(
+            @FeathersTextInputContainer
+            Node { width: {width}, flex_shrink: 0.0, height: {height} }
+            FieldPath({path}) WritesNum({num})
+            Children [( @FeathersTextInput EditableText::new(value) )]
+        )),
+        None => Box::new(bsn_list!(
+            @FeathersTextInputContainer
+            Node { width: {width}, flex_shrink: 0.0, height: {height} }
+            FieldPath({path})
+            Children [( @FeathersTextInput EditableText::new(value) )]
+        )),
+    }
+}
+
+/// How a bounded number splits its control column: the slider's track,
+/// and the box beside it if there is room for one.
+///
+/// Both widgets have a floor. Below [`PanelStyle::track_min`] a slider is
+/// not something a pointer can sweep, and below
+/// [`PanelStyle::number_min`] the box shows a prefix of its own number.
+/// The graph inspector's column is a third of a 300px panel, which does
+/// not hold `number` and a usable track at once — an unclamped
+/// `value - number - gap` left it 39px there, and any narrower column
+/// asks for a NEGATIVE width, which no layout can give back.
+///
+/// The box is what goes when only one fits: a Feathers slider prints the
+/// value on its own track, so the row keeps its number either way and
+/// loses only exact entry.
+fn number_columns(style: &PanelStyle) -> (f32, Option<f32>) {
+    let value = style.value.max(0.0);
+    let room = value - style.track_min - style.gap;
+    if room < style.number_min {
+        return (value, None);
+    }
+    let box_w = style.number.min(room);
+    (value - box_w - style.gap, Some(box_w))
 }
 
 /// A dropdown of what a field may hold: the level's own answers, or an
@@ -188,6 +242,73 @@ fn menu(
             (@FeathersMenuPopup Children [ {items} ]),
         ]
     ))
+}
+
+/// The name column, and on a plain number the surface that SCRUBS it.
+///
+/// The drag components go on a wrapper rather than on the cell, so the
+/// cell stays written once: a pointer event bubbles, so a drag anywhere in
+/// the name reaches the wrapper whichever of the two it started on.
+fn label_column(row: &Row, style: &PanelStyle) -> Box<dyn SceneList> {
+    let Some((from, speed, writes)) = scrub(row) else {
+        return Box::new(vec![label_cell(row, style)]);
+    };
+    let p = row.path.clone();
+    let inner = vec![label_cell(row, style)];
+    // A field that restreams the world waits for the pointer to be let go
+    // — see `CommitOnRelease`.
+    if row.rebuilds {
+        Box::new(bsn_list!(
+            Node {
+                height: {size::ROW_HEIGHT},
+                flex_shrink: 0.0,
+                display: Display::Flex,
+                align_items: AlignItems::Center,
+            }
+            EntityCursor::System(bevy::window::SystemCursorIcon::EwResize)
+            DragsNum { from: {from}, speed: {speed} } WritesNum({writes}) FieldPath({p}) CommitOnRelease
+            Children [ {inner} ]
+        ))
+    } else {
+        Box::new(bsn_list!(
+            Node {
+                height: {size::ROW_HEIGHT},
+                flex_shrink: 0.0,
+                display: Display::Flex,
+                align_items: AlignItems::Center,
+            }
+            EntityCursor::System(bevy::window::SystemCursorIcon::EwResize)
+            DragsNum { from: {from}, speed: {speed} } WritesNum({writes}) FieldPath({p})
+            Children [ {inner} ]
+        ))
+    }
+}
+
+/// The name itself: the indent and the disclosure inside a FIXED width, so
+/// the value column starts at the same x on every row however deep it sits
+/// — an inspector reads down its values, and a value column that stepped
+/// right with depth cannot be read down at all.
+fn label_cell(row: &Row, style: &PanelStyle) -> impl Scene {
+    let indent = px(style.indent * row.depth as f32);
+    let (gap, label_w) = (px(style.gap), px(style.label));
+    let label = row.label.clone();
+    bsn! {
+        Node {
+            width: {label_w},
+            height: {size::ROW_HEIGHT},
+            flex_shrink: 0.0,
+            display: Display::Flex,
+            flex_direction: FlexDirection::Row,
+            align_items: AlignItems::Center,
+            column_gap: {gap},
+            padding: UiRect::left(indent),
+            overflow: Overflow::clip(),
+        }
+        Children [
+            {gutter(row, style)},
+            {vec![text(label, style.font)]},
+        ]
+    }
 }
 
 /// The disclosure column: a chevron for a container, empty for a leaf.
@@ -337,80 +458,77 @@ fn value_widget(row: &Row, style: &PanelStyle) -> Box<dyn SceneList> {
             menu(current, options, &row.path, None, true, style)
         }
 
+        // Typed, always: a drag moves by a percent of the value it starts
+        // from, so a field left at its default of 0 is hundreds of
+        // millions of pixels away from 800 and every node created from
+        // scratch would be unreachable. The label scrubs it — see
+        // `label_column` — and where the field declares bounds a slider
+        // sweeps them.
+        //
+        // Not `FeathersNumberInput`, which displayed `14` as `4` and `2.5`
+        // as `5` — it keeps its text in a child it manages, and only the
+        // last character survived. A tool opened to check a number must
+        // not be the thing that gets it wrong.
         RowKind::Number {
-            value,
-            num,
-            range,
-            speed,
-        } => match range {
-            Some(r) => {
-                let (v, lo, hi) = (*value as f32, r.0, r.1);
-                let writes = *num;
-                // `SliderPrecision` and `SliderStep` are NOT part of the
-                // Feathers slider scene, and `update_slider_pos` queries
-                // for the former — without it the fill never moves and the
-                // label keeps the literal placeholder the scene ships,
-                // which is the string "10.0". Four different fields all
-                // reading 10.0 is what that looks like.
-                let (step, digits) = match writes {
-                    Num::F32 | Num::F64 => ((hi - lo) / 100.0, 3),
-                    _ => (1.0, 0),
-                };
-                if hold {
-                    Box::new(bsn_list!(
-                        @FeathersSlider { @value: {v}, @min: {lo}, @max: {hi} }
-                        Node { width: px(style.value), flex_shrink: 0.0 }
-                        SliderStep({step}) SliderPrecision({digits})
-                        WritesNum({writes}) FieldPath({p}) CommitOnRelease
-                    ))
-                } else {
-                    Box::new(bsn_list!(
-                        @FeathersSlider { @value: {v}, @min: {lo}, @max: {hi} }
-                        Node { width: px(style.value), flex_shrink: 0.0 }
-                        SliderStep({step}) SliderPrecision({digits})
-                        WritesNum({writes}) FieldPath({p})
-                    ))
+            value, num, range, ..
+        } => {
+            let shown = format_num(*value, *num);
+            let writes = *num;
+            let Some(r) = range else {
+                return typed_box(shown, p, Some(writes), style.value, style);
+            };
+            let (v, lo, hi) = (*value as f32, r.0, r.1);
+            // `SliderPrecision` and `SliderStep` are NOT part of the
+            // Feathers slider scene, and `update_slider_pos` queries for
+            // the former — without it the fill never moves and the label
+            // keeps the literal placeholder the scene ships, which is the
+            // string "10.0". Four different fields all reading 10.0 is
+            // what that looks like.
+            let (step, digits) = match writes {
+                Num::F32 | Num::F64 => ((hi - lo) / 100.0, 3),
+                _ => (1.0, 0),
+            };
+            // A slider quantises to its hundred steps, so a bounded field
+            // needs the box too: 0.437 is not reachable by sweeping. The
+            // column is not always wide enough for both, and where it is
+            // not the BOX goes: a Feathers slider prints its own value, so
+            // dropping the slider would cost the row its number as well as
+            // its sweep.
+            let (track, box_w) = number_columns(style);
+            let (gap, boxed) = match box_w {
+                Some(box_w) => (
+                    px(style.gap),
+                    typed_box(shown, p.clone(), Some(writes), box_w, style),
+                ),
+                None => (px(0.0), Box::new(bsn_list!()) as Box<dyn SceneList>),
+            };
+            let slider: Box<dyn SceneList> = if hold {
+                Box::new(bsn_list!(
+                    @FeathersSlider { @value: {v}, @min: {lo}, @max: {hi} }
+                    Node { width: px(track), flex_shrink: 0.0 }
+                    SliderStep({step}) SliderPrecision({digits})
+                    WritesNum({writes}) FieldPath({p}) CommitOnRelease
+                ))
+            } else {
+                Box::new(bsn_list!(
+                    @FeathersSlider { @value: {v}, @min: {lo}, @max: {hi} }
+                    Node { width: px(track), flex_shrink: 0.0 }
+                    SliderStep({step}) SliderPrecision({digits})
+                    WritesNum({writes}) FieldPath({p})
+                ))
+            };
+            Box::new(bsn_list!(
+                Node {
+                    width: {px(style.value)},
+                    flex_shrink: 0.0,
+                    display: Display::Flex,
+                    flex_direction: FlexDirection::Row,
+                    align_items: AlignItems::Center,
+                    column_gap: {gap},
                 }
-            }
-            // No bounds to slide between, so it DRAGS: press and move
-            // sideways. The number is still shown as the level writes it.
-            //
-            // Not `FeathersNumberInput`, which displayed `14` as `4` and
-            // `2.5` as `5` — it keeps its text in a child it manages, and
-            // only the last character survived. A tool opened to check a
-            // number must not be the thing that gets it wrong.
-            None => {
-                let shown = format_num(*value, *num);
-                let (writes, from, speed) = (*num, *value as f32, *speed);
-                if hold {
-                    Box::new(bsn_list!(
-                        Node {
-                            width: {px(style.value)},
-                            flex_shrink: 0.0,
-                            justify_content: bevy::ui::JustifyContent::FlexEnd,
-                            align_items: AlignItems::Center,
-                            overflow: Overflow::clip(),
-                        }
-                        EntityCursor::System(bevy::window::SystemCursorIcon::EwResize)
-                        DragsNum { from: {from}, speed: {speed} } WritesNum({writes}) FieldPath({p}) CommitOnRelease
-                        Children [ {vec![text(shown, style.font)]} ]
-                    ))
-                } else {
-                    Box::new(bsn_list!(
-                        Node {
-                            width: {px(style.value)},
-                            flex_shrink: 0.0,
-                            justify_content: bevy::ui::JustifyContent::FlexEnd,
-                            align_items: AlignItems::Center,
-                            overflow: Overflow::clip(),
-                        }
-                        EntityCursor::System(bevy::window::SystemCursorIcon::EwResize)
-                        DragsNum { from: {from}, speed: {speed} } WritesNum({writes}) FieldPath({p})
-                        Children [ {vec![text(shown, style.font)]} ]
-                    ))
-                }
-            }
-        },
+                Children [ {slider}, {boxed} ]
+            ))
+        }
 
         RowKind::Bool(v) => match (*v, hold) {
             (true, true) => {
@@ -421,22 +539,7 @@ fn value_widget(row: &Row, style: &PanelStyle) -> Box<dyn SceneList> {
             (false, false) => Box::new(bsn_list!(@FeathersCheckbox FieldPath({p}))),
         },
 
-        RowKind::Text(s) => {
-            let value = s.clone();
-            Box::new(bsn_list!(
-                @FeathersTextInputContainer
-                Node { width: {px(style.value)}, flex_shrink: 0.0, height: px(style.tab) }
-                FieldPath({p})
-                Children [(
-                    @FeathersTextInput
-                    // Seeded with what the document holds, and read back
-                    // when the edit is COMMITTED — never per keystroke: a
-                    // name is a reference, and half a name refers to
-                    // nothing.
-                    EditableText::new(value)
-                )]
-            ))
-        }
+        RowKind::Text(s) => typed_box(s.clone(), p, None, style.value, style),
 
         RowKind::Color { rgb, .. } => {
             let value = Color::linear_rgb(rgb[0], rgb[1], rgb[2]);
@@ -517,5 +620,50 @@ pub fn tab(index: usize, label: &str, active: bool, style: &PanelStyle) -> impl 
         }
         SelectsRoot({index})
         Node { flex_grow: 1.0, min_width: px(0), height: px(style.tab) }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The control column is split between a track and a box, and neither
+    /// may be squeezed below the width that makes it a widget at all —
+    /// least of all below ZERO, which is not a width.
+    ///
+    /// The graph inspector's column is the case that made this: a third of
+    /// a 300px panel, which an unclamped `value - number - gap` left a
+    /// 39px track.
+    #[test]
+    fn a_narrow_control_column_never_makes_a_useless_widget() {
+        let default = PanelStyle::default();
+        let split = |value: f32| {
+            number_columns(&PanelStyle {
+                value,
+                ..default.clone()
+            })
+        };
+
+        // Wide enough for both: the box is the width it asks for.
+        let (track, boxed) = split(default.value);
+        assert_eq!(boxed, Some(default.number));
+        assert_eq!(track + default.number + default.gap, default.value);
+
+        // The graph inspector, where the box is squeezed rather than the
+        // track being made unusable.
+        let inspector = default.inspector * 0.35;
+        let (track, boxed) = split(inspector);
+        let boxed = boxed.expect("a 105px column still holds both");
+        assert!(track >= default.track_min, "a track that can be swept");
+        assert!(boxed >= default.number_min, "beside a readable number");
+        assert_eq!(track + boxed + default.gap, inspector);
+
+        // Narrower than the two floors together: the box goes and the
+        // slider — which prints its own value — takes the column.
+        for value in [90.0, 40.0, 0.0] {
+            let (track, boxed) = split(value);
+            assert_eq!(boxed, None, "no room for a box at {value}px");
+            assert_eq!(track, value);
+        }
     }
 }
