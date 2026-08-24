@@ -29,7 +29,28 @@ pub fn parse(path: &str) -> Result<Vec<Step<'_>>, String> {
                 let end = rest[1..]
                     .find(['.', '[', '{'])
                     .map_or(rest.len(), |i| i + 1);
-                (Step::Field(&rest[1..end]), &rest[end..])
+                let name = &rest[1..end];
+                // `.0` is an INDEX, because that is what bevy's `GetPath`
+                // makes of it (`Ident::field` parses the ident as a number
+                // first) — and a path in this crate is written by one
+                // resolver and read by the other: `panel.rs` reaches the
+                // selected node and its `.name.0` through `reflect_path`,
+                // which IS `GetPath`. Two resolvers that disagree about
+                // `.0` land an edit somewhere other than the row it came
+                // from.
+                //
+                // Not a corner: `walk` appends `.0` for every newtype it
+                // collapses, so this is the shape of every wire path —
+                // `Wires` around its map, `Wire::One` around its name — and
+                // nothing could write a wire before this.
+                //
+                // Rust has no struct field named `0`, so no named field can
+                // be shadowed. The parse-failure fallback keeps a
+                // non-numeric name working; it does NOT rescue a dynamic
+                // map key that happens to be numeric, which would parse and
+                // be read as an index. No walk emits one.
+                let step = name.parse().map_or(Step::Field(name), Step::Index);
+                (step, &rest[end..])
             }
             b'[' => {
                 let end = rest.find(']').ok_or_else(|| format!("'{path}': no ]"))?;
@@ -110,7 +131,12 @@ mod tests {
         ops: Vec<Op>,
         prefabs: HashMap<String, f32>,
         pair: (i32, i32),
+        seed: Seed,
     }
+
+    /// A newtype, which the walk collapses and addresses as `.seed.0`.
+    #[derive(Reflect, Debug, PartialEq)]
+    struct Seed(u32);
 
     #[derive(Reflect, Debug, PartialEq)]
     struct Lod {
@@ -133,10 +159,11 @@ mod tests {
             ops: vec![Op::Fbm { amp: 800.0 }, Op::Solid],
             prefabs: HashMap::from_iter([("hut".to_string(), 4.0)]),
             pair: (1, 2),
+            seed: Seed(7),
         }
     }
 
-    fn set(d: &mut Doc, path: &str, v: impl PartialReflect) -> Result<(), String> {
+    fn set(d: &mut dyn PartialReflect, path: &str, v: impl PartialReflect) -> Result<(), String> {
         let slot = resolve_mut(d, path)?;
         slot.try_apply(&v).map_err(|e| e.to_string())
     }
@@ -198,5 +225,96 @@ mod tests {
         let mut d = doc();
         assert!(set(&mut d, ".lod.split_k", 4.0f32).is_err());
         assert_eq!(d.lod.split_k, 2.0);
+    }
+
+    /// `.0` names the field a newtype wraps, the way `GetPath` reads it —
+    /// and the way the walk WRITES it, since it collapses a newtype and
+    /// keeps the `.0`.
+    #[test]
+    fn a_dotted_digit_is_an_index_not_a_field() {
+        assert_eq!(
+            parse(".seed.0").unwrap(),
+            [Step::Field("seed"), Step::Index(0)]
+        );
+
+        let mut d = doc();
+        set(&mut d, ".seed.0", 9u32).unwrap();
+        assert_eq!(d.seed, Seed(9));
+    }
+
+    /// Every wire path in a level is this shape: a tuple struct around a
+    /// map whose values are an enum. Against the engine's own types rather
+    /// than a stand-in, because what has to agree here is this resolver and
+    /// the schema a level is actually written in.
+    #[test]
+    fn a_wire_resolves_through_the_tuple_struct_the_map_and_the_variant() {
+        use std::collections::BTreeMap;
+        use voxel_engine::graph::{Wire, Wires};
+
+        let mut wires = Wires(BTreeMap::from_iter([(
+            "height".to_string(),
+            Wire::One("sea".to_string()),
+        )]));
+        set(&mut wires, ".0{height}.0", "ocean".to_string()).unwrap();
+        assert_eq!(
+            wires.get("height").map(Wire::sources),
+            Some(&["ocean".to_string()][..])
+        );
+    }
+
+    /// A path the WALK emits must be a path this resolves.
+    ///
+    /// The two halves of one round trip: rows are built from a real level
+    /// and one of them is written back through its own path. A fixture
+    /// could not check this — it would only prove the walk and the resolver
+    /// agree about a schema neither the level nor anything else uses.
+    #[test]
+    fn a_path_the_walk_emitted_for_a_real_level_writes() {
+        use crate::walk::{self, RowKind};
+        use bevy::platform::collections::HashSet;
+        use voxel_engine::graph::registry;
+        use voxel_engine::LevelDef;
+
+        let file = concat!(env!("CARGO_MANIFEST_DIR"), "/../../levels/planet.json");
+        let mut level =
+            LevelDef::from_path_known(std::path::Path::new(file), &registry::engine_kinds())
+                .unwrap();
+        let at = level
+            .nodes
+            .iter()
+            .position(|n| !n.wires.is_empty())
+            .expect("planet wires its nodes");
+
+        // Open the document along the way to that node: the walk descends
+        // only into what is expanded, so each pass reveals what the last
+        // one opened.
+        let under = format!(".nodes[{at}]");
+        let mut expanded = HashSet::default();
+        let mut rows = Vec::new();
+        for _ in 0..6 {
+            rows = walk::rows(level.as_partial_reflect(), &expanded);
+            for row in &rows {
+                if row.path == ".nodes" || row.path.starts_with(&under) {
+                    expanded.insert(row.path.clone());
+                }
+            }
+        }
+
+        let wire = rows
+            .iter()
+            .find(|r| {
+                r.path.starts_with(&format!("{under}.wires"))
+                    && matches!(r.kind, RowKind::Choice { .. } | RowKind::Text(_))
+            })
+            .expect("the walk reaches a wire's source");
+        set(&mut level, &wire.path, "ocean".to_string()).unwrap();
+        assert!(
+            level.nodes[at]
+                .wires
+                .iter()
+                .any(|(_, w)| w.sources().iter().any(|s| s == "ocean")),
+            "'{}' resolved but wrote nothing",
+            wire.path
+        );
     }
 }

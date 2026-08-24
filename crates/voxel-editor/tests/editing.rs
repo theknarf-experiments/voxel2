@@ -206,19 +206,33 @@ fn picking_a_reference_writes_it() {
         "a numeric reference lands as a number"
     );
 
-    // A textual one: the node a port is wired to.
-    let (at, port) = app
+    // A textual one: the node a port is wired to. The name it is wired to
+    // NOW comes with it, because picking that same name back would assert
+    // something a write that never landed also satisfies — which is how
+    // `.0` failing to resolve on the write side went unnoticed.
+    let (at, port, was) = app
         .world()
         .resource::<LevelDef>()
         .nodes
         .iter()
         .enumerate()
-        .find_map(|(i, n)| Some((i, n.wires.iter().next()?.0.clone())))
+        .find_map(|(i, n)| match n.wires.iter().next()? {
+            // One source: a `Wire::Many` is a list, and the path its
+            // entries carry ends in an index this would have to guess.
+            (port, voxel_engine::graph::Wire::One(source)) => {
+                Some((i, port.clone(), source.clone()))
+            }
+            _ => None,
+        })
         .expect("planet wires its nodes");
-    let name = app.world().resource::<LevelDef>().nodes[0]
-        .name
-        .clone()
-        .expect("the first node is named");
+    let name = app
+        .world()
+        .resource::<LevelDef>()
+        .nodes
+        .iter()
+        .filter_map(|n| n.name.clone())
+        .find(|n| *n != was)
+        .expect("planet names more than one node");
     let item = app
         .world_mut()
         .spawn(PicksOption {
@@ -235,7 +249,11 @@ fn picking_a_reference_writes_it() {
         .wires
         .get(&port)
         .and_then(|w| w.sources().first().cloned());
-    assert_eq!(wired.as_deref(), Some(name.as_str()), "a wire is rewired");
+    assert_eq!(
+        wired.as_deref(),
+        Some(name.as_str()),
+        "a wire is rewired: it said '{was}'"
+    );
 }
 
 /// Save is asked for, never done here: this crate edits any reflected
