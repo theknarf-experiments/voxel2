@@ -75,7 +75,8 @@ const SAMPLES: u32 = 38;
 /// many threads are in flight.
 const DENSITY_Y_PER_THREAD: u32 = 4;
 const CELLS: u32 = 32;
-/// Compressed vertex: 12 bytes (unorm16 pos ×4 incl. pad, snorm16 oct normal).
+/// Compressed vertex: 12 bytes (unorm16 pos ×4 incl. pad; then oct12 normal
+/// with 8 bits of baked occlusion in the two low nibbles).
 const VERTEX_BYTES: u64 = 12;
 
 // Depth of the pipeline, in chunks. Doubling these used to make a cold
@@ -1579,8 +1580,12 @@ fn init_chunk_resources(
                         offset: 0,
                         shader_location: 0,
                     },
+                    // Raw, not Snorm16x2: word 2 packs two 12-bit oct
+                    // components against 8 bits of occlusion, and a
+                    // normalized format would decode the word — losing the
+                    // low bits — before the shader could split it.
                     VertexAttribute {
-                        format: VertexFormat::Snorm16x2,
+                        format: VertexFormat::Uint32,
                         offset: 8,
                         shader_location: 1,
                     },

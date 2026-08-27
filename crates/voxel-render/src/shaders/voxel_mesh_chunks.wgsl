@@ -28,7 +28,9 @@ const SLOT_STRIDE: u32 = 54872u;   // 38^3
 const CELL_STRIDE: u32 = 39304u;   // 34^3
 const NONE16: u32 = 0xFFFFu;
 const NONE: u32 = 0xFFFFFFFFu;
-// Compressed vertex: 3 u32 words — pos.xy (unorm16), pos.z + pad, oct normal.
+// Compressed vertex: 3 u32 words — pos.xy (unorm16), pos.z + pad, and
+// oct12 normal + 8 bits of baked occlusion. Layout twin of `VsIn` in
+// voxel_chunk_draw.wgsl and of the vertex attributes in chunks.rs.
 const VERTEX_WORDS: u32 = 3u;
 // Position quantization: chunk-local voxels mapped from [-8, 40] to [0, 1]
 // (covers the apron with margin; kept for vertex-format stability).
@@ -255,6 +257,128 @@ fn cell_has_vertex(mask: u32) -> bool {
     return mask != 0u && mask != 255u;
 }
 
+// Radius is ONE voxel beyond the emitting cell, and that is a ceiling,
+// not a taste. Cells run -1..=32 and the arena holds corners -2..=35, so
+// [c-1, c+2] is the widest box every copy of a shared vertex can read
+// WITHOUT the clamp in `sample_sdf`: a wider one reads a clamped sample
+// at c = -1 whose twin at the neighbour's c = 31 reads the real one, and
+// two occlusion values on one vertex is a dark line along every chunk
+// boundary. Inside it every tap is within sqrt(3)*2 = 3.46 voxels of the
+// vertex — but that bounds the DISTANCE, not the stored value, which is
+// in field units and clamps at 4 whatever the gradient. See AO_FAR.
+//
+// Cost, counted and not guessed: 64 loop iterations and, with the weight
+// test, 32 loads per emitted vertex. 32 of the 64 positions are ones the
+// gradient loop in `sn_vertices` already read (all of [c, c+1]^3, plus
+// every point one step off it along an axis), and half of a hemisphere's
+// 32 taps land in that set, so about 16 loads a vertex are warm and 16
+// are fresh — NOT "the same footprint", which is what this said before it
+// was counted. This runs in the pass that dominates settle time and the
+// settle cost has not been measured on a GPU.
+//
+// There is no long-range answer available here either: the density pass
+// stores the field in VOXEL units clamped to +-4, so nothing in the arena
+// carries distance far enough to cone-trace.
+const AO_LO: i32 = -1;
+const AO_HI: i32 = 2;
+// Voxels of protrusion past the tangent plane that saturate one tap. At
+// 1 the band is exactly one voxel, which makes both operands below
+// dimensionless — voxel units against voxel units — so the value depends
+// on the shape and not on the units it is measured in. That is NOT the
+// same as LOD invariance: the same world shape sampled at a coarser voxel
+// is a different shape at this scale, and it measures as one.
+const AO_GAIN: f32 = 1.0;
+// Below this the local gradient carries no direction and the vertex
+// normal is the degenerate fallback, so there is nothing to measure
+// against; the ramp to _OK avoids putting a step where a field crosses
+// it. Both are far under any shipped field — the lowest gradient measured
+// on the four levels is 0.007 (an fbm3 carve at width 8, coarse LOD) —
+// and far over the f16 storage's subnormal floor, which is where the
+// differences the estimator takes would quantize to zero.
+const AO_GRAD_MIN: f32 = 1.0e-3;
+const AO_GRAD_OK: f32 = 3.0e-3;
+// The density pass stores clamp(d/vs, -4, 4). The floor is harmless — a
+// tap pinned at -4 is deep solid and saturates over any gradient — but
+// the CEILING lies in the direction that costs light: it makes a distant
+// empty tap read nearer to solid than it is, and on a steep field, where
+// 4 is only 4/k voxels away, that is most of the box. A flat plane at
+// k = 3 measured 0.141 and at k = 4 0.229 without this test, and both
+// gradients occur on megastructure and brutalist at the finest LOD. A tap
+// AT the ceiling carries one fact — it is far from solid — so it counts
+// toward the total and occludes nothing. Creases are untouched: at k = 1
+// no tap in the box can reach 4.
+const AO_FAR: f32 = 3.999;
+
+/// Cosine-weighted fraction of the outward hemisphere that lies within
+/// one voxel of solid, measured against the vertex's TANGENT PLANE.
+/// Shaped into a darkening in the DRAW shader, not here, so the strength
+/// is tunable without remeshing.
+///
+/// `f_pv` is the field at `pv` and `k` its local gradient magnitude in
+/// stored units per voxel. With AO_FAR they are three corrections to one
+/// mistake — that `dn - sdf(q)` is a tangent-plane term — and each one on
+/// its own is worth the whole term:
+///
+///   - Without `f_pv` the zero is only a zero where `pv` sits exactly on
+///     the isosurface. The surface-nets vertex does not: it is the mean
+///     of the edge crossings, which is off the isosurface wherever the
+///     field is not linear across the cell, and `dn - sdf(q)` then
+///     reports that offset directly (measured as an exact identity —
+///     0.25 voxel in gives 0.2500).
+///   - Without `k` the term assumes the field advances one unit per
+///     voxel, and the level data explicitly does not: an fbm3 carve turns
+///     a noise value into a distance by an authored width, and
+///     megastructure's own reads a gradient around 0.11. Fed that, the
+///     un-normalized estimator returns 0.76 (median, measured on the
+///     level's own op) on FLAT geometry, which would have multiplied that
+///     district's ambient by 0.35 everywhere.
+///   - Without AO_FAR the same thing happens from the other end, on
+///     fields STEEPER than one unit per voxel: 0.14 on a flat plane at
+///     k = 3, 0.23 at k = 4, both of which the shipped levels reach.
+///
+/// With all three, on a locally planar field, `(f(q) - f_pv)/k == dn`
+/// identically and the term is exactly 0 — at every gradient from 0.03 to
+/// 64, every orientation and every sub-voxel position of the vertex. Run
+/// against megastructure's own carve op through the CPU interpreter, it
+/// reads 0.000 at p50 and 0.002 at p90 at the finest LOD, where the
+/// un-normalized version read 0.764 and 0.844.
+///
+/// What it does NOT do is hold that mean across LOD: on the same op at
+/// 6.4 m voxels the p50 is 0.024 and the p90 0.149, because a coarser
+/// sampling of the same relief is genuinely bumpier per voxel. Nothing
+/// here can fix that — a per-vertex term measures in voxels — so the DRAW
+/// side gates the whole thing on the material's own `detail_fade` and
+/// keeps it off the terrain recipes entirely.
+fn baked_occlusion(c: vec3<i32>, pv: vec3<f32>, n: vec3<f32>, f_pv: f32, k: f32) -> f32 {
+    let inv_k = 1.0 / k;
+    var occ = 0.0;
+    var total = 0.0;
+    for (var z = AO_LO; z <= AO_HI; z++) {
+    for (var y = AO_LO; y <= AO_HI; y++) {
+    for (var x = AO_LO; x <= AO_HI; x++) {
+        let q = c + vec3<i32>(x, y, z);
+        let d = vec3<f32>(q) - pv;          // voxel units, like pv
+        let r2 = dot(d, d);
+        if (r2 < 1.0e-6) { continue; }
+        let dn = dot(d, n);
+        // Weighted before the tap: half the box is behind the surface and
+        // contributes nothing, so it should not cost a load either.
+        let w = max(dn * inverseSqrt(r2), 0.0) / (1.0 + r2);
+        if (w <= 0.0) { continue; }
+        total += w;
+        // Against the tangent plane THROUGH `pv`, in voxels: how far the
+        // field at `q` falls short of the plane's own distance. Taps at
+        // the stored ceiling are counted as unoccluded rather than
+        // measured — see AO_FAR.
+        let f = sample_sdf(q);
+        if (f < AO_FAR) {
+            occ += w * saturate((dn - (f - f_pv) * inv_k) * AO_GAIN);
+        }
+    }}}
+    if (total <= 0.0) { return 0.0; }
+    return occ / total;
+}
+
 fn quad_exists(c: vec3<i32>, axis: u32) -> bool {
     var e = vec3<i32>(0);
     e[axis] = 1;
@@ -326,7 +450,36 @@ fn sn_vertices(@builtin(global_invocation_id) id: vec3<u32>) {
 
     // Position in voxel units (chunk-local); scaling to meters happens at
     // decode using the per-chunk voxel size.
-    var pv = vec3<f32>(c) + sum / n;
+    let frac = sum / n;
+    var pv = vec3<f32>(c) + frac;
+
+    // BEFORE the parity snap, and the order is the whole correctness of
+    // the term. The snap moves `pv` off this cell's own isosurface — onto
+    // the parity cell's solution, or, where that cell has no crossing,
+    // onto a neighbouring parity vertex two or more voxels away in an
+    // arbitrary direction. Measured after it, the estimator reports that
+    // displacement as occlusion (0.5 voxel in reads 1.0), which is a dark
+    // band along every coarse-facing chunk boundary and a black speck at
+    // every failed weld. Measuring first also keeps `pv` inside cell `c`,
+    // which is what makes `f_pv` free — the trilinear of the eight corner
+    // samples already in registers — and what keeps every tap inside the
+    // box this chunk can read unclamped.
+    //
+    // The two copies of a seam vertex do not agree on this, and cannot:
+    // the coarse side measures its own field at its own resolution. They
+    // do not agree on the normal or the material either. What they DO
+    // agree on is a plane, where both report exactly 0.
+    var occ = 0.0;
+    let gk = length(g) * (1.0 / 16.0);   // |g| is 8 central differences: 16x the gradient
+    if (gk > AO_GRAD_MIN) {
+        var f_pv = 0.0;
+        for (var i = 0u; i < 8u; i++) {
+            let w = mix(1.0 - frac, frac, vec3<f32>(corner_offset(i)));
+            f_pv += s[i] * w.x * w.y * w.z;
+        }
+        occ = baked_occlusion(c, pv, normal, f_pv, gk)
+            * smoothstep(AO_GRAD_MIN, AO_GRAD_OK, gk);
+    }
 
     // Seam vertices toward a coarser neighbor land exactly on its own
     // surface-nets vertex: the parity cell's SN solution over parent-band
@@ -409,7 +562,7 @@ fn sn_vertices(@builtin(global_invocation_id) id: vec3<u32>) {
         mat = 255u;
     }
 
-    write_vertex(params.base_vertex + local, pv, normal, mat);
+    write_vertex(params.base_vertex + local, pv, normal, mat, occ);
     cell_indices[cell_slot_index(c)] = local & 0xFFFFu;
 }
 
@@ -679,7 +832,15 @@ fn oct_encode(n: vec3<f32>) -> vec2<f32> {
 }
 
 // The spare u16 packs material (high byte) and baked shadow (low byte).
-fn write_vertex(index: u32, pos_voxels: vec3<f32>, normal: vec3<f32>, material: u32) {
+//
+// Word 2 is the octahedral normal at 12 bits a component and 8 bits of
+// baked occlusion in the two low nibbles. The occlusion lives there
+// because the spare u16 above is full and a fourth word would add 93 MB
+// to the default slab for one byte; oct12 pays for it at ~0.06 degrees of
+// angular error, whose worst-case effect on a Lambert term is a quarter
+// of one 8-bit step.
+fn write_vertex(index: u32, pos_voxels: vec3<f32>, normal: vec3<f32>, material: u32,
+                occ: f32) {
     let pn = clamp((pos_voxels + POS_BIAS) / POS_RANGE, vec3<f32>(0.0), vec3<f32>(1.0));
     let world = params.origin.xyz + pos_voxels * params.origin.w;
     let baked = baked_sun_shadow(world);
@@ -688,7 +849,12 @@ fn write_vertex(index: u32, pos_voxels: vec3<f32>, normal: vec3<f32>, material: 
     let out = index * VERTEX_WORDS;
     vertices[out + 0u] = pack2x16unorm(pn.xy);
     vertices[out + 1u] = pack2x16unorm(vec2<f32>(pn.z, extra));
-    vertices[out + 2u] = pack2x16snorm(oct_encode(normal));
+    let o = oct_encode(normal);
+    let qn = vec2<i32>(round(clamp(o, vec2<f32>(-1.0), vec2<f32>(1.0)) * 2047.0));
+    let occ_u = u32(round(clamp(occ, 0.0, 1.0) * 255.0));
+    let nx = ((bitcast<u32>(qn.x) & 0xFFFu) << 4u) | (occ_u & 0xFu);
+    let ny = ((bitcast<u32>(qn.y) & 0xFFFu) << 4u) | ((occ_u >> 4u) & 0xFu);
+    vertices[out + 2u] = nx | (ny << 16u);
 }
 
 @compute @workgroup_size(4, 4, 4)
