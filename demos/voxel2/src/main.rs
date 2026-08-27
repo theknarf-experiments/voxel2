@@ -75,6 +75,7 @@ const SHIPPED_LEVELS: &[&str] = &[
     "levels/planet.json",
     "levels/megastructure.json",
     "levels/purgatory.json",
+    "levels/brutalist.json",
 ];
 use grass::GrassPlugin;
 use impostors::ImpostorPlugin;
@@ -154,6 +155,33 @@ fn scene_for(level_path: &std::path::Path) -> Scene {
             }),
             // Nothing here has an ocean. What pools in the low ground is
             // the lava the planning stack routes, and that is a ribbon.
+            sea_level: None,
+        },
+        Some("brutalist") => Scene {
+            // Overcast-white sky. The building is one grey, and the only
+            // thing that separates its planes is which way they face, so
+            // the background has to be brighter than every one of them or
+            // the silhouette stops reading.
+            clear_color: Color::srgb(0.66, 0.69, 0.73),
+            // Off the corner of the plaza, at the distance the massing
+            // was composed for: the whole 180 m elevation in frame, the
+            // overhang against the sky, and close enough that the window
+            // reveals are still reveals rather than dents.
+            start: Vec3::new(-258.0, 44.0, 212.0),
+            look: Vec3::new(0.77, 0.02, -0.63),
+            walk_speed: 24.0,
+            run_speed: 220.0,
+            sun_illuminance: Some(light_consts::lux::FULL_DAYLIGHT * 0.22),
+            sun_shadows: true,
+            sun_from: None,
+            ambient_color: Color::srgb(0.70, 0.77, 0.90),
+            ambient_brightness: 620.0,
+            fog: Some(DistanceFog {
+                color: Color::srgb(0.64, 0.67, 0.71),
+                directional_light_color: Color::srgb(0.95, 0.93, 0.88),
+                directional_light_exponent: 8.0,
+                falloff: FogFalloff::Exponential { density: 4.0e-5 },
+            }),
             sea_level: None,
         },
         Some("megastructure") => Scene {

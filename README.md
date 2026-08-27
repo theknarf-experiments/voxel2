@@ -20,6 +20,7 @@ Worlds are data: one binary presents a JSON level definition.
 ```sh
 cargo run -p voxel2 -- levels/planet.json         # forests, biomes, rivers, ruins, roads, caves, dungeons
 cargo run -p voxel2 -- levels/megastructure.json  # endless interior: pocket districts linked by tubes
+cargo run -p voxel2 -- levels/brutalist.json      # one building on a plaza: a finite thing, from the same ops
 ```
 
 There are no hardcoded worlds. A level file describes everything as **one
@@ -33,10 +34,15 @@ once.
 
 Nodes come in two **domains**, which is a backend decision and not a
 second language. Point nodes (FBM height bands, floor lattices,
-pillar/wall grids, shafts, catwalk beams, 3D noise carves, domain warp)
-compile to the generator program one GPU interpreter evaluates as the
-world's SDF — a lush planet and a concrete megacity are the same engine
-fed different data. Region nodes have a lifetime and become LayerProcGen
+pillar/wall grids, shafts, catwalk beams, 3D noise carves, domain warp,
+boxes) compile to the generator program one GPU interpreter evaluates as
+the world's SDF — a lush planet and a concrete megacity are the same
+engine fed different data. Every structural node is a field with no edge
+anywhere, which is what an endless interior wants; `box` is the one with
+an edge, and its `clip` mode is what makes a BUILDING out of the same
+ops — the fabric is unbounded, the envelope stops it, and the massing is
+then carved out of what is left. `levels/brutalist.json` is that, and
+nothing in the engine knows it is a building. Region nodes have a lifetime and become LayerProcGen
 layers: `biomes` (blended regions), `scatter`/`scatter3` (sites),
 `connect`/`connect3` (pathfound or orthogonal links), `flow` (descent
 hydrology), `worm` (burrows), `emit` (CSG patches, ribbons, clearance,

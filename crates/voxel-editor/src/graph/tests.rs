@@ -91,7 +91,7 @@ fn a_scope_frames_what_it_gates() {
 #[test]
 fn no_two_boxes_overlap_in_any_shipped_level() {
     let style = GraphStyle::default();
-    for name in ["planet", "megastructure", "purgatory"] {
+    for name in ["planet", "megastructure", "purgatory", "brutalist"] {
         let level = shipped(name);
         let out = layout(&graph_of(&level.nodes), Some(&head()), &style);
         assert!(!out.nodes.is_empty(), "{name} placed nothing");
@@ -142,7 +142,7 @@ fn every_wire_is_drawn() {
             .sum()
     }
     let style = GraphStyle::default();
-    for name in ["planet", "megastructure", "purgatory"] {
+    for name in ["planet", "megastructure", "purgatory", "brutalist"] {
         let level = shipped(name);
         let out = layout(&graph_of(&level.nodes), Some(&head()), &style);
         assert_eq!(

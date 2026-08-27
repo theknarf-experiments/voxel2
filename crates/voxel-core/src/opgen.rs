@@ -358,7 +358,9 @@ if mat == to_u(@p1.z) && ta >= @p0.x && ta < @p0.y && tb >= @p0.z && tb < @p0.w 
         body: "\
 level = round_half_up(p.y / @p0.x);
 fy = p.y - level * @p0.x;",
-        range: None,
+        // Writes the lattice and nothing else, so a box containing one is
+        // bounded exactly as it would be without it.
+        range: Some("// lattice only"),
     },
     OpDef {
         name: "WOP_SLABS_Y",
@@ -367,9 +369,26 @@ fy = p.y - level * @p0.x;",
         ins: &[("sdf", Value::Sdf), ("lattice", Value::Lattice)],
         outs: &[("sdf", Value::Sdf)],
         body: "\
-let nd = abs(fy) - @p0.x;
-if nd < d { d = nd; mat = @mat; }",
-        range: None,
+let nd = abs(fy - @p0.y) - @p0.x;
+if @p0.z > 0.5 {
+    d = max(d, -nd);
+} else {
+    if nd < d { d = nd; mat = @mat; }
+}",
+        range: Some("\
+            // The lattice is not tracked here, so where the band falls is
+            // unknown — but its DIRECTION is not, and that is what the
+            // pruning actually turns on. A merge can only bring the
+            // surface nearer and a cut can only push it away, so each
+            // moves one end of the interval and leaves the other alone.
+            // A later `clip` whose box is all air then keeps `lo` above
+            // zero and the chunk is decided, which is how a finite
+            // building gets pruned at all.
+            if @p0.z > 0.5 {
+                d = d.max(Interval::UNBOUNDED);
+            } else {
+                d = d.min(Interval::UNBOUNDED);
+            }"),
     },
     OpDef {
         name: "WOP_GRID_HOLES",
@@ -385,7 +404,8 @@ if hash3(iv3(c.x, to_i(level), c.y)) < @p0.y {
     let cut = sd_box(v3(p.x - oc.x, fy, p.z - oc.y), @p1.xyz);
     d = max(d, -cut);
 }",
-        range: None,
+        // A cut, so it can only push the surface away: see WOP_SLABS_Y.
+        range: Some("d = d.max(Interval::UNBOUNDED);"),
     },
     OpDef {
         name: "WOP_PILLARS_XZ",
@@ -401,7 +421,8 @@ let q = pxz - to_v2(c) * sp - jit;
 let girth = @p0.z + hash2(c + iv2(9, -4)) * @p0.w;
 let nd = max(abs(q.x), abs(q.y)) - girth;
 if nd < d { d = nd; mat = @mat; }",
-        range: None,
+        // A merge, so it can only bring the surface nearer.
+        range: Some("d = d.min(Interval::UNBOUNDED);"),
     },
     OpDef {
         name: "WOP_WALLS",
@@ -427,7 +448,10 @@ if hash2(iv2(to_i(wi) + to_i(@p1.x), to_i(level))) < @p0.z {
     }
     if wall < d { d = wall; mat = @mat; }
 }",
-        range: None,
+        // A merge with a hole in it — but the hole is cut out of the
+        // wall this op is about to merge, never out of what was already
+        // there, so from outside it is still only ever a merge.
+        range: Some("d = d.min(Interval::UNBOUNDED);"),
     },
     OpDef {
         name: "WOP_SHAFTS_XZ",
@@ -442,7 +466,8 @@ let jit = v2(hash2(c + iv2(41, 13)) - 0.5, hash2(c + iv2(-7, 99)) - 0.5) * @p0.y
 sxz = pxz - to_v2(c) * sp - jit;
 sr = @p0.z + hash2(c) * @p0.w;
 shaft = length(sxz) - sr;",
-        range: None,
+        // Writes the shaft registers and not the SDF.
+        range: Some("// shafts only"),
     },
     OpDef {
         name: "WOP_SHAFTS_CUT",
@@ -451,7 +476,46 @@ shaft = length(sxz) - sr;",
         ins: &[("sdf", Value::Sdf), ("shafts", Value::Shafts)],
         outs: &[("sdf", Value::Sdf)],
         body: "d = max(d, -shaft);",
-        range: None,
+        range: Some("d = d.max(Interval::UNBOUNDED);"),
+    },
+    OpDef {
+        name: "WOP_BOX",
+        kind: WOP_BOX,
+        height: false,
+        ins: &[("sdf", Value::Sdf)],
+        outs: &[("sdf", Value::Sdf)],
+        body: "\
+let nd = sd_box(p - @p0.xyz, @p1.xyz);
+if @p0.w < 0.5 {
+    if nd < d { d = nd; mat = @mat; }
+} else if @p0.w < 1.5 {
+    d = max(d, -nd);
+} else {
+    d = max(d, nd);
+}",
+        range: Some("\
+            // A box is a true distance field, so one evaluation at the
+            // centre bounds the whole box: within `r` metres the value
+            // can have moved by at most `r`. The same argument
+            // `CsgOp::sdf_range` makes, and the reason a finite structure
+            // can be pruned at all — every box in the world outside the
+            // envelope this clips to comes back all-air.
+            //
+            // Over `min`/`max`, NOT over `pxz_lo`/`pxz_hi`: those are the
+            // xz box as a domain warp left it, and a warp whose range
+            // happens not to straddle zero shifts them off the real box
+            // entirely. Height ops want that box because they sample
+            // through the warp; this one samples `p`.
+            let sd = sd_box((min + max) * 0.5 - @p0.xyz, @p1.xyz);
+            let r = (max - min).length() * 0.5;
+            let nd = Interval::new(sd - r, sd + r);
+            if @p0.w < 0.5 {
+                d = d.min(nd);
+            } else if @p0.w < 1.5 {
+                d = d.max(-nd);
+            } else {
+                d = d.max(nd);
+            }"),
     },
     OpDef {
         name: "WOP_BEAMS",
@@ -465,7 +529,7 @@ if abs(level - round_half_up(level / n) * n) < 0.5 {
     let beam = max(max(abs(sxz.y) - @p0.y, abs(fy + @p0.z) - @p0.w), length(sxz) - (sr + @p1.x));
     if beam < d { d = beam; mat = @mat; }
 }",
-        range: None,
+        range: Some("d = d.min(Interval::UNBOUNDED);"),
     },
 ];
 

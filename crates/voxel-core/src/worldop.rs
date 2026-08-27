@@ -20,7 +20,13 @@ pub const WOP_COARSE_SOLID: u32 = 3;
 /// Set the Y-lattice registers: `level = round(y / spacing)`,
 /// `fy = y - level * spacing`. `p0.x = spacing`.
 pub const WOP_LATTICE_Y: u32 = 4;
-/// Merge horizontal slabs on the Y lattice. `p0.x = half thickness`.
+/// Merge horizontal slabs on the Y lattice, or cut them out of it.
+///
+/// `p0 = (half thickness, y offset from the lattice plane, cut)`. The
+/// offset and the cut are what turn the floor-plate op into the ribbon
+/// window op: one band per storey at `fy = 0` is the plate, one at
+/// `fy = 1.6` subtracted is the glazing above it, and both read the same
+/// lattice so a facade cannot come unstuck from the floors behind it.
 pub const WOP_SLABS_Y: u32 = 5;
 /// Cut hash-gated holes on an XZ grid, one roll per (cell, lattice level).
 /// `p0 = (cell_m, chance)`, `p1 = (half_x, half_y, half_z)`; the cut box is
@@ -121,6 +127,26 @@ pub const WOP_HEIGHT_STEP: u32 = 16;
 /// cycles_per_m_y, threshold, width_m)`, `p1 = (offset x, y, z, mode)`
 /// (mode 0 = union, 1 = carve), `p2.x = octaves`.
 pub const WOP_FBM3: u32 = 15;
+
+/// An axis-aligned box, unioned into the SDF, subtracted from it, or
+/// intersected with it.
+///
+/// The op that makes a FINITE thing out of an infinite one. Every other
+/// structural op here — slabs, walls, pillars, shafts — is a periodic
+/// field with no edge anywhere, which is what an endless interior wants
+/// and exactly what a building does not: a building is those fields
+/// bounded by its own envelope. `Clip` is that bound, and it is why the
+/// mode is on this op rather than being two ops: the same three numbers
+/// describe the mass, the void inside it and the envelope the fabric is
+/// confined to, and a level says which of the three it means.
+///
+/// Cuts and clips leave the material register alone. What a cut exposes
+/// is whatever the last union put there, which is the wall it cut
+/// through — a hole in concrete is concrete-coloured.
+///
+/// `p0 = (center x, y, z, mode)` (0 = add, 1 = cut, 2 = clip),
+/// `p1 = (half x, y, z, -)`.
+pub const WOP_BOX: u32 = 21;
 
 /// Skip this op at coarse LODs (voxel size >= the structural cutoff).
 pub const WOP_FLAG_FINE_ONLY: u32 = 1;

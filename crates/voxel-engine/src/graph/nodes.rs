@@ -19,7 +19,7 @@ use super::node::{Node, Ports, ReflectNode};
 use super::NodeDef;
 use crate::level::gate_flags;
 use crate::level::{d_band_octaves, d_full_band, default_one, mat_concrete, mat_grass};
-use crate::level::{DoorDef, LodGateDef, NoiseModeDef};
+use crate::level::{BoxModeDef, DoorDef, LodGateDef, NoiseModeDef};
 use crate::schema;
 
 /// A region gate and the nodes it applies to.
@@ -388,11 +388,24 @@ op_node!(LatticeY, "lattice_y", WOP_LATTICE_Y, { spacing, lod } =>
         .flags(gate_flags(lod, WOP_FLAG_FINE_ONLY))
         .p0([spacing, 0.0, 0.0, 0.0]));
 
-/// Floor slabs on the lattice.
+/// A horizontal band on the lattice, one per level: floor slabs, or the
+/// ribbon of glazing cut out between them.
 #[derive(Reflect, Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
 #[reflect(Node, Serialize, Deserialize, Default)]
 pub struct SlabsY {
     pub half_thickness: f32,
+    /// Where the band sits relative to its lattice plane, in meters.
+    /// Zero is the plane itself, which is where a floor goes; a window
+    /// band sits above the floor it belongs to.
+    ///
+    /// `fy` only ever spans half a spacing either side of the plane, so a
+    /// band that reaches past `spacing / 2` is simply clipped there — it
+    /// does not wrap into the storey above.
+    #[serde(default)]
+    pub y: f32,
+    /// Subtract the band instead of merging it.
+    #[serde(default)]
+    pub cut: bool,
     #[serde(default = "mat_concrete")]
     #[reflect(@schema::OneOf("materials[].id"))]
     pub material: u32,
@@ -400,11 +413,42 @@ pub struct SlabsY {
     pub lod: LodGateDef,
 }
 
-op_node!(SlabsY, "slabs_y", WOP_SLABS_Y, { half_thickness, material, lod } =>
+op_node!(SlabsY, "slabs_y", WOP_SLABS_Y, { half_thickness, y, cut, material, lod } =>
     WorldOp::new(WOP_SLABS_Y)
         .flags(gate_flags(lod, WOP_FLAG_FINE_ONLY))
         .material(material)
-        .p0([half_thickness, 0.0, 0.0, 0.0]));
+        .p0([half_thickness, y, if cut { 1.0 } else { 0.0 }, 0.0]));
+
+/// An axis-aligned box merged into the world, cut out of it, or used to
+/// clip everything merged so far.
+///
+/// The only op here with an EDGE. Everything else structural is a field
+/// that repeats forever, so a building is one of those fields plus the
+/// envelope that stops it: mass, void, fabric, `clip`. A cut after the
+/// clip then carves the massing, and because it only ever removes, it
+/// costs nothing where there is nothing.
+#[derive(Reflect, Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
+#[reflect(Node, Serialize, Deserialize, Default)]
+pub struct Boxy {
+    pub center: [f32; 3],
+    pub half: [f32; 3],
+    #[serde(default)]
+    pub mode: BoxModeDef,
+    #[serde(default = "mat_concrete")]
+    #[reflect(@schema::OneOf("materials[].id"))]
+    pub material: u32,
+    /// Applies at every LOD by default: a mass that vanished at distance
+    /// would leave the building a hole in the sky.
+    #[serde(default)]
+    pub lod: LodGateDef,
+}
+
+op_node!(Boxy, "box", WOP_BOX, { center, half, mode, material, lod } =>
+    WorldOp::new(WOP_BOX)
+        .flags(gate_flags(lod, 0))
+        .material(material)
+        .p0([center[0], center[1], center[2], mode as u32 as f32])
+        .p1([half[0], half[1], half[2], 0.0]));
 
 /// Hash-gated holes cut through the slabs on an XZ grid.
 #[derive(Reflect, Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
@@ -548,6 +592,7 @@ op_node!(Beams, "beams", WOP_BEAMS, { every, half_width, y, half_height, reach, 
 /// the first time a level uses it.
 pub fn register(registry: &mut bevy::reflect::TypeRegistry) {
     registry.register::<Beams>();
+    registry.register::<Boxy>();
     registry.register::<CoarseSolid>();
     registry.register::<Fbm3>();
     registry.register::<Field>();

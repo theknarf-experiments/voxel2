@@ -53,7 +53,7 @@ fn a_number_row_carries_the_levels_own_value_and_type() {
 /// bounds are easy to invent and only the levels know if they are true.
 #[test]
 fn no_declared_range_excludes_a_value_a_level_ships() {
-    for name in ["planet", "megastructure", "purgatory"] {
+    for name in ["planet", "megastructure", "purgatory", "brutalist"] {
         let path = format!("{}/../../levels/{name}.json", env!("CARGO_MANIFEST_DIR"));
         let level =
             LevelDef::from_path_known(std::path::Path::new(&&path), &registry::engine_kinds())
@@ -318,7 +318,7 @@ fn a_newtype_does_not_cost_a_row() {
 /// it named by three commits.
 #[test]
 fn every_reference_a_level_makes_resolves() {
-    for name in ["planet", "megastructure", "purgatory"] {
+    for name in ["planet", "megastructure", "purgatory", "brutalist"] {
         let path = format!("{}/../../levels/{name}.json", env!("CARGO_MANIFEST_DIR"));
         let level =
             LevelDef::from_path_known(std::path::Path::new(&&path), &registry::engine_kinds())
@@ -446,7 +446,7 @@ fn a_colour_opens_into_its_components() {
 #[test]
 fn the_types_with_no_widget_are_the_ones_we_know_about() {
     let mut unsupported: Vec<String> = Vec::new();
-    for name in ["planet", "megastructure", "purgatory"] {
+    for name in ["planet", "megastructure", "purgatory", "brutalist"] {
         let path = format!("{}/../../levels/{name}.json", env!("CARGO_MANIFEST_DIR"));
         let level =
             LevelDef::from_path_known(std::path::Path::new(&&path), &registry::engine_kinds())

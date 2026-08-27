@@ -865,6 +865,20 @@ pub struct DoorDef {
     pub salt: i32,
 }
 
+/// What a `box` does to the SDF it is wired to.
+#[derive(Reflect, Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum BoxModeDef {
+    /// Union: the box becomes solid, in this op's material.
+    #[default]
+    Add,
+    /// Subtract: the box becomes air, whatever was there.
+    Cut,
+    /// Intersect: everything OUTSIDE the box becomes air. What confines
+    /// an endless field — slabs, walls, pillars — to a building.
+    Clip,
+}
+
 /// Octave shaping for `height_fbm`.
 #[derive(Reflect, Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]

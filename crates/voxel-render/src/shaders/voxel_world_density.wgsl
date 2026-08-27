@@ -432,8 +432,12 @@ fn eval_program(p: vec3<f32>, vs: f32, col: Column) -> WorldSample {
                 fy = p.y - level * op.p0.x;
             }
             case 5u: { // WOP_SLABS_Y
-                let nd = abs(fy) - op.p0.x;
-                if nd < d { d = nd; mat = op.head.z; }
+                let nd = abs(fy - op.p0.y) - op.p0.x;
+                if op.p0.z > 0.5 {
+                    d = max(d, -nd);
+                } else {
+                    if nd < d { d = nd; mat = op.head.z; }
+                }
             }
             case 6u: { // WOP_GRID_HOLES
                 let cell = op.p0.x;
@@ -474,6 +478,16 @@ fn eval_program(p: vec3<f32>, vs: f32, col: Column) -> WorldSample {
             }
             case 10u: { // WOP_SHAFTS_CUT
                 d = max(d, -shaft);
+            }
+            case 21u: { // WOP_BOX
+                let nd = sd_box(p - op.p0.xyz, op.p1.xyz);
+                if op.p0.w < 0.5 {
+                    if nd < d { d = nd; mat = op.head.z; }
+                } else if op.p0.w < 1.5 {
+                    d = max(d, -nd);
+                } else {
+                    d = max(d, nd);
+                }
             }
             case 11u: { // WOP_BEAMS
                 let n = op.p0.x;

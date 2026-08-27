@@ -914,6 +914,213 @@ pub fn mega_program() -> Vec<WorldOp> {
     ]
 }
 
+/// A FINITE structure: the same endless storey fabric a megastructure is
+/// made of, plus the `box` clip that stops it being endless.
+///
+/// The fixture for the third shape a level can have. `planet_program` is a
+/// heightfield and bounds itself everywhere; `mega_program` is volumetric
+/// and bounds itself nowhere. This one is volumetric INSIDE a box and air
+/// outside it, which is the case the structural ops' range rules exist
+/// for — they say only which way each op can move the surface, and that
+/// is enough for the clip to decide every box outside the building.
+pub fn building_program() -> Vec<WorldOp> {
+    let half = [40.0, 30.0, 20.0];
+    vec![
+        // Mass, hollowed.
+        WorldOp::new(WOP_BOX)
+            .material(2)
+            .p0([0.0, 30.0, 0.0, 0.0])
+            .p1([half[0], half[1], half[2], 0.0]),
+        WorldOp::new(WOP_BOX).p0([0.0, 30.0, 0.0, 1.0]).p1([
+            half[0] - 3.0,
+            half[1] - 3.0,
+            half[2] - 3.0,
+            0.0,
+        ]),
+        // Storeys, with the window ribbon cut before the structure that
+        // fills it back in.
+        WorldOp::new(WOP_LATTICE_Y)
+            .flags(WOP_FLAG_FINE_ONLY)
+            .p0([5.0, 0.0, 0.0, 0.0]),
+        WorldOp::new(WOP_SLABS_Y)
+            .flags(WOP_FLAG_FINE_ONLY)
+            .p0([1.0, 1.75, 1.0, 0.0]),
+        WorldOp::new(WOP_SLABS_Y)
+            .flags(WOP_FLAG_FINE_ONLY)
+            .material(3)
+            .p0([0.6, 0.0, 0.0, 0.0]),
+        WorldOp::new(WOP_PILLARS_XZ)
+            .flags(WOP_FLAG_FINE_ONLY)
+            .material(3)
+            .p0([8.0, 0.0, 1.6, 0.0]),
+        WorldOp::new(WOP_BOX)
+            .p0([0.0, 30.0, 0.0, 2.0])
+            .p1([half[0], half[1], half[2], 0.0]),
+    ]
+}
+
+#[cfg(test)]
+mod building_tests {
+    use super::*;
+
+    fn solid(ops: &[WorldOp], p: Vec3) -> bool {
+        eval(ops, 0, p, 0.5).0 < 0.0
+    }
+
+    /// The three verbs, each doing its own and nobody else's.
+    #[test]
+    fn a_box_merges_subtracts_and_clips() {
+        let at = |mode: f32| {
+            vec![
+                WorldOp::new(WOP_BOX)
+                    .material(2)
+                    .p0([0.0, 0.0, 0.0, 0.0])
+                    .p1([10.0, 10.0, 10.0, 0.0]),
+                WorldOp::new(WOP_BOX)
+                    .material(3)
+                    .p0([6.0, 0.0, 0.0, mode])
+                    .p1([6.0, 4.0, 4.0, 0.0]),
+            ]
+        };
+        let inside_both = Vec3::new(4.0, 0.0, 0.0);
+        let first_only = Vec3::new(-6.0, 0.0, 0.0);
+        let second_only = Vec3::new(11.0, 0.0, 0.0);
+
+        let add = at(0.0);
+        assert!(solid(&add, inside_both) && solid(&add, first_only));
+        assert!(solid(&add, second_only), "a merge reaches past the first");
+
+        let cut = at(1.0);
+        assert!(!solid(&cut, inside_both), "the cut took it");
+        assert!(solid(&cut, first_only), "and nothing else");
+        assert!(!solid(&cut, second_only));
+
+        let clip = at(2.0);
+        assert!(solid(&clip, inside_both));
+        assert!(!solid(&clip, first_only), "outside the clip is air");
+        assert!(
+            !solid(&clip, second_only),
+            "a clip only ever removes: it cannot make solid where there was none"
+        );
+    }
+
+    /// A cut band sits where its offset puts it, and a merged one still
+    /// sits on the lattice plane — which is what lets one op be both the
+    /// floor and the window above it.
+    #[test]
+    fn a_slab_band_cuts_at_its_offset() {
+        let ops = vec![
+            WorldOp::new(WOP_BOX)
+                .material(2)
+                .p0([0.0, 0.0, 0.0, 0.0])
+                .p1([40.0, 40.0, 40.0, 0.0]),
+            WorldOp::new(WOP_LATTICE_Y).p0([10.0, 0.0, 0.0, 0.0]),
+            WorldOp::new(WOP_SLABS_Y).p0([1.5, 3.0, 1.0, 0.0]),
+        ];
+        // The band is `|fy - 3| < 1.5`, so on the plane at y = 20 it takes
+        // 21.5..24.5 and leaves the plane itself and the metre below it.
+        for y in [21.6, 23.0, 24.4] {
+            assert!(!solid(&ops, Vec3::new(0.0, y, 0.0)), "y {y} should be cut");
+        }
+        for y in [20.0, 21.0, 25.0, 27.0] {
+            assert!(solid(&ops, Vec3::new(0.0, y, 0.0)), "y {y} should be solid");
+        }
+    }
+
+    /// The soundness of every range rule the structural ops carry, on the
+    /// program they were written for.
+    ///
+    /// They are deliberately crude — each says only which end of the
+    /// interval its op can move — so the thing to check is not that they
+    /// are tight but that they never LIE. A rule that understated what a
+    /// merge can reach would let a chunk full of floor plates be called
+    /// air, which is a hole nobody sees until they stand in the right
+    /// place.
+    #[test]
+    fn the_bound_contains_a_finite_structure() {
+        let ops = building_program();
+        let mut rng = voxel_core::seed::Rng::new(0xB011D);
+        let (mut air, mut undecided) = (0, 0);
+        for _ in 0..2_000 {
+            let c = Vec3::new(
+                (rng.next_f32() - 0.5) * 300.0,
+                (rng.next_f32() - 0.5) * 200.0,
+                (rng.next_f32() - 0.5) * 300.0,
+            );
+            let edge = 1.6 * (1u32 << (rng.next_f32() * 5.0) as u32) as f32;
+            let (min, max) = (c, c + Vec3::splat(edge));
+            let bound = eval_range(&ops, 0, min, max, 0.5).expect("a clipped world is analysable");
+            if bound.is_positive() {
+                air += 1;
+            } else if bound.straddles_zero() {
+                undecided += 1;
+            }
+            for _ in 0..12 {
+                let p = Vec3::new(
+                    min.x + (max.x - min.x) * rng.next_f32(),
+                    min.y + (max.y - min.y) * rng.next_f32(),
+                    min.z + (max.z - min.z) * rng.next_f32(),
+                );
+                let (d, _) = eval(&ops, 0, p, 0.5);
+                assert!(
+                    bound.contains(d),
+                    "sdf {d} at {p:?} escapes {bound:?} for box {min:?}..{max:?}"
+                );
+            }
+        }
+        // And it prunes: outside the clip there is nothing, and saying so
+        // is the whole reason a building can afford a high `split_k`.
+        println!("air {air}, undecided {undecided} of 2000");
+        assert!(
+            air > 1_200,
+            "only {air} of 2000 boxes were called air; the clip is not pruning"
+        );
+    }
+
+    /// A domain warp must not move a box.
+    ///
+    /// The range interpreter carries the xz box a warp has bent, because
+    /// that is the box a HEIGHT op samples over. A `box` samples `p`, so
+    /// it must bound itself over the real one — and a warp whose range
+    /// happens not to straddle zero slides the bent box clear of it,
+    /// which is a bound that misses the geometry and a chunk of building
+    /// that never gets meshed.
+    #[test]
+    fn a_warp_does_not_move_the_box_a_box_op_bounds() {
+        let mut warped = vec![WorldOp::new(WOP_WARP_XZ)
+            .p0([0.004, 240.0, 17.0, -53.0])
+            .p1([3.0, 0.0, 0.0, 0.0])];
+        warped.extend(building_program());
+        let plain = building_program();
+        let mut rng = voxel_core::seed::Rng::new(0x0_A70D);
+        for _ in 0..500 {
+            let c = Vec3::new(
+                (rng.next_f32() - 0.5) * 200.0,
+                (rng.next_f32() - 0.5) * 140.0,
+                (rng.next_f32() - 0.5) * 200.0,
+            );
+            let (min, max) = (c, c + Vec3::splat(3.2));
+            // The warp writes only the warp register, which nothing left
+            // in this program reads — so it may not change the answer by
+            // one bit.
+            assert_eq!(
+                eval_range(&warped, 0, min, max, 0.5),
+                eval_range(&plain, 0, min, max, 0.5),
+                "the warp moved the bound at {min:?}"
+            );
+        }
+    }
+
+    /// The rules must not have made a VOLUMETRIC world decidable. Nothing
+    /// here bounds `coarse_solid` or `fbm3`, so the megastructure and the
+    /// planet's caves still decline — which is the honest answer and the
+    /// one that keeps them rendering exactly what they render today.
+    #[test]
+    fn a_world_with_an_unbounded_op_still_declines() {
+        assert!(eval_range(&mega_program(), 0, Vec3::ZERO, Vec3::splat(100.0), 1.0).is_none());
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

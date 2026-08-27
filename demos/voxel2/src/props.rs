@@ -68,8 +68,30 @@ impl PropTable {
         match level_path.file_stem().and_then(|s| s.to_str()) {
             Some("purgatory") => Self::purgatory(),
             Some("megastructure") => Self::megastructure(),
+            Some("brutalist") => Self::brutalist(),
             _ => Self::planet(),
         }
+    }
+
+    /// What is left on the plaza: precast blocks, squashed flat and pale,
+    /// standing in for the bollards and planters a finished forecourt
+    /// would have. Sparse on purpose — the building is the subject and a
+    /// littered apron would argue with it.
+    fn brutalist() -> Self {
+        let mut classes = HashMap::new();
+        classes.insert(
+            "blocks".to_string(),
+            PropClass {
+                variants: vec![PropVariant {
+                    model: Model::Rock,
+                    trunk: Color::srgb(0.1600, 0.1560, 0.1470),
+                    foliage: Color::srgb(0.2050, 0.2000, 0.1880),
+                }],
+                blob_shadow: false,
+                squash: Vec3::new(1.1, 0.7, 1.1),
+            },
+        );
+        Self(classes)
     }
 
     /// Purgatory's litter: bone piles and scorched boulders.
