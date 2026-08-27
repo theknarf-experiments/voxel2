@@ -128,6 +128,30 @@ pub const WOP_HEIGHT_STEP: u32 = 16;
 /// (mode 0 = union, 1 = carve), `p2.x = octaves`.
 pub const WOP_FBM3: u32 = 15;
 
+/// Make the two region axes a LINEAR function of x and z, so that every
+/// `region` gate in the program is a rectangle on the map.
+///
+/// The same two registers [`WOP_REGION_AXES`] fills with noise, filled
+/// with a ramp instead — and that one substitution turns the whole
+/// district mechanism into an authoring tool for a building complex. A
+/// gate stops meaning "wherever this noise happens to be" and starts
+/// meaning "this block, here", so each mass in a complex can carry its
+/// own storey height, bay rhythm and wall pattern with nothing new behind
+/// it. Nine districts and five buildings are the same feature.
+///
+/// The gate is a BYTE per edge (see [`pack_region`]), so an edge lands
+/// within `size / 255` metres of where a level asks. Author the gate a
+/// couple of metres INSIDE the mass it belongs to: short, the fabric
+/// stops inside the wall and nothing shows; long, it stands in the air
+/// outside.
+///
+/// Unwarped, like the noise axes and for the same reason: where a block
+/// is, is a fact about the map rather than a feature of the terrain.
+///
+/// `p0 = (origin_x, origin_z, 1 / span_x, 1 / span_z)` — the axes read 0
+/// at the origin and 1 a span away.
+pub const WOP_REGION_XZ: u32 = 22;
+
 /// An axis-aligned box, unioned into the SDF, subtracted from it, or
 /// intersected with it.
 ///

@@ -158,24 +158,31 @@ fn scene_for(level_path: &std::path::Path) -> Scene {
             sea_level: None,
         },
         Some("brutalist") => Scene {
-            // Overcast-white sky. The building is one grey, and the only
-            // thing that separates its planes is which way they face, so
-            // the background has to be brighter than every one of them or
-            // the silhouette stops reading.
-            clear_color: Color::srgb(0.66, 0.69, 0.73),
-            // Off the corner of the plaza, at the distance the massing
-            // was composed for: the whole 180 m elevation in frame, the
-            // overhang against the sky, and close enough that the window
-            // reveals are still reveals rather than dents.
-            start: Vec3::new(-258.0, 44.0, 212.0),
-            look: Vec3::new(0.77, 0.02, -0.63),
+            // A cool overcast sky, and it has to stay brighter than every
+            // plane in front of it: the complex is one grey plus three
+            // colours, and what separates its planes is which way they
+            // face. A sky darker than the concrete loses the silhouette.
+            clear_color: Color::srgb(0.70, 0.74, 0.80),
+            // Off the corner of the deck, on the side the shadows fall
+            // toward: the tower and the slab in three-quarter view, the
+            // bridge between them against the sky, and the sun raking
+            // the ends rather than washing the long elevations flat.
+            start: Vec3::new(236.0, 66.0, 300.0),
+            look: Vec3::new(-0.58, -0.12, -0.80),
             walk_speed: 24.0,
             run_speed: 220.0,
-            sun_illuminance: Some(light_consts::lux::FULL_DAYLIGHT * 0.22),
+            sun_illuminance: Some(light_consts::lux::FULL_DAYLIGHT * 0.62),
             sun_shadows: true,
             sun_from: None,
-            ambient_color: Color::srgb(0.70, 0.77, 0.90),
-            ambient_brightness: 620.0,
+            // A ninth of the sun, and blue. Concrete has no colour of
+            // its own worth speaking of, so what tells one plane from
+            // another is a warm lit face against a sky-lit shadow: an
+            // ambient near the sun's strength erases both, and one far
+            // below it turns every elevation not facing the sun into a
+            // silhouette. The long faces here are the ones in shade, so
+            // this end of it is the one that matters.
+            ambient_color: Color::srgb(0.58, 0.70, 0.96),
+            ambient_brightness: 2_600.0,
             fog: Some(DistanceFog {
                 color: Color::srgb(0.64, 0.67, 0.71),
                 directional_light_color: Color::srgb(0.95, 0.93, 0.88),

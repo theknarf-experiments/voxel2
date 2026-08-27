@@ -354,6 +354,10 @@ fn eval_column(pxz: vec2<f32>, vs: f32) -> Column {
                 ta = fbm(pxz + op.p0.xy, op.p0.z, to_i(op.p1.z), vs, 0) + 0.5;
                 tb = fbm(pxz + op.p1.xy, op.p0.w, to_i(op.p1.z), vs, 0) + 0.5;
             }
+            case 22u: { // WOP_REGION_XZ
+                ta = (pxz.x - op.p0.x) * op.p0.z;
+                tb = (pxz.y - op.p0.y) * op.p0.w;
+            }
             case 20u: { // WOP_HEIGHT_BAND_FBM
                 let fa = op.p1.z;
                 let wa = smoothstep(op.p2.x - fa, op.p2.x + fa, ta) * (1.0 - smoothstep(op.p2.y - fa, op.p2.y + fa, ta));

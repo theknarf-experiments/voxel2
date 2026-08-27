@@ -269,6 +269,33 @@ op_node!(RegionAxes, "region_axes", WOP_REGION_AXES, { scale, offset, octaves } 
         .p0([offset[0], offset[1], scale[0], scale[1]])
         .p1([offset[2], offset[3], octaves as f32, 0.0]));
 
+/// Make the two region axes a ramp in x and z, so every `region` gate in
+/// this program is a RECTANGLE on the map rather than a noise band.
+///
+/// The alternative to `region_axes`, and the one an authored place wants:
+/// a gate stops meaning "wherever this noise happens to be" and starts
+/// meaning "this block, here". A complex of masses then divides into
+/// districts the same way an endless city does — each with its own storey
+/// height, bay rhythm and materials — with nothing new behind it.
+///
+/// A gate edge is a byte, so it lands within `span / 255` metres of where
+/// it is asked for. Put a mass's gate a couple of metres INSIDE the mass:
+/// short, the fabric stops inside the wall and nothing shows; long, it
+/// stands in the air outside.
+#[derive(Reflect, Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
+#[reflect(Node, Serialize, Deserialize, Default)]
+pub struct RegionXz {
+    /// World xz where both axes read 0.
+    pub origin: [f32; 2],
+    /// Metres each axis takes to go from 0 to 1. Everything outside is
+    /// outside every gate, which is what confines a level to its site.
+    pub span: [f32; 2],
+}
+
+op_node!(RegionXz, "region_xz", WOP_REGION_XZ, { origin, span } =>
+    WorldOp::new(WOP_REGION_XZ)
+        .p0([origin[0], origin[1], 1.0 / span[0], 1.0 / span[1]]));
+
 /// Add terrain shaped by a region: dunes in one, ridges in another.
 ///
 /// Faded in smoothly by how firmly the point is inside the region,
@@ -612,6 +639,7 @@ pub fn register(registry: &mut bevy::reflect::TypeRegistry) {
     registry.register::<crate::level::place::Prefab>();
     registry.register::<Region>();
     registry.register::<RegionAxes>();
+    registry.register::<RegionXz>();
     registry.register::<SdfVoid>();
     registry.register::<ShaftsCut>();
     registry.register::<ShaftsXz>();

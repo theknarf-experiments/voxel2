@@ -1060,15 +1060,19 @@ impl LevelDef {
 /// therefore not merely wrong, it is wrong DIFFERENTLY in each
 /// interpreter, which is the expensive kind of bug to find.
 fn assert_region_axes_first(ops: &[WorldOp]) {
-    let axes_at = ops.iter().position(|op| op.kind == WOP_REGION_AXES);
+    // Either op fills the axes — noise for a world that has no edges, a
+    // ramp for one whose districts are places on a map.
+    let axes_at = ops
+        .iter()
+        .position(|op| matches!(op.kind, WOP_REGION_AXES | WOP_REGION_XZ));
     let reader_at = ops.iter().position(|op| {
         op.region != 0 || matches!(op.kind, WOP_MATERIAL_BAND | WOP_HEIGHT_BAND_FBM)
     });
     let Some(reader) = reader_at else { return };
     assert!(
         axes_at.is_some_and(|axes| axes < reader),
-        "generator op {reader} reads the region axes but no `region_axes` op precedes it \
-         (add one, first in the list)"
+        "generator op {reader} reads the region axes but no `region_axes` or `region_xz` op \
+         precedes it (add one, first in the list)"
     );
 }
 

@@ -532,6 +532,10 @@ fn height_coarse(xz: vec2<f32>) -> f32 {
                 ta = hfbm(pxz + op.p0.xy, op.p0.z, to_i(op.p1.z), 0) + 0.5;
                 tb = hfbm(pxz + op.p1.xy, op.p0.w, to_i(op.p1.z), 0) + 0.5;
             }
+            case 22u: { // WOP_REGION_XZ
+                ta = (pxz.x - op.p0.x) * op.p0.z;
+                tb = (pxz.y - op.p0.y) * op.p0.w;
+            }
             case 20u: { // WOP_HEIGHT_BAND_FBM
                 let fa = op.p1.z;
                 let wa = smoothstep(op.p2.x - fa, op.p2.x + fa, ta) * (1.0 - smoothstep(op.p2.y - fa, op.p2.y + fa, ta));
@@ -545,22 +549,117 @@ fn height_coarse(xz: vec2<f32>) -> f32 {
     return h;
 }
 
-fn baked_sun_shadow(world: vec3<f32>) -> f32 {
-    // Heightfield-free programs (pure structures) have no horizon to march.
+// Does the sun ray from `o` enter this box before it leaves?
+//
+// Exact, and the reason the massing is tested this way rather than
+// marched: nine samples spaced exponentially along a ray walk straight
+// past a 64 m tower as often as they hit it, and a shadow that appears
+// and disappears with the sample spacing is worse than no shadow. A box
+// has a closed-form answer.
+//
+// `bias` is what keeps a vertex off the box it is standing on: the ray
+// leaves that one immediately, so its exit is at t ~ 0 and only a
+// RE-entry further along counts as shade.
+fn ray_hits_box(o: vec3<f32>, inv: vec3<f32>, c: vec3<f32>, h: vec3<f32>, bias: f32) -> bool {
+    let t1 = (c - h - o) * inv;
+    let t2 = (c + h - o) * inv;
+    let lo = min(t1, t2);
+    let hi = max(t1, t2);
+    let tn = max(max(lo.x, lo.y), lo.z);
+    let tf = min(min(hi.x, hi.y), hi.z);
+    return tf > max(tn, bias);
+}
+
+// Is this point in the shadow of the world's MASSING — the merged `box`
+// ops, and nothing finer?
+//
+// A heightfield's horizon comes from marching its own height; a
+// building's comes from here. Deliberately not the whole program: slabs,
+// walls and piers are a metre of relief on a face the mass already
+// shadows, and evaluating forty ops per vertex to find them would cost
+// the mesh pass more than the shadow is worth. What this catches is the
+// thing that reads at three hundred metres — a tower lying across a
+// plaza.
+//
+// A gated box is intersected with its gate as a RECTANGLE, which is what
+// a gate is once the axes are linear. Where they are noise a gate is not
+// a box at all and there is nothing to intersect, so a gated mass in
+// such a world casts nothing rather than casting everywhere.
+fn mass_shadowed(p: vec3<f32>, dir: vec3<f32>, bias: f32) -> bool {
+    let w = world_header();
+    let inv = vec3<f32>(1.0) / dir;
+    var have_rect = false;
+    var origin = vec2<f32>(0.0);
+    var inv_span = vec2<f32>(1.0);
+    for (var i = 0u; i < w.count.y; i++) {
+        let op = prog.ops[w.count.x + i];
+        if (op.head.x == 22u) {  // WOP_REGION_XZ
+            have_rect = true;
+            origin = op.p0.xy;
+            inv_span = vec2<f32>(op.p0.z, op.p0.w);
+            continue;
+        }
+        if (op.head.x == 19u) {  // WOP_REGION_AXES: not a rectangle
+            have_rect = false;
+            continue;
+        }
+        if (op.head.x != 21u || op.p0.w >= 0.5) {
+            continue;  // not a merged box
+        }
+        var c = op.p0.xyz;
+        var h = op.p1.xyz;
+        if (op.head.w != 0u) {
+            if (!have_rect) { continue; }
+            let g = vec4<f32>(
+                f32(op.head.w & 0xFFu), f32((op.head.w >> 8u) & 0xFFu),
+                f32((op.head.w >> 16u) & 0xFFu), f32((op.head.w >> 24u) & 0xFFu),
+            ) / 255.0;
+            let rlo = origin + vec2<f32>(g.x, g.z) / inv_span;
+            let rhi = origin + vec2<f32>(g.y, g.w) / inv_span;
+            let blo = max(c.xz - h.xz, rlo);
+            let bhi = min(c.xz + h.xz, rhi);
+            if (blo.x >= bhi.x || blo.y >= bhi.y) { continue; }
+            c = vec3<f32>(0.5 * (blo.x + bhi.x), c.y, 0.5 * (blo.y + bhi.y));
+            h = vec3<f32>(0.5 * (bhi.x - blo.x), h.y, 0.5 * (bhi.y - blo.y));
+        }
+        if (ray_hits_box(p, inv, c, h, bias)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// Returns (how lit, whether that answer is exact).
+fn baked_sun_shadow(world: vec3<f32>) -> vec2<f32> {
+    // A world with neither a heightfield nor a massing has no horizon to
+    // march and pays for neither pass.
     let wh = world_header();
-    if (wh.count.z == 0u) {
-        return 1.0;
+    let masses = wh.sun.w > 0.5;
+    if (wh.count.z == 0u && !masses) {
+        return vec2<f32>(1.0, 0.0);
     }
     let sun_dir = normalize(wh.sun.xyz);
-    var occ = 0.0;
-    var t = 8.0;
-    for (var i = 0; i < 9; i++) {
-        let sp = world + sun_dir * t;
-        let dh = height_coarse(sp.xz) - sp.y;
-        occ = max(occ, dh / t);
-        t *= 1.8;
+    var lit = 1.0;
+    if (wh.count.z != 0u) {
+        var occ = 0.0;
+        var t = 8.0;
+        for (var i = 0; i < 9; i++) {
+            let sp = world + sun_dir * t;
+            occ = max(occ, (height_coarse(sp.xz) - sp.y) / t);
+            t *= 1.8;
+        }
+        lit = 1.0 - smoothstep(0.0, 0.2, occ);
     }
-    return 1.0 - smoothstep(0.0, 0.2, occ);
+    // The bias scales with the voxel size, because what it has to clear
+    // is the surface this vertex is on and that surface is a voxel thick.
+    // Floored rather than zeroed: the draw shader multiplies the FINAL
+    // colour by this, ambient included, so a shadow of 0 is a hole. What
+    // is left is roughly what the sky alone puts on a shaded wall, which
+    // is the amount that keeps a facade readable in its own shade.
+    if (masses && mass_shadowed(world, sun_dir, max(1.5, 3.0 * params.origin.w))) {
+        return vec2<f32>(min(lit, 0.30), 1.0);
+    }
+    return vec2<f32>(lit, 0.0);
 }
 
 // Octahedral normal encoding.
@@ -579,7 +678,8 @@ fn oct_encode(n: vec3<f32>) -> vec2<f32> {
 fn write_vertex(index: u32, pos_voxels: vec3<f32>, normal: vec3<f32>, material: u32) {
     let pn = clamp((pos_voxels + POS_BIAS) / POS_RANGE, vec3<f32>(0.0), vec3<f32>(1.0));
     let world = params.origin.xyz + pos_voxels * params.origin.w;
-    let shadow_u = u32(round(baked_sun_shadow(world) * 255.0));
+    let baked = baked_sun_shadow(world);
+    let shadow_u = u32(round(baked.x * 127.0)) | (u32(baked.y) << 7u);
     let extra = f32((material << 8u) | shadow_u) / 65535.0;
     let out = index * VERTEX_WORDS;
     vertices[out + 0u] = pack2x16unorm(pn.xy);

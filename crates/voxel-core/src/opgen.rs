@@ -303,6 +303,28 @@ tb = @FBM(pxz + @p1.xy, @p0.w, to_i(@p1.z), @VS@0) + 0.5;",
             tb = frange(pxz_lo + @p1.xy, pxz_hi + @p1.xy, @p0.w, to_i(@p1.z), 0) + 0.5;"),
     },
     OpDef {
+        name: "WOP_REGION_XZ",
+        kind: WOP_REGION_XZ,
+        height: true,
+        ins: &[],
+        outs: &[("regions", Value::Regions)],
+        body: "\
+ta = (pxz.x - @p0.x) * @p0.z;
+tb = (pxz.y - @p0.y) * @p0.w;",
+        range: Some("\
+            // Linear, so this bound is EXACT — which is what makes a
+            // rectangular district decidable rather than merely
+            // bounded: `ops_reaching` drops a whole mass's fabric for
+            // every chunk that is not in that mass.
+            //
+            // Over `min`/`max` and not the warp-widened xz box: this op
+            // samples the unwarped column, exactly as the interpreters
+            // do, and a warp whose range does not straddle zero would
+            // slide the widened box off the real one.
+            ta = Interval::new((min.x - @p0.x) * @p0.z, (max.x - @p0.x) * @p0.z);
+            tb = Interval::new((min.z - @p0.y) * @p0.w, (max.z - @p0.y) * @p0.w);"),
+    },
+    OpDef {
         name: "WOP_HEIGHT_BAND_FBM",
         kind: WOP_HEIGHT_BAND_FBM,
         height: true,
@@ -1017,6 +1039,7 @@ mod axis_tests {
                 "WOP_HEIGHT_OFFSET",
                 "WOP_HEIGHT_STEP",
                 "WOP_REGION_AXES",
+                "WOP_REGION_XZ",
                 "WOP_SHAFTS_XZ",
                 "WOP_WARP_XZ",
             ]

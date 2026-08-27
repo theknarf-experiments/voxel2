@@ -20,7 +20,7 @@ Worlds are data: one binary presents a JSON level definition.
 ```sh
 cargo run -p voxel2 -- levels/planet.json         # forests, biomes, rivers, ruins, roads, caves, dungeons
 cargo run -p voxel2 -- levels/megastructure.json  # endless interior: pocket districts linked by tubes
-cargo run -p voxel2 -- levels/brutalist.json      # one building on a plaza: a finite thing, from the same ops
+cargo run -p voxel2 -- levels/brutalist.json      # a concrete complex on a deck: finite things, from the same ops
 ```
 
 There are no hardcoded worlds. A level file describes everything as **one
@@ -41,7 +41,16 @@ engine fed different data. Every structural node is a field with no edge
 anywhere, which is what an endless interior wants; `box` is the one with
 an edge, and its `clip` mode is what makes a BUILDING out of the same
 ops — the fabric is unbounded, the envelope stops it, and the massing is
-then carved out of what is left. `levels/brutalist.json` is that, and
+then carved out of what is left.
+
+A `region` scope means "wherever this noise happens to be" over the axes
+`region_axes` lays down; `region_xz` makes the same two axes a ramp in x
+and z instead, so a gate becomes a RECTANGLE ON THE MAP. That one
+substitution turns the district mechanism into an authoring tool: nine
+districts of an endless city and five masses of one building complex are
+the same feature, each carrying its own storey height, bay rhythm, wall
+pattern and materials, each confined to its own footprint by a clip that
+is gated along with it. `levels/brutalist.json` is built that way, and
 nothing in the engine knows it is a building. Region nodes have a lifetime and become LayerProcGen
 layers: `biomes` (blended regions), `scatter`/`scatter3` (sites),
 `connect`/`connect3` (pathfound or orthogonal links), `flow` (descent
@@ -217,8 +226,12 @@ is admitted against the slab budget and caps what the others can stream.
   no world-specific shader branches: one fragment path indexes the level's
   material table (noise-grained bands, grime, streaks, moss, emissive
   light strips, altitude-zoned terrain) and its environment uniform
-  (sun, hemispheric ambient, tinted haze). Horizon-marched sun shadows
-  bake per vertex at mesh time (free per frame). Grass is one instanced
+  (sun, hemispheric ambient, tinted haze). Sun shadows bake per vertex at
+  mesh time and cost nothing per frame: a horizon march for the
+  heightfield, and — for a world that has a MASSING — a closed-form ray
+  test against its merged `box` ops. Only the second is exact, and only
+  the second is trusted in the near field; the vertex carries a bit
+  saying which it got. Grass is one instanced
   draw with wind sway and distance shrink; far forests are merged
   silhouette impostors to ~3 km.
 

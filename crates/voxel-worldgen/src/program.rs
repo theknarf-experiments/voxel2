@@ -435,6 +435,13 @@ pub fn ops_reaching(ops: &[WorldOp], seed: u32, min: Vec3, max: Vec3, vs: f32) -
                     0,
                 ) + 0.5;
             }
+            // The linear axes bound EXACTLY, which is the whole point of
+            // them here: a mass's fabric is dropped for every chunk
+            // outside that mass rather than merely bounded by it.
+            if reaches && op.kind == WOP_REGION_XZ {
+                ta = Interval::new((min.x - op.p0[0]) * op.p0[2], (max.x - op.p0[0]) * op.p0[2]);
+                tb = Interval::new((min.z - op.p0[1]) * op.p0[3], (max.z - op.p0[1]) * op.p0[3]);
+            }
             reaches
         })
         .collect()
@@ -1074,6 +1081,51 @@ mod building_tests {
         assert!(
             air > 1_200,
             "only {air} of 2000 boxes were called air; the clip is not pruning"
+        );
+    }
+
+    /// A gate over the LINEAR axes is a rectangle on the map, and it is
+    /// exact enough that a chunk outside it drops the ops entirely.
+    ///
+    /// Both halves matter. The first is the authoring feature — a mass in
+    /// a complex gets its own fabric because a gate can finally mean
+    /// "here" — and the second is what pays for it: with noise axes a
+    /// district straddles its own boundary everywhere and `ops_reaching`
+    /// keeps everything.
+    #[test]
+    fn a_linear_axis_makes_a_gate_a_rectangle_on_the_map() {
+        // 0..1 over 0..400 m on both axes; the block is the middle
+        // quarter, x and z in 100..200.
+        let block = [0.25, 0.5, 0.25, 0.5];
+        let ops = vec![
+            WorldOp::new(WOP_REGION_XZ).p0([0.0, 0.0, 1.0 / 400.0, 1.0 / 400.0]),
+            WorldOp::new(WOP_BOX)
+                .material(2)
+                .region(block)
+                .p0([150.0, 20.0, 150.0, 0.0])
+                .p1([400.0, 10.0, 400.0, 0.0]),
+        ];
+        // The box is far wider than the gate, so what bounds it IS the
+        // gate — inside the rectangle and nowhere else.
+        for (x, z, want) in [
+            (150.0, 150.0, true),
+            (105.0, 195.0, true),
+            (95.0, 150.0, false),
+            (150.0, 205.0, false),
+            (350.0, 350.0, false),
+            (-50.0, 150.0, false),
+        ] {
+            let hit = eval(&ops, 0, Vec3::new(x, 20.0, z), 0.5).0 < 0.0;
+            assert_eq!(hit, want, "at ({x}, {z})");
+        }
+        // And a chunk outside the rectangle does not carry the op at all.
+        let reach =
+            |c: Vec3| ops_reaching(&ops, 0, c - Vec3::splat(8.0), c + Vec3::splat(8.0), 0.5)[1];
+        assert!(reach(Vec3::new(150.0, 20.0, 150.0)), "inside must reach");
+        assert!(!reach(Vec3::new(300.0, 20.0, 300.0)), "outside must not");
+        assert!(
+            reach(Vec3::new(100.0, 20.0, 150.0)),
+            "a chunk ON the edge straddles it and must be kept"
         );
     }
 

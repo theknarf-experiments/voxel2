@@ -166,6 +166,10 @@ struct VsOut {
     @location(0) normal: vec3<f32>,
     @location(1) cam_rel: vec3<f32>,
     @location(2) shadow: f32,
+    // 1 where that shadow came from the EXACT half of the bake (the
+    // massing) rather than the coarse half (the horizon march). It
+    // decides whether the near-field fade below applies at all.
+    @location(4) shadow_exact: f32,
     // Flat-interpolated material id from the most-solid corner.
     @location(3) @interpolate(flat) material: u32,
 }
@@ -174,6 +178,14 @@ const POS_BIAS: f32 = 8.0;
 const POS_RANGE: f32 = 48.0;
 
 // Where the baked sun shadow takes over from Bevy's cascades (m).
+//
+// It used to start at 140 m because the only thing baked was a march
+// over a COARSE heightfield, which disagrees with the geometry it is
+// shading by metres and had to be kept out of the near field. The
+// massing half of the bake is a closed-form ray test against boxes and
+// agrees exactly, and it is the half that matters for a building — so
+// the handover moved in to where the cascades actually stop being the
+// better answer.
 const BAKED_SHADOW_NEAR: f32 = 140.0;
 const BAKED_SHADOW_FAR: f32 = 320.0;
 
@@ -196,9 +208,14 @@ fn vertex(in: VsIn) -> VsOut {
     out.clip = view.clip_from_view * vec4<f32>(view_space, 1.0);
     out.normal = oct_decode(in.oct);
     out.cam_rel = cam_rel;
-    // Spare u16: material in the high byte, baked shadow in the low byte.
+    // Spare u16: material in the high byte, baked shadow in the low —
+    // seven bits of it, with the top bit saying which half of the bake
+    // the value came from. A seventh of a percent per step is finer than
+    // a soft shadow's own gradient, and the bit is worth more than the
+    // step.
     let extra = u32(round(in.pos.w * 65535.0));
-    out.shadow = f32(extra & 0xFFu) / 255.0;
+    out.shadow = f32(extra & 0x7Fu) / 127.0;
+    out.shadow_exact = f32((extra >> 7u) & 1u);
     out.material = (extra >> 8u) & 0xFFu;
     return out;
 }
@@ -446,10 +463,14 @@ fn fragment(in: VsOut) -> @location(0) vec4<f32> {
 
     var color = pbr_functions::apply_pbr_lighting(pbr_input);
 
-    // Baked horizon sun shadow, faded in past the cascade range: Bevy's
-    // shadow maps cover the near field, the mesh-time march covers the
-    // kilometres they can't reach. Never both at full strength.
-    let baked = mix(1.0, in.shadow, smoothstep(BAKED_SHADOW_NEAR, BAKED_SHADOW_FAR, dist));
+    // Baked sun shadow. The coarse half fades in past the cascade range
+    // — Bevy's shadow maps cover the near field, the mesh-time march
+    // covers the kilometres they can't reach, and never both at full
+    // strength. The exact half is not faded at all, because nothing else
+    // casts it: voxel chunks are not in the shadow map, so a building
+    // that gave this up in the near field would stand in its own light.
+    let faded = mix(1.0, in.shadow, smoothstep(BAKED_SHADOW_NEAR, BAKED_SHADOW_FAR, dist));
+    let baked = mix(faded, in.shadow, in.shadow_exact);
     color = vec4<f32>(color.rgb * baked, color.a);
 
     return pbr_functions::main_pass_post_lighting_processing(pbr_input, color);

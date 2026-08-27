@@ -2,8 +2,8 @@
  "environment": {
   "sun_direction": [
    0.86,
-   0.4,
-   0.31
+   0.34,
+   -0.38
   ]
  },
  "lod": {
@@ -31,14 +31,26 @@
    "name": "unwarped"
   },
   {
+   "kind": "region_xz",
+   "name": "axes",
+   "origin": [
+    -200.0,
+    -200.0
+   ],
+   "span": [
+    400.0,
+    400.0
+   ]
+  },
+  {
    "kind": "height_fbm",
    "name": "ground.1",
    "in": {
     "height": "sea",
     "warp": "unwarped"
    },
-   "scale": 0.0006,
-   "amp": 3.4,
+   "scale": 0.00055,
+   "amp": 3.6,
    "octaves": 3
   },
   {
@@ -52,8 +64,8 @@
     610.0,
     -220.0
    ],
-   "scale": 0.0052,
-   "amp": 1.1,
+   "scale": 0.0048,
+   "amp": 1.2,
    "octaves": 3
   },
   {
@@ -62,434 +74,822 @@
    "in": {
     "height": "ground.2"
    },
-   "value": -3.5
+   "value": -4.5
   },
   {
    "kind": "box",
-   "name": "mass.low",
+   "center": [
+    -8.0,
+    6.0,
+    0.0
+   ],
+   "half": [
+    176.0,
+    6.0,
+    112.0
+   ],
+   "material": 4,
    "in": {
     "sdf": "void"
    },
-   "center": [
-    0.0,
-    51.0,
-    0.0
-   ],
-   "half": [
-    90.0,
-    41.0,
-    30.0
-   ],
-   "material": 2
+   "name": "deck"
   },
   {
    "kind": "box",
-   "name": "mass.high",
-   "in": {
-    "sdf": "mass.low"
-   },
    "center": [
-    0.0,
-    117.0,
+    -112.0,
+    54.0,
     0.0
    ],
    "half": [
-    90.0,
-    25.0,
-    45.0
+    56.0,
+    42.0,
+    48.0
    ],
-   "material": 3
+   "material": 2,
+   "in": {
+    "sdf": "deck"
+   },
+   "name": "mass.slab"
   },
   {
    "kind": "box",
-   "name": "void.low",
-   "in": {
-    "sdf": "mass.high"
-   },
    "center": [
-    0.0,
-    52.0,
-    0.0
-   ],
-   "half": [
-    85.5,
-    38.5,
-    25.5
-   ],
-   "mode": "cut"
-  },
-  {
-   "kind": "box",
-   "name": "void.high",
-   "in": {
-    "sdf": "void.low"
-   },
-   "center": [
-    0.0,
+    -112.0,
     114.0,
     0.0
    ],
    "half": [
-    85.5,
-    23.5,
-    40.5
+    56.0,
+    18.0,
+    64.0
    ],
-   "mode": "cut"
-  },
-  {
-   "kind": "lattice_y",
-   "name": "storeys",
-   "spacing": 5.6
-  },
-  {
-   "kind": "slabs_y",
-   "name": "windows",
+   "material": 2,
    "in": {
-    "sdf": "void.high",
-    "lattice": "storeys"
+    "sdf": "mass.slab"
    },
-   "half_thickness": 1.1,
-   "y": 1.9,
-   "cut": true
-  },
-  {
-   "kind": "slabs_y",
-   "name": "plates",
-   "in": {
-    "sdf": "windows",
-    "lattice": "storeys"
-   },
-   "half_thickness": 0.7,
-   "material": 6
-  },
-  {
-   "kind": "walls",
-   "name": "cross",
-   "in": {
-    "sdf": "plates",
-    "lattice": "storeys"
-   },
-   "axis": "x",
-   "spacing": 22.5,
-   "half_thickness": 0.8,
-   "chance": 1.0,
-   "door": {
-    "cell": 9.0,
-    "chance": 0.75,
-    "half": [
-     1.0,
-     1.35,
-     2.6
-    ],
-    "y": -1.55
-   },
-   "material": 6
-  },
-  {
-   "kind": "walls",
-   "name": "spine",
-   "in": {
-    "sdf": "cross",
-    "lattice": "storeys"
-   },
-   "axis": "z",
-   "spacing": 26.0,
-   "half_thickness": 0.7,
-   "chance": 1.0,
-   "salt": 617,
-   "door": {
-    "cell": 9.0,
-    "chance": 0.7,
-    "half": [
-     0.9,
-     1.35,
-     2.6
-    ],
-    "y": -1.55,
-    "salt": 41
-   },
-   "material": 6
-  },
-  {
-   "kind": "pillars_xz",
-   "name": "columns",
-   "in": {
-    "sdf": "spine"
-   },
-   "spacing": 7.5,
-   "jitter": 0.0,
-   "girth": [
-    1.85,
-    0.0
-   ],
-   "material": 7
+   "name": "mass.slab.cap"
   },
   {
    "kind": "box",
-   "name": "envelope",
-   "in": {
-    "sdf": "columns"
-   },
    "center": [
-    0.0,
-    76.0,
+    112.0,
+    108.0,
+    -16.0
+   ],
+   "half": [
+    32.0,
+    96.0,
+    32.0
+   ],
+   "material": 3,
+   "in": {
+    "sdf": "mass.slab.cap"
+   },
+   "name": "mass.tower"
+  },
+  {
+   "kind": "box",
+   "center": [
+    -112.0,
+    54.0,
     0.0
    ],
    "half": [
-    90.0,
-    66.0,
-    45.0
+    52.0,
+    38.0,
+    44.0
    ],
-   "mode": "clip"
+   "mode": "cut",
+   "in": {
+    "sdf": "mass.tower"
+   },
+   "name": "void.slab"
   },
   {
    "kind": "box",
-   "name": "skirt.z+",
-   "in": {
-    "sdf": "envelope"
-   },
    "center": [
-    0.0,
-    50.0,
-    38.5
-   ],
-   "half": [
-    95.0,
-    42.0,
-    8.5
-   ],
-   "mode": "cut"
-  },
-  {
-   "kind": "box",
-   "name": "skirt.z-",
-   "in": {
-    "sdf": "skirt.z+"
-   },
-   "center": [
-    0.0,
-    50.0,
-    -38.5
-   ],
-   "half": [
-    95.0,
-    42.0,
-    8.5
-   ],
-   "mode": "cut"
-  },
-  {
-   "kind": "box",
-   "name": "base",
-   "in": {
-    "sdf": "skirt.z-"
-   },
-   "center": [
-    0.0,
-    19.0,
+    -112.0,
+    114.0,
     0.0
    ],
    "half": [
-    90.0,
-    9.0,
-    30.0
-   ],
-   "material": 2
-  },
-  {
-   "kind": "box",
-   "name": "crown",
-   "in": {
-    "sdf": "base"
-   },
-   "center": [
-    0.0,
-    135.0,
-    0.0
-   ],
-   "half": [
-    90.0,
-    7.0,
-    45.0
-   ],
-   "material": 3
-  },
-  {
-   "kind": "box",
-   "name": "entrance",
-   "in": {
-    "sdf": "crown"
-   },
-   "center": [
-    0.0,
-    19.5,
-    36.0
-   ],
-   "half": [
-    24.0,
-    6.0,
-    14.0
-   ],
-   "mode": "cut"
-  },
-  {
-   "kind": "box",
-   "name": "service",
-   "in": {
-    "sdf": "entrance"
-   },
-   "center": [
-    0.0,
-    18.5,
-    -36.0
-   ],
-   "half": [
-    13.0,
-    5.0,
-    12.0
-   ],
-   "mode": "cut"
-  },
-  {
-   "kind": "box",
-   "name": "roof.court",
-   "in": {
-    "sdf": "service"
-   },
-   "center": [
-    0.0,
-    136.0,
-    0.0
-   ],
-   "half": [
-    36.0,
-    6.5,
-    26.0
-   ],
-   "mode": "cut"
-  },
-  {
-   "kind": "box",
-   "name": "tower.x-",
-   "in": {
-    "sdf": "roof.court"
-   },
-   "center": [
-    -101.0,
-    72.0,
-    0.0
-   ],
-   "half": [
-    11.0,
-    80.0,
-    21.0
-   ],
-   "material": 4
-  },
-  {
-   "kind": "box",
-   "name": "tower.x+",
-   "in": {
-    "sdf": "tower.x-"
-   },
-   "center": [
-    101.0,
-    72.0,
-    0.0
-   ],
-   "half": [
-    11.0,
-    80.0,
-    21.0
-   ],
-   "material": 4
-  },
-  {
-   "kind": "box",
-   "name": "tower.stair",
-   "in": {
-    "sdf": "tower.x+"
-   },
-   "center": [
-    0.0,
-    70.0,
-    -49.0
-   ],
-   "half": [
+    52.0,
     14.0,
-    78.0,
-    7.0
+    60.0
    ],
-   "material": 4
+   "mode": "cut",
+   "in": {
+    "sdf": "void.slab"
+   },
+   "name": "void.slab.cap"
   },
   {
    "kind": "box",
-   "name": "plinth",
-   "in": {
-    "sdf": "tower.stair"
-   },
    "center": [
-    0.0,
-    5.0,
-    0.0
+    112.0,
+    108.0,
+    -16.0
    ],
    "half": [
-    126.0,
-    5.0,
-    76.0
+    28.0,
+    92.0,
+    28.0
    ],
-   "material": 5
+   "mode": "cut",
+   "in": {
+    "sdf": "void.slab.cap"
+   },
+   "name": "void.tower"
+  },
+  {
+   "kind": "region",
+   "name": "slab",
+   "axes": [
+    0.07375,
+    0.36625,
+    0.33375,
+    0.66625
+   ],
+   "nodes": [
+    {
+     "kind": "lattice_y",
+     "name": "slab.storeys",
+     "spacing": 5.6
+    },
+    {
+     "kind": "slabs_y",
+     "in": {
+      "lattice": "slab.storeys",
+      "sdf": "void.tower"
+     },
+     "half_thickness": 1.1,
+     "y": 1.9,
+     "cut": true,
+     "name": "slab.windows"
+    },
+    {
+     "kind": "slabs_y",
+     "in": {
+      "lattice": "slab.storeys",
+      "sdf": "slab.windows"
+     },
+     "half_thickness": 0.7,
+     "material": 6,
+     "name": "slab.plates"
+    },
+    {
+     "kind": "walls",
+     "in": {
+      "lattice": "slab.storeys",
+      "sdf": "slab.plates"
+     },
+     "axis": "x",
+     "spacing": 25.0,
+     "half_thickness": 0.7,
+     "chance": 1.0,
+     "material": 6,
+     "door": {
+      "cell": 9.0,
+      "chance": 0.75,
+      "half": [
+       1.0,
+       1.35,
+       2.6
+      ],
+      "y": -1.55
+     },
+     "name": "slab.cross"
+    },
+    {
+     "kind": "walls",
+     "in": {
+      "lattice": "slab.storeys",
+      "sdf": "slab.cross"
+     },
+     "axis": "z",
+     "spacing": 26.0,
+     "half_thickness": 0.6,
+     "chance": 1.0,
+     "salt": 617,
+     "material": 6,
+     "door": {
+      "cell": 9.0,
+      "chance": 0.7,
+      "half": [
+       0.9,
+       1.35,
+       2.6
+      ],
+      "y": -1.55,
+      "salt": 41
+     },
+     "name": "slab.spine"
+    },
+    {
+     "kind": "pillars_xz",
+     "spacing": 8.0,
+     "jitter": 0.0,
+     "girth": [
+      1.7,
+      0.0
+     ],
+     "material": 7,
+     "in": {
+      "sdf": "slab.spine"
+     },
+     "name": "slab.piers"
+    },
+    {
+     "kind": "box",
+     "center": [
+      -112.0,
+      72.0,
+      0.0
+     ],
+     "half": [
+      56.0,
+      60.0,
+      64.0
+     ],
+     "mode": "clip",
+     "in": {
+      "sdf": "slab.piers"
+     },
+     "name": "slab.clip"
+    },
+    {
+     "kind": "box",
+     "center": [
+      0.0,
+      54.0,
+      58.0
+     ],
+     "half": [
+      200.0,
+      43.0,
+      10.0
+     ],
+     "mode": "cut",
+     "in": {
+      "sdf": "slab.clip"
+     },
+     "name": "slab.skirt+"
+    },
+    {
+     "kind": "box",
+     "center": [
+      0.0,
+      54.0,
+      -58.0
+     ],
+     "half": [
+      200.0,
+      43.0,
+      10.0
+     ],
+     "mode": "cut",
+     "in": {
+      "sdf": "slab.skirt+"
+     },
+     "name": "slab.skirt-"
+    },
+    {
+     "kind": "box",
+     "center": [
+      -112.0,
+      21.0,
+      0.0
+     ],
+     "half": [
+      56.0,
+      9.0,
+      48.0
+     ],
+     "material": 2,
+     "in": {
+      "sdf": "slab.skirt-"
+     },
+     "name": "slab.base"
+    },
+    {
+     "kind": "box",
+     "center": [
+      -112.0,
+      128.0,
+      0.0
+     ],
+     "half": [
+      56.0,
+      4.0,
+      64.0
+     ],
+     "material": 2,
+     "in": {
+      "sdf": "slab.base"
+     },
+     "name": "slab.crown"
+    }
+   ]
+  },
+  {
+   "kind": "region",
+   "name": "tower",
+   "axes": [
+    0.69375,
+    0.86625,
+    0.37375,
+    0.54625
+   ],
+   "nodes": [
+    {
+     "kind": "lattice_y",
+     "name": "tower.storeys",
+     "spacing": 4.4
+    },
+    {
+     "kind": "slabs_y",
+     "in": {
+      "lattice": "tower.storeys",
+      "sdf": "void.tower"
+     },
+     "half_thickness": 0.85,
+     "y": 1.6,
+     "cut": true,
+     "name": "tower.windows"
+    },
+    {
+     "kind": "slabs_y",
+     "in": {
+      "lattice": "tower.storeys",
+      "sdf": "tower.windows"
+     },
+     "half_thickness": 0.55,
+     "material": 6,
+     "name": "tower.plates"
+    },
+    {
+     "kind": "walls",
+     "in": {
+      "lattice": "tower.storeys",
+      "sdf": "tower.plates"
+     },
+     "axis": "x",
+     "spacing": 25.0,
+     "half_thickness": 0.7,
+     "chance": 1.0,
+     "material": 6,
+     "door": {
+      "cell": 8.0,
+      "chance": 0.7,
+      "half": [
+       1.0,
+       1.1,
+       2.2
+      ],
+      "y": -1.3
+     },
+     "name": "tower.cross"
+    },
+    {
+     "kind": "pillars_xz",
+     "spacing": 8.0,
+     "jitter": 0.0,
+     "girth": [
+      2.2,
+      0.0
+     ],
+     "material": 7,
+     "in": {
+      "sdf": "tower.cross"
+     },
+     "name": "tower.piers"
+    },
+    {
+     "kind": "box",
+     "center": [
+      112.0,
+      108.0,
+      -16.0
+     ],
+     "half": [
+      32.0,
+      96.0,
+      32.0
+     ],
+     "mode": "clip",
+     "in": {
+      "sdf": "tower.piers"
+     },
+     "name": "tower.clip"
+    },
+    {
+     "kind": "box",
+     "center": [
+      112.0,
+      23.0,
+      -16.0
+     ],
+     "half": [
+      32.0,
+      11.0,
+      32.0
+     ],
+     "material": 3,
+     "in": {
+      "sdf": "tower.clip"
+     },
+     "name": "tower.base"
+    },
+    {
+     "kind": "box",
+     "center": [
+      112.0,
+      196.0,
+      -16.0
+     ],
+     "half": [
+      32.0,
+      8.0,
+      32.0
+     ],
+     "material": 3,
+     "in": {
+      "sdf": "tower.base"
+     },
+     "name": "tower.crown"
+    }
+   ]
+  },
+  {
+   "kind": "region",
+   "name": "colonnade",
+   "axes": [
+    0.39375,
+    0.68625,
+    0.63375,
+    0.70625
+   ],
+   "nodes": [
+    {
+     "kind": "pillars_xz",
+     "spacing": 20.0,
+     "jitter": 0.0,
+     "girth": [
+      4.0,
+      0.0
+     ],
+     "material": 7,
+     "in": {
+      "sdf": "void.tower"
+     },
+     "name": "colonnade.piers"
+    },
+    {
+     "kind": "box",
+     "center": [
+      16.0,
+      23.0,
+      68.0
+     ],
+     "half": [
+      56.0,
+      11.0,
+      12.0
+     ],
+     "mode": "clip",
+     "in": {
+      "sdf": "colonnade.piers"
+     },
+     "name": "colonnade.clip"
+    }
+   ]
   },
   {
    "kind": "box",
-   "name": "apron",
-   "in": {
-    "sdf": "plinth"
-   },
    "center": [
-    0.0,
+    -8.0,
     1.0,
     0.0
    ],
    "half": [
-    158.0,
-    3.0,
-    104.0
+    200.0,
+    5.0,
+    136.0
    ],
-   "material": 5
+   "material": 4,
+   "in": {
+    "sdf": [
+     "void.tower",
+     "slab.crown",
+     "tower.crown",
+     "colonnade.clip"
+    ]
+   },
+   "name": "apron"
   },
   {
    "kind": "box",
-   "name": "stair",
+   "center": [
+    -100.0,
+    8.5,
+    92.0
+   ],
+   "half": [
+    60.0,
+    8.5,
+    4.0
+   ],
+   "material": 4,
    "in": {
     "sdf": "apron"
    },
+   "name": "wall.long"
+  },
+  {
+   "kind": "box",
    "center": [
-    0.0,
-    5.0,
-    84.0
+    136.0,
+    13.5,
+    92.0
    ],
    "half": [
-    54.0,
-    5.0,
-    10.0
+    16.0,
+    13.5,
+    16.0
    ],
-   "material": 5
+   "material": 5,
+   "in": {
+    "sdf": "wall.long"
+   },
+   "name": "stone.a"
+  },
+  {
+   "kind": "box",
+   "center": [
+    92.0,
+    7.5,
+    100.0
+   ],
+   "half": [
+    8.0,
+    7.5,
+    8.0
+   ],
+   "material": 4,
+   "in": {
+    "sdf": "stone.a"
+   },
+   "name": "stone.b"
   },
   {
    "kind": "height_surface",
-   "name": "plaza",
    "in": {
     "height": "ground.3",
-    "sdf": "stair"
+    "sdf": "stone.b"
    },
-   "material": 1
+   "material": 1,
+   "name": "plaza"
+  },
+  {
+   "kind": "box",
+   "center": [
+    16.0,
+    -5.0,
+    0.0
+   ],
+   "half": [
+    56.0,
+    17.0,
+    56.0
+   ],
+   "mode": "cut",
+   "in": {
+    "sdf": "plaza"
+   },
+   "name": "court"
+  },
+  {
+   "kind": "box",
+   "center": [
+    16.0,
+    -23.5,
+    0.0
+   ],
+   "half": [
+    56.0,
+    1.5,
+    56.0
+   ],
+   "material": 4,
+   "in": {
+    "sdf": "court"
+   },
+   "name": "court.floor"
+  },
+  {
+   "kind": "box",
+   "center": [
+    64.0,
+    -1.0,
+    0.0
+   ],
+   "half": [
+    8.0,
+    5.0,
+    56.0
+   ],
+   "material": 4,
+   "in": {
+    "sdf": "court.floor"
+   },
+   "name": "court.step0"
+  },
+  {
+   "kind": "box",
+   "center": [
+    58.0,
+    -11.0,
+    0.0
+   ],
+   "half": [
+    14.0,
+    5.0,
+    56.0
+   ],
+   "material": 4,
+   "in": {
+    "sdf": "court.step0"
+   },
+   "name": "court.step1"
+  },
+  {
+   "kind": "box",
+   "center": [
+    52.0,
+    -21.0,
+    0.0
+   ],
+   "half": [
+    20.0,
+    5.0,
+    56.0
+   ],
+   "material": 4,
+   "in": {
+    "sdf": "court.step1"
+   },
+   "name": "court.step2"
+  },
+  {
+   "kind": "box",
+   "center": [
+    12.0,
+    84.0,
+    -8.0
+   ],
+   "half": [
+    68.0,
+    14.0,
+    16.0
+   ],
+   "material": 3,
+   "in": {
+    "sdf": "court.step2"
+   },
+   "name": "bridge"
+  },
+  {
+   "kind": "box",
+   "center": [
+    12.0,
+    83.0,
+    7.75
+   ],
+   "half": [
+    68.0,
+    3.0,
+    2.75
+   ],
+   "mode": "cut",
+   "in": {
+    "sdf": "bridge"
+   },
+   "name": "bridge.slot+"
+  },
+  {
+   "kind": "box",
+   "center": [
+    12.0,
+    83.0,
+    -23.75
+   ],
+   "half": [
+    68.0,
+    3.0,
+    2.75
+   ],
+   "mode": "cut",
+   "in": {
+    "sdf": "bridge.slot+"
+   },
+   "name": "bridge.slot-"
+  },
+  {
+   "kind": "box",
+   "center": [
+    4.0,
+    22.0,
+    8.0
+   ],
+   "half": [
+    16.0,
+    42.0,
+    16.0
+   ],
+   "material": 5,
+   "in": {
+    "sdf": "bridge.slot-"
+   },
+   "name": "monolith"
+  },
+  {
+   "kind": "box",
+   "center": [
+    -54.4,
+    54.0,
+    0.0
+   ],
+   "half": [
+    1.6000000000000014,
+    42.0,
+    48.0
+   ],
+   "material": 8,
+   "in": {
+    "sdf": "monolith"
+   },
+   "name": "plane.red"
+  },
+  {
+   "kind": "box",
+   "center": [
+    145.6,
+    111.0,
+    -16.0
+   ],
+   "half": [
+    1.5999999999999943,
+    77.0,
+    32.0
+   ],
+   "material": 9,
+   "in": {
+    "sdf": "plane.red"
+   },
+   "name": "plane.ochre"
+  },
+  {
+   "kind": "box",
+   "center": [
+    16.0,
+    -5.0,
+    -57.6
+   ],
+   "half": [
+    56.0,
+    17.0,
+    1.6000000000000014
+   ],
+   "material": 10,
+   "in": {
+    "sdf": "plane.ochre"
+   },
+   "name": "plane.teal"
+  },
+  {
+   "kind": "box",
+   "center": [
+    -112.0,
+    110.0,
+    -62.7
+   ],
+   "half": [
+    56.0,
+    14.0,
+    1.3000000000000007
+   ],
+   "material": 5,
+   "in": {
+    "sdf": "plane.teal"
+   },
+   "name": "plane.dark"
   },
   {
    "kind": "population",
    "name": "blocks",
    "per_tile": 4,
-   "chance": 0.3,
+   "chance": 0.28,
    "altitude": [
     -40.0,
     30.0
@@ -516,9 +916,9 @@
    "type": "surface",
    "id": 1,
    "base": [
-    0.086,
-    0.084,
-    0.078
+    0.06,
+    0.058,
+    0.053
    ],
    "grain": 0.4,
    "grime": {
@@ -535,11 +935,11 @@
    "type": "surface",
    "id": 2,
    "base": [
-    0.132,
-    0.13,
-    0.123
+    0.216,
+    0.214,
+    0.205
    ],
-   "grain": 0.5,
+   "grain": 0.45,
    "band": {
     "freq": 0.75,
     "amp": 0.22,
@@ -553,7 +953,7 @@
      0.53,
      0.5
     ],
-    "amount": 0.55
+    "amount": 0.6
    },
    "detail_fade": 0.003
   },
@@ -561,25 +961,18 @@
    "type": "surface",
    "id": 3,
    "base": [
-    0.112,
-    0.111,
-    0.109
+    0.132,
+    0.131,
+    0.128
    ],
    "grain": 0.5,
-   "band": {
-    "freq": 0.75,
-    "amp": 0.22,
-    "lo": 0.05,
-    "hi": 0.45,
-    "warp": 0.3
-   },
    "grime": {
     "tint": [
      0.52,
      0.53,
      0.5
     ],
-    "amount": 0.65
+    "amount": 0.6
    },
    "detail_fade": 0.003
   },
@@ -587,9 +980,28 @@
    "type": "surface",
    "id": 4,
    "base": [
-    0.074,
-    0.074,
-    0.075
+    0.078,
+    0.077,
+    0.073
+   ],
+   "grain": 0.45,
+   "grime": {
+    "tint": [
+     0.52,
+     0.53,
+     0.5
+    ],
+    "amount": 0.6
+   },
+   "detail_fade": 0.003
+  },
+  {
+   "type": "surface",
+   "id": 5,
+   "base": [
+    0.038,
+    0.038,
+    0.04
    ],
    "grain": 0.55,
    "streaks": 0.5,
@@ -605,30 +1017,11 @@
   },
   {
    "type": "surface",
-   "id": 5,
-   "base": [
-    0.15,
-    0.147,
-    0.137
-   ],
-   "grain": 0.45,
-   "grime": {
-    "tint": [
-     0.5,
-     0.5,
-     0.46
-    ],
-    "amount": 0.6
-   },
-   "detail_fade": 0.003
-  },
-  {
-   "type": "surface",
    "id": 6,
    "base": [
-    0.052,
-    0.05,
-    0.048
+    0.048,
+    0.046,
+    0.044
    ],
    "grain": 0.3,
    "emissive": {
@@ -638,7 +1031,7 @@
      0.86
     ],
     "intensity": 2.2,
-    "spacing": 7.5,
+    "spacing": 8.0,
     "level_spacing": 5.6,
     "chance": 0.6,
     "glow": 0.3
@@ -649,11 +1042,76 @@
    "type": "surface",
    "id": 7,
    "base": [
-    0.121,
-    0.119,
-    0.114
+    0.18,
+    0.177,
+    0.169
    ],
    "grain": 0.5,
+   "grime": {
+    "tint": [
+     0.52,
+     0.53,
+     0.5
+    ],
+    "amount": 0.6
+   },
+   "detail_fade": 0.003
+  },
+  {
+   "type": "surface",
+   "id": 8,
+   "base": [
+    0.232,
+    0.062,
+    0.045
+   ],
+   "grain": 0.5,
+   "grime": {
+    "tint": [
+     0.52,
+     0.53,
+     0.5
+    ],
+    "amount": 0.6
+   },
+   "detail_fade": 0.003
+  },
+  {
+   "type": "surface",
+   "id": 9,
+   "base": [
+    0.31,
+    0.196,
+    0.052
+   ],
+   "grain": 0.5,
+   "grime": {
+    "tint": [
+     0.52,
+     0.53,
+     0.5
+    ],
+    "amount": 0.6
+   },
+   "detail_fade": 0.003
+  },
+  {
+   "type": "surface",
+   "id": 10,
+   "base": [
+    0.048,
+    0.168,
+    0.16
+   ],
+   "grain": 0.5,
+   "grime": {
+    "tint": [
+     0.52,
+     0.53,
+     0.5
+    ],
+    "amount": 0.6
+   },
    "detail_fade": 0.003
   }
  ]

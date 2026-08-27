@@ -802,7 +802,13 @@ pub(crate) struct GpuWorldOp {
 pub const MAX_WORLDS: usize = 8;
 
 /// One world's slice of the shared program buffer.
-/// `count = (op offset, op count, height ops, seed)`.
+/// `count = (op offset, op count, height ops, seed)`,
+/// `sun = (direction, additive `box` ops)`.
+///
+/// The op counts are not statistics: each one tells a shader whether a
+/// pass is worth running at all. `height ops` is nothing to march a
+/// horizon over; `box` ops are the world's massing, and a world with
+/// none pays nothing for the march that would find them.
 #[derive(ShaderType, Clone, Copy, Default)]
 pub struct GpuWorldHeader {
     count: UVec4,
@@ -836,6 +842,11 @@ impl GpuWorldProgram {
         {
             let offset = gpu_ops.len() as u32;
             let height_ops = program.ops.iter().filter(|op| op.is_height_op()).count() as u32;
+            let masses = program
+                .ops
+                .iter()
+                .filter(|op| op.kind == voxel_core::worldop::WOP_BOX && op.p0[3] < 0.5)
+                .count() as u32;
             gpu_ops.extend(program.ops.iter().map(|op| GpuWorldOp {
                 meta: UVec4::new(
                     op.kind,
@@ -849,7 +860,7 @@ impl GpuWorldProgram {
             }));
             worlds[world] = GpuWorldHeader {
                 count: UVec4::new(offset, program.ops.len() as u32, height_ops, program.seed),
-                sun: program.sun_dir.extend(0.0),
+                sun: program.sun_dir.extend(masses as f32),
             };
         }
         // Runtime-sized arrays must not be empty.
