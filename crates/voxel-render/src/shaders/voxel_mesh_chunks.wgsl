@@ -557,9 +557,13 @@ fn height_coarse(xz: vec2<f32>) -> f32 {
 // and disappears with the sample spacing is worse than no shadow. A box
 // has a closed-form answer.
 //
-// `bias` is what keeps a vertex off the box it is standing on: the ray
-// leaves that one immediately, so its exit is at t ~ 0 and only a
-// RE-entry further along counts as shade.
+// The ray must ENTER: `tn > bias`, not merely `tf > bias`. A point
+// already inside a box has `tn < 0`, and testing only the exit called
+// every such point shadowed — which is every surface a later cut opened
+// up INSIDE a mass. That is both hollow interiors seen through their own
+// windows and every wall of a court sunk through the deck box, all baked
+// flat at the floor value. `bias` still keeps a vertex off the box it is
+// standing on, because that ray leaves without re-entering.
 fn ray_hits_box(o: vec3<f32>, inv: vec3<f32>, c: vec3<f32>, h: vec3<f32>, bias: f32) -> bool {
     let t1 = (c - h - o) * inv;
     let t2 = (c + h - o) * inv;
@@ -567,7 +571,7 @@ fn ray_hits_box(o: vec3<f32>, inv: vec3<f32>, c: vec3<f32>, h: vec3<f32>, bias: 
     let hi = max(t1, t2);
     let tn = max(max(lo.x, lo.y), lo.z);
     let tf = min(min(hi.x, hi.y), hi.z);
-    return tf > max(tn, bias);
+    return tn > bias && tf > tn;
 }
 
 // Is this point in the shadow of the world's MASSING — the merged `box`

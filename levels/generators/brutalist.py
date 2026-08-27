@@ -73,6 +73,12 @@ class Mass:
         cz, hz = span(self.z[0] + wall, self.z[1] - wall)
         return [cx, cy, cz], [hx, hy, hz]
 
+    def to_deck(self):
+        """The same box, opened downward to the deck. What a district's
+        clip has to be, so that bounding a mass does not excavate under
+        it."""
+        return Mass(self.x, self.z, (CLIP_FLOOR, self.y[1]))
+
     def gate(self, z=None):
         z = z or self.z
         return rect(self.x[0] - OUTSET, self.x[1] + OUTSET,
@@ -161,6 +167,16 @@ def mass(name, m, mat, wall=0.0, mode="add"):
     return box(name, mode, c, h, mat=mat)
 
 
+# A district's clip reaches DOWN TO THE DECK, not to the underside of the
+# mass it bounds. A gated clip intersects everything standing inside its
+# rectangle, not merely the fabric declared above it in the same scope —
+# so a clip whose box starts at the mass's own base deletes the deck out
+# from under it, and the masses stood in trenches with the apron six
+# metres down for a floor. Nothing below the deck is visible anyway: it is
+# either buried in the deck or refilled by the ground merge at the end.
+CLIP_FLOOR = 0.0
+
+
 def district(name, gate):
     """Open a `region` scope. Its ops are gated to `gate`, which means its
     final clip is gated too — so a district bounds ITSELF and cannot
@@ -235,7 +251,7 @@ chain("slab.spine", {"kind": "walls", "in": {"lattice": "slab.storeys"},
                               "half": [0.9, 1.35, 2.6], "y": -1.55, "salt": 41}})
 chain("slab.piers", {"kind": "pillars_xz", "spacing": BAY, "jitter": 0.0,
                      "girth": [1.7, 0.0], "material": PIER})
-mass("slab.clip", SLAB_ALL, None, mode="clip")
+mass("slab.clip", SLAB_ALL.to_deck(), None, mode="clip")
 # The overhang: below the cap the block is 32 m narrower, and the fabric
 # the clip left standing out there comes away in one cut a side.
 for side in (1, -1):
@@ -266,7 +282,7 @@ chain("tower.cross", {"kind": "walls", "in": {"lattice": "tower.storeys"},
                                "half": [1.0, 1.1, 2.2], "y": -1.3}})
 chain("tower.piers", {"kind": "pillars_xz", "spacing": BAY, "jitter": 0.0,
                       "girth": [2.2, 0.0], "material": PIER})
-mass("tower.clip", TOWER, None, mode="clip")
+mass("tower.clip", TOWER.to_deck(), None, mode="clip")
 box("tower.base", "add", *Mass(TOWER.x, TOWER.z, (TOWER.y[0], 34.0)).box(), mat=MID)
 box("tower.crown", "add", *Mass(TOWER.x, TOWER.z, (188.0, TOWER.y[1])).box(), mat=MID)
 close()
@@ -278,7 +294,7 @@ COLONNADE = Mass((-40, 72), (56, 80), (12, 34))
 district("colonnade", COLONNADE.gate())
 chain("colonnade.piers", {"kind": "pillars_xz", "spacing": 2.5 * BAY, "jitter": 0.0,
                           "girth": [4.0, 0.0], "material": PIER})
-mass("colonnade.clip", COLONNADE, None, mode="clip")
+mass("colonnade.clip", COLONNADE.to_deck(), None, mode="clip")
 close()
 
 # --- the deck's own things -------------------------------------------------
