@@ -624,7 +624,7 @@ pub fn rename(nodes: &mut [NodeDef], from: &str, to: &str) -> usize {
             if node.name.as_deref() == Some(from) {
                 node.name = Some(to.to_string());
             }
-            for (_, wire) in node.wires.0.iter_mut() {
+            for wire in node.wires.0.values_mut() {
                 match wire {
                     Wire::One(name) if name == from => {
                         *name = to.to_string();

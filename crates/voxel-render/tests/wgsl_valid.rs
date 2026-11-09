@@ -4,9 +4,9 @@
 //! presents as geometry silently missing rather than as an error — which
 //! is exactly how `struct MatSample` went missing once.
 //!
-//! These shaders are import-free, so naga can take them whole. The ones
-//! that `#import bevy_pbr::...` need naga_oil and Bevy's own module
-//! sources to compose first; they are not covered here.
+//! These shaders are plain, import-free WGSL, so naga can take them
+//! whole. The `.wesl` ones import `bevy_pbr` modules and need Bevy's WESL
+//! linker and module sources first; they are not covered here.
 
 const STANDALONE: &[&str] = &[
     "src/shaders/voxel_world_density.wgsl",
@@ -23,9 +23,9 @@ fn standalone_shaders_are_valid_wgsl() {
         let full = format!("{}/{}", env!("CARGO_MANIFEST_DIR"), path);
         let src = std::fs::read_to_string(&full).unwrap_or_else(|e| panic!("{path}: {e}"));
         assert!(
-            !src.contains("#import"),
-            "{path} gained an #import — it can no longer be validated standalone, \
-             so either move it out of STANDALONE or compose it with naga_oil"
+            !src.lines().any(|l| l.trim_start().starts_with("import ")),
+            "{path} gained an import — it is WESL now, not WGSL: rename it to \
+             .wesl and move it out of STANDALONE"
         );
         let module = naga::front::wgsl::parse_str(&src)
             .unwrap_or_else(|e| panic!("{path} does not parse:\n{}", e.emit_to_string(&src)));

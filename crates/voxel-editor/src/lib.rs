@@ -280,10 +280,18 @@ impl Plugin for EditorPlugin {
         let unthemed = app
             .world()
             .get_resource::<UiTheme>()
-            .is_none_or(|t| t.0.color.is_empty());
+            .is_none_or(|t| t.0.token_assignments.is_empty());
         if unthemed {
             app.insert_resource(UiTheme(create_dark_theme()));
         }
+        // Whoever supplied the theme, the grip needs a colour in it — an
+        // unassigned token renders fuchsia.
+        app.world_mut()
+            .resource_mut::<UiTheme>()
+            .0
+            .token_assignments
+            .entry(panel::GRIP)
+            .or_insert(bevy::feathers::tokens::semantic::BORDER_DEFAULT);
 
         if !app.is_plugin_added::<bevy_graph_view::GraphViewPlugin>() {
             app.add_plugins(bevy_graph_view::GraphViewPlugin);

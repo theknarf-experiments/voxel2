@@ -569,7 +569,7 @@ impl WorldLod {
                 // agreeing, and only then is the old configuration
                 // released.
                 let pending: Vec<ChunkKey> =
-                    shared.state.lock().unwrap().pending.drain(..).collect();
+                    std::mem::take(&mut shared.state.lock().unwrap().pending);
                 voxel_core::csg::LOD_PASSES.count(1);
                 voxel_core::csg::LOD_COMMITTED.count(pending.len() as u64);
                 for key in pending {

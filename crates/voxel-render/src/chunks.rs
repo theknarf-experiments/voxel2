@@ -466,6 +466,7 @@ pub struct CameraWorld(pub voxel_core::WorldId);
 /// DIFFERENT world into the same frame. A camera without one looks at
 /// world 0.
 #[derive(Component, Default, Clone, Copy, ExtractComponent)]
+#[extract_app(bevy::render::RenderApp)]
 pub struct ViewWorld(pub voxel_core::WorldId);
 
 impl Default for WorldProgram {
@@ -877,6 +878,7 @@ impl GpuWorldProgram {
 
 /// Marker entity that anchors the terrain draw in the render phases.
 #[derive(Clone, Component, ExtractComponent)]
+#[extract_app(bevy::render::RenderApp)]
 #[require(VisibilityClass)]
 #[component(on_add = visibility::add_visibility_class::<VoxelTerrainMarker>)]
 pub struct VoxelTerrainMarker;
@@ -895,7 +897,7 @@ impl Plugin for VoxelChunksPlugin {
     fn build(&self, app: &mut App) {
         embedded_asset!(app, "shaders/voxel_world_density.wgsl");
         embedded_asset!(app, "shaders/voxel_mesh_chunks.wgsl");
-        embedded_asset!(app, "shaders/voxel_chunk_draw.wgsl");
+        embedded_asset!(app, "shaders/voxel_chunk_draw.wesl");
 
         let slab_config = self.slab;
         let (ready_tx, ready_rx) = crossbeam_channel::unbounded();
@@ -1554,7 +1556,7 @@ fn init_chunk_resources(
         ),
     );
     let draw_shader: Handle<Shader> =
-        load_embedded_asset!(asset_server.as_ref(), "shaders/voxel_chunk_draw.wgsl");
+        load_embedded_asset!(asset_server.as_ref(), "shaders/voxel_chunk_draw.wesl");
     let base_descriptor = RenderPipelineDescriptor {
         label: Some("voxel_chunks_draw".into()),
         // Groups 0/1 are replaced per key by the specializer (the view
@@ -1570,6 +1572,7 @@ fn init_chunk_resources(
         vertex: VertexState {
             shader: draw_shader.clone(),
             shader_defs: vec![],
+            constants: Default::default(),
             entry_point: Some("vertex".into()),
             buffers: vec![VertexBufferLayout {
                 array_stride: VERTEX_BYTES,
@@ -1595,6 +1598,7 @@ fn init_chunk_resources(
         fragment: Some(FragmentState {
             shader: draw_shader,
             shader_defs: vec![],
+            constants: Default::default(),
             entry_point: Some("fragment".into()),
             targets: vec![Some(ColorTargetState {
                 format: TextureFormat::Rgba8UnormSrgb,
@@ -2137,7 +2141,11 @@ fn plan_frame_inner(
         else {
             continue;
         };
-        let data = slot_entry.buffer.slice(..).get_mapped_range();
+        let data = slot_entry
+            .buffer
+            .slice(..)
+            .get_mapped_range()
+            .expect("map_rx only reports slots whose map_async completed");
         let counts: &[u32] = bytemuck::cast_slice(&data);
         for (key, counts_slot) in &entries {
             let verts = counts[(counts_slot * 2) as usize];
@@ -3128,7 +3136,7 @@ mod surface_map_tests {
     /// where the map is read: the mesh pass chose the material per VERTEX
     /// and threw away everything finer than the vertex spacing.
     fn shader_const(name: &str) -> usize {
-        let src = include_str!("shaders/voxel_chunk_draw.wgsl");
+        let src = include_str!("shaders/voxel_chunk_draw.wesl");
         let prefix = format!("const {name}:");
         let line = src
             .lines()
@@ -3377,7 +3385,7 @@ mod multi_world_tests {
     /// with another world's recipe.
     #[test]
     fn the_slot_index_matches_the_draw_shader() {
-        let src = include_str!("shaders/voxel_chunk_draw.wgsl");
+        let src = include_str!("shaders/voxel_chunk_draw.wesl");
         assert!(
             src.contains(&format!(
                 "let i = chunk.head.y * {MATERIAL_SLOTS}u + min(id, {}u);",
@@ -3437,7 +3445,7 @@ mod multi_world_tests {
     /// treats 0 as "nothing painted". Both halves are load-bearing.
     #[test]
     fn the_surface_map_table_matches_the_draw_shader() {
-        let src = include_str!("shaders/voxel_chunk_draw.wgsl");
+        let src = include_str!("shaders/voxel_chunk_draw.wesl");
         assert!(
             src.contains("let base = surface_map[chunk.head.y];"),
             "painted_material must index the table by the chunk's world",

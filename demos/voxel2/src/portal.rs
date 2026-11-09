@@ -103,7 +103,7 @@ pub struct PortalPlugin;
 
 impl Plugin for PortalPlugin {
     fn build(&self, app: &mut App) {
-        embedded_asset!(app, "voxel_portal.wgsl");
+        embedded_asset!(app, "voxel_portal.wesl");
         app.add_plugins(MaterialPlugin::<PortalViewMaterial>::default())
             .add_systems(Update, size_portal_target);
         app.add_systems(
@@ -365,7 +365,7 @@ pub struct PortalViewMaterial {
 
 impl Material for PortalViewMaterial {
     fn fragment_shader() -> ShaderRef {
-        "embedded://voxel2/voxel_portal.wgsl".into()
+        "embedded://voxel2/voxel_portal.wesl".into()
     }
 
     /// BOTH FACES. An opening is approachable from either side, and a

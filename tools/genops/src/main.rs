@@ -85,7 +85,7 @@ fn main() {
             "            ",
         ),
         (
-            "demos/voxel2/src/voxel_water.wgsl",
+            "demos/voxel2/src/voxel_water.wesl",
             Ctx::Height,
             Ctx::Height,
             false,
@@ -132,7 +132,7 @@ fn main() {
     }
     // The material table is read by the draw shader alone, which has no
     // interpreter in it at all.
-    let draw = "crates/voxel-render/src/shaders/voxel_chunk_draw.wgsl";
+    let draw = "crates/voxel-render/src/shaders/voxel_chunk_draw.wesl";
     let text = std::fs::read_to_string(draw).unwrap_or_else(|e| panic!("{draw}: {e}"));
     let text = splice(&text, TEXEL_BEGIN, TEXEL_END, &wgsl_texel_index(), "");
     let text = splice(&text, MAT_BEGIN, MAT_END, &wgsl_material_accessors(), "");

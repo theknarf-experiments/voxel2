@@ -14,12 +14,12 @@
 // matrix with w = 0 drops its translation, so the camera effectively sits at
 // the origin and world-space f32 error never grows with distance.
 
-#import bevy_pbr::{
+import bevy_pbr::render::{
     mesh_view_bindings::view,
     mesh_types::MESH_FLAGS_SHADOW_RECEIVER_BIT,
     pbr_types,
     pbr_functions,
-}
+};
 
 struct ChunkDrawUniform {
     // xyz = chunk minimum corner relative to the camera (m), w = voxel size.

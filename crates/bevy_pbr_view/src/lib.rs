@@ -35,6 +35,7 @@ use bevy::{
             Canonical, RenderPipeline, RenderPipelineDescriptor, Specializer, SpecializerKey,
             Variants,
         },
+        sync_world::MainEntityHashSet,
         view::{ExtractedView, RenderVisibleEntities},
     },
     shader::ShaderDefVal,
@@ -66,11 +67,12 @@ pub fn view_key(
 ) -> MeshPipelineKey {
     let mut key = MeshPipelineKey::from_msaa_samples(msaa.samples())
         | MeshPipelineKey::from_target_format(view.target_format);
-    if !camera.is_some_and(|camera| camera.hdr) {
-        if let Some(tonemapping) = tonemapping {
-            key |= MeshPipelineKey::TONEMAP_IN_SHADER;
-            key |= tonemapping_pipeline_key(*tonemapping);
-        }
+    // `Tonemapping::None` is a full passthrough: no tone curve, and no
+    // dither either, which is tied to tonemapping in the shader.
+    let tonemapping = tonemapping.filter(|t| t.is_enabled());
+    if let (true, Some(tonemapping)) = (camera.is_none_or(|camera| !camera.hdr), tonemapping) {
+        key |= MeshPipelineKey::TONEMAP_IN_SHADER;
+        key |= tonemapping_pipeline_key(*tonemapping);
         if let Some(DebandDither::Enabled) = dither {
             key |= MeshPipelineKey::DEBAND_DITHER;
         }
@@ -165,8 +167,8 @@ fn shader_defs(key: MeshPipelineKey) -> Vec<ShaderDefVal> {
 /// path in `main_pass_post_lighting_processing` switches on it.
 fn tonemap_method_def(key: MeshPipelineKey) -> ShaderDefVal {
     let method = key.intersection(MeshPipelineKey::TONEMAP_METHOD_RESERVED_BITS);
-    if method == MeshPipelineKey::TONEMAP_METHOD_NONE {
-        "TONEMAP_METHOD_NONE".into()
+    if method == MeshPipelineKey::TONEMAP_METHOD_LINEAR {
+        "TONEMAP_METHOD_LINEAR".into()
     } else if method == MeshPipelineKey::TONEMAP_METHOD_REINHARD {
         "TONEMAP_METHOD_REINHARD".into()
     } else if method == MeshPipelineKey::TONEMAP_METHOD_REINHARD_LUMINANCE {
@@ -272,6 +274,7 @@ impl<M> Default for PendingDrawQueues<M> {
 /// water — differing only in which entities a view should look for, which
 /// pipeline to specialize and which draw to run. Those are the two type
 /// parameters and the marker on the pipeline.
+#[allow(clippy::too_many_arguments)]
 pub fn queue_by_marker<M, D>(
     pipeline_cache: Res<bevy::render::render_resource::PipelineCache>,
     pipeline: Option<ResMut<DrawPipeline<M>>>,
@@ -280,6 +283,7 @@ pub fn queue_by_marker<M, D>(
     views: Query<PbrViewQuery>,
     dirty_specializations: Res<DirtySpecializations>,
     mut pending_queues: ResMut<PendingDrawQueues<M>>,
+    mut queued_scratch: Local<MainEntityHashSet>,
 ) where
     M: Component,
     D: 'static,
@@ -326,6 +330,7 @@ pub fn queue_by_marker<M, D>(
             view.retained_view_entity,
             visible,
             &view_pending.prev_frame,
+            &mut queued_scratch,
         ) {
             let Ok(pipeline_id) = pipeline
                 .variants
@@ -342,7 +347,7 @@ pub fn queue_by_marker<M, D>(
                     slabs: MeshSlabs::default(),
                 },
                 Opaque3dBinKey {
-                    asset_id: AssetId::<Mesh>::invalid().untyped(),
+                    asset_id: AssetId::<Mesh>::default().untyped(),
                 },
                 (*render_entity, *main_entity),
                 InputUniformIndex::default(),

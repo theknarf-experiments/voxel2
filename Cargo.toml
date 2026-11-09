@@ -14,14 +14,14 @@ license = "MIT OR Apache-2.0"
 # the host's planning schema reachable at runtime — the editor reads field
 # labels and tooltips off `NamedField::docs()` rather than restating them.
 # It is NOT a bevy default feature.
-bevy = { version = "0.19", features = [
+bevy = { version = "0.20", features = [
     "free_camera",
     "bevy_remote",
     "bevy_dev_tools",
     "bevy_feathers",
     "reflect_documentation",
 ] }
-glam = { version = "0.32", features = ["serde"] }  # keep in sync with bevy's glam version
+glam = { version = "0.33", features = ["serde"] }  # keep in sync with bevy's glam version
 bytemuck = { version = "1", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
 postcard = { version = "1", features = ["alloc"] }
@@ -29,7 +29,7 @@ lz4_flex = "0.11"
 ahash = "0.8"
 crossbeam-channel = "0.5"
 serde_json = "1"
-naga = { version = "29", features = ["wgsl-in"] }
+naga = { version = "30", features = ["wgsl-in"] }
 
 # Internal
 bevy_graph_view = { path = "crates/bevy_graph_view" }

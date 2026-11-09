@@ -203,16 +203,16 @@ fn setup(world: &mut World) {
                 height: percent(100),
                 flex_direction: FlexDirection::Column,
             }
-            Children [(
+            Children [
                 Node { padding: UiRect::all(px(8)), flex_shrink: 0.0 }
                 ThemeBackgroundColor(tokens::PANE_HEADER_BG)
-                Children [(
+                Children [
                     StatusLine
                     Text("")
                     TextFont { font_size: FontSize::Px(11.0) }
                     ThemedText
-                )]
-            )]
+                ]
+            ]
         })
         .expect("the shell is static and must resolve")
         .id();
@@ -264,7 +264,7 @@ fn rebuild(world: &mut World) {
 /// clearing has to ask where the click STARTED, or the viewport at the
 /// end of the chain undoes what the box just did.
 fn on_click(
-    click: On<Pointer<Click>>,
+    click: On<PointerClick>,
     boxes: Query<&SelectsNode>,
     backdrops: Query<(), With<GraphBackdrop>>,
     mut state: ResMut<ViewState>,

@@ -30,7 +30,7 @@ const NONE16: u32 = 0xFFFFu;
 const NONE: u32 = 0xFFFFFFFFu;
 // Compressed vertex: 3 u32 words — pos.xy (unorm16), pos.z + pad, and
 // oct12 normal + 8 bits of baked occlusion. Layout twin of `VsIn` in
-// voxel_chunk_draw.wgsl and of the vertex attributes in chunks.rs.
+// voxel_chunk_draw.wesl and of the vertex attributes in chunks.rs.
 const VERTEX_WORDS: u32 = 3u;
 // Position quantization: chunk-local voxels mapped from [-8, 40] to [0, 1]
 // (covers the apron with margin; kept for vertex-format stability).

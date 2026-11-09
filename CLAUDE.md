@@ -1,6 +1,6 @@
 # voxel2 — agent notes
 
-GPU-driven voxel engine (Rust, Bevy 0.19 pinned). Read `README.md` for
+GPU-driven voxel engine (Rust, Bevy 0.20 pinned). Read `README.md` for
 architecture. Design plan: `~/.claude/plans/binary-twirling-brooks.md`.
 
 ## Build / test / run

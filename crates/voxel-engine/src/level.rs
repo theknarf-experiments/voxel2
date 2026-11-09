@@ -2046,7 +2046,7 @@ mod tests {
         let reg = crate::graph::registry::engine_kinds();
         let planet = LevelDef::from_path_known(&shipped("planet.json"), &reg).unwrap();
 
-        let snapshot = planet.to_dynamic();
+        let snapshot = planet.to_dynamic().expect("dynamic snapshot");
         let mut edited = planet.clone();
         edited.lod.max_level -= 1;
         // Whatever recipe it was, make it a different one.

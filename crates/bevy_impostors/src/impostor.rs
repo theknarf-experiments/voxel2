@@ -58,6 +58,7 @@ pub trait ImpostorSet: Send + Sync + 'static {
 
 /// Marker entity anchoring one set's impostor draw. See [`Prop`].
 #[derive(Component, ExtractComponent)]
+#[extract_app(bevy::render::RenderApp)]
 #[require(VisibilityClass)]
 #[component(on_add = visibility::add_visibility_class::<Impostors<S>>)]
 pub struct Impostors<S: ImpostorSet> {
@@ -97,7 +98,7 @@ impl<S: ImpostorSet> Prop for Impostors<S> {
     }
 
     fn shader(assets: &AssetServer) -> Handle<Shader> {
-        load_embedded_asset!(assets, "impostor.wgsl")
+        load_embedded_asset!(assets, "impostor.wesl")
     }
 
     fn mesh() -> (Vec<ImpostorVertex>, Vec<u32>) {
@@ -137,14 +138,14 @@ impl<S: ImpostorSet> Plugin for ImpostorPlugin<S> {
             .is_none()
         {
             app.insert_resource(ImpostorShaderEmbedded);
-            embedded_asset!(app, "impostor.wgsl");
+            embedded_asset!(app, "impostor.wesl");
         }
         app.add_plugins(PropPlugin::<Impostors<S>>::default());
     }
 }
 
 /// Fraction of the cull distance the impostors start shrinking at. Twin
-/// of the `env.size.z * 0.82` in `impostor.wgsl`.
+/// of the `env.size.z * 0.82` in `impostor.wesl`.
 ///
 /// Public because a host aligning the far edge with something of its own
 /// — a ground texture taking over, a fog wall — needs to divide by it:
@@ -298,7 +299,7 @@ mod tests {
     /// [`IMPOSTOR_FADE_FROM`]: super::IMPOSTOR_FADE_FROM
     #[test]
     fn the_shaders_fade_start_is_fade_from() {
-        let wgsl = include_str!("impostor.wgsl");
+        let wgsl = include_str!("impostor.wesl");
         assert_eq!(
             wgsl.matches("env.size.z * ").count(),
             1,
@@ -309,24 +310,24 @@ mod tests {
             .nth(1)
             .and_then(|rest| rest.split([',', ')', ';']).next())
             .and_then(|n| n.trim().parse().ok())
-            .expect("impostor.wgsl multiplies env.size.z by a literal");
+            .expect("impostor.wesl multiplies env.size.z by a literal");
         assert_eq!(
             declared,
             super::IMPOSTOR_FADE_FROM,
-            "impostor.wgsl and IMPOSTOR_FADE_FROM disagree about where the fade starts"
+            "impostor.wesl and IMPOSTOR_FADE_FROM disagree about where the fade starts"
         );
     }
 
     /// The variant count is a twin of the WGSL array length.
     #[test]
     fn the_shaders_variant_table_matches_max() {
-        let wgsl = include_str!("impostor.wgsl");
+        let wgsl = include_str!("impostor.wesl");
         let declared: usize = wgsl
             .split("array<ImpostorVariant, ")
             .nth(1)
             .and_then(|rest| rest.split('u').next())
             .and_then(|n| n.trim().parse().ok())
-            .expect("impostor.wgsl declares the variant array length");
+            .expect("impostor.wesl declares the variant array length");
         assert_eq!(declared, super::MAX_IMPOSTOR_VARIANTS);
     }
 }

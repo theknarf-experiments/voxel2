@@ -419,7 +419,7 @@ fn read(app: &App, path: &str) -> f32 {
 /// under test is the arithmetic from a drag to a value, and a real pointer
 /// would need a window, a camera and a hit.
 fn drag(app: &mut App, widget: Entity, x: f32) {
-    use bevy::picking::events::{Drag, Pointer};
+    use bevy::picking::events::{Pointer, PointerDrag};
     use bevy::picking::pointer::{Location, PointerId};
     let window = app.world_mut().spawn(bevy::window::Window::default()).id();
     let location = Location {
@@ -429,17 +429,13 @@ fn drag(app: &mut App, widget: Entity, x: f32) {
             .into(),
         position: Vec2::ZERO,
     };
-    app.world_mut()
-        .trigger(Pointer::<Drag>::new_without_propagate(
-            PointerId::Mouse,
-            location,
-            Drag {
-                button: bevy::picking::pointer::PointerButton::Primary,
-                distance: Vec2::new(x, 0.0),
-                delta: Vec2::new(x, 0.0),
-            },
-            widget,
-        ));
+    app.world_mut().trigger(PointerDrag {
+        entity: widget,
+        pointer: Pointer::new(PointerId::Mouse, location),
+        button: bevy::picking::pointer::PointerButton::Primary,
+        distance: Vec2::new(x, 0.0),
+        delta: Vec2::new(x, 0.0),
+    });
     app.update();
 }
 
@@ -543,7 +539,7 @@ fn redo_puts_back_what_undo_took_and_an_edit_forgets_it() {
 /// click, box or not, so clearing there would race every selection.
 #[test]
 fn clicking_a_node_selects_it_even_through_its_children() {
-    use bevy::picking::events::{Click, Pointer};
+    use bevy::picking::events::{Pointer, PointerClick};
     use bevy::picking::pointer::{Location, PointerButton, PointerId};
     use bevy_graph_view::GraphBackdrop;
     use voxel_editor::SelectsNode;
@@ -564,17 +560,14 @@ fn clicking_a_node_selects_it_even_through_its_children() {
                 .into(),
             position: Vec2::ZERO,
         };
-        app.world_mut().trigger(Pointer::<Click>::new(
-            PointerId::Mouse,
-            location,
-            Click {
-                button: PointerButton::Primary,
-                hit: bevy::picking::backend::HitData::new(Entity::PLACEHOLDER, 0.0, None, None),
-                duration: std::time::Duration::ZERO,
-                count: 1,
-            },
-            at,
-        ));
+        app.world_mut().trigger(PointerClick {
+            entity: at,
+            pointer: Pointer::new(PointerId::Mouse, location),
+            button: PointerButton::Primary,
+            hit: bevy::picking::backend::HitData::new(Entity::PLACEHOLDER, 0.0, None, None),
+            duration: std::time::Duration::ZERO,
+            count: 1,
+        });
         app.update();
     };
 
@@ -1222,7 +1215,7 @@ fn focus_follows_the_field_through_a_rebuild() {
 
 /// Press `at`, the way the picking backend does.
 fn press(app: &mut App, at: Entity) {
-    use bevy::picking::events::{Pointer, Press};
+    use bevy::picking::events::{Pointer, PointerPress};
     use bevy::picking::pointer::{Location, PointerButton, PointerId};
 
     let window = app.world_mut().spawn(bevy::window::Window::default()).id();
@@ -1233,16 +1226,13 @@ fn press(app: &mut App, at: Entity) {
             .into(),
         position: Vec2::ZERO,
     };
-    app.world_mut().trigger(Pointer::<Press>::new(
-        PointerId::Mouse,
-        location,
-        Press {
-            button: PointerButton::Primary,
-            hit: bevy::picking::backend::HitData::new(Entity::PLACEHOLDER, 0.0, None, None),
-            count: 1,
-        },
-        at,
-    ));
+    app.world_mut().trigger(PointerPress {
+        entity: at,
+        pointer: Pointer::new(PointerId::Mouse, location),
+        button: PointerButton::Primary,
+        hit: bevy::picking::backend::HitData::new(Entity::PLACEHOLDER, 0.0, None, None),
+        count: 1,
+    });
 }
 
 /// The panel knows whether there is work not yet on disk.

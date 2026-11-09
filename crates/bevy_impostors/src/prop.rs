@@ -315,7 +315,7 @@ pub fn prop_pipeline<Env: ShaderType>(
 /// per instance set, with whatever visibility filtering (render layers)
 /// its views need. Bevy's visible-entity filtering then picks the right
 /// marker per view and the draw binds that set's instances.
-pub trait Prop: Component + ExtractComponent + Copy {
+pub trait Prop: Component + ExtractComponent<bevy::render::RenderApp> + Copy {
     /// The uniform at group 2 — the only binding that differs between
     /// populations, and a layout twin of the shader's `Env` struct.
     type Env: ShaderType + WriteInto + Default + Send + Sync + 'static;

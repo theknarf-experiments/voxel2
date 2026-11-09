@@ -4,12 +4,12 @@
 // terrain heightfield at the fragment — shallow tint and a foam band where
 // the seabed grazes sea level. Opaque; matches the terrain's sun and haze.
 
-#import bevy_pbr::{
+import bevy_pbr::render::{
     mesh_view_bindings::{view, globals},
     mesh_types::MESH_FLAGS_SHADOW_RECEIVER_BIT,
     pbr_types,
     pbr_functions,
-}
+};
 
 struct WaterParams {
     // xz = grid origin (camera-snapped, world meters), y = sea level, w unused.

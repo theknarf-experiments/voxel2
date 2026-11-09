@@ -345,7 +345,7 @@ fn build_prop_assets(
         // default F0 of 0.04 under this demo's sun (FULL_DAYLIGHT against an
         // ambient a hundredth of it) put a white highlight on every skyward
         // face, which turned a dark green conifer into pale mint while the
-        // impostor standing behind it stayed green. `voxel_impostor.wgsl`
+        // impostor standing behind it stayed green. `impostor.wesl`
         // already zeroes reflectance for exactly this reason; the props were
         // the half that never got the memo.
         let mat = |base_color: Color, rough: f32| StandardMaterial {
@@ -426,7 +426,7 @@ fn build_prop_assets(
             assets.classes.insert((world, class.clone()), variants);
         }
     }
-    assets.blob_mesh = meshes.add(bevy::math::primitives::Circle::new(1.0));
+    assets.blob_mesh = meshes.add(bevy::shape::Circle::new(1.0));
     assets.blob_mat = materials.add(StandardMaterial {
         base_color: Color::srgba(0.05, 0.07, 0.04, 0.42),
         alpha_mode: AlphaMode::Blend,

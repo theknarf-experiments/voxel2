@@ -21,15 +21,15 @@ use bevy::feathers::controls::{
     FeathersDisclosureToggle, FeathersMenu, FeathersMenuButton, FeathersMenuItem,
     FeathersMenuPopup, FeathersSlider, FeathersTextInput, FeathersTextInputContainer,
 };
-use bevy::feathers::cursor::EntityCursor;
 use bevy::feathers::font_styles::InheritableFont;
 use bevy::feathers::theme::{InheritableThemeTextColor, ThemedText};
 use bevy::feathers::tokens;
+use bevy::picking::cursor::EntityCursor;
 use bevy::prelude::*;
 use bevy::text::EditableText;
 use bevy::text::{FontSize, FontWeight, LineBreak, TextLayout};
 use bevy::ui::{px, AlignItems, Checked, Display, FlexDirection, Node, Overflow, UiRect};
-use bevy::ui_widgets::{SliderPrecision, SliderStep};
+use bevy::ui_widgets::{SliderPrecision, SliderStep, SliderValue};
 
 use crate::style::PanelStyle;
 use crate::walk::{format_num, Num, Row, RowKind};
@@ -129,23 +129,23 @@ pub fn scene(row: &Row, style: &PanelStyle) -> impl Scene {
             flex_shrink: 0.0,
         }
         Children [
-            (
-                Node {
-                    display: Display::Flex,
-                    flex_direction: FlexDirection::Row,
-                    align_items: AlignItems::Center,
-                    column_gap: {gap},
-                    // Feathers' own controls are `ROW_HEIGHT`; a shorter
-                    // line clips a slider.
-                    height: {size::ROW_HEIGHT},
-                    flex_shrink: 0.0,
-                }
-                Children [
-                    {label_column(row, style)},
-                    {value_widget(row, style)},
-                ]
-            ),
-            {doc_line(row.docs, style.indent * row.depth as f32, style)},
+            Node {
+                display: Display::Flex,
+                flex_direction: FlexDirection::Row,
+                align_items: AlignItems::Center,
+                column_gap: {gap},
+                // Feathers' own controls are `ROW_HEIGHT`; a shorter
+                // line clips a slider.
+                height: {size::ROW_HEIGHT},
+                flex_shrink: 0.0,
+            }
+            Children [
+                {label_column(row, style)}
+                --
+                {value_widget(row, style)}
+            ]
+            --
+            {doc_line(row.docs, style.indent * row.depth as f32, style)}
         ]
     }
 }
@@ -170,18 +170,18 @@ fn typed_box(
 ) -> Box<dyn SceneList> {
     let (width, height) = (px(width), px(style.tab));
     match num {
-        Some(num) => Box::new(bsn_list!(
+        Some(num) => Box::new(bsn_list! {
             @FeathersTextInputContainer
             Node { width: {width}, flex_shrink: 0.0, height: {height} }
             FieldPath({path}) WritesNum({num})
-            Children [( @FeathersTextInput EditableText::new(value) )]
-        )),
-        None => Box::new(bsn_list!(
+            Children [@FeathersTextInput EditableText::new(value)]
+        }),
+        None => Box::new(bsn_list! {
             @FeathersTextInputContainer
             Node { width: {width}, flex_shrink: 0.0, height: {height} }
             FieldPath({path})
-            Children [( @FeathersTextInput EditableText::new(value) )]
-        )),
+            Children [@FeathersTextInput EditableText::new(value)]
+        }),
     }
 }
 
@@ -231,17 +231,16 @@ fn menu(
         })
         .collect();
     let caption = Box::new(vec![text(current.to_string(), style.font)]) as Box<dyn SceneList>;
-    Box::new(bsn_list!(
+    Box::new(bsn_list! {
         @FeathersMenu
         Node { width: {px(style.value)}, flex_shrink: 0.0 }
         Children [
-            (
-                @FeathersMenuButton { @caption: {caption} }
-                Node { flex_grow: 1.0, min_width: px(0), height: px(style.tab) }
-            ),
-            (@FeathersMenuPopup Children [ {items} ]),
+            @FeathersMenuButton { @caption: {caption} }
+            Node { flex_grow: 1.0, min_width: px(0), height: px(style.tab) }
+            --
+            @FeathersMenuPopup Children [ {items} ]
         ]
-    ))
+    })
 }
 
 /// The name column, and on a plain number the surface that SCRUBS it.
@@ -258,7 +257,7 @@ fn label_column(row: &Row, style: &PanelStyle) -> Box<dyn SceneList> {
     // A field that restreams the world waits for the pointer to be let go
     // — see `CommitOnRelease`.
     if row.rebuilds {
-        Box::new(bsn_list!(
+        Box::new(bsn_list! {
             Node {
                 height: {size::ROW_HEIGHT},
                 flex_shrink: 0.0,
@@ -268,9 +267,9 @@ fn label_column(row: &Row, style: &PanelStyle) -> Box<dyn SceneList> {
             EntityCursor::System(bevy::window::SystemCursorIcon::EwResize)
             DragsNum { from: {from}, speed: {speed} } WritesNum({writes}) FieldPath({p}) CommitOnRelease
             Children [ {inner} ]
-        ))
+        })
     } else {
-        Box::new(bsn_list!(
+        Box::new(bsn_list! {
             Node {
                 height: {size::ROW_HEIGHT},
                 flex_shrink: 0.0,
@@ -280,7 +279,7 @@ fn label_column(row: &Row, style: &PanelStyle) -> Box<dyn SceneList> {
             EntityCursor::System(bevy::window::SystemCursorIcon::EwResize)
             DragsNum { from: {from}, speed: {speed} } WritesNum({writes}) FieldPath({p})
             Children [ {inner} ]
-        ))
+        })
     }
 }
 
@@ -305,8 +304,9 @@ fn label_cell(row: &Row, style: &PanelStyle) -> impl Scene {
             overflow: Overflow::clip(),
         }
         Children [
-            {gutter(row, style)},
-            {vec![text(label, style.font)]},
+            {gutter(row, style)}
+            --
+            {vec![text(label, style.font)]}
         ]
     }
 }
@@ -322,16 +322,16 @@ fn gutter(row: &Row, style: &PanelStyle) -> Box<dyn SceneList> {
         | RowKind::Color { expanded, .. } => expanded,
         _ => {
             let w = px(style.gutter);
-            return Box::new(bsn_list!(Node {
+            return Box::new(bsn_list! {Node {
                 width: { w },
                 flex_shrink: 0.0
-            }));
+            }});
         }
     };
     let toggles = row.path.clone();
     let w = px(style.gutter);
     if expanded {
-        Box::new(bsn_list!(
+        Box::new(bsn_list! {
             Node {
                 width: {w},
                 height: {size::ROW_HEIGHT},
@@ -339,10 +339,10 @@ fn gutter(row: &Row, style: &PanelStyle) -> Box<dyn SceneList> {
                 display: Display::Flex,
                 align_items: AlignItems::Center,
             }
-            Children [(@FeathersDisclosureToggle Checked TogglesPath({toggles}))]
-        ))
+            Children [@FeathersDisclosureToggle Checked TogglesPath({toggles})]
+        })
     } else {
-        Box::new(bsn_list!(
+        Box::new(bsn_list! {
             Node {
                 width: {w},
                 height: {size::ROW_HEIGHT},
@@ -350,8 +350,8 @@ fn gutter(row: &Row, style: &PanelStyle) -> Box<dyn SceneList> {
                 display: Display::Flex,
                 align_items: AlignItems::Center,
             }
-            Children [(@FeathersDisclosureToggle TogglesPath({toggles}))]
-        ))
+            Children [@FeathersDisclosureToggle TogglesPath({toggles})]
+        })
     }
 }
 
@@ -403,7 +403,7 @@ fn text(s: String, size: f32) -> impl Scene {
 /// disclosure gutter.
 fn doc_line(docs: Option<&'static str>, indent: f32, style: &PanelStyle) -> Box<dyn SceneList> {
     let Some(docs) = docs else {
-        return Box::new(bsn_list!());
+        return Box::new(bsn_list! {});
     };
     let flat = docs
         .split('\n')
@@ -413,11 +413,11 @@ fn doc_line(docs: Option<&'static str>, indent: f32, style: &PanelStyle) -> Box<
         .trim()
         .to_string();
     if flat.is_empty() {
-        return Box::new(bsn_list!());
+        return Box::new(bsn_list! {});
     }
     let font = FontSize::Px(style.doc_font);
     let doc_indent = px(indent + style.gutter + style.gap);
-    Box::new(bsn_list!(
+    Box::new(bsn_list! {
         // No height and no clipping: the sentence wraps to as many lines
         // as it needs, and the row grows to hold them. The value line
         // above it stays a fixed-height grid either way.
@@ -430,8 +430,8 @@ fn doc_line(docs: Option<&'static str>, indent: f32, style: &PanelStyle) -> Box<
             weight: FontWeight::NORMAL,
         }
         InheritableThemeTextColor(tokens::TEXT_DIM)
-        Children [( Text({flat}) ThemedText )]
-    ))
+        Children [Text({flat}) ThemedText]
+    })
 }
 
 /// `bsn!` builds a fixed shape; the value side of a row is a different
@@ -500,24 +500,24 @@ fn value_widget(row: &Row, style: &PanelStyle) -> Box<dyn SceneList> {
                     px(style.gap),
                     typed_box(shown, p.clone(), Some(writes), box_w, style),
                 ),
-                None => (px(0.0), Box::new(bsn_list!()) as Box<dyn SceneList>),
+                None => (px(0.0), Box::new(bsn_list! {}) as Box<dyn SceneList>),
             };
             let slider: Box<dyn SceneList> = if hold {
-                Box::new(bsn_list!(
-                    @FeathersSlider { @value: {v}, @min: {lo}, @max: {hi} }
+                Box::new(bsn_list! {
+                    @FeathersSlider { @min: {lo}, @max: {hi} } SliderValue({v})
                     Node { width: px(track), flex_shrink: 0.0 }
                     SliderStep({step}) SliderPrecision({digits})
                     WritesNum({writes}) FieldPath({p}) CommitOnRelease
-                ))
+                })
             } else {
-                Box::new(bsn_list!(
-                    @FeathersSlider { @value: {v}, @min: {lo}, @max: {hi} }
+                Box::new(bsn_list! {
+                    @FeathersSlider { @min: {lo}, @max: {hi} } SliderValue({v})
                     Node { width: px(track), flex_shrink: 0.0 }
                     SliderStep({step}) SliderPrecision({digits})
                     WritesNum({writes}) FieldPath({p})
-                ))
+                })
             };
-            Box::new(bsn_list!(
+            Box::new(bsn_list! {
                 Node {
                     width: {px(style.value)},
                     flex_shrink: 0.0,
@@ -526,28 +526,28 @@ fn value_widget(row: &Row, style: &PanelStyle) -> Box<dyn SceneList> {
                     align_items: AlignItems::Center,
                     column_gap: {gap},
                 }
-                Children [ {slider}, {boxed} ]
-            ))
+                Children [ {slider} -- {boxed} ]
+            })
         }
 
         RowKind::Bool(v) => match (*v, hold) {
             (true, true) => {
-                Box::new(bsn_list!(@FeathersCheckbox Checked FieldPath({p}) CommitOnRelease))
+                Box::new(bsn_list! {@FeathersCheckbox Checked FieldPath({p}) CommitOnRelease})
             }
-            (true, false) => Box::new(bsn_list!(@FeathersCheckbox Checked FieldPath({p}))),
-            (false, true) => Box::new(bsn_list!(@FeathersCheckbox FieldPath({p}) CommitOnRelease)),
-            (false, false) => Box::new(bsn_list!(@FeathersCheckbox FieldPath({p}))),
+            (true, false) => Box::new(bsn_list! {@FeathersCheckbox Checked FieldPath({p})}),
+            (false, true) => Box::new(bsn_list! {@FeathersCheckbox FieldPath({p}) CommitOnRelease}),
+            (false, false) => Box::new(bsn_list! {@FeathersCheckbox FieldPath({p})}),
         },
 
         RowKind::Text(s) => typed_box(s.clone(), p, None, style.value, style),
 
         RowKind::Color { rgb, .. } => {
             let value = Color::linear_rgb(rgb[0], rgb[1], rgb[2]);
-            Box::new(bsn_list!(
+            Box::new(bsn_list! {
                 @FeathersColorSwatch
                 Node { width: px(style.value), flex_shrink: 0.0 }
                 ColorSwatchValue({value})
-            ))
+            })
         }
 
         RowKind::Choice {
@@ -576,17 +576,16 @@ fn value_widget(row: &Row, style: &PanelStyle) -> Box<dyn SceneList> {
                 .collect();
             let caption =
                 Box::new(vec![self::text(current.clone(), style.font)]) as Box<dyn SceneList>;
-            Box::new(bsn_list!(
+            Box::new(bsn_list! {
                 @FeathersMenu
                 Node { width: {px(style.value)}, flex_shrink: 0.0 }
                 Children [
-                    (
-                        @FeathersMenuButton { @caption: {caption} }
-                        Node { flex_grow: 1.0, min_width: px(0), height: px(style.tab) }
-                    ),
-                    (@FeathersMenuPopup Children [ {items} ]),
+                    @FeathersMenuButton { @caption: {caption} }
+                    Node { flex_grow: 1.0, min_width: px(0), height: px(style.tab) }
+                    --
+                    @FeathersMenuPopup Children [ {items} ]
                 ]
-            ))
+            })
         }
 
         RowKind::Unsupported(type_path) => {

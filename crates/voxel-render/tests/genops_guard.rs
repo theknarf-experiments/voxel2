@@ -25,7 +25,7 @@ const SHADERS: &[(&str, Ctx, Ctx, bool)] = &[
         false,
     ),
     (
-        "../../demos/voxel2/src/voxel_water.wgsl",
+        "../../demos/voxel2/src/voxel_water.wesl",
         Ctx::Height,
         Ctx::Height,
         false,
@@ -237,7 +237,7 @@ fn eval_column(pxz: vec2<f32>, vs: f32) -> Column {{
 
 /// The generated arms compile as WGSL: a minimal standalone module with
 /// the register shell and stub twins stands in for the real shaders
-/// (which need naga_oil imports).
+/// (which import bevy_pbr through the WESL linker).
 #[test]
 fn generated_arms_are_valid_wgsl() {
     let harness = |ctx: Ctx| -> String {
@@ -330,7 +330,7 @@ fn spliced_layout_regions_match_the_tables() {
     }
     assert_eq!(
         region(
-            &at("src/shaders/voxel_chunk_draw.wgsl"),
+            &at("src/shaders/voxel_chunk_draw.wesl"),
             "// GENMAT ACCESSORS BEGIN",
             "// GENMAT ACCESSORS END"
         ),
@@ -339,7 +339,7 @@ fn spliced_layout_regions_match_the_tables() {
     );
     assert_eq!(
         region(
-            &at("src/shaders/voxel_chunk_draw.wgsl"),
+            &at("src/shaders/voxel_chunk_draw.wesl"),
             "// GENMAT TEXELORDER BEGIN",
             "// GENMAT TEXELORDER END"
         ),

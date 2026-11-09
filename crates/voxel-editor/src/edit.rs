@@ -161,7 +161,7 @@ pub struct Focused<'w> {
 /// is picked, so the gap is outside it, and what is in the box is still
 /// committed by Enter or by the next thing that takes focus.
 pub fn on_press(
-    press: On<Pointer<Press>>,
+    press: On<PointerPress>,
     focus: Res<bevy::input_focus::InputFocus>,
     editable: Query<(), With<EditableText>>,
     parents: Query<&ChildOf>,
@@ -314,7 +314,7 @@ type DragRows<'w, 's> = Query<
 /// drag's OWN total: a dropped frame or a re-entrant observer cannot make
 /// it drift away from the pointer, the way accumulating deltas would.
 pub fn on_drag(
-    drag: On<Pointer<Drag>>,
+    drag: On<PointerDrag>,
     rows: DragRows,
     state: Res<EditorState>,
     mut pending: ResMut<Pending>,
@@ -324,7 +324,7 @@ pub fn on_drag(
 
 /// The end of a drag, for the fields that wait for it.
 pub fn on_drag_done(
-    drag: On<Pointer<DragEnd>>,
+    drag: On<PointerDragEnd>,
     rows: DragRows,
     state: Res<EditorState>,
     mut pending: ResMut<Pending>,
@@ -495,7 +495,10 @@ pub fn undo(world: &mut World) {
         return;
     };
     // What is being replaced becomes the way back.
-    let now = document.as_partial_reflect().to_dynamic();
+    let now = document
+        .as_partial_reflect()
+        .to_dynamic()
+        .expect("a level document has no opaque field that refuses reflect_clone");
     if let Err(e) = document.as_partial_reflect_mut().try_apply(was.as_ref()) {
         warn!("editor: that did not take — {e}");
         return;
@@ -599,7 +602,10 @@ pub fn apply(world: &mut World) {
         // Before the first edit of this batch touches it.
         if remember {
             remember = false;
-            let snapshot = document.as_partial_reflect().to_dynamic();
+            let snapshot = document
+                .as_partial_reflect()
+                .to_dynamic()
+                .expect("a level document has no opaque field that refuses reflect_clone");
             history.push((edit.root, snapshot));
         }
 

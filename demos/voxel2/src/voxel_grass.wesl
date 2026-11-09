@@ -3,12 +3,12 @@
 // rotates the tuft, scales it, applies wind sway, and fades it out with
 // distance. Camera-relative transform matches the chunk draw shader.
 
-#import bevy_pbr::{
+import bevy_pbr::render::{
     mesh_view_bindings::{view, globals},
     mesh_types::MESH_FLAGS_SHADOW_RECEIVER_BIT,
     pbr_types,
     pbr_functions,
-}
+};
 
 // Blade look only — light, shadows, fog and tonemapping are Bevy's.
 struct GrassEnv {

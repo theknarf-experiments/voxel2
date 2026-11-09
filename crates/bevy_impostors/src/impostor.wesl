@@ -11,11 +11,11 @@
 // Impostors are the FAR half of a population — something with real
 // geometry covers the near field — so an impostor fades IN with distance.
 
-#import bevy_pbr::{
+import bevy_pbr::render::{
     mesh_view_bindings::{view, globals, lights},
     pbr_types,
     pbr_functions,
-}
+};
 
 struct ImpostorVariant {
     // Linear color of the silhouette.

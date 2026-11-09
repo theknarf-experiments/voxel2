@@ -10,10 +10,10 @@
 
 use bevy::feathers::constants::fonts;
 use bevy::feathers::containers::{pane, pane_body};
-use bevy::feathers::cursor::EntityCursor;
 use bevy::feathers::font_styles::InheritableFont;
 use bevy::feathers::theme::{ThemeBackgroundColor, ThemedText};
 use bevy::feathers::tokens;
+use bevy::picking::cursor::EntityCursor;
 use bevy::prelude::*;
 use bevy::text::FontWeight;
 use bevy::ui::{
@@ -39,13 +39,20 @@ pub struct EditorBody;
 #[derive(Component, Clone, Default)]
 pub struct ResizeGrip;
 
+/// What the grip is painted in. The editor's own token, because no
+/// Feathers token means "a divider you can grab": `PANE_HEADER_BORDER`
+/// was one until the dark theme mapped it onto the pane body, which left
+/// the grip there but invisible.
+pub const GRIP: bevy::feathers::theme::ThemeToken =
+    bevy::feathers::theme::ThemeToken::new_static("voxel_editor.grip");
+
 /// Drag the panel's inner edge.
 ///
 /// The width lives in [`EditorState`] rather than on the node, because the
 /// panel is respawned whenever the document changes and a width kept only
 /// on the node would snap back to the default mid-drag.
 pub fn on_grip_drag(
-    drag: On<Pointer<Drag>>,
+    drag: On<PointerDrag>,
     grips: Query<(), With<ResizeGrip>>,
     style: Res<PanelStyle>,
     mut state: ResMut<EditorState>,
@@ -223,11 +230,11 @@ pub struct Shown {
 #[derive(Resource, Default)]
 pub struct Dragging(pub bool);
 
-pub fn on_drag_start(_: On<Pointer<DragStart>>, mut dragging: ResMut<Dragging>) {
+pub fn on_drag_start(_: On<PointerDragStart>, mut dragging: ResMut<Dragging>) {
     dragging.0 = true;
 }
 
-pub fn on_drag_end(_: On<Pointer<DragEnd>>, mut dragging: ResMut<Dragging>) {
+pub fn on_drag_end(_: On<PointerDragEnd>, mut dragging: ResMut<Dragging>) {
     dragging.0 = false;
 }
 
@@ -283,7 +290,7 @@ pub fn save(
 /// Inspect the node that was clicked, or clear the selection when the
 /// click lands on the canvas behind them.
 pub fn on_select(
-    click: On<Pointer<Click>>,
+    click: On<PointerClick>,
     boxes: Query<&SelectsNode>,
     backdrops: Query<(), With<GraphBackdrop>>,
     mut state: ResMut<EditorState>,
@@ -407,24 +414,24 @@ pub fn rebuild(world: &mut World) {
             let camera = world.resource::<EditorState>().camera;
             let selected = world.resource::<EditorState>().selected.clone();
             let graph_style = world.resource::<GraphStyle>().clone();
-            let canvas = bsn_list! {(
-                {bevy_graph_view::scene(
+            let canvas = bsn_list! {
+                @{bevy_graph_view::scene(
                     layout,
                     &graph_style,
                     camera,
                     selected.as_deref(),
                     blamed.as_deref(),
                 )}
-            )};
+            };
             let inspector = inspector(&props, &style);
-            Box::new(bsn_list! {(
+            Box::new(bsn_list! {
                 Node {
                     flex_grow: 1.0,
                     min_height: px(0),
                     flex_direction: FlexDirection::Row,
                 }
-                Children [ {canvas}, {inspector} ]
-            )})
+                Children [ {canvas} -- {inspector} ]
+            })
         }
     };
     let complaint_scene = notice_bar(
@@ -464,33 +471,30 @@ pub fn rebuild(world: &mut World) {
                 flex_direction: FlexDirection::Row,
             }
             Children [
-                (
-                    ResizeGrip
-                    Node { width: {grip}, height: percent(100), flex_shrink: 0.0 }
-                    ThemeBackgroundColor(tokens::PANE_HEADER_BORDER)
-                    EntityCursor::System(SystemCursorIcon::EwResize)
-                ),
-                (
-                    pane()
-                    Node { flex_grow: 1.0, min_width: px(0), flex_direction: FlexDirection::Column }
-                    Children [
-                        (
-                            Node {
-                                display: {tabs},
-                                flex_direction: FlexDirection::Row,
-                                column_gap: {row_gap},
-                                padding: UiRect::all(px(2)),
-                                flex_shrink: 0.0,
-                            }
-                            // Part of the header, not of the document: an
-                            // unthemed strip shows whatever is behind it.
-                            ThemeBackgroundColor(tokens::PANE_HEADER_BG)
-                            Children [ {tab_scenes} ]
-                        ),
-                        {complaint_scene},
-                        (pane_body() Node { flex_grow: 1.0, min_height: px(0), flex_direction: FlexDirection::Column } Children [ {body_scene} ]),
-                    ]
-                ),
+                ResizeGrip
+                Node { width: {grip}, height: percent(100), flex_shrink: 0.0 }
+                ThemeBackgroundColor(GRIP)
+                EntityCursor::System(SystemCursorIcon::EwResize)
+                --
+                @pane()
+                Node { flex_grow: 1.0, min_width: px(0), flex_direction: FlexDirection::Column }
+                Children [
+                    Node {
+                        display: {tabs},
+                        flex_direction: FlexDirection::Row,
+                        column_gap: {row_gap},
+                        padding: UiRect::all(px(2)),
+                        flex_shrink: 0.0,
+                    }
+                    // Part of the header, not of the document: an
+                    // unthemed strip shows whatever is behind it.
+                    ThemeBackgroundColor(tokens::PANE_HEADER_BG)
+                    Children [ {tab_scenes} ]
+                    --
+                    {complaint_scene}
+                    --
+                    @pane_body() Node { flex_grow: 1.0, min_height: px(0), flex_direction: FlexDirection::Column } Children [ {body_scene} ]
+                ]
             ]
         })
         .map(|e| e.id());
@@ -592,7 +596,7 @@ fn inspector(props: &Option<(String, Vec<walk::Row>)>, style: &PanelStyle) -> im
     };
     let header = self::rows_header(title.clone(), style);
     let body = rows_body(rows, style);
-    Some(bsn_list! {(
+    Some(bsn_list! {
         Node {
             width: {width},
             flex_shrink: 0.0,
@@ -601,8 +605,8 @@ fn inspector(props: &Option<(String, Vec<walk::Row>)>, style: &PanelStyle) -> im
         }
         BorderColor::all(Color::srgba(0.0, 0.0, 0.0, 0.5))
         ThemeBackgroundColor(tokens::PANE_HEADER_BG)
-        Children [ {header}, {body} ]
-    )})
+        Children [ {header} -- {body} ]
+    })
 }
 
 /// The one line along the top, and what it says when nothing was refused.
@@ -637,7 +641,7 @@ fn notice_bar(complaint: Option<&str>, edited: bool, style: &PanelStyle) -> impl
     let (said, colour, display) = shown_notice(&base);
     let font = bevy::text::FontSize::Px(style.font);
     let pad = px(style.pad);
-    bsn_list! {(
+    bsn_list! {
         NoticeBar({base})
         Node {
             padding: UiRect::all(pad),
@@ -645,12 +649,12 @@ fn notice_bar(complaint: Option<&str>, edited: bool, style: &PanelStyle) -> impl
             display: {display},
         }
         BackgroundColor({colour})
-        Children [(
+        Children [
             Text({said})
             TextFont { font_size: {font} }
             ThemedText
-        )]
-    )}
+        ]
+    }
 }
 
 /// How the bar renders a notice, or the absence of one.
@@ -709,19 +713,19 @@ pub fn notice(
 fn rows_header(title: String, style: &PanelStyle) -> impl SceneList {
     let font = bevy::text::FontSize::Px(style.font);
     let pad = px(style.pad);
-    bsn_list! {(
+    bsn_list! {
         Node {
             padding: UiRect::all(pad),
             flex_shrink: 0.0,
             overflow: Overflow::clip(),
         }
-        Children [(
+        Children [
             Text({title})
             TextFont { font_size: {font} }
             bevy::text::TextLayout { linebreak: bevy::text::LineBreak::NoWrap }
             ThemedText
-        )]
-    )}
+        ]
+    }
 }
 
 /// The scrolling list of rows.
@@ -729,7 +733,7 @@ fn rows_body(rows: &[walk::Row], style: &PanelStyle) -> impl SceneList {
     let scenes: Vec<_> = rows.iter().map(|r| row::scene(r, style)).collect();
     let (pad, row_gap) = (px(style.pad), px(style.row_gap));
     let body_font = bevy::text::FontSize::Px(style.font);
-    bsn_list! {(
+    bsn_list! {
         EditorBody
         ScrollPosition
         // Feathers propagates `TextFont` only from an ancestor carrying
@@ -753,7 +757,7 @@ fn rows_body(rows: &[walk::Row], style: &PanelStyle) -> impl SceneList {
             overflow: Overflow { x: OverflowAxis::Clip, y: OverflowAxis::Scroll },
         }
         Children [ {scenes} ]
-    )}
+    }
 }
 
 /// Read the selected document and walk it into rows.

@@ -27,10 +27,10 @@
 //! when its viewport node dies.
 
 use bevy::camera::RenderTarget;
-use bevy::feathers::cursor::EntityCursor;
 use bevy::feathers::font_styles::InheritableFont;
 use bevy::feathers::theme::{InheritableThemeTextColor, ThemeBackgroundColor, ThemedText};
 use bevy::feathers::{constants::fonts, tokens};
+use bevy::picking::cursor::EntityCursor;
 use bevy::picking::hover::Hovered;
 use bevy::prelude::*;
 use bevy::render::render_resource::TextureFormat;
@@ -203,40 +203,37 @@ pub fn scene(
             min_height: px(0),
         }
         Children [
-            (
-                GraphCanvas
-                Node {
-                    position_type: PositionType::Absolute,
-                    left: px(0),
-                    top: px(0),
-                    width: px(0),
-                    height: px(0),
-                }
-                UiTransform {
-                    translation: Val2::px(pan.x, pan.y),
-                    scale: {scale},
-                }
-                InheritableFont {
-                    font: fonts::MONO,
-                    font_size: {font},
-                    weight: FontWeight::NORMAL,
-                }
-                Children [ {frames}, {edges}, {nodes} ]
-            ),
-            (
-                ZoomLabel
-                Text({zoom})
-                TextFont { font_size: {chip_font} }
-                InheritableThemeTextColor(tokens::TEXT_DIM)
-                ThemedText
-                Node {
-                    position_type: PositionType::Absolute,
-                    right: px(6),
-                    bottom: px(6),
-                    padding: UiRect::axes(px(6), px(2)),
-                }
-                BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.5))
-            ),
+            GraphCanvas
+            Node {
+                position_type: PositionType::Absolute,
+                left: px(0),
+                top: px(0),
+                width: px(0),
+                height: px(0),
+            }
+            UiTransform {
+                translation: Val2::px(pan.x, pan.y),
+                scale: {scale},
+            }
+            InheritableFont {
+                font: fonts::MONO,
+                font_size: {font},
+                weight: FontWeight::NORMAL,
+            }
+            Children [ {frames} -- {edges} -- {nodes} ]
+            --
+            ZoomLabel
+            Text({zoom})
+            TextFont { font_size: {chip_font} }
+            InheritableThemeTextColor(tokens::TEXT_DIM)
+            ThemedText
+            Node {
+                position_type: PositionType::Absolute,
+                right: px(6),
+                bottom: px(6),
+                padding: UiRect::axes(px(6), px(2)),
+            }
+            BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.5))
         ]
     }
 }
@@ -464,22 +461,21 @@ fn node(placed: &Placed, style: &GraphStyle, mark: Mark) -> impl Scene {
         BorderColor::all(border)
         ThemeBackgroundColor(tokens::SUBPANE_BODY_BG)
         Children [
-            (
-                Node {
-                    height: {header},
-                    flex_shrink: 0.0,
-                    padding: UiRect::horizontal(px(4)),
-                    align_items: bevy::ui::AlignItems::Center,
-                }
-                ThemeBackgroundColor(tokens::SUBPANE_HEADER_BG)
-                Children [(
-                    Text({title})
-                    TextFont { font_size: {font} }
-                    TextLayout { linebreak: LineBreak::NoWrap }
-                    ThemedText
-                )]
-            ),
-            {ports},
+            Node {
+                height: {header},
+                flex_shrink: 0.0,
+                padding: UiRect::horizontal(px(4)),
+                align_items: bevy::ui::AlignItems::Center,
+            }
+            ThemeBackgroundColor(tokens::SUBPANE_HEADER_BG)
+            Children [
+                Text({title})
+                TextFont { font_size: {font} }
+                TextLayout { linebreak: LineBreak::NoWrap }
+                ThemedText
+            ]
+            --
+            {ports}
         ]
     }
 }
@@ -502,13 +498,13 @@ fn port(name: &str, input: bool, style: &GraphStyle) -> impl Scene {
             align_items: bevy::ui::AlignItems::Center,
             justify_content: {justify},
         }
-        Children [(
+        Children [
             Text({label})
             TextFont { font_size: {font} }
             TextLayout { linebreak: LineBreak::NoWrap }
             InheritableThemeTextColor(tokens::TEXT_DIM)
             ThemedText
-        )]
+        ]
     }
 }
 
@@ -550,20 +546,20 @@ fn frame(frame: &Frame, style: &GraphStyle) -> impl Scene {
         }
         BorderColor::all(Color::srgba(0.55, 0.5, 0.35, 0.7))
         BackgroundColor({Color::srgba(0.5, 0.45, 0.25, 0.07)})
-        Children [(
+        Children [
             Node {
                 height: {header},
                 padding: UiRect::horizontal(px(5)),
                 align_items: bevy::ui::AlignItems::Center,
             }
-            Children [(
+            Children [
                 Text({title})
                 TextFont { font_size: {font} }
                 TextLayout { linebreak: LineBreak::NoWrap }
                 InheritableThemeTextColor(tokens::TEXT_DIM)
                 ThemedText
-            )]
-        )]
+            ]
+        ]
     }
 }
 
@@ -628,6 +624,9 @@ mod tests {
     fn a_canvas_moves_behind_glass_and_is_buried_with_its_viewport() {
         let mut app = App::new();
         app.insert_resource(Assets::<Image>::default());
+        // `ViewportNode` brings a `PointerId`, whose insert hook registers
+        // it in the picking plugin's map.
+        app.init_resource::<bevy::picking::pointer::PointerMap>();
         app.add_systems(Update, (create_cameras, cleanup_cameras).chain());
         let world = app.world_mut();
         let viewport = world.spawn((GraphViewport, Node::default())).id();

@@ -20,6 +20,7 @@ use crate::prop_worlds::{WorldProp, WorldPropPlugin};
 
 /// Marker entity anchoring one world's grass draw.
 #[derive(Clone, Copy, Component, ExtractComponent)]
+#[extract_app(bevy::render::RenderApp)]
 #[require(VisibilityClass)]
 #[component(on_add = visibility::add_visibility_class::<GrassMarker>)]
 pub struct GrassMarker {
@@ -44,7 +45,7 @@ impl bevy_impostors::Prop for GrassMarker {
     }
 
     fn shader(assets: &AssetServer) -> Handle<Shader> {
-        load_embedded_asset!(assets, "voxel_grass.wgsl")
+        load_embedded_asset!(assets, "voxel_grass.wesl")
     }
 
     fn mesh() -> (Vec<BladeVertex>, Vec<u32>) {
@@ -75,7 +76,7 @@ pub struct GrassPlugin;
 
 impl Plugin for GrassPlugin {
     fn build(&self, app: &mut App) {
-        embedded_asset!(app, "voxel_grass.wgsl");
+        embedded_asset!(app, "voxel_grass.wesl");
         app.add_plugins((
             bevy_impostors::PropPlugin::<GrassMarker>::default(),
             WorldPropPlugin::<GrassMarker>::default(),

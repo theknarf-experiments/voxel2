@@ -92,6 +92,7 @@ struct WaterParams {
 /// only the water of the world it is looking at and the draw command
 /// binds that world's parameters and river segments.
 #[derive(Clone, Copy, Component, ExtractComponent)]
+#[extract_app(bevy::render::RenderApp)]
 #[require(VisibilityClass)]
 #[component(on_add = visibility::add_visibility_class::<WaterMarker>)]
 pub struct WaterMarker {
@@ -168,7 +169,7 @@ pub struct WaterPlugin;
 
 impl Plugin for WaterPlugin {
     fn build(&self, app: &mut App) {
-        embedded_asset!(app, "voxel_water.wgsl");
+        embedded_asset!(app, "voxel_water.wesl");
         app.init_resource::<RiverWater>()
             .add_plugins(ExtractComponentPlugin::<WaterMarker>::default())
             .add_systems(Update, sync_water_markers);
@@ -247,7 +248,7 @@ fn init_water_pipeline(
             ),
         ),
     );
-    let shader: Handle<Shader> = load_embedded_asset!(asset_server.as_ref(), "voxel_water.wgsl");
+    let shader: Handle<Shader> = load_embedded_asset!(asset_server.as_ref(), "voxel_water.wesl");
     let base_descriptor = RenderPipelineDescriptor {
         label: Some("water_draw".into()),
         // Groups 0/1 are replaced per key by the specializer.
@@ -412,17 +413,17 @@ mod tests {
     /// shoreline's height replay off the front of the op list.
     #[test]
     fn the_water_shaders_world_table_is_as_long_as_the_engine_writes() {
-        let wgsl = include_str!("voxel_water.wgsl");
+        let wgsl = include_str!("voxel_water.wesl");
         let declared = wgsl
             .split("array<WorldHeader,")
             .nth(1)
             .and_then(|rest| rest.split('>').next())
             .and_then(|n| n.trim().parse::<usize>().ok())
-            .expect("voxel_water.wgsl declares array<WorldHeader, N>");
+            .expect("voxel_water.wesl declares array<WorldHeader, N>");
         assert_eq!(
             declared,
             voxel_render::MAX_WORLDS,
-            "voxel_water.wgsl's world table must match voxel_render::MAX_WORLDS"
+            "voxel_water.wesl's world table must match voxel_render::MAX_WORLDS"
         );
     }
 
@@ -430,7 +431,7 @@ mod tests {
     /// told which slice to replay rather than assuming the first.
     #[test]
     fn the_shoreline_reads_the_worlds_own_ops() {
-        let wgsl = include_str!("voxel_water.wgsl");
+        let wgsl = include_str!("voxel_water.wesl");
         assert!(
             !wgsl.contains("prog.worlds[0]"),
             "the shoreline must index by the world in params, not world 0"
